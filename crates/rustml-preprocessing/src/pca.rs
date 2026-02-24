@@ -463,4 +463,73 @@ mod tests {
             assert!(v.abs() < 1e-10, "expected near-zero variance, got {}", v);
         }
     }
+
+    #[test]
+    fn test_large_values() {
+        // Large feature values should not produce NaN/Inf
+        let x = array![
+            [1e10, 2e10],
+            [3e10, 4e10],
+            [5e10, 6e10],
+            [7e10, 8e10],
+        ];
+
+        let pca = Pca { n_components: 2 };
+        let fitted = FitUnsupervised::<f64>::fit(&pca, &x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        for &v in transformed.iter() {
+            assert!(v.is_finite(), "PCA on large values produced non-finite: {}", v);
+        }
+        for &v in fitted.explained_variance().iter() {
+            assert!(v.is_finite() && v >= 0.0, "variance should be finite and non-negative: {}", v);
+        }
+    }
+
+    #[test]
+    fn test_near_zero_variance_column() {
+        // One column has near-zero variance, other column has real variance
+        let x = array![
+            [1.0, 5.0],
+            [2.0, 5.0 + 1e-14],
+            [3.0, 5.0 - 1e-14],
+            [4.0, 5.0],
+        ];
+
+        let pca = Pca { n_components: 2 };
+        let fitted = FitUnsupervised::<f64>::fit(&pca, &x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        for &v in transformed.iter() {
+            assert!(v.is_finite(), "near-zero variance column produced non-finite: {}", v);
+        }
+        // First component should capture nearly all variance
+        let var = fitted.explained_variance();
+        assert!(var[0] > var[1] * 1e6, "first component should dominate");
+    }
+
+    #[test]
+    fn test_collinear_features() {
+        // Features 1 and 2 are perfectly collinear (col2 = 2*col1)
+        // PCA should handle this gracefully
+        let x = array![
+            [1.0, 2.0, 0.5],
+            [2.0, 4.0, 1.0],
+            [3.0, 6.0, 1.5],
+            [4.0, 8.0, 2.0],
+            [5.0, 10.0, 2.5],
+        ];
+
+        let pca = Pca { n_components: 3 };
+        let fitted = FitUnsupervised::<f64>::fit(&pca, &x).unwrap();
+        let var = fitted.explained_variance();
+
+        // All values should be finite and non-negative
+        for &v in var.iter() {
+            assert!(v.is_finite() && v >= -1e-10, "variance should be finite and non-negative: {}", v);
+        }
+        // With perfect collinearity, effective rank is 1, so at most 1 non-zero eigenvalue
+        let nonzero_count = var.iter().filter(|&&v| v > 1e-8).count();
+        assert!(nonzero_count <= 2, "collinear data should have rank <= 2, got {} non-zero eigenvalues", nonzero_count);
+    }
 }

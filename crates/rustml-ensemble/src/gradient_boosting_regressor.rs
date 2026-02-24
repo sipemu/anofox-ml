@@ -443,4 +443,61 @@ mod tests {
         };
         assert!(Fit::<f64>::fit(&gb, &x, &y).is_err());
     }
+
+    #[test]
+    fn test_predictions_finite() {
+        let x = array![
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
+        ];
+        let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
+
+        let gb = GradientBoostingRegressor {
+            n_estimators: 100,
+            learning_rate: 0.1,
+            max_depth: Some(3),
+            seed: 42,
+            ..Default::default()
+        };
+        let fitted: FittedGradientBoostingRegressor<f64> = gb.fit(&x, &y).unwrap();
+
+        let preds = fitted.predict(&x).unwrap();
+        for &p in preds.iter() {
+            assert!(
+                p.is_finite(),
+                "prediction must be finite, got {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_n_estimators_one_regressor() {
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]];
+        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+
+        let gb = GradientBoostingRegressor {
+            n_estimators: 1,
+            learning_rate: 0.1,
+            max_depth: Some(3),
+            seed: 0,
+            ..Default::default()
+        };
+        let fitted: FittedGradientBoostingRegressor<f64> = gb.fit(&x, &y).unwrap();
+        assert_eq!(fitted.n_estimators(), 1);
+
+        let preds = fitted.predict(&x).unwrap();
+        assert_eq!(preds.len(), y.len());
+        // All predictions should be finite even with a single tree.
+        for &p in preds.iter() {
+            assert!(p.is_finite());
+        }
+    }
 }

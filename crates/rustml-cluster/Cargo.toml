@@ -16,6 +16,7 @@ rustml-core = { path = "../rustml-core" }
 ndarray = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

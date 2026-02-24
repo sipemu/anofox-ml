@@ -1,6 +1,7 @@
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use rustml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
 use serde::{Serialize, Deserialize};
 
@@ -89,18 +90,42 @@ impl<F: Float> FittedKMeans<F> {
     }
 }
 
-/// Compute squared Euclidean distance between two slices.
+/// Compute squared Euclidean distance between two slices using 4-accumulator
+/// chunked pattern for SIMD-friendly auto-vectorization.
+#[inline]
 fn squared_euclidean<F: Float>(a: &[F], b: &[F]) -> F {
-    a.iter()
-        .zip(b.iter())
-        .map(|(&ai, &bi)| {
-            let diff = ai - bi;
-            diff * diff
-        })
-        .fold(F::zero(), |acc, v| acc + v)
+    let n = a.len();
+    let chunks = n / 4;
+    let remainder = n % 4;
+
+    let mut acc0 = F::zero();
+    let mut acc1 = F::zero();
+    let mut acc2 = F::zero();
+    let mut acc3 = F::zero();
+
+    let mut i = 0;
+    for _ in 0..chunks {
+        let d0 = a[i] - b[i];
+        let d1 = a[i + 1] - b[i + 1];
+        let d2 = a[i + 2] - b[i + 2];
+        let d3 = a[i + 3] - b[i + 3];
+        acc0 += d0 * d0;
+        acc1 += d1 * d1;
+        acc2 += d2 * d2;
+        acc3 += d3 * d3;
+        i += 4;
+    }
+
+    for j in 0..remainder {
+        let d = a[i + j] - b[i + j];
+        acc0 += d * d;
+    }
+
+    (acc0 + acc1) + (acc2 + acc3)
 }
 
 /// Find the index of the nearest centroid for a given point.
+#[inline]
 fn nearest_centroid<F: Float>(point: &[F], centroids: &Array2<F>) -> (usize, F) {
     let mut best_idx = 0;
     let mut best_dist = F::infinity();
@@ -170,7 +195,7 @@ fn kmeans_plus_plus<F: Float>(
     centroids
 }
 
-impl<F: Float> FitUnsupervised<F> for KMeans {
+impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
     type Fitted = FittedKMeans<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
@@ -196,19 +221,23 @@ impl<F: Float> FitUnsupervised<F> for KMeans {
 
         let mut rng = StdRng::seed_from_u64(self.seed);
         let mut centroids = kmeans_plus_plus(x, self.n_clusters, &mut rng);
-        let mut labels = Array1::<usize>::zeros(n_samples);
+        let mut labels = vec![0usize; n_samples];
         let tol = F::from_f64(self.tol).unwrap();
         let mut n_iter = 0;
 
         for iter in 0..self.max_iter {
             n_iter = iter + 1;
 
-            // Assignment step: assign each point to nearest centroid.
-            for i in 0..n_samples {
-                let (best_idx, _) =
-                    nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
-                labels[i] = best_idx;
-            }
+            // Assignment step: parallel assignment of each point to nearest centroid.
+            let new_labels: Vec<usize> = (0..n_samples)
+                .into_par_iter()
+                .map(|i| {
+                    let (best_idx, _) =
+                        nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
+                    best_idx
+                })
+                .collect();
+            labels = new_labels;
 
             // Update step: recompute centroids as mean of assigned points.
             let mut new_centroids = Array2::<F>::zeros((self.n_clusters, n_features));

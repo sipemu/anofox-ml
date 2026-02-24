@@ -180,4 +180,42 @@ mod tests {
             assert_abs_diff_eq!(a, b, epsilon = 1e-10);
         }
     }
+
+    #[test]
+    fn test_large_values() {
+        let x = array![[1e10], [2e10], [3e10]];
+        let scaler = MinMaxScaler::<f64>::default();
+        let fitted = scaler.fit(&x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        assert_abs_diff_eq!(transformed[[0, 0]], 0.0, epsilon = 1e-8);
+        assert_abs_diff_eq!(transformed[[2, 0]], 1.0, epsilon = 1e-8);
+        for &v in transformed.iter() {
+            assert!(v.is_finite(), "large values produced non-finite: {}", v);
+        }
+    }
+
+    #[test]
+    fn test_small_values() {
+        let x = array![[1e-10], [2e-10], [3e-10]];
+        let scaler = MinMaxScaler::<f64>::default();
+        let fitted = scaler.fit(&x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        assert_abs_diff_eq!(transformed[[0, 0]], 0.0, epsilon = 1e-8);
+        assert_abs_diff_eq!(transformed[[2, 0]], 1.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_constant_column() {
+        // Column with zero range should not produce NaN
+        let x = array![[5.0, 1.0], [5.0, 2.0], [5.0, 3.0]];
+        let scaler = MinMaxScaler::<f64>::default();
+        let fitted = scaler.fit(&x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        for &v in transformed.iter() {
+            assert!(v.is_finite(), "constant column produced non-finite: {}", v);
+        }
+    }
 }

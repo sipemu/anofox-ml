@@ -261,6 +261,212 @@ mod tests {
         assert_abs_diff_eq!(sum, 1.0, epsilon = 1e-10);
     }
 
+    #[test]
+    fn test_min_samples_split_constraint() {
+        // 4 samples with min_samples_split=5 means the root can never split
+        let x = array![[1.0], [2.0], [3.0], [4.0]];
+        let y = array![0.0, 0.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::new().with_min_samples_split(5);
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+
+        // All predictions should be the same (single leaf)
+        let first = preds[0];
+        for &p in preds.iter() {
+            assert_abs_diff_eq!(p, first, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_min_samples_leaf_constraint() {
+        // 4 samples, 2 of each class. min_samples_leaf=2 means leaves need >= 2 samples.
+        // A split into [0,0] and [1,1] satisfies this, but min_samples_leaf=3 would not.
+        let x = array![[1.0], [2.0], [3.0], [4.0]];
+        let y = array![0.0, 0.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::new().with_min_samples_leaf(3);
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+
+        // With min_samples_leaf=3 on 4 samples, no valid split exists (each side would
+        // have at most 2 samples), so the tree degenerates to a single leaf.
+        let first = preds[0];
+        for &p in preds.iter() {
+            assert_abs_diff_eq!(p, first, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_multiclass_three_classes() {
+        // 9 data points, 3 classes separated by feature value
+        let x = array![
+            [1.0], [2.0], [3.0],  // class 0
+            [5.0], [6.0], [7.0],  // class 1
+            [9.0], [10.0], [11.0] // class 2
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+
+        let tree = DecisionTreeClassifier::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+
+        for (pred, target) in preds.iter().zip(y.iter()) {
+            assert_abs_diff_eq!(pred, target, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_single_class_input() {
+        let x = array![[1.0], [2.0], [3.0], [4.0]];
+        let y = array![7.0, 7.0, 7.0, 7.0];
+
+        let tree = DecisionTreeClassifier::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+
+        for &p in preds.iter() {
+            assert_abs_diff_eq!(p, 7.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_single_feature() {
+        // Simple binary split on one feature
+        let x = array![[0.0], [1.0], [2.0], [10.0], [11.0], [12.0]];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+
+        let test_x = array![[0.5], [11.5]];
+        let preds = fitted.predict(&test_x).unwrap();
+        assert_abs_diff_eq!(preds[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(preds[1], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_stump_depth_one() {
+        let x = array![[1.0], [2.0], [3.0], [4.0]];
+        let y = array![0.0, 0.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::new().with_max_depth(Some(1));
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+
+        // The root should be a Split whose children are both Leaves
+        match fitted.tree() {
+            TreeNode::Split { left, right, .. } => {
+                assert!(matches!(**left, TreeNode::Leaf { .. }));
+                assert!(matches!(**right, TreeNode::Leaf { .. }));
+            }
+            TreeNode::Leaf { .. } => panic!("expected a stump (Split node), got Leaf"),
+        }
+    }
+
+    #[test]
+    fn test_shape_mismatch_error() {
+        let x = array![[1.0], [2.0], [3.0]];
+        let y = array![0.0, 1.0]; // 3 rows vs 2 labels
+
+        let tree = DecisionTreeClassifier::default();
+        let result = Fit::<f64>::fit(&tree, &x, &y);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RustMlError::ShapeMismatch(_) => {} // expected
+            other => panic!("expected ShapeMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_empty_input_error() {
+        let x: Array2<f64> = Array2::zeros((0, 0));
+        let y: Array1<f64> = array![];
+
+        let tree = DecisionTreeClassifier::default();
+        let result = Fit::<f64>::fit(&tree, &x, &y);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RustMlError::EmptyInput(_) => {} // expected
+            other => panic!("expected EmptyInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_predict_wrong_features() {
+        let x = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
+        let y = array![0.0, 0.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+
+        // Predict with 3 features instead of 2
+        let bad_x = array![[1.0, 2.0, 3.0]];
+        let result = fitted.predict(&bad_x);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RustMlError::ShapeMismatch(_) => {} // expected
+            other => panic!("expected ShapeMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_large_feature_values() {
+        // Very large feature values should not cause panics or NaN
+        let x = array![
+            [1e10_f64, -1e10],
+            [2e10, -2e10],
+            [3e10, -3e10],
+            [4e10, -4e10],
+        ];
+        let y = array![0.0_f64, 0.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        for &p in preds.iter() {
+            assert!(p.is_finite(), "prediction should be finite, got {}", p);
+        }
+    }
+
+    #[test]
+    fn test_small_feature_values() {
+        // Very small feature values should still produce valid splits
+        let x = array![
+            [1e-10],
+            [2e-10],
+            [3e-10],
+            [4e-10],
+        ];
+        let y = array![0.0, 0.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        // Should separate the two classes
+        assert_abs_diff_eq!(preds[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(preds[3], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_near_identical_feature_values() {
+        // Features that differ by tiny amounts (near machine epsilon)
+        let x = array![
+            [1.0 + 1e-14],
+            [1.0 + 2e-14],
+            [1.0 + 3e-14],
+            [1.0 + 4e-14],
+        ];
+        let y = array![0.0, 0.0, 1.0, 1.0];
+
+        let tree = DecisionTreeClassifier::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        // Should not panic; predictions should be valid labels
+        for &p in preds.iter() {
+            assert!(p == 0.0 || p == 1.0, "prediction should be 0 or 1, got {}", p);
+        }
+    }
+
     mod prop_tests {
         use super::*;
         use proptest::prelude::*;

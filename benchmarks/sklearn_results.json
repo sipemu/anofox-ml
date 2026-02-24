@@ -1,70 +1,70 @@
 {
-    "benchmarks": [
-        {
-            "name": "StandardScaler fit+transform 1000x50",
-            "mean_ms": 0.6446,
-            "std_ms": 0.2329,
-            "iterations": 5
-        },
-        {
-            "name": "StandardScaler fit+transform 10000x100",
-            "mean_ms": 7.6954,
-            "std_ms": 2.3845,
-            "iterations": 5
-        },
-        {
-            "name": "KNN fit 1000x50",
-            "mean_ms": 0.3251,
-            "std_ms": 0.1192,
-            "iterations": 5
-        },
-        {
-            "name": "KNN predict 1000x50",
-            "mean_ms": 14.687,
-            "std_ms": 15.7748,
-            "iterations": 5
-        },
-        {
-            "name": "DecisionTree fit 5000x20",
-            "mean_ms": 78.057,
-            "std_ms": 1.1983,
-            "iterations": 5
-        },
-        {
-            "name": "DecisionTree predict 5000x20",
-            "mean_ms": 0.1126,
-            "std_ms": 0.0614,
-            "iterations": 5
-        },
-        {
-            "name": "RandomForest fit 5000x20",
-            "mean_ms": 1055.3721,
-            "std_ms": 9.0755,
-            "iterations": 5
-        },
-        {
-            "name": "RandomForest predict 5000x20",
-            "mean_ms": 5.9504,
-            "std_ms": 0.1253,
-            "iterations": 5
-        },
-        {
-            "name": "KMeans fit 5000x20",
-            "mean_ms": 37.5098,
-            "std_ms": 13.3397,
-            "iterations": 5
-        },
-        {
-            "name": "GaussianNB fit 5000x20",
-            "mean_ms": 1.5546,
-            "std_ms": 0.271,
-            "iterations": 5
-        },
-        {
-            "name": "GaussianNB predict 5000x20",
-            "mean_ms": 0.2514,
-            "std_ms": 0.0315,
-            "iterations": 5
-        }
-    ]
+  "benchmarks": [
+    {
+      "name": "StandardScaler fit+transform 1000x50",
+      "mean_ms": 1.3132,
+      "std_ms": 0.3362,
+      "iterations": 5
+    },
+    {
+      "name": "StandardScaler fit+transform 10000x100",
+      "mean_ms": 6.8784,
+      "std_ms": 2.019,
+      "iterations": 5
+    },
+    {
+      "name": "KNN fit 1000x50",
+      "mean_ms": 0.5227,
+      "std_ms": 0.5222,
+      "iterations": 5
+    },
+    {
+      "name": "KNN predict 1000x50",
+      "mean_ms": 7.8191,
+      "std_ms": 7.193,
+      "iterations": 5
+    },
+    {
+      "name": "DecisionTree fit 5000x20",
+      "mean_ms": 77.5899,
+      "std_ms": 0.812,
+      "iterations": 5
+    },
+    {
+      "name": "DecisionTree predict 5000x20",
+      "mean_ms": 0.1084,
+      "std_ms": 0.0611,
+      "iterations": 5
+    },
+    {
+      "name": "RandomForest fit 5000x20",
+      "mean_ms": 1043.1619,
+      "std_ms": 1.9308,
+      "iterations": 5
+    },
+    {
+      "name": "RandomForest predict 5000x20",
+      "mean_ms": 6.0078,
+      "std_ms": 0.1711,
+      "iterations": 5
+    },
+    {
+      "name": "KMeans fit 5000x20",
+      "mean_ms": 173.5381,
+      "std_ms": 34.9529,
+      "iterations": 5
+    },
+    {
+      "name": "GaussianNB fit 5000x20",
+      "mean_ms": 4.8191,
+      "std_ms": 3.4483,
+      "iterations": 5
+    },
+    {
+      "name": "GaussianNB predict 5000x20",
+      "mean_ms": 0.2622,
+      "std_ms": 0.0294,
+      "iterations": 5
+    }
+  ]
 }

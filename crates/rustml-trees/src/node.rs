@@ -27,6 +27,7 @@ pub enum TreeNode<F: Float> {
 
 impl<F: Float> TreeNode<F> {
     /// Predict a single sample by traversing the tree.
+    #[inline]
     pub fn predict_one(&self, features: &[F]) -> F {
         match self {
             TreeNode::Leaf { value, .. } => *value,

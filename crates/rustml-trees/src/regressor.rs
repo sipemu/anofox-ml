@@ -239,4 +239,117 @@ mod tests {
         assert_abs_diff_eq!(preds[2], 3.5, epsilon = 1e-10);
         assert_abs_diff_eq!(preds[3], 3.5, epsilon = 1e-10);
     }
+
+    #[test]
+    fn test_feature_importances() {
+        let x = array![[1.0, 100.0], [2.0, 200.0], [3.0, 300.0], [4.0, 400.0]];
+        let y = array![1.0, 2.0, 3.0, 4.0];
+
+        let tree = DecisionTreeRegressor::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+
+        let importances = fitted.feature_importances();
+        // All importances should be non-negative
+        for &imp in importances.iter() {
+            assert!(imp >= 0.0, "importance should be non-negative, got {}", imp);
+        }
+        // Sum should be 1.0
+        let sum: f64 = importances.iter().sum();
+        assert_abs_diff_eq!(sum, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_min_samples_split_regression() {
+        // 4 samples with min_samples_split=5: root cannot split
+        let x = array![[1.0], [2.0], [3.0], [4.0]];
+        let y = array![1.0, 2.0, 3.0, 4.0];
+
+        let tree = DecisionTreeRegressor::new().with_min_samples_split(5);
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+
+        // Single leaf predicts the mean: (1+2+3+4)/4 = 2.5
+        for &p in preds.iter() {
+            assert_abs_diff_eq!(p, 2.5, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_min_samples_leaf_regression() {
+        // 4 samples, min_samples_leaf=3 means no valid split can produce
+        // leaves with >= 3 samples each (4 total), so tree is a single leaf.
+        let x = array![[1.0], [2.0], [3.0], [4.0]];
+        let y = array![1.0, 2.0, 3.0, 4.0];
+
+        let tree = DecisionTreeRegressor::new().with_min_samples_leaf(3);
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+
+        // Single leaf predicts the mean: 2.5
+        for &p in preds.iter() {
+            assert_abs_diff_eq!(p, 2.5, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_single_feature_regression() {
+        // Simple linear data with one feature
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0]];
+        let y = array![10.0, 20.0, 30.0, 40.0, 50.0];
+
+        let tree = DecisionTreeRegressor::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+
+        // With unlimited depth, should perfectly fit training data
+        let preds = fitted.predict(&x).unwrap();
+        for (p, t) in preds.iter().zip(y.iter()) {
+            assert_abs_diff_eq!(p, t, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_shape_mismatch_error() {
+        let x = array![[1.0], [2.0], [3.0]];
+        let y = array![1.0, 2.0]; // 3 rows vs 2 labels
+
+        let tree = DecisionTreeRegressor::default();
+        let result = Fit::<f64>::fit(&tree, &x, &y);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RustMlError::ShapeMismatch(_) => {} // expected
+            other => panic!("expected ShapeMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_empty_input_error() {
+        let x: Array2<f64> = Array2::zeros((0, 0));
+        let y: Array1<f64> = array![];
+
+        let tree = DecisionTreeRegressor::default();
+        let result = Fit::<f64>::fit(&tree, &x, &y);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RustMlError::EmptyInput(_) => {} // expected
+            other => panic!("expected EmptyInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_predict_wrong_features() {
+        let x = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
+        let y = array![1.0, 2.0, 3.0, 4.0];
+
+        let tree = DecisionTreeRegressor::default();
+        let fitted = Fit::fit(&tree, &x, &y).unwrap();
+
+        // Predict with 3 features instead of 2
+        let bad_x = array![[1.0, 2.0, 3.0]];
+        let result = fitted.predict(&bad_x);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RustMlError::ShapeMismatch(_) => {} // expected
+            other => panic!("expected ShapeMismatch, got {:?}", other),
+        }
+    }
 }

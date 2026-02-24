@@ -189,6 +189,68 @@ mod tests {
         assert!(transformed[[0, 0]] > 0.0);
     }
 
+    #[test]
+    fn test_large_values() {
+        // Very large feature values should not produce NaN/Inf
+        let x = array![
+            [1e10, -1e10],
+            [2e10, -2e10],
+            [3e10, -3e10],
+            [4e10, -4e10],
+        ];
+        let scaler = StandardScaler::default();
+        let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        for &v in transformed.iter() {
+            assert!(v.is_finite(), "transformed value should be finite, got {}", v);
+        }
+        // Mean should be ~0
+        let col_means = transformed.sum_axis(Axis(0)) / 4.0;
+        assert_abs_diff_eq!(col_means[0], 0.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_small_values() {
+        // Very small feature values should not lose precision
+        let x = array![
+            [1e-10, 2e-10],
+            [3e-10, 4e-10],
+            [5e-10, 6e-10],
+            [7e-10, 8e-10],
+        ];
+        let scaler = StandardScaler::default();
+        let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        for &v in transformed.iter() {
+            assert!(v.is_finite(), "transformed value should be finite, got {}", v);
+        }
+        // Roundtrip should preserve values
+        let recovered = fitted.inverse_transform(&transformed).unwrap();
+        for (a, b) in x.iter().zip(recovered.iter()) {
+            assert_abs_diff_eq!(a, b, epsilon = 1e-18);
+        }
+    }
+
+    #[test]
+    fn test_near_zero_variance_column() {
+        // One column has near-zero variance; scaler should handle without NaN
+        let x = array![
+            [1.0, 5.0],
+            [2.0, 5.0 + 1e-15],
+            [3.0, 5.0 - 1e-15],
+            [4.0, 5.0],
+        ];
+        let scaler = StandardScaler::default();
+        let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
+        let transformed = fitted.transform(&x).unwrap();
+
+        for &v in transformed.iter() {
+            assert!(v.is_finite(), "near-zero variance column produced non-finite: {}", v);
+        }
+    }
+
     mod prop_tests {
         use super::*;
         use proptest::prelude::*;

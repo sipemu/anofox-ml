@@ -467,4 +467,80 @@ mod tests {
 
         assert_eq!(fitted.n_clusters(), 2);
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn make_cluster_data(n_clusters: usize, n_per_cluster: usize, seed: u64) -> Array2<f64> {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let n = n_clusters * n_per_cluster;
+            let mut data = Vec::with_capacity(n * 2);
+            for c in 0..n_clusters {
+                let cx = (c as f64) * 10.0;
+                let cy = (c as f64) * 10.0;
+                for i in 0..n_per_cluster {
+                    let mut h = DefaultHasher::new();
+                    seed.hash(&mut h);
+                    (c as u64).hash(&mut h);
+                    (i as u64).hash(&mut h);
+                    let bits = h.finish();
+                    let dx = (bits as f64 / u64::MAX as f64) * 2.0 - 1.0;
+                    let mut h2 = DefaultHasher::new();
+                    seed.hash(&mut h2);
+                    (c as u64).hash(&mut h2);
+                    (i as u64).hash(&mut h2);
+                    1u64.hash(&mut h2);
+                    let bits2 = h2.finish();
+                    let dy = (bits2 as f64 / u64::MAX as f64) * 2.0 - 1.0;
+                    data.push(cx + dx);
+                    data.push(cy + dy);
+                }
+            }
+            Array2::from_shape_vec((n, 2), data).unwrap()
+        }
+
+        proptest! {
+            #[test]
+            fn labels_in_range(
+                n_clusters in 1usize..=5,
+                n_per_cluster in 3usize..=10,
+                seed in 0u64..1000,
+            ) {
+                let x = make_cluster_data(n_clusters, n_per_cluster, seed);
+                let dbscan = Dbscan::new(2.0, 3);
+                let fitted = FitUnsupervised::<f64>::fit(&dbscan, &x).unwrap();
+
+                let labels = fitted.labels();
+                let nc = fitted.n_clusters();
+                for &label in labels.iter() {
+                    prop_assert!(
+                        label >= -1.0 && label < nc as f64,
+                        "label {} out of range -1..{}", label, nc
+                    );
+                }
+            }
+
+            #[test]
+            fn noise_plus_clustered_equals_total(
+                n_clusters in 1usize..=5,
+                n_per_cluster in 3usize..=10,
+                seed in 0u64..1000,
+            ) {
+                let x = make_cluster_data(n_clusters, n_per_cluster, seed);
+                let n_total = x.nrows();
+                let dbscan = Dbscan::new(2.0, 3);
+                let fitted = FitUnsupervised::<f64>::fit(&dbscan, &x).unwrap();
+
+                let labels = fitted.labels();
+                let n_noise = labels.iter().filter(|&&l| l == -1.0).count();
+                let n_clustered = labels.iter().filter(|&&l| l >= 0.0).count();
+                prop_assert_eq!(
+                    n_noise + n_clustered, n_total,
+                    "noise({}) + clustered({}) != total({})", n_noise, n_clustered, n_total
+                );
+            }
+        }
+    }
 }

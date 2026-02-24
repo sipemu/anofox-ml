@@ -17,6 +17,10 @@ from generators import (
     gen_kmeans,
     gen_random_forest,
     gen_pca,
+    gen_svm,
+    gen_gradient_boosting,
+    gen_dbscan,
+    gen_feature_selection,
 )
 
 OUTPUT_DIR = os.path.join(
@@ -44,6 +48,10 @@ def main():
     write_json("kmeans.json", gen_kmeans.generate())
     write_json("random_forest.json", gen_random_forest.generate())
     write_json("pca.json", gen_pca.generate())
+    write_json("svm.json", gen_svm.generate())
+    write_json("gradient_boosting.json", gen_gradient_boosting.generate())
+    write_json("dbscan.json", gen_dbscan.generate())
+    write_json("feature_selection.json", gen_feature_selection.generate())
 
     print()
     print("Done! All fixtures written to crates/rustml/tests/golden_data/")

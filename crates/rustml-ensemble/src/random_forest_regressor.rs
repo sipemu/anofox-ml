@@ -180,24 +180,24 @@ impl<F: Float> Predict<F> for FittedRandomForestRegressor<F> {
         }
 
         let n_samples = x.nrows();
-        let n_trees = F::from_usize(self.trees.len()).unwrap();
-        let mut predictions = Vec::with_capacity(n_samples);
+        let n_trees_f = F::from_usize(self.trees.len()).unwrap();
 
+        // Collect all tree predictions in batch: one predict call per tree
+        let mut all_preds: Vec<Array1<F>> = Vec::with_capacity(self.trees.len());
+        for forest_tree in &self.trees {
+            let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
+            let tree_preds = forest_tree.tree.predict(&sub_x)?;
+            all_preds.push(tree_preds);
+        }
+
+        // Average predictions across trees
+        let mut predictions = Vec::with_capacity(n_samples);
         for i in 0..n_samples {
             let mut sum = F::zero();
-            for forest_tree in &self.trees {
-                // Build a row with only the features this tree was trained on
-                let sub_row: Vec<F> = forest_tree
-                    .feature_indices
-                    .iter()
-                    .map(|&fi| x[[i, fi]])
-                    .collect();
-                let sub_x = Array2::from_shape_vec((1, sub_row.len()), sub_row)
-                    .expect("shape matches feature count");
-                let pred = forest_tree.tree.predict(&sub_x)?;
-                sum += pred[0];
+            for tree_pred in &all_preds {
+                sum += tree_pred[i];
             }
-            predictions.push(sum / n_trees);
+            predictions.push(sum / n_trees_f);
         }
 
         Ok(Array1::from_vec(predictions))
@@ -234,6 +234,22 @@ impl<F: Float> FittedRandomForestRegressor<F> {
     pub fn n_estimators(&self) -> usize {
         self.trees.len()
     }
+}
+
+/// Build a sub-matrix selecting all rows but only specific columns from `x`.
+fn build_sub_matrix_cols<F: Float>(
+    x: &Array2<F>,
+    col_indices: &[usize],
+) -> Array2<F> {
+    let n_rows = x.nrows();
+    let n_cols = col_indices.len();
+    let mut data = Vec::with_capacity(n_rows * n_cols);
+    for i in 0..n_rows {
+        for &ci in col_indices {
+            data.push(x[[i, ci]]);
+        }
+    }
+    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
 }
 
 /// Select `k` distinct feature indices from `0..n_features` without replacement.

@@ -180,25 +180,25 @@ impl<F: Float> Predict<F> for FittedRandomForestClassifier<F> {
         }
 
         let n_samples = x.nrows();
+        let n_trees = self.trees.len();
+
+        // Collect all tree predictions in batch: one predict call per tree
+        // instead of n_samples × n_trees individual calls.
+        let mut all_preds: Vec<Array1<F>> = Vec::with_capacity(n_trees);
+        for forest_tree in &self.trees {
+            let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
+            let tree_preds = forest_tree.tree.predict(&sub_x)?;
+            all_preds.push(tree_preds);
+        }
+
+        // Aggregate votes per sample
         let mut predictions = Vec::with_capacity(n_samples);
-
+        let mut votes = Vec::with_capacity(n_trees);
         for i in 0..n_samples {
-            // Collect votes from each tree
-            let mut votes: Vec<F> = Vec::with_capacity(self.trees.len());
-            for forest_tree in &self.trees {
-                // Build a row with only the features this tree was trained on
-                let sub_row: Vec<F> = forest_tree
-                    .feature_indices
-                    .iter()
-                    .map(|&fi| x[[i, fi]])
-                    .collect();
-                let sub_x = Array2::from_shape_vec((1, sub_row.len()), sub_row)
-                    .expect("shape matches feature count");
-                let pred = forest_tree.tree.predict(&sub_x)?;
-                votes.push(pred[0]);
+            votes.clear();
+            for tree_pred in &all_preds {
+                votes.push(tree_pred[i]);
             }
-
-            // Majority vote
             predictions.push(majority_vote(&votes));
         }
 
@@ -274,21 +274,37 @@ fn build_sub_matrix<F: Float>(
     Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
 }
 
-/// Return the class that appears most frequently in `votes`.
-fn majority_vote<F: Float>(votes: &[F]) -> F {
-    let mut counts: Vec<(F, usize)> = Vec::new();
-    for &v in votes {
-        if let Some(entry) = counts
-            .iter_mut()
-            .find(|(c, _)| (*c - v).abs() < F::from_f64(1e-9).unwrap())
-        {
-            entry.1 += 1;
-        } else {
-            counts.push((v, 1));
+/// Build a sub-matrix selecting all rows but only specific columns from `x`.
+fn build_sub_matrix_cols<F: Float>(
+    x: &Array2<F>,
+    col_indices: &[usize],
+) -> Array2<F> {
+    let n_rows = x.nrows();
+    let n_cols = col_indices.len();
+    let mut data = Vec::with_capacity(n_rows * n_cols);
+    for i in 0..n_rows {
+        for &ci in col_indices {
+            data.push(x[[i, ci]]);
         }
     }
+    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
+}
+
+/// Return the class that appears most frequently in `votes`.
+/// Uses HashMap with f64 bit representation for O(1) lookup per vote.
+#[inline]
+fn majority_vote<F: Float>(votes: &[F]) -> F {
+    use std::collections::HashMap;
+    let mut counts: HashMap<u64, (F, usize)> = HashMap::new();
+    for &v in votes {
+        let key = v.to_f64().unwrap().to_bits();
+        counts
+            .entry(key)
+            .and_modify(|e| e.1 += 1)
+            .or_insert((v, 1));
+    }
     counts
-        .into_iter()
+        .into_values()
         .max_by_key(|&(_, count)| count)
         .unwrap()
         .0
@@ -453,5 +469,218 @@ mod tests {
         };
         let result: std::result::Result<FittedRandomForestClassifier<f64>, _> = rf.fit(&x, &y);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_feature_importances_non_negative() {
+        let x = array![
+            [1.0, 100.0, 0.5],
+            [2.0, 200.0, 0.6],
+            [3.0, 300.0, 0.7],
+            [10.0, 400.0, 0.8],
+            [11.0, 500.0, 0.9],
+            [12.0, 600.0, 1.0]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        let rf = RandomForestClassifier {
+            n_estimators: 20,
+            seed: 7,
+            ..Default::default()
+        };
+        let fitted: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+
+        let importances = fitted.feature_importances();
+        for &imp in importances.iter() {
+            assert!(
+                imp >= 0.0,
+                "feature importance must be non-negative, got {imp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_n_estimators_one() {
+        let x = array![
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        let rf = RandomForestClassifier {
+            n_estimators: 1,
+            max_depth: Some(3),
+            seed: 42,
+            ..Default::default()
+        };
+        let fitted: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+        assert_eq!(fitted.n_estimators(), 1);
+
+        // A single tree should still produce valid predictions.
+        let preds = fitted.predict(&x).unwrap();
+        assert_eq!(preds.len(), y.len());
+    }
+
+    #[test]
+    fn test_predictions_are_valid_labels() {
+        let x = array![
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0],
+            [20.0, 2.0],
+            [21.0, 2.0],
+            [22.0, 2.0]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+
+        let rf = RandomForestClassifier {
+            n_estimators: 30,
+            max_depth: Some(5),
+            seed: 42,
+            ..Default::default()
+        };
+        let fitted: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+
+        let preds = fitted.predict(&x).unwrap();
+        let valid_labels: std::collections::HashSet<u64> =
+            y.iter().map(|v| v.to_bits()).collect();
+        for &p in preds.iter() {
+            assert!(
+                valid_labels.contains(&p.to_bits()),
+                "prediction {p} is not a valid training label"
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_input_error() {
+        let x: Array2<f64> = Array2::zeros((0, 2));
+        let y: Array1<f64> = Array1::zeros(0);
+
+        let rf = RandomForestClassifier::default();
+        let result: std::result::Result<FittedRandomForestClassifier<f64>, _> = rf.fit(&x, &y);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_zero_estimators_error() {
+        let x = array![[1.0, 2.0], [3.0, 4.0]];
+        let y = array![0.0, 1.0];
+
+        let rf = RandomForestClassifier {
+            n_estimators: 0,
+            seed: 0,
+            ..Default::default()
+        };
+        let result: std::result::Result<FittedRandomForestClassifier<f64>, _> = rf.fit(&x, &y);
+        assert!(result.is_err());
+    }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::HashSet;
+
+        /// Generate deterministic training data for classification.
+        fn make_classification_data(
+            n_samples: usize,
+            n_features: usize,
+            n_classes: usize,
+            seed: u64,
+        ) -> (Array2<f64>, Array1<f64>) {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut x_data = Vec::with_capacity(n_samples * n_features);
+            let mut y_data = Vec::with_capacity(n_samples);
+
+            for i in 0..n_samples {
+                for j in 0..n_features {
+                    let mut h = DefaultHasher::new();
+                    seed.hash(&mut h);
+                    (i as u64).hash(&mut h);
+                    (j as u64).hash(&mut h);
+                    let bits = h.finish();
+                    let v = (bits as f64 / u64::MAX as f64) * 20.0 - 10.0;
+                    x_data.push(v);
+                }
+                let mut h = DefaultHasher::new();
+                seed.hash(&mut h);
+                (i as u64).hash(&mut h);
+                0xDEAD_BEEFu64.hash(&mut h);
+                let label = (h.finish() % n_classes as u64) as f64;
+                y_data.push(label);
+            }
+
+            let x = Array2::from_shape_vec((n_samples, n_features), x_data).unwrap();
+            let y = Array1::from_vec(y_data);
+            (x, y)
+        }
+
+        proptest! {
+            #[test]
+            fn predictions_are_valid_labels(
+                n_samples in 6..30usize,
+                n_features in 1..5usize,
+                n_classes in 2..5usize,
+                seed in 0u64..1000,
+            ) {
+                let (x, y) = make_classification_data(n_samples, n_features, n_classes, seed);
+
+                let train_labels: HashSet<u64> = y.iter()
+                    .map(|&v| v.to_bits())
+                    .collect();
+
+                let rf = RandomForestClassifier {
+                    n_estimators: 10,
+                    max_depth: Some(5),
+                    seed: seed as u64,
+                    ..Default::default()
+                };
+                let fitted: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+                let preds = fitted.predict(&x).unwrap();
+
+                for (i, &p) in preds.iter().enumerate() {
+                    prop_assert!(
+                        train_labels.contains(&p.to_bits()),
+                        "prediction {} at index {} is not a valid training label",
+                        p, i
+                    );
+                }
+            }
+
+            #[test]
+            fn feature_importances_sum_to_one(
+                n_samples in 6..30usize,
+                n_features in 1..5usize,
+                seed in 0u64..1000,
+            ) {
+                let n_classes = 3;
+                let (x, y) = make_classification_data(n_samples, n_features, n_classes, seed);
+
+                let rf = RandomForestClassifier {
+                    n_estimators: 10,
+                    max_depth: Some(5),
+                    seed: seed as u64,
+                    ..Default::default()
+                };
+                let fitted: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+                let importances = fitted.feature_importances();
+                let sum: f64 = importances.iter().sum();
+
+                prop_assert!(
+                    (sum - 1.0).abs() < 1e-10,
+                    "feature importances sum to {} (expected ~1.0), n_samples={}, n_features={}, seed={}",
+                    sum, n_samples, n_features, seed
+                );
+            }
+        }
     }
 }

@@ -297,4 +297,311 @@ mod tests {
             other => panic!("expected ShapeMismatch error, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_zero_variance_feature() {
+        // One feature column is constant — var_smoothing should prevent NaN.
+        let x_train = array![
+            [1.0, 5.0],
+            [2.0, 5.0],
+            [3.0, 5.0],
+            [10.0, 5.0],
+            [11.0, 5.0],
+            [12.0, 5.0]
+        ];
+        let y_train = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        // Variance for the second feature should be the smoothing value, not zero.
+        assert!(fitted.sigma()[[0, 1]] > 0.0);
+        assert!(fitted.sigma()[[1, 1]] > 0.0);
+
+        // Predictions should still work without NaN.
+        let x_test = array![[2.0, 5.0], [11.0, 5.0]];
+        let preds = fitted.predict(&x_test).unwrap();
+        assert_abs_diff_eq!(preds[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(preds[1], 1.0, epsilon = 1e-10);
+        // Verify no NaN in predictions.
+        for &p in preds.iter() {
+            assert!(!p.is_nan(), "prediction should not be NaN");
+        }
+    }
+
+    #[test]
+    fn test_highly_imbalanced_classes() {
+        // 50 class-0 samples and 2 class-1 samples.
+        let mut x_data = Vec::new();
+        let mut y_data = Vec::new();
+        for i in 0..50 {
+            x_data.push(i as f64 * 0.1);
+            x_data.push(i as f64 * 0.1);
+            y_data.push(0.0);
+        }
+        // Class-1 samples far away.
+        x_data.push(100.0);
+        x_data.push(100.0);
+        y_data.push(1.0);
+        x_data.push(101.0);
+        x_data.push(101.0);
+        y_data.push(1.0);
+
+        let x_train = Array2::from_shape_vec((52, 2), x_data).unwrap();
+        let y_train = Array1::from_vec(y_data);
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        // Should not crash, and priors should reflect the imbalance.
+        assert_abs_diff_eq!(fitted.class_prior()[0], 50.0 / 52.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(fitted.class_prior()[1], 2.0 / 52.0, epsilon = 1e-10);
+
+        // A point near class-1 cluster should still be predicted as class 1.
+        let x_test = array![[100.5, 100.5]];
+        let preds = fitted.predict(&x_test).unwrap();
+        assert_abs_diff_eq!(preds[0], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_many_classes() {
+        // 10 different classes, each with 3 samples.
+        let mut x_data = Vec::new();
+        let mut y_data = Vec::new();
+        for class in 0..10 {
+            let center = class as f64 * 100.0;
+            for offset in &[-0.1, 0.0, 0.1] {
+                x_data.push(center + offset);
+                x_data.push(center + offset);
+                y_data.push(class as f64);
+            }
+        }
+        let x_train = Array2::from_shape_vec((30, 2), x_data).unwrap();
+        let y_train = Array1::from_vec(y_data);
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        assert_eq!(fitted.class_labels().len(), 10);
+
+        // Predict at each class center; verify predictions are valid labels.
+        let mut test_data = Vec::new();
+        for class in 0..10 {
+            test_data.push(class as f64 * 100.0);
+            test_data.push(class as f64 * 100.0);
+        }
+        let x_test = Array2::from_shape_vec((10, 2), test_data).unwrap();
+        let preds = fitted.predict(&x_test).unwrap();
+
+        for &p in preds.iter() {
+            assert!(
+                fitted.class_labels().contains(&p),
+                "prediction {} is not a valid class label",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn test_f32_support() {
+        let x_train: Array2<f32> = array![
+            [1.0f32, 1.0],
+            [1.1, 1.1],
+            [10.0, 10.0],
+            [10.1, 10.1]
+        ];
+        let y_train: Array1<f32> = array![0.0f32, 0.0, 1.0, 1.0];
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f32> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        let x_test: Array2<f32> = array![[1.0f32, 1.0], [10.0, 10.0]];
+        let preds = fitted.predict(&x_test).unwrap();
+
+        assert_abs_diff_eq!(preds[0], 0.0f32, epsilon = 1e-5);
+        assert_abs_diff_eq!(preds[1], 1.0f32, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn test_shape_mismatch_error() {
+        // x has 3 rows but y has 2 elements.
+        let x = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
+        let y = array![0.0, 1.0];
+
+        let nb = GaussianNB::default();
+        let result: Result<FittedGaussianNB<f64>> = Fit::fit(&nb, &x, &y);
+        assert!(result.is_err());
+        match result {
+            Err(RustMlError::ShapeMismatch(msg)) => {
+                assert!(msg.contains("3"), "error should mention row count");
+                assert!(msg.contains("2"), "error should mention y length");
+            }
+            other => panic!("expected ShapeMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_predict_wrong_features() {
+        let x_train = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let y_train = array![0.0, 1.0];
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        // Predict with 2 features instead of 3.
+        let x_test = array![[1.0, 2.0]];
+        let result = fitted.predict(&x_test);
+        assert!(result.is_err());
+        match result {
+            Err(RustMlError::ShapeMismatch(msg)) => {
+                assert!(msg.contains("3"), "error should mention expected features");
+                assert!(msg.contains("2"), "error should mention actual features");
+            }
+            other => panic!("expected ShapeMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_prior_probabilities() {
+        // 6 class-0 and 4 class-1 samples.
+        let x_train = array![
+            [1.0], [1.1], [1.2], [0.9], [0.8], [1.3],
+            [10.0], [10.1], [10.2], [9.9]
+        ];
+        let y_train = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        // Priors should reflect 6/10 and 4/10.
+        assert_abs_diff_eq!(fitted.class_prior()[0], 0.6, epsilon = 1e-10);
+        assert_abs_diff_eq!(fitted.class_prior()[1], 0.4, epsilon = 1e-10);
+
+        // Priors should sum to 1.
+        let prior_sum: f64 = fitted.class_prior().iter().sum();
+        assert_abs_diff_eq!(prior_sum, 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_single_sample_per_class() {
+        // Two classes, one sample each.
+        let x_train = array![[0.0, 0.0], [10.0, 10.0]];
+        let y_train = array![0.0, 1.0];
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        // Means should match the single sample.
+        assert_abs_diff_eq!(fitted.theta()[[0, 0]], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(fitted.theta()[[0, 1]], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(fitted.theta()[[1, 0]], 10.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(fitted.theta()[[1, 1]], 10.0, epsilon = 1e-10);
+
+        // Should still predict correctly (variance is just smoothing).
+        let x_test = array![[0.1, 0.1], [9.9, 9.9]];
+        let preds = fitted.predict(&x_test).unwrap();
+        assert_abs_diff_eq!(preds[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(preds[1], 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_three_features_two_classes() {
+        // Well-separated 3D data.
+        let x_train = array![
+            [1.0, 2.0, 3.0],
+            [1.1, 2.1, 3.1],
+            [0.9, 1.9, 2.9],
+            [1.0, 2.0, 3.2],
+            [20.0, 21.0, 22.0],
+            [20.1, 21.1, 22.1],
+            [19.9, 20.9, 21.9],
+            [20.0, 21.0, 22.2]
+        ];
+        let y_train = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+
+        let nb = GaussianNB::default();
+        let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
+
+        // Verify theta has the right shape.
+        assert_eq!(fitted.theta().shape(), &[2, 3]);
+        assert_eq!(fitted.sigma().shape(), &[2, 3]);
+
+        // Predict near each cluster.
+        let x_test = array![[1.0, 2.0, 3.0], [20.0, 21.0, 22.0], [10.0, 11.0, 12.0]];
+        let preds = fitted.predict(&x_test).unwrap();
+        assert_abs_diff_eq!(preds[0], 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(preds[1], 1.0, epsilon = 1e-10);
+        // The midpoint could go either way, but it should be a valid label.
+        assert!(preds[2] == 0.0 || preds[2] == 1.0);
+    }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate well-separated two-class Gaussian data.
+        ///
+        /// Class 0 is centred at -5.0, class 1 at 5.0 on every feature,
+        /// with small deterministic perturbations derived from a hash so
+        /// that proptest does not rely on external RNGs.
+        fn make_separated_data(
+            n_per_class: usize,
+            n_features: usize,
+            seed: u64,
+        ) -> (Array2<f64>, Array1<f64>) {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let n_samples = n_per_class * 2;
+            let mut x_data = Vec::with_capacity(n_samples * n_features);
+            let mut y_data = Vec::with_capacity(n_samples);
+
+            for i in 0..n_samples {
+                let class = if i < n_per_class { 0.0 } else { 1.0 };
+                let center = if i < n_per_class { -5.0 } else { 5.0 };
+                for j in 0..n_features {
+                    let mut h = DefaultHasher::new();
+                    seed.hash(&mut h);
+                    (i as u64).hash(&mut h);
+                    (j as u64).hash(&mut h);
+                    let bits = h.finish();
+                    // Small perturbation in [-0.5, 0.5]
+                    let noise = (bits as f64 / u64::MAX as f64) - 0.5;
+                    x_data.push(center + noise);
+                }
+                y_data.push(class);
+            }
+
+            let x = Array2::from_shape_vec((n_samples, n_features), x_data).unwrap();
+            let y = Array1::from_vec(y_data);
+            (x, y)
+        }
+
+        proptest! {
+            #[test]
+            fn well_separated_accuracy_above_80(
+                n_per_class in 5..30usize,
+                n_features in 1..5usize,
+                seed in 0u64..1000,
+            ) {
+                let (x, y) = make_separated_data(n_per_class, n_features, seed);
+
+                let nb = GaussianNB::default();
+                let fitted: FittedGaussianNB<f64> = Fit::fit(&nb, &x, &y).unwrap();
+                let preds = fitted.predict(&x).unwrap();
+
+                let correct = preds.iter()
+                    .zip(y.iter())
+                    .filter(|(&p, &t)| (p - t).abs() < 1e-10)
+                    .count();
+                let accuracy = correct as f64 / y.len() as f64;
+
+                prop_assert!(
+                    accuracy >= 0.8,
+                    "accuracy was {:.3} (expected >= 0.8), n_per_class={}, n_features={}, seed={}",
+                    accuracy, n_per_class, n_features, seed
+                );
+            }
+        }
+    }
 }

@@ -553,4 +553,161 @@ mod tests {
         };
         assert!(Fit::<f64>::fit(&gb, &x, &y).is_err());
     }
+
+    #[test]
+    fn test_n_estimators_one() {
+        let x = array![
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        let gb = GradientBoostingClassifier {
+            n_estimators: 1,
+            learning_rate: 0.1,
+            max_depth: Some(3),
+            seed: 42,
+            ..Default::default()
+        };
+        let fitted: FittedGradientBoostingClassifier<f64> = gb.fit(&x, &y).unwrap();
+        assert_eq!(fitted.n_estimators(), 1);
+
+        // Even a single boosting round should produce predictions with the correct length.
+        let preds = fitted.predict(&x).unwrap();
+        assert_eq!(preds.len(), y.len());
+    }
+
+    #[test]
+    fn test_predictions_are_valid_labels() {
+        let x = array![
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [1.0, 0.0],
+            [5.0, 5.0],
+            [5.5, 5.0],
+            [6.0, 5.0],
+            [10.0, 10.0],
+            [10.5, 10.0],
+            [11.0, 10.0]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+
+        let gb = GradientBoostingClassifier {
+            n_estimators: 50,
+            learning_rate: 0.1,
+            max_depth: Some(3),
+            seed: 42,
+            ..Default::default()
+        };
+        let fitted: FittedGradientBoostingClassifier<f64> = gb.fit(&x, &y).unwrap();
+
+        let preds = fitted.predict(&x).unwrap();
+        let valid_labels: std::collections::HashSet<u64> =
+            y.iter().map(|v| v.to_bits()).collect();
+        for &p in preds.iter() {
+            assert!(
+                valid_labels.contains(&p.to_bits()),
+                "prediction {p} is not a valid training label"
+            );
+        }
+    }
+
+    #[test]
+    fn test_subsample_impact() {
+        // With subsample < 1.0, the model should still produce reasonable
+        // predictions on clearly separable data.
+        let x = array![
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0],
+            [13.0, 1.0]
+        ];
+        let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+
+        let gb = GradientBoostingClassifier {
+            n_estimators: 80,
+            learning_rate: 0.1,
+            max_depth: Some(3),
+            subsample: 0.5,
+            seed: 7,
+            ..Default::default()
+        };
+        let fitted: FittedGradientBoostingClassifier<f64> = gb.fit(&x, &y).unwrap();
+
+        let preds = fitted.predict(&x).unwrap();
+        let correct: usize = preds
+            .iter()
+            .zip(y.iter())
+            .filter(|(p, t)| (*p - *t).abs() < 1e-10)
+            .count();
+        let accuracy = correct as f64 / y.len() as f64;
+        assert!(
+            accuracy >= 0.75,
+            "subsample=0.5 should still achieve reasonable accuracy, got {accuracy}"
+        );
+    }
+
+    #[test]
+    fn test_learning_rate_zero_error_or_degrades() {
+        // A very small learning rate with few estimators should produce weaker
+        // predictions than a normal learning rate (less overfitting / underfitting
+        // with few rounds).
+        let x = array![
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        // Normal learning rate should fit well with enough estimators.
+        let gb_normal = GradientBoostingClassifier {
+            n_estimators: 50,
+            learning_rate: 0.1,
+            max_depth: Some(3),
+            seed: 42,
+            ..Default::default()
+        };
+        let fitted_normal: FittedGradientBoostingClassifier<f64> =
+            gb_normal.fit(&x, &y).unwrap();
+        let preds_normal = fitted_normal.predict(&x).unwrap();
+        let correct_normal: usize = preds_normal
+            .iter()
+            .zip(y.iter())
+            .filter(|(p, t)| (*p - *t).abs() < 1e-10)
+            .count();
+
+        // Tiny learning rate with the same number of estimators should learn slower.
+        let gb_tiny = GradientBoostingClassifier {
+            n_estimators: 50,
+            learning_rate: 0.001,
+            max_depth: Some(3),
+            seed: 42,
+            ..Default::default()
+        };
+        let fitted_tiny: FittedGradientBoostingClassifier<f64> =
+            gb_tiny.fit(&x, &y).unwrap();
+        let preds_tiny = fitted_tiny.predict(&x).unwrap();
+        let correct_tiny: usize = preds_tiny
+            .iter()
+            .zip(y.iter())
+            .filter(|(p, t)| (*p - *t).abs() < 1e-10)
+            .count();
+
+        // The normal learning rate should be at least as accurate (likely better).
+        assert!(
+            correct_normal >= correct_tiny,
+            "normal lr ({correct_normal} correct) should be >= tiny lr ({correct_tiny} correct)"
+        );
+    }
 }

@@ -640,4 +640,81 @@ mod tests {
             }
         }
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use rustml_core::Fit;
+        use rustml_core::Predict;
+
+        /// Generate well-separated 2D binary classification data using
+        /// a deterministic hash-based noise generator.
+        fn make_well_separated_binary(
+            n_per_class: usize,
+            seed: u64,
+        ) -> (Array2<f64>, Array1<f64>) {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let n = n_per_class * 2;
+            let mut x_data = Vec::with_capacity(n * 2);
+            let mut y_data = Vec::with_capacity(n);
+
+            for i in 0..n {
+                let class = if i < n_per_class { 0.0 } else { 1.0 };
+                let offset = if class == 0.0 { -5.0 } else { 5.0 };
+
+                let mut h = DefaultHasher::new();
+                seed.hash(&mut h);
+                (i as u64).hash(&mut h);
+                let bits = h.finish();
+                let noise = (bits as f64 / u64::MAX as f64) * 2.0 - 1.0; // [-1, 1]
+                x_data.push(offset + noise);
+
+                let mut h2 = DefaultHasher::new();
+                seed.hash(&mut h2);
+                (i as u64).hash(&mut h2);
+                1u64.hash(&mut h2);
+                let bits2 = h2.finish();
+                let noise2 = (bits2 as f64 / u64::MAX as f64) * 2.0 - 1.0;
+                x_data.push(noise2);
+
+                y_data.push(class);
+            }
+
+            let x = Array2::from_shape_vec((n, 2), x_data).unwrap();
+            let y = Array1::from_vec(y_data);
+            (x, y)
+        }
+
+        proptest! {
+            /// For well-separated data, every prediction must be a valid
+            /// class label from the training set.
+            #[test]
+            fn predictions_are_valid_class_labels(
+                n_per_class in 5_usize..50,
+                seed in 0_u64..10_000,
+            ) {
+                let (x, y) = make_well_separated_binary(n_per_class, seed);
+
+                let svc = LinearSvc::new()
+                    .with_c(1.0)
+                    .with_max_iter(1000)
+                    .with_seed(seed);
+
+                let fitted: FittedLinearSvc<f64> = svc.fit(&x, &y).unwrap();
+                let preds = fitted.predict(&x).unwrap();
+                let labels = fitted.class_labels();
+
+                for &p in preds.iter() {
+                    prop_assert!(
+                        labels.contains(&p),
+                        "prediction {} is not a valid class label (valid: {:?})",
+                        p,
+                        labels,
+                    );
+                }
+            }
+        }
+    }
 }
