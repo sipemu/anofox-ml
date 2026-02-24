@@ -1,0 +1,17 @@
+[package]
+name = "rustml"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustml-core = { path = "../rustml-core" }
+rustml-metrics = { path = "../rustml-metrics" }
+rustml-preprocessing = { path = "../rustml-preprocessing" }
+rustml-neighbors = { path = "../rustml-neighbors" }
+rustml-trees = { path = "../rustml-trees" }
+ndarray = { workspace = true }
+num-traits = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+approx = { workspace = true }

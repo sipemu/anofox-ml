@@ -1,0 +1,588 @@
+[
+  {
+    "name": "knn_classifier_k3_uniform_euclidean",
+    "algorithm": "KnnClassifier",
+    "X_train": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.5,
+        0.5
+      ],
+      [
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        5.0,
+        5.0
+      ],
+      [
+        5.5,
+        5.5
+      ],
+      [
+        6.0,
+        5.0
+      ],
+      [
+        5.0,
+        6.0
+      ]
+    ],
+    "y_train": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "X_test": [
+      [
+        0.2,
+        0.3
+      ],
+      [
+        5.2,
+        5.3
+      ],
+      [
+        2.5,
+        2.5
+      ]
+    ],
+    "y_pred": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "n_neighbors": 3,
+    "weights": "uniform",
+    "metric": "euclidean"
+  },
+  {
+    "name": "knn_classifier_k3_distance_euclidean",
+    "algorithm": "KnnClassifier",
+    "X_train": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.5,
+        0.5
+      ],
+      [
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        5.0,
+        5.0
+      ],
+      [
+        5.5,
+        5.5
+      ],
+      [
+        6.0,
+        5.0
+      ],
+      [
+        5.0,
+        6.0
+      ]
+    ],
+    "y_train": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "X_test": [
+      [
+        0.2,
+        0.3
+      ],
+      [
+        5.2,
+        5.3
+      ],
+      [
+        2.5,
+        2.5
+      ]
+    ],
+    "y_pred": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "n_neighbors": 3,
+    "weights": "distance",
+    "metric": "euclidean"
+  },
+  {
+    "name": "knn_classifier_k5_uniform_euclidean",
+    "algorithm": "KnnClassifier",
+    "X_train": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.5,
+        0.5
+      ],
+      [
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        5.0,
+        5.0
+      ],
+      [
+        5.5,
+        5.5
+      ],
+      [
+        6.0,
+        5.0
+      ],
+      [
+        5.0,
+        6.0
+      ]
+    ],
+    "y_train": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "X_test": [
+      [
+        0.2,
+        0.3
+      ],
+      [
+        5.2,
+        5.3
+      ],
+      [
+        2.5,
+        2.5
+      ]
+    ],
+    "y_pred": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "n_neighbors": 5,
+    "weights": "uniform",
+    "metric": "euclidean"
+  },
+  {
+    "name": "knn_classifier_k5_distance_euclidean",
+    "algorithm": "KnnClassifier",
+    "X_train": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.5,
+        0.5
+      ],
+      [
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        5.0,
+        5.0
+      ],
+      [
+        5.5,
+        5.5
+      ],
+      [
+        6.0,
+        5.0
+      ],
+      [
+        5.0,
+        6.0
+      ]
+    ],
+    "y_train": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "X_test": [
+      [
+        0.2,
+        0.3
+      ],
+      [
+        5.2,
+        5.3
+      ],
+      [
+        2.5,
+        2.5
+      ]
+    ],
+    "y_pred": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "n_neighbors": 5,
+    "weights": "distance",
+    "metric": "euclidean"
+  },
+  {
+    "name": "knn_classifier_k3_uniform_manhattan",
+    "algorithm": "KnnClassifier",
+    "X_train": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.5,
+        0.5
+      ],
+      [
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0
+      ],
+      [
+        5.0,
+        5.0
+      ],
+      [
+        5.5,
+        5.5
+      ],
+      [
+        6.0,
+        5.0
+      ],
+      [
+        5.0,
+        6.0
+      ]
+    ],
+    "y_train": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "X_test": [
+      [
+        0.2,
+        0.3
+      ],
+      [
+        5.2,
+        5.3
+      ],
+      [
+        2.5,
+        2.5
+      ]
+    ],
+    "y_pred": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "n_neighbors": 3,
+    "weights": "uniform",
+    "metric": "manhattan"
+  },
+  {
+    "name": "knn_regressor_k3_uniform_euclidean",
+    "algorithm": "KnnRegressor",
+    "X_train": [
+      [
+        1.0
+      ],
+      [
+        2.0
+      ],
+      [
+        3.0
+      ],
+      [
+        4.0
+      ],
+      [
+        5.0
+      ],
+      [
+        6.0
+      ],
+      [
+        7.0
+      ],
+      [
+        8.0
+      ]
+    ],
+    "y_train": [
+      2.0,
+      4.0,
+      6.0,
+      8.0,
+      10.0,
+      12.0,
+      14.0,
+      16.0
+    ],
+    "X_test": [
+      [
+        2.5
+      ],
+      [
+        5.5
+      ],
+      [
+        1.0
+      ]
+    ],
+    "y_pred": [
+      4.0,
+      10.0,
+      4.0
+    ],
+    "n_neighbors": 3,
+    "weights": "uniform",
+    "metric": "euclidean"
+  },
+  {
+    "name": "knn_regressor_k3_distance_euclidean",
+    "algorithm": "KnnRegressor",
+    "X_train": [
+      [
+        1.0
+      ],
+      [
+        2.0
+      ],
+      [
+        3.0
+      ],
+      [
+        4.0
+      ],
+      [
+        5.0
+      ],
+      [
+        6.0
+      ],
+      [
+        7.0
+      ],
+      [
+        8.0
+      ]
+    ],
+    "y_train": [
+      2.0,
+      4.0,
+      6.0,
+      8.0,
+      10.0,
+      12.0,
+      14.0,
+      16.0
+    ],
+    "X_test": [
+      [
+        2.5
+      ],
+      [
+        5.5
+      ],
+      [
+        1.0
+      ]
+    ],
+    "y_pred": [
+      4.571428571428571,
+      10.571428571428571,
+      2.0
+    ],
+    "n_neighbors": 3,
+    "weights": "distance",
+    "metric": "euclidean"
+  },
+  {
+    "name": "knn_regressor_k5_uniform_euclidean",
+    "algorithm": "KnnRegressor",
+    "X_train": [
+      [
+        1.0
+      ],
+      [
+        2.0
+      ],
+      [
+        3.0
+      ],
+      [
+        4.0
+      ],
+      [
+        5.0
+      ],
+      [
+        6.0
+      ],
+      [
+        7.0
+      ],
+      [
+        8.0
+      ]
+    ],
+    "y_train": [
+      2.0,
+      4.0,
+      6.0,
+      8.0,
+      10.0,
+      12.0,
+      14.0,
+      16.0
+    ],
+    "X_test": [
+      [
+        2.5
+      ],
+      [
+        5.5
+      ],
+      [
+        1.0
+      ]
+    ],
+    "y_pred": [
+      6.0,
+      10.0,
+      6.0
+    ],
+    "n_neighbors": 5,
+    "weights": "uniform",
+    "metric": "euclidean"
+  },
+  {
+    "name": "knn_regressor_k5_distance_euclidean",
+    "algorithm": "KnnRegressor",
+    "X_train": [
+      [
+        1.0
+      ],
+      [
+        2.0
+      ],
+      [
+        3.0
+      ],
+      [
+        4.0
+      ],
+      [
+        5.0
+      ],
+      [
+        6.0
+      ],
+      [
+        7.0
+      ],
+      [
+        8.0
+      ]
+    ],
+    "y_train": [
+      2.0,
+      4.0,
+      6.0,
+      8.0,
+      10.0,
+      12.0,
+      14.0,
+      16.0
+    ],
+    "X_test": [
+      [
+        2.5
+      ],
+      [
+        5.5
+      ],
+      [
+        1.0
+      ]
+    ],
+    "y_pred": [
+      5.348837209302324,
+      10.651162790697672,
+      2.0
+    ],
+    "n_neighbors": 5,
+    "weights": "distance",
+    "metric": "euclidean"
+  }
+]
