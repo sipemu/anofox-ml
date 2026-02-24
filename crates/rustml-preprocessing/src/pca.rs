@@ -58,6 +58,12 @@ impl<F: Float> FitUnsupervised<F> for Pca {
             )));
         }
 
+        if n_samples < 2 {
+            return Err(RustMlError::InvalidParameter(
+                "PCA requires at least 2 samples to compute covariance".into(),
+            ));
+        }
+
         let n_f = F::from_usize(n_samples).unwrap();
 
         // 1. Compute per-feature mean.
@@ -135,7 +141,8 @@ impl<F: Float> FitUnsupervised<F> for Pca {
             }
             v.mapv_inplace(|vi| vi / norm);
 
-            // (b) Power iteration.
+            // (b) Power iteration with convergence check.
+            let convergence_tol = F::from_f64(1e-12).unwrap();
             for _ in 0..POWER_ITER_STEPS {
                 // w = C @ v
                 let mut w = cov.dot(&v);
@@ -154,7 +161,15 @@ impl<F: Float> FitUnsupervised<F> for Pca {
                     // Degenerate -- remaining eigenvalues are essentially zero.
                     break;
                 }
-                v = w.mapv(|wi| wi / w_norm);
+                let v_new = w.mapv(|wi| wi / w_norm);
+                // Check convergence: |v_new - v| < tol
+                let diff: F = v_new.iter().zip(v.iter())
+                    .map(|(&a, &b)| (a - b) * (a - b))
+                    .fold(F::zero(), |acc, d| acc + d);
+                v = v_new;
+                if diff < convergence_tol {
+                    break;
+                }
             }
 
             // (c) Eigenvalue = v^T C v. Clamp to zero if negative (numerical noise).
@@ -424,5 +439,28 @@ mod tests {
         let pca = Pca { n_components: 1 };
         let result = FitUnsupervised::<f64>::fit(&pca, &x);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_single_sample_error() {
+        let x = array![[1.0, 2.0, 3.0]];
+
+        let pca = Pca { n_components: 1 };
+        let result = FitUnsupervised::<f64>::fit(&pca, &x);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_constant_features() {
+        // All features identical — zero variance.
+        let x = array![[1.0, 2.0], [1.0, 2.0], [1.0, 2.0], [1.0, 2.0]];
+
+        let pca = Pca { n_components: 2 };
+        let fitted = FitUnsupervised::<f64>::fit(&pca, &x).unwrap();
+
+        // All eigenvalues should be zero (or near-zero).
+        for &v in fitted.explained_variance().iter() {
+            assert!(v.abs() < 1e-10, "expected near-zero variance, got {}", v);
+        }
     }
 }

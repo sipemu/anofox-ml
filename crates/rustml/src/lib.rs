@@ -44,12 +44,12 @@ pub mod trees {
     pub use rustml_trees::*;
 }
 
-/// Ensemble methods (Random Forest).
+/// Ensemble methods (Random Forest, Gradient Boosting).
 pub mod ensemble {
     pub use rustml_ensemble::*;
 }
 
-/// Clustering algorithms (KMeans).
+/// Clustering algorithms (KMeans, DBSCAN).
 pub mod cluster {
     pub use rustml_cluster::*;
 }
@@ -57,6 +57,11 @@ pub mod cluster {
 /// Naive Bayes classifiers.
 pub mod naive_bayes {
     pub use rustml_naive_bayes::*;
+}
+
+/// Data I/O utilities (CSV reading).
+pub mod io {
+    pub use rustml_io::*;
 }
 
 /// Convenient prelude importing the most commonly used items.
@@ -67,18 +72,24 @@ pub mod prelude {
     };
 
     pub use rustml_metrics::{
-        accuracy_score, confusion_matrix, f1_score, mae, mse, precision, r2_score, recall,
+        accuracy_score, confusion_matrix, f1_score, f1_score_avg, mae, mse, precision,
+        precision_score, r2_score, recall, recall_score, Average,
     };
 
-    pub use rustml_preprocessing::{MinMaxScaler, Pca, StandardScaler};
+    pub use rustml_preprocessing::{
+        MinMaxScaler, MutualInformationSelector, Pca, StandardScaler, VarianceThreshold,
+    };
 
     pub use rustml_neighbors::{DistanceMetric, KnnClassifier, KnnRegressor, WeightFunction};
 
     pub use rustml_trees::{DecisionTreeClassifier, DecisionTreeRegressor, SplitCriterion};
 
-    pub use rustml_ensemble::{RandomForestClassifier, RandomForestRegressor};
+    pub use rustml_ensemble::{
+        GradientBoostingClassifier, GradientBoostingRegressor, RandomForestClassifier,
+        RandomForestRegressor,
+    };
 
-    pub use rustml_cluster::KMeans;
+    pub use rustml_cluster::{Dbscan, KMeans};
 
     pub use rustml_naive_bayes::GaussianNB;
 }

@@ -260,4 +260,95 @@ mod tests {
         let sum: f64 = importances.iter().sum();
         assert_abs_diff_eq!(sum, 1.0, epsilon = 1e-10);
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use std::collections::HashSet;
+
+        /// Generate deterministic training data for classification.
+        fn make_classification_data(
+            n_samples: usize,
+            n_features: usize,
+            n_classes: usize,
+            seed: u64,
+        ) -> (Array2<f64>, Array1<f64>) {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut x_data = Vec::with_capacity(n_samples * n_features);
+            let mut y_data = Vec::with_capacity(n_samples);
+
+            for i in 0..n_samples {
+                for j in 0..n_features {
+                    let mut h = DefaultHasher::new();
+                    seed.hash(&mut h);
+                    (i as u64).hash(&mut h);
+                    (j as u64).hash(&mut h);
+                    let bits = h.finish();
+                    let v = (bits as f64 / u64::MAX as f64) * 20.0 - 10.0;
+                    x_data.push(v);
+                }
+                let mut h = DefaultHasher::new();
+                seed.hash(&mut h);
+                (i as u64).hash(&mut h);
+                0xDEAD_BEEFu64.hash(&mut h);
+                let label = (h.finish() % n_classes as u64) as f64;
+                y_data.push(label);
+            }
+
+            let x = Array2::from_shape_vec((n_samples, n_features), x_data).unwrap();
+            let y = Array1::from_vec(y_data);
+            (x, y)
+        }
+
+        proptest! {
+            #[test]
+            fn tree_predictions_are_valid_labels(
+                n_samples in 4..30usize,
+                n_features in 1..5usize,
+                seed in 0u64..1000,
+            ) {
+                let n_classes = 3;
+                let (x, y) = make_classification_data(n_samples, n_features, n_classes, seed);
+
+                // Collect unique training labels
+                let train_labels: HashSet<u64> = y.iter()
+                    .map(|&v| v.to_bits())
+                    .collect();
+
+                let tree = DecisionTreeClassifier::new()
+                    .with_max_depth(Some(5));
+                let fitted = Fit::fit(&tree, &x, &y).unwrap();
+                let preds = fitted.predict(&x).unwrap();
+
+                for (i, &p) in preds.iter().enumerate() {
+                    prop_assert!(
+                        train_labels.contains(&p.to_bits()),
+                        "prediction {} at index {} is not a valid training label",
+                        p, i
+                    );
+                }
+            }
+
+            #[test]
+            fn tree_deterministic(seed in 0u64..1000) {
+                let (x, y) = make_classification_data(20, 3, 3, seed);
+
+                let tree = DecisionTreeClassifier::new()
+                    .with_max_depth(Some(4));
+
+                let fitted1 = Fit::fit(&tree, &x, &y).unwrap();
+                let fitted2 = Fit::fit(&tree, &x, &y).unwrap();
+
+                let preds1 = fitted1.predict(&x).unwrap();
+                let preds2 = fitted2.predict(&x).unwrap();
+
+                for (i, (&a, &b)) in preds1.iter().zip(preds2.iter()).enumerate() {
+                    prop_assert!((a - b).abs() < 1e-15,
+                        "non-deterministic prediction at index {}: {} vs {}", i, a, b);
+                }
+            }
+        }
+    }
 }

@@ -1,0 +1,21 @@
+[package]
+name = "rustml-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rustml_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+numpy = "0.28"
+ndarray = { workspace = true }
+rustml-core = { path = "../rustml-core" }
+rustml-preprocessing = { path = "../rustml-preprocessing" }
+rustml-neighbors = { path = "../rustml-neighbors" }
+rustml-trees = { path = "../rustml-trees" }
+rustml-ensemble = { path = "../rustml-ensemble" }
+rustml-cluster = { path = "../rustml-cluster" }
+rustml-naive-bayes = { path = "../rustml-naive-bayes" }
+rustml-metrics = { path = "../rustml-metrics" }

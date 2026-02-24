@@ -1,24 +1,22 @@
 [package]
-name = "rustml-ensemble"
+name = "rustml-io"
 version = "0.1.0"
 edition = "2021"
-description = "Random forest and gradient boosting ensemble methods for the RustML library"
+description = "CSV data loading with ndarray integration for the RustML machine learning library"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sipemu/rustml"
-documentation = "https://docs.rs/rustml-ensemble"
+documentation = "https://docs.rs/rustml-io"
 readme = "../../README.md"
-keywords = ["machine-learning", "random-forest", "gradient-boosting", "ensemble", "ndarray"]
+keywords = ["machine-learning", "csv", "data-loading", "io", "ndarray"]
 categories = ["science", "algorithms"]
 rust-version = "1.70"
 
 [dependencies]
 rustml-core = { path = "../rustml-core" }
-rustml-trees = { path = "../rustml-trees" }
 ndarray = { workspace = true }
 num-traits = { workspace = true }
-rand = "0.8"
-rayon = { workspace = true }
-serde = { workspace = true }
+csv = "1.3"
 
 [dev-dependencies]
 approx = { workspace = true }
+tempfile = "3"

@@ -125,4 +125,45 @@ mod tests {
         let b: Array1<f64> = array![];
         assert!(mse(&a, &b).is_err());
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::collection::vec;
+
+        proptest! {
+            #[test]
+            fn mse_non_negative(data in vec(proptest::num::f64::NORMAL, 1..100)) {
+                let n = data.len();
+                let y_true = Array1::from_vec(data.clone());
+                // Shift values to create different predictions
+                let y_pred = Array1::from_vec(
+                    data.iter().map(|&v| v + 1.0).collect::<Vec<_>>()
+                );
+                let result = mse(&y_true, &y_pred).unwrap();
+                prop_assert!(result >= 0.0, "MSE should be non-negative, got {}", result);
+                let _ = n;
+            }
+
+            #[test]
+            fn mse_zero_for_identical(data in vec(proptest::num::f64::NORMAL, 1..100)) {
+                let y = Array1::from_vec(data);
+                let result = mse(&y, &y).unwrap();
+                prop_assert!((result - 0.0).abs() < 1e-10,
+                    "MSE(y, y) should be 0, got {}", result);
+            }
+
+            #[test]
+            fn r2_perfect_for_identical(data in vec(proptest::num::f64::NORMAL, 2..100)) {
+                let y = Array1::from_vec(data.clone());
+                // Need at least 2 different values for a meaningful r2
+                let has_variance = data.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-15);
+                prop_assume!(has_variance);
+
+                let result = r2_score(&y, &y).unwrap();
+                prop_assert!((result - 1.0).abs() < 1e-10,
+                    "R2(y, y) should be 1.0, got {}", result);
+            }
+        }
+    }
 }

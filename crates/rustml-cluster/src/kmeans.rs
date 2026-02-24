@@ -458,4 +458,68 @@ mod tests {
         }
         assert_abs_diff_eq!(fitted1.inertia(), fitted2.inertia(), epsilon = 1e-15);
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate well-separated cluster data for k clusters.
+        fn make_cluster_data(k: usize, seed: u64) -> Array2<f64> {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let points_per_cluster = 15;
+            let n_samples = k * points_per_cluster;
+            let mut data = Array2::<f64>::zeros((n_samples, 2));
+
+            for c in 0..k {
+                let cx = (c as f64) * 100.0;
+                let cy = (c as f64) * 100.0;
+                for i in 0..points_per_cluster {
+                    let row = c * points_per_cluster + i;
+                    data[[row, 0]] = cx + rng.gen_range(-1.0..1.0);
+                    data[[row, 1]] = cy + rng.gen_range(-1.0..1.0);
+                }
+            }
+            data
+        }
+
+        proptest! {
+            #[test]
+            fn kmeans_labels_in_range(k in 2..5usize, seed in 0u64..1000) {
+                let x = make_cluster_data(k, seed);
+                let kmeans = KMeans::new(k).with_seed(seed);
+                let fitted = FitUnsupervised::<f64>::fit(&kmeans, &x).unwrap();
+
+                let labels = fitted.labels();
+                for (i, &label) in labels.iter().enumerate() {
+                    let l = label as usize;
+                    prop_assert!(l < k,
+                        "label {} at index {} is out of range [0, {})", l, i, k);
+                }
+
+                // Also check predict on the same data
+                let predicted = fitted.predict(&x).unwrap();
+                for (i, &label) in predicted.iter().enumerate() {
+                    let l = label as usize;
+                    prop_assert!(l < k,
+                        "predicted label {} at index {} is out of range [0, {})", l, i, k);
+                }
+            }
+
+            #[test]
+            fn kmeans_deterministic(seed in 0u64..1000) {
+                let x = make_cluster_data(3, seed);
+                let kmeans = KMeans::new(3).with_seed(seed);
+
+                let fitted1 = FitUnsupervised::<f64>::fit(&kmeans, &x).unwrap();
+                let fitted2 = FitUnsupervised::<f64>::fit(&kmeans, &x).unwrap();
+
+                for (a, b) in fitted1.labels().iter().zip(fitted2.labels().iter()) {
+                    prop_assert!((a - b).abs() < 1e-15,
+                        "non-deterministic labels: {} vs {}", a, b);
+                }
+                prop_assert!((fitted1.inertia() - fitted2.inertia()).abs() < 1e-15,
+                    "non-deterministic inertia: {} vs {}", fitted1.inertia(), fitted2.inertia());
+            }
+        }
+    }
 }

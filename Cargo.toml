@@ -9,6 +9,8 @@ members = [
     "crates/rustml-ensemble",
     "crates/rustml-cluster",
     "crates/rustml-naive-bayes",
+    "crates/rustml-io",
+    "crates/rustml-python",
     "crates/rustml",
 ]
 
@@ -21,3 +23,4 @@ serde_json = "1.0"
 approx = "0.5"
 rand = "0.8"
 rayon = "1.10"
+proptest = "1.4"

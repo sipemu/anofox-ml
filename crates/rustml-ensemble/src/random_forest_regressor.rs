@@ -1,6 +1,7 @@
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 use rustml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 
@@ -133,34 +134,36 @@ impl<F: Float> Fit<F> for RandomForestRegressor {
             min_samples_leaf: self.min_samples_leaf,
         };
 
-        let mut trees = Vec::with_capacity(self.n_estimators);
+        // Pre-generate bootstrap and feature indices for determinism
+        let sample_plans: Vec<(Vec<usize>, Vec<usize>)> = (0..self.n_estimators)
+            .map(|_| {
+                let bootstrap_indices: Vec<usize> = (0..n_samples)
+                    .map(|_| rng.gen_range(0..n_samples))
+                    .collect();
+                let feature_indices = select_features(n_features, self.max_features, &mut rng);
+                (bootstrap_indices, feature_indices)
+            })
+            .collect();
 
-        for _ in 0..self.n_estimators {
-            // Bootstrap sample: sample n_samples indices with replacement
-            let bootstrap_indices: Vec<usize> = (0..n_samples)
-                .map(|_| rng.gen_range(0..n_samples))
-                .collect();
-
-            // Feature subsampling
-            let feature_indices = select_features(n_features, self.max_features, &mut rng);
-
-            // Build the sub-matrix with only the selected bootstrap rows and features
-            let x_bootstrap = build_sub_matrix(x, &bootstrap_indices, &feature_indices);
-            let y_bootstrap = Array1::from_vec(
-                bootstrap_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
-            );
-
-            let fitted_tree: FittedDecisionTreeRegressor<F> =
-                tree_params.fit(&x_bootstrap, &y_bootstrap)?;
-
-            trees.push(ForestTree {
-                tree: fitted_tree,
-                feature_indices,
-            });
-        }
+        // Train trees in parallel
+        let trees: Result<Vec<ForestTree<F>>> = sample_plans
+            .into_par_iter()
+            .map(|(bootstrap_indices, feature_indices)| {
+                let x_bootstrap = build_sub_matrix(x, &bootstrap_indices, &feature_indices);
+                let y_bootstrap = Array1::from_vec(
+                    bootstrap_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
+                );
+                let fitted_tree: FittedDecisionTreeRegressor<F> =
+                    tree_params.fit(&x_bootstrap, &y_bootstrap)?;
+                Ok(ForestTree {
+                    tree: fitted_tree,
+                    feature_indices,
+                })
+            })
+            .collect();
 
         Ok(FittedRandomForestRegressor {
-            trees,
+            trees: trees?,
             n_features,
         })
     }

@@ -188,4 +188,78 @@ mod tests {
         // Without centering, values should still be positive
         assert!(transformed[[0, 0]] > 0.0);
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate a deterministic Array2<f64> from dimensions and a seed.
+        fn make_data(rows: usize, cols: usize, seed: u64) -> Array2<f64> {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut values = Vec::with_capacity(rows * cols);
+            for i in 0..(rows * cols) {
+                let mut h = DefaultHasher::new();
+                seed.hash(&mut h);
+                (i as u64).hash(&mut h);
+                let bits = h.finish();
+                // Map to a reasonable f64 range [-10, 10]
+                let v = (bits as f64 / u64::MAX as f64) * 20.0 - 10.0;
+                values.push(v);
+            }
+            Array2::from_shape_vec((rows, cols), values).unwrap()
+        }
+
+        proptest! {
+            #[test]
+            fn standard_scaler_roundtrip(
+                rows in 2..50usize,
+                cols in 1..10usize,
+                seed in 0u64..10000,
+            ) {
+                let x = make_data(rows, cols, seed);
+
+                let scaler = StandardScaler::default();
+                let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
+                let transformed = fitted.transform(&x).unwrap();
+                let recovered = fitted.inverse_transform(&transformed).unwrap();
+
+                for (a, b) in x.iter().zip(recovered.iter()) {
+                    prop_assert!((a - b).abs() < 1e-8,
+                        "roundtrip failed: original={}, recovered={}", a, b);
+                }
+            }
+
+            #[test]
+            fn standard_scaler_mean_zero(
+                rows in 2..50usize,
+                cols in 1..10usize,
+                seed in 0u64..10000,
+            ) {
+                let x = make_data(rows, cols, seed);
+
+                let scaler = StandardScaler::default();
+                let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
+                let transformed = fitted.transform(&x).unwrap();
+
+                let n = rows as f64;
+                for col_idx in 0..cols {
+                    let col_mean: f64 = transformed.column(col_idx).sum() / n;
+                    prop_assert!(col_mean.abs() < 1e-8,
+                        "column {} mean should be ~0, got {}", col_idx, col_mean);
+
+                    // Standard deviation should be ~1 (if original std > 0)
+                    let col_std: f64 = (transformed.column(col_idx)
+                        .iter()
+                        .map(|&v| (v - col_mean) * (v - col_mean))
+                        .sum::<f64>() / n)
+                        .sqrt();
+                    if fitted.std()[col_idx] > 1e-15 {
+                        prop_assert!((col_std - 1.0).abs() < 1e-6,
+                            "column {} std should be ~1, got {}", col_idx, col_std);
+                    }
+                }
+            }
+        }
+    }
 }

@@ -1,6 +1,12 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ndarray::{Array1, Array2};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rustml::prelude::*;
+
+// ---------------------------------------------------------------------------
+// Shared data generators
+// ---------------------------------------------------------------------------
 
 fn generate_classification_data(n_samples: usize, n_features: usize) -> (Array2<f64>, Array1<f64>) {
     let mut x = Array2::<f64>::zeros((n_samples, n_features));
@@ -37,6 +43,46 @@ fn generate_regression_data(n_samples: usize, n_features: usize) -> (Array2<f64>
 
     (x, y)
 }
+
+/// Generate random classification data with a seeded RNG (matches the Python
+/// script's `generate_classification_data`).
+fn generate_random_classification_data(
+    n_samples: usize,
+    n_features: usize,
+    n_classes: usize,
+    seed: u64,
+) -> (Array2<f64>, Array1<f64>) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut x = Array2::<f64>::zeros((n_samples, n_features));
+    let mut y = Array1::<f64>::zeros(n_samples);
+
+    for i in 0..n_samples {
+        for j in 0..n_features {
+            x[[i, j]] = rng.gen::<f64>() * 2.0 - 1.0; // roughly standard normal approximation
+        }
+        y[i] = (rng.gen::<u64>() % n_classes as u64) as f64;
+    }
+
+    (x, y)
+}
+
+/// Generate random regression/unsupervised data with a seeded RNG.
+fn generate_random_data(n_samples: usize, n_features: usize, seed: u64) -> Array2<f64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut x = Array2::<f64>::zeros((n_samples, n_features));
+
+    for i in 0..n_samples {
+        for j in 0..n_features {
+            x[[i, j]] = rng.gen::<f64>() * 2.0 - 1.0;
+        }
+    }
+
+    x
+}
+
+// ===========================================================================
+// Original benchmark groups (kept intact)
+// ===========================================================================
 
 fn bench_knn_classifier(c: &mut Criterion) {
     let mut group = c.benchmark_group("knn_classifier");
@@ -181,13 +227,213 @@ fn bench_metrics(c: &mut Criterion) {
     group.finish();
 }
 
+// ===========================================================================
+// Comparison benchmark groups (matching sklearn_benchmark.py scenarios)
+// ===========================================================================
+
+/// StandardScaler fit+transform on 1000x50.
+fn bench_scaler_1000x50(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaler_1000x50");
+    let x = generate_random_data(1000, 50, 42);
+
+    group.bench_function("fit_transform", |b| {
+        b.iter(|| {
+            let scaler = StandardScaler::default();
+            let fitted = FitUnsupervised::<f64>::fit(&scaler, black_box(&x)).unwrap();
+            fitted.transform(black_box(&x)).unwrap()
+        });
+    });
+
+    group.finish();
+}
+
+/// StandardScaler fit+transform on 10000x100.
+fn bench_scaler_10000x100(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaler_10000x100");
+    let x = generate_random_data(10000, 100, 42);
+
+    group.bench_function("fit_transform", |b| {
+        b.iter(|| {
+            let scaler = StandardScaler::default();
+            let fitted = FitUnsupervised::<f64>::fit(&scaler, black_box(&x)).unwrap();
+            fitted.transform(black_box(&x)).unwrap()
+        });
+    });
+
+    group.finish();
+}
+
+/// KNN classifier on 1000 train / 200 test, 50 features, k=5, Euclidean.
+fn bench_knn_1000x50(c: &mut Criterion) {
+    let mut group = c.benchmark_group("knn_1000x50");
+    let (x_train, y_train) = generate_random_classification_data(1000, 50, 2, 42);
+    let (x_test, _) = generate_random_classification_data(200, 50, 2, 43);
+
+    // Bench fit
+    group.bench_function("fit", |b| {
+        b.iter(|| {
+            let knn = KnnClassifier {
+                n_neighbors: 5,
+                metric: DistanceMetric::Euclidean,
+                ..Default::default()
+            };
+            Fit::<f64>::fit(&knn, black_box(&x_train), black_box(&y_train)).unwrap()
+        });
+    });
+
+    // Bench predict
+    let knn = KnnClassifier {
+        n_neighbors: 5,
+        metric: DistanceMetric::Euclidean,
+        ..Default::default()
+    };
+    let fitted = Fit::fit(&knn, &x_train, &y_train).unwrap();
+
+    group.bench_function("predict", |b| {
+        b.iter(|| fitted.predict(black_box(&x_test)).unwrap());
+    });
+
+    group.finish();
+}
+
+/// Decision tree classifier on 5000x20, max_depth=10.
+fn bench_tree_5000x20(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tree_5000x20");
+    group.sample_size(20);
+
+    let (x_train, y_train) = generate_random_classification_data(5000, 20, 5, 42);
+    let (x_test, _) = generate_random_classification_data(500, 20, 5, 43);
+
+    // Bench fit
+    group.bench_function("fit", |b| {
+        b.iter(|| {
+            let tree = DecisionTreeClassifier {
+                max_depth: Some(10),
+                ..Default::default()
+            };
+            Fit::<f64>::fit(&tree, black_box(&x_train), black_box(&y_train)).unwrap()
+        });
+    });
+
+    // Bench predict
+    let tree = DecisionTreeClassifier {
+        max_depth: Some(10),
+        ..Default::default()
+    };
+    let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();
+
+    group.bench_function("predict", |b| {
+        b.iter(|| fitted.predict(black_box(&x_test)).unwrap());
+    });
+
+    group.finish();
+}
+
+/// Random forest classifier on 5000x20, 100 trees, max_depth=10.
+fn bench_rf_5000x20(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rf_5000x20");
+    group.sample_size(10);
+
+    let (x_train, y_train) = generate_random_classification_data(5000, 20, 5, 42);
+    let (x_test, _) = generate_random_classification_data(500, 20, 5, 43);
+
+    // Bench fit
+    group.bench_function("fit", |b| {
+        b.iter(|| {
+            let rf = RandomForestClassifier {
+                n_estimators: 100,
+                max_depth: Some(10),
+                seed: 42,
+                ..Default::default()
+            };
+            Fit::<f64>::fit(&rf, black_box(&x_train), black_box(&y_train)).unwrap()
+        });
+    });
+
+    // Bench predict
+    let rf = RandomForestClassifier {
+        n_estimators: 100,
+        max_depth: Some(10),
+        seed: 42,
+        ..Default::default()
+    };
+    let fitted = Fit::fit(&rf, &x_train, &y_train).unwrap();
+
+    group.bench_function("predict", |b| {
+        b.iter(|| fitted.predict(black_box(&x_test)).unwrap());
+    });
+
+    group.finish();
+}
+
+/// KMeans clustering on 5000x20, k=10.
+fn bench_kmeans_5000x20(c: &mut Criterion) {
+    let mut group = c.benchmark_group("kmeans_5000x20");
+    group.sample_size(10);
+
+    let x = generate_random_data(5000, 20, 42);
+
+    group.bench_function("fit", |b| {
+        b.iter(|| {
+            let km = KMeans {
+                n_clusters: 10,
+                max_iter: 300,
+                seed: 42,
+                ..Default::default()
+            };
+            FitUnsupervised::<f64>::fit(&km, black_box(&x)).unwrap()
+        });
+    });
+
+    group.finish();
+}
+
+/// Gaussian Naive Bayes on 5000x20.
+fn bench_gnb_5000x20(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gnb_5000x20");
+
+    let (x_train, y_train) = generate_random_classification_data(5000, 20, 5, 42);
+    let (x_test, _) = generate_random_classification_data(500, 20, 5, 43);
+
+    // Bench fit
+    group.bench_function("fit", |b| {
+        b.iter(|| {
+            let gnb = GaussianNB::default();
+            Fit::<f64>::fit(&gnb, black_box(&x_train), black_box(&y_train)).unwrap()
+        });
+    });
+
+    // Bench predict
+    let gnb = GaussianNB::default();
+    let fitted = Fit::fit(&gnb, &x_train, &y_train).unwrap();
+
+    group.bench_function("predict", |b| {
+        b.iter(|| fitted.predict(black_box(&x_test)).unwrap());
+    });
+
+    group.finish();
+}
+
+// ===========================================================================
+// Registration
+// ===========================================================================
+
 criterion_group!(
     benches,
+    // Original benchmark groups
     bench_knn_classifier,
     bench_decision_tree,
     bench_random_forest,
     bench_preprocessing,
     bench_kmeans,
     bench_metrics,
+    // Comparison benchmark groups (matching sklearn_benchmark.py)
+    bench_scaler_1000x50,
+    bench_scaler_10000x100,
+    bench_knn_1000x50,
+    bench_tree_5000x20,
+    bench_rf_5000x20,
+    bench_kmeans_5000x20,
+    bench_gnb_5000x20,
 );
 criterion_main!(benches);

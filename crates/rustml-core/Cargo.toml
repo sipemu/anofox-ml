@@ -2,6 +2,14 @@
 name = "rustml-core"
 version = "0.1.0"
 edition = "2021"
+description = "Core traits and types for the RustML machine learning library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sipemu/rustml"
+documentation = "https://docs.rs/rustml-core"
+readme = "../../README.md"
+keywords = ["machine-learning", "ml", "scikit-learn", "traits", "ndarray"]
+categories = ["science", "algorithms"]
+rust-version = "1.70"
 
 [dependencies]
 ndarray = { workspace = true }
