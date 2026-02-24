@@ -138,18 +138,20 @@ impl<F: Float> Pipeline<F> {
     /// Fit the pipeline: fit each transformer sequentially, transforming
     /// X at each step, then fit the final estimator on the transformed X.
     pub fn fit(self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedPipeline<F>> {
-        let mut current_x = x.clone();
+        let mut current_x_owned: Option<Array2<F>> = None;
         let mut fitted_transformers = Vec::with_capacity(self.transformers.len());
 
         for (name, transformer) in self.transformers {
-            let (fitted, transformed) = transformer.fit_transform(&current_x)?;
+            let x_ref = current_x_owned.as_ref().unwrap_or(x);
+            let (fitted, transformed) = transformer.fit_transform(x_ref)?;
             fitted_transformers.push((name, fitted));
-            current_x = transformed;
+            current_x_owned = Some(transformed);
         }
 
+        let x_final = current_x_owned.as_ref().unwrap_or(x);
         let fitted_estimator = match self.estimator {
             Some((name, estimator)) => {
-                let fitted = estimator.fit_predict_step(&current_x, y)?;
+                let fitted = estimator.fit_predict_step(x_final, y)?;
                 Some((name, fitted))
             }
             None => None,
@@ -177,11 +179,12 @@ pub struct FittedPipeline<F: Float> {
 impl<F: Float> FittedPipeline<F> {
     /// Transform new data through all transformer steps.
     pub fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        let mut current_x = x.clone();
+        let mut current_x_owned: Option<Array2<F>> = None;
         for (_, transformer) in &self.transformers {
-            current_x = transformer.transform(&current_x)?;
+            let x_ref = current_x_owned.as_ref().unwrap_or(x);
+            current_x_owned = Some(transformer.transform(x_ref)?);
         }
-        Ok(current_x)
+        Ok(current_x_owned.unwrap_or_else(|| x.clone()))
     }
 
     /// Transform new data through all steps, then predict with the final estimator.

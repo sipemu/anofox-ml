@@ -2,8 +2,10 @@ use ndarray::{Array1, Array2};
 use rustml_core::Float;
 
 /// Numerically stable softmax: subtract row max before exp.
-pub fn softmax<F: Float>(logits: &Array2<F>) -> Array2<F> {
-    let mut result = logits.clone();
+///
+/// Takes ownership of `logits` to avoid cloning; all callers produce
+/// fresh arrays from `forward_pass`.
+pub fn softmax<F: Float>(mut result: Array2<F>) -> Array2<F> {
     for mut row in result.rows_mut() {
         let max = row.fold(F::neg_infinity(), |a, &b| if b > a { b } else { a });
         row.mapv_inplace(|v| (v - max).exp());
@@ -87,7 +89,7 @@ mod tests {
     #[test]
     fn softmax_uniform() {
         let logits = array![[1.0, 1.0, 1.0]];
-        let probs = softmax(&logits);
+        let probs = softmax(logits);
         let third = 1.0 / 3.0;
         for &p in probs.iter() {
             assert_abs_diff_eq!(p, third, epsilon = 1e-10);
@@ -97,7 +99,7 @@ mod tests {
     #[test]
     fn softmax_rows_sum_to_one() {
         let logits = array![[1.0, 2.0, 3.0], [10.0, -1.0, 0.0]];
-        let probs = softmax(&logits);
+        let probs = softmax(logits);
         for row in probs.rows() {
             assert_abs_diff_eq!(row.sum(), 1.0, epsilon = 1e-10);
         }

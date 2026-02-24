@@ -81,32 +81,35 @@ fn sort_feature_pairs<F: Float>(
     sorted_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 }
 
-/// If `improvement` beats `best_improvement`, update the best split.
+/// Candidate best split (without index vectors) used during the search.
+struct CandidateSplit<F: Float> {
+    feature: usize,
+    threshold: F,
+    improvement: F,
+    /// Split position in the feature-sorted order: left = [..=pos], right = [pos+1..].
+    pos: usize,
+}
+
+/// If `improvement` beats `best_improvement`, record the candidate.
 ///
-/// Reconstructs left/right index vectors from the sorted pairs at
-/// the given split position.
+/// Index vectors are NOT allocated here — they are reconstructed once
+/// after the search completes, avoiding repeated allocations.
 #[inline]
 fn try_update_best_split<F: Float>(
     improvement: F,
     best_improvement: &mut F,
-    best: &mut Option<BestSplit<F>>,
+    best: &mut Option<CandidateSplit<F>>,
     feature: usize,
     threshold: F,
-    sorted_pairs: &[(F, usize)],
     pos: usize,
 ) {
     if improvement > *best_improvement {
         *best_improvement = improvement;
-        let left_indices: Vec<usize> =
-            sorted_pairs[..=pos].iter().map(|&(_, idx)| idx).collect();
-        let right_indices: Vec<usize> =
-            sorted_pairs[pos + 1..].iter().map(|&(_, idx)| idx).collect();
-        *best = Some(BestSplit {
-            feature_index: feature,
+        *best = Some(CandidateSplit {
+            feature,
             threshold,
-            left_indices,
-            right_indices,
             improvement,
+            pos,
         });
     }
 }
@@ -298,7 +301,7 @@ where
     F: Float,
     A: SplitAccumulator<F>,
 {
-    let mut best: Option<BestSplit<F>> = None;
+    let mut best: Option<CandidateSplit<F>> = None;
     let mut best_improvement = F::neg_infinity();
 
     let mut sorted_pairs: Vec<(F, usize)> = Vec::with_capacity(n);
@@ -322,14 +325,31 @@ where
                     &mut best,
                     feature,
                     threshold,
-                    &sorted_pairs,
                     pos,
                 );
             }
         }
     }
 
-    best
+    // Reconstruct index vectors only for the winning split.
+    best.map(|candidate| {
+        sort_feature_pairs(x, indices, candidate.feature, &mut sorted_pairs);
+        let left_indices: Vec<usize> = sorted_pairs[..=candidate.pos]
+            .iter()
+            .map(|&(_, idx)| idx)
+            .collect();
+        let right_indices: Vec<usize> = sorted_pairs[candidate.pos + 1..]
+            .iter()
+            .map(|&(_, idx)| idx)
+            .collect();
+        BestSplit {
+            feature_index: candidate.feature,
+            threshold: candidate.threshold,
+            left_indices,
+            right_indices,
+            improvement: candidate.improvement,
+        }
+    })
 }
 
 /// Classification split finding with incremental class counts.

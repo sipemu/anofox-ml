@@ -108,13 +108,11 @@ impl<F: Float> FitUnsupervised<F> for Pca {
             // Orthogonalize against previously found components.
             for prev in 0..k {
                 let prev_comp = components.row(prev);
-                let dot: F = v.iter().zip(prev_comp.iter()).map(|(&a, &b)| a * b).fold(F::zero(), |s, p| s + p);
-                for (vi, &ci) in v.iter_mut().zip(prev_comp.iter()) {
-                    *vi -= dot * ci;
-                }
+                let dot = v.dot(&prev_comp);
+                v.scaled_add(-dot, &prev_comp);
             }
             // Normalize.
-            let norm = v.iter().map(|&vi| vi * vi).fold(F::zero(), |a, b| a + b).sqrt();
+            let norm = v.dot(&v).sqrt();
             if norm < eps {
                 // All directions exhausted; store zero eigenvalue with arbitrary
                 // orthogonal direction (already zeroed out).
@@ -125,12 +123,10 @@ impl<F: Float> FitUnsupervised<F> for Pca {
                     v[basis_idx] = F::one();
                     for prev in 0..k {
                         let prev_comp = components.row(prev);
-                        let dot: F = v.iter().zip(prev_comp.iter()).map(|(&a, &b)| a * b).fold(F::zero(), |s, p| s + p);
-                        for (vi, &ci) in v.iter_mut().zip(prev_comp.iter()) {
-                            *vi -= dot * ci;
-                        }
+                        let dot = v.dot(&prev_comp);
+                        v.scaled_add(-dot, &prev_comp);
                     }
-                    let n2 = v.iter().map(|&vi| vi * vi).fold(F::zero(), |a, b| a + b).sqrt();
+                    let n2 = v.dot(&v).sqrt();
                     if n2 > eps {
                         v.mapv_inplace(|vi| vi / n2);
                         break;
@@ -150,22 +146,19 @@ impl<F: Float> FitUnsupervised<F> for Pca {
                 // for numerical stability.
                 for prev in 0..k {
                     let prev_comp = components.row(prev);
-                    let dot: F = w.iter().zip(prev_comp.iter()).map(|(&a, &b)| a * b).fold(F::zero(), |s, p| s + p);
-                    for (wi, &ci) in w.iter_mut().zip(prev_comp.iter()) {
-                        *wi -= dot * ci;
-                    }
+                    let dot = w.dot(&prev_comp);
+                    w.scaled_add(-dot, &prev_comp);
                 }
                 // norm(w)
-                let w_norm = w.iter().map(|&wi| wi * wi).fold(F::zero(), |a, b| a + b).sqrt();
+                let w_norm = w.dot(&w).sqrt();
                 if w_norm < F::from_f64(1e-30).unwrap() {
                     // Degenerate -- remaining eigenvalues are essentially zero.
                     break;
                 }
                 let v_new = w.mapv(|wi| wi / w_norm);
                 // Check convergence: |v_new - v| < tol
-                let diff: F = v_new.iter().zip(v.iter())
-                    .map(|(&a, &b)| (a - b) * (a - b))
-                    .fold(F::zero(), |acc, d| acc + d);
+                let diff_vec = &v_new - &v;
+                let diff = diff_vec.dot(&diff_vec);
                 v = v_new;
                 if diff < convergence_tol {
                     break;
@@ -174,7 +167,7 @@ impl<F: Float> FitUnsupervised<F> for Pca {
 
             // (c) Eigenvalue = v^T C v. Clamp to zero if negative (numerical noise).
             let cv = cov.dot(&v);
-            let eigenvalue = v.iter().zip(cv.iter()).map(|(&a, &b)| a * b).fold(F::zero(), |s, p| s + p);
+            let eigenvalue = v.dot(&cv);
             let eigenvalue = if eigenvalue < F::zero() { F::zero() } else { eigenvalue };
 
             // (d) Deflate: C = C - eigenvalue * v v^T.

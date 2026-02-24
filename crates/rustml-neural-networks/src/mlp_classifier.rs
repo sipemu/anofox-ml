@@ -72,7 +72,7 @@ impl<F: Float> FittedMlpClassifier<F> {
             )));
         }
         let (logits, _) = forward_pass(&self.layers, self.activation, x);
-        Ok(softmax(&logits))
+        Ok(softmax(logits))
     }
 }
 
@@ -182,7 +182,7 @@ impl<F: Float> Fit<F> for MlpClassifier {
 
                 // Forward
                 let (logits, caches) = forward_pass(&layers, self.activation, x_b);
-                let probs = softmax(&logits);
+                let probs = softmax(logits);
 
                 // Loss
                 epoch_loss += cross_entropy_loss(&probs, y_b);
