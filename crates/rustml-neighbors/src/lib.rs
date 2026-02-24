@@ -1,4 +1,5 @@
 pub mod distance;
+pub mod kdtree;
 pub mod knn_classifier;
 pub mod knn_regressor;
 

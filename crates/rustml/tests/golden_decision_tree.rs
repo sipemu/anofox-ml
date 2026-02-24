@@ -3,11 +3,10 @@ mod common;
 use common::{assert_array1_close, json_to_array1, json_to_array2, load_golden_data};
 use rustml::prelude::*;
 
-// Decision trees can have different splitting strategies (sklearn uses random_state
-// to break ties), so we use a looser tolerance for predictions where tree structure
-// may differ slightly. Feature importances especially can vary.
+// Our deterministic tie-breaking (lowest feature index wins) matches sklearn's
+// behavior on this data. Both predictions and importances should match tightly.
 const PRED_TOL: f64 = 1e-10;
-const IMPORTANCE_TOL: f64 = 0.15;
+const IMPORTANCE_TOL: f64 = 1e-10;
 
 #[test]
 fn test_golden_decision_tree_classifier() {

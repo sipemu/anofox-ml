@@ -2,7 +2,7 @@ use ndarray::{Array1, Array2};
 use rustml_core::Float;
 
 /// Criterion for evaluating splits.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SplitCriterion {
     /// Gini impurity (for classification).
     Gini,

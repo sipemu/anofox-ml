@@ -1,7 +1,8 @@
 use rustml_core::Float;
 
 /// A node in a decision tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub enum TreeNode<F: Float> {
     /// Internal node: split on a feature at a threshold.
     Split {

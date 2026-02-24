@@ -6,6 +6,9 @@ members = [
     "crates/rustml-preprocessing",
     "crates/rustml-neighbors",
     "crates/rustml-trees",
+    "crates/rustml-ensemble",
+    "crates/rustml-cluster",
+    "crates/rustml-naive-bayes",
     "crates/rustml",
 ]
 
@@ -16,3 +19,5 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 approx = "0.5"
+rand = "0.8"
+rayon = "1.10"

@@ -7,7 +7,7 @@ use crate::split::{
 };
 
 /// Decision tree classifier parameters (unfitted state).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DecisionTreeClassifier {
     pub max_depth: Option<usize>,
     pub min_samples_split: usize,
@@ -15,8 +15,9 @@ pub struct DecisionTreeClassifier {
     pub criterion: SplitCriterion,
 }
 
-impl Default for DecisionTreeClassifier {
-    fn default() -> Self {
+impl DecisionTreeClassifier {
+    /// Create a new `DecisionTreeClassifier` with sensible defaults.
+    pub fn new() -> Self {
         Self {
             max_depth: None,
             min_samples_split: 2,
@@ -24,10 +25,41 @@ impl Default for DecisionTreeClassifier {
             criterion: SplitCriterion::Gini,
         }
     }
+
+    /// Set the maximum depth of the tree.
+    pub fn with_max_depth(mut self, max_depth: Option<usize>) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Set the minimum number of samples required to split a node.
+    pub fn with_min_samples_split(mut self, min_samples_split: usize) -> Self {
+        self.min_samples_split = min_samples_split;
+        self
+    }
+
+    /// Set the minimum number of samples required in a leaf node.
+    pub fn with_min_samples_leaf(mut self, min_samples_leaf: usize) -> Self {
+        self.min_samples_leaf = min_samples_leaf;
+        self
+    }
+
+    /// Set the split quality criterion.
+    pub fn with_criterion(mut self, criterion: SplitCriterion) -> Self {
+        self.criterion = criterion;
+        self
+    }
+}
+
+impl Default for DecisionTreeClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted decision tree classifier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedDecisionTreeClassifier<F: Float> {
     tree: TreeNode<F>,
     n_features: usize,

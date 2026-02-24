@@ -5,7 +5,7 @@ use rustml_core::{Float, FitUnsupervised, InverseTransform, Result, RustMlError,
 ///
 /// Standardizes features by removing the mean and scaling to unit variance:
 /// `z = (x - mean) / std`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StandardScaler {
     /// If true, center data to zero mean before scaling.
     pub with_mean: bool,
@@ -13,17 +13,37 @@ pub struct StandardScaler {
     pub with_std: bool,
 }
 
-impl Default for StandardScaler {
-    fn default() -> Self {
+impl StandardScaler {
+    /// Create a new `StandardScaler` with defaults (both centering and scaling enabled).
+    pub fn new() -> Self {
         Self {
             with_mean: true,
             with_std: true,
         }
     }
+
+    /// Set whether to center data to zero mean before scaling.
+    pub fn with_mean(mut self, with_mean: bool) -> Self {
+        self.with_mean = with_mean;
+        self
+    }
+
+    /// Set whether to scale data to unit variance.
+    pub fn with_std(mut self, with_std: bool) -> Self {
+        self.with_std = with_std;
+        self
+    }
+}
+
+impl Default for StandardScaler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted StandardScaler — holds learned mean and std per feature.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedStandardScaler<F: Float> {
     mean: Array1<F>,
     std: Array1<F>,

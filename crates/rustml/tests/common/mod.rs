@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use ndarray::{Array1, Array2};
 use serde_json::Value;
 use std::fs;

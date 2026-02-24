@@ -2,7 +2,7 @@ use ndarray::ArrayView1;
 use rustml_core::Float;
 
 /// Distance metric for KNN.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum DistanceMetric {
     #[default]
     Euclidean,

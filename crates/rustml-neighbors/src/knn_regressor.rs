@@ -1,32 +1,57 @@
 use ndarray::{Array1, Array2};
+use rayon::prelude::*;
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 
 use crate::distance::{compute_distance, DistanceMetric};
+use crate::kdtree::KdTree;
 use crate::knn_classifier::WeightFunction;
 
 /// KNN regressor parameters (unfitted state).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KnnRegressor {
     pub n_neighbors: usize,
     pub metric: DistanceMetric,
     pub weights: WeightFunction,
 }
 
-impl Default for KnnRegressor {
-    fn default() -> Self {
+impl KnnRegressor {
+    /// Create a new `KnnRegressor` with the given number of neighbors and default parameters.
+    pub fn new(k: usize) -> Self {
         Self {
-            n_neighbors: 5,
+            n_neighbors: k,
             metric: DistanceMetric::default(),
             weights: WeightFunction::default(),
         }
     }
+
+    /// Set the weighting strategy for neighbor contributions.
+    pub fn with_weights(mut self, weights: WeightFunction) -> Self {
+        self.weights = weights;
+        self
+    }
+
+    /// Set the distance metric used to find nearest neighbors.
+    pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+}
+
+impl Default for KnnRegressor {
+    fn default() -> Self {
+        Self::new(5)
+    }
 }
 
 /// Fitted KNN regressor — stores training data (lazy learner).
-#[derive(Debug, Clone)]
+///
+/// Uses a KD-tree for Euclidean distance and brute-force for other metrics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedKnnRegressor<F: Float> {
     x_train: Array2<F>,
     y_train: Array1<F>,
+    kdtree: Option<KdTree<F>>,
     n_neighbors: usize,
     metric: DistanceMetric,
     weights: WeightFunction,
@@ -59,9 +84,22 @@ impl<F: Float> Fit<F> for KnnRegressor {
             )));
         }
 
+        let kdtree = if self.metric == DistanceMetric::Euclidean {
+            let points: Vec<(Vec<F>, usize)> = x
+                .rows()
+                .into_iter()
+                .enumerate()
+                .map(|(i, row)| (row.to_vec(), i))
+                .collect();
+            Some(KdTree::build(&points, x.ncols()))
+        } else {
+            None
+        };
+
         Ok(FittedKnnRegressor {
             x_train: x.to_owned(),
             y_train: y.to_owned(),
+            kdtree,
             n_neighbors: self.n_neighbors,
             metric: self.metric,
             weights: self.weights,
@@ -69,7 +107,7 @@ impl<F: Float> Fit<F> for KnnRegressor {
     }
 }
 
-impl<F: Float> Predict<F> for FittedKnnRegressor<F> {
+impl<F: Float + Send + Sync> Predict<F> for FittedKnnRegressor<F> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.x_train.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -79,27 +117,44 @@ impl<F: Float> Predict<F> for FittedKnnRegressor<F> {
             )));
         }
 
-        let mut predictions = Array1::<F>::zeros(x.nrows());
+        let rows: Vec<Vec<F>> = x.rows().into_iter().map(|r| r.to_vec()).collect();
 
-        for (i, row) in x.rows().into_iter().enumerate() {
+        let predictions: Vec<F> = rows
+            .par_iter()
+            .map(|row| {
+                let neighbors = self.find_neighbors(row);
+                weighted_mean(&neighbors, self.weights)
+            })
+            .collect();
+
+        Ok(Array1::from_vec(predictions))
+    }
+}
+
+impl<F: Float> FittedKnnRegressor<F> {
+    fn find_neighbors(&self, query: &[F]) -> Vec<(F, F)> {
+        if let Some(ref kdtree) = self.kdtree {
+            kdtree
+                .query_k_nearest(query, self.n_neighbors)
+                .into_iter()
+                .map(|(dist, idx)| (dist, self.y_train[idx]))
+                .collect()
+        } else {
+            let query_view = ndarray::ArrayView1::from(query);
             let mut distances: Vec<(F, F)> = self
                 .x_train
                 .rows()
                 .into_iter()
                 .zip(self.y_train.iter())
                 .map(|(train_row, &target)| {
-                    let dist = compute_distance(&row, &train_row, self.metric);
+                    let dist = compute_distance(&query_view, &train_row, self.metric);
                     (dist, target)
                 })
                 .collect();
-
             distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            let neighbors = &distances[..self.n_neighbors];
-
-            predictions[i] = weighted_mean(neighbors, self.weights);
+            distances.truncate(self.n_neighbors);
+            distances
         }
-
-        Ok(predictions)
     }
 }
 
@@ -138,7 +193,7 @@ mod tests {
     #[test]
     fn test_knn_regressor_simple() {
         let x_train = array![[1.0], [2.0], [3.0], [4.0], [5.0]];
-        let y_train = array![2.0, 4.0, 6.0, 8.0, 10.0]; // y = 2x
+        let y_train = array![2.0, 4.0, 6.0, 8.0, 10.0];
 
         let knn = KnnRegressor {
             n_neighbors: 3,
@@ -148,7 +203,6 @@ mod tests {
 
         let x_test = array![[3.0]];
         let preds = fitted.predict(&x_test).unwrap();
-        // Nearest to 3.0 are 2.0, 3.0, 4.0 with targets 4.0, 6.0, 8.0
         assert_abs_diff_eq!(preds[0], 6.0, epsilon = 1e-10);
     }
 
@@ -164,10 +218,8 @@ mod tests {
         };
         let fitted = Fit::fit(&knn, &x_train, &y_train).unwrap();
 
-        // Point at 2.9: nearest is 3.0 (dist=0.1), then 1.0 (dist=1.9), then 5.0 (dist=2.1)
         let x_test = array![[2.9]];
         let preds = fitted.predict(&x_test).unwrap();
-        // Should be heavily weighted towards 20.0
         assert!(preds[0] > 18.0 && preds[0] < 22.0);
     }
 }

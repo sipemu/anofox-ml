@@ -5,25 +5,51 @@ use crate::node::TreeNode;
 use crate::split::{compute_impurity, find_best_split, leaf_value, SplitCriterion};
 
 /// Decision tree regressor parameters (unfitted state).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DecisionTreeRegressor {
     pub max_depth: Option<usize>,
     pub min_samples_split: usize,
     pub min_samples_leaf: usize,
 }
 
-impl Default for DecisionTreeRegressor {
-    fn default() -> Self {
+impl DecisionTreeRegressor {
+    /// Create a new `DecisionTreeRegressor` with sensible defaults.
+    pub fn new() -> Self {
         Self {
             max_depth: None,
             min_samples_split: 2,
             min_samples_leaf: 1,
         }
     }
+
+    /// Set the maximum depth of the tree.
+    pub fn with_max_depth(mut self, max_depth: Option<usize>) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Set the minimum number of samples required to split a node.
+    pub fn with_min_samples_split(mut self, min_samples_split: usize) -> Self {
+        self.min_samples_split = min_samples_split;
+        self
+    }
+
+    /// Set the minimum number of samples required in a leaf node.
+    pub fn with_min_samples_leaf(mut self, min_samples_leaf: usize) -> Self {
+        self.min_samples_leaf = min_samples_leaf;
+        self
+    }
+}
+
+impl Default for DecisionTreeRegressor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted decision tree regressor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedDecisionTreeRegressor<F: Float> {
     tree: TreeNode<F>,
     n_features: usize,

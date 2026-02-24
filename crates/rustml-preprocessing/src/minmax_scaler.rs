@@ -5,23 +5,39 @@ use rustml_core::{Float, FitUnsupervised, InverseTransform, Result, RustMlError,
 ///
 /// Scales features to a given range (default [0, 1]):
 /// `x_scaled = (x - min) / (max - min) * (feature_max - feature_min) + feature_min`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct MinMaxScaler<F: Float> {
     pub feature_min: F,
     pub feature_max: F,
 }
 
-impl<F: Float> Default for MinMaxScaler<F> {
-    fn default() -> Self {
+impl<F: Float> MinMaxScaler<F> {
+    /// Create a new `MinMaxScaler` with the default range [0, 1].
+    pub fn new() -> Self {
         Self {
             feature_min: F::zero(),
             feature_max: F::one(),
         }
     }
+
+    /// Set the target feature range (min, max).
+    pub fn with_range(mut self, min: F, max: F) -> Self {
+        self.feature_min = min;
+        self.feature_max = max;
+        self
+    }
+}
+
+impl<F: Float> Default for MinMaxScaler<F> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted MinMaxScaler — holds learned min/max per feature.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedMinMaxScaler<F: Float> {
     data_min: Array1<F>,
     data_max: Array1<F>,

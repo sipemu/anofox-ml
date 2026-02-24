@@ -29,7 +29,7 @@ pub mod metrics {
     pub use rustml_metrics::*;
 }
 
-/// Feature preprocessing (scalers).
+/// Feature preprocessing (scalers, PCA).
 pub mod preprocessing {
     pub use rustml_preprocessing::*;
 }
@@ -44,17 +44,41 @@ pub mod trees {
     pub use rustml_trees::*;
 }
 
+/// Ensemble methods (Random Forest).
+pub mod ensemble {
+    pub use rustml_ensemble::*;
+}
+
+/// Clustering algorithms (KMeans).
+pub mod cluster {
+    pub use rustml_cluster::*;
+}
+
+/// Naive Bayes classifiers.
+pub mod naive_bayes {
+    pub use rustml_naive_bayes::*;
+}
+
 /// Convenient prelude importing the most commonly used items.
 pub mod prelude {
-    pub use rustml_core::{Fit, FitUnsupervised, Float, InverseTransform, Predict, Transform};
+    pub use rustml_core::{
+        cross_val_score, train_test_split, Fit, FitUnsupervised, FittedPipeline, Float,
+        InverseTransform, Pipeline, Predict, Transform,
+    };
 
     pub use rustml_metrics::{
         accuracy_score, confusion_matrix, f1_score, mae, mse, precision, r2_score, recall,
     };
 
-    pub use rustml_preprocessing::{MinMaxScaler, StandardScaler};
+    pub use rustml_preprocessing::{MinMaxScaler, Pca, StandardScaler};
 
     pub use rustml_neighbors::{DistanceMetric, KnnClassifier, KnnRegressor, WeightFunction};
 
     pub use rustml_trees::{DecisionTreeClassifier, DecisionTreeRegressor, SplitCriterion};
+
+    pub use rustml_ensemble::{RandomForestClassifier, RandomForestRegressor};
+
+    pub use rustml_cluster::KMeans;
+
+    pub use rustml_naive_bayes::GaussianNB;
 }
