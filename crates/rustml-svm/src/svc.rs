@@ -1,6 +1,4 @@
 use ndarray::{Array1, Array2};
-use rand::rngs::StdRng;
-use rand::SeedableRng;
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 
 use crate::kernel::SvmKernel;
@@ -255,173 +253,139 @@ fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
     labels
 }
 
-/// Train a single binary SVC using simplified SMO.
-///
-/// Labels must be +1/-1 encoded.
-fn fit_binary_svc<F: Float>(
-    x: &Array2<F>,
+/// Compute the decision value f(x_i) = sum(alpha_j * y_j * K(j, i)) + bias.
+fn compute_decision_value<F: Float>(
+    alpha: &[F],
     y: &Array1<F>,
-    kernel: &SvmKernel,
-    c: F,
-    max_iter: usize,
-    tol: F,
-    seed: u64,
-) -> BinarySvc<F> {
-    let n_samples = x.nrows();
-    let mut alpha = vec![F::zero(); n_samples];
-    let mut bias = F::zero();
+    k_matrix: &Array2<F>,
+    bias: F,
+    sample_idx: usize,
+) -> F {
+    let n_samples = alpha.len();
+    let mut f = bias;
+    for j in 0..n_samples {
+        f += alpha[j] * y[j] * k_matrix[[j, sample_idx]];
+    }
+    f
+}
 
+/// Select the second alpha index j that maximises |E_i - E_j|.
+fn select_second_alpha<F: Float>(
+    i: usize,
+    e_i: F,
+    alpha: &[F],
+    y: &Array1<F>,
+    k_matrix: &Array2<F>,
+    bias: F,
+) -> usize {
+    let n_samples = alpha.len();
+    let mut best_j = if i == 0 { 1 } else { 0 };
+    let mut best_delta = F::zero();
+    for j in 0..n_samples {
+        if j == i {
+            continue;
+        }
+        let f_j = compute_decision_value(alpha, y, k_matrix, bias, j);
+        let e_j = f_j - y[j];
+        let delta = (e_i - e_j).abs();
+        if delta > best_delta {
+            best_delta = delta;
+            best_j = j;
+        }
+    }
+    best_j
+}
+
+/// Compute the L and H bounds for the new alpha_j value.
+fn compute_alpha_bounds<F: Float>(
+    alpha_i: F,
+    alpha_j: F,
+    y_i: F,
+    y_j: F,
+    c: F,
+) -> (F, F) {
+    let zero = F::zero();
+    let eps = F::from_f64(1e-12).unwrap();
+    if (y_i - y_j).abs() > eps {
+        // y_i != y_j
+        let l = if alpha_j - alpha_i > zero {
+            alpha_j - alpha_i
+        } else {
+            zero
+        };
+        let h = if c + alpha_j - alpha_i < c {
+            c + alpha_j - alpha_i
+        } else {
+            c
+        };
+        (l, h)
+    } else {
+        // y_i == y_j
+        let l = if alpha_i + alpha_j - c > zero {
+            alpha_i + alpha_j - c
+        } else {
+            zero
+        };
+        let h = if alpha_i + alpha_j < c {
+            alpha_i + alpha_j
+        } else {
+            c
+        };
+        (l, h)
+    }
+}
+
+/// Compute the updated bias after an alpha pair update.
+fn update_bias<F: Float>(
+    bias: F,
+    e_i: F,
+    e_j: F,
+    alpha_i: F,
+    old_ai: F,
+    alpha_j: F,
+    old_aj: F,
+    y_i: F,
+    y_j: F,
+    k_ii: F,
+    k_ij: F,
+    k_jj: F,
+    c: F,
+) -> F {
     let zero = F::zero();
     let two = F::from_f64(2.0).unwrap();
+    let b1 = bias - e_i
+        - y_i * (alpha_i - old_ai) * k_ii
+        - y_j * (alpha_j - old_aj) * k_ij;
+    let b2 = bias - e_j
+        - y_i * (alpha_i - old_ai) * k_ij
+        - y_j * (alpha_j - old_aj) * k_jj;
 
-    // Precompute the kernel matrix for efficiency.
-    let mut k_matrix = Array2::<F>::zeros((n_samples, n_samples));
-    for i in 0..n_samples {
-        for j in i..n_samples {
-            let val = kernel.compute(&x.row(i), &x.row(j));
-            k_matrix[[i, j]] = val;
-            k_matrix[[j, i]] = val;
-        }
+    if alpha_i > zero && alpha_i < c {
+        b1
+    } else if alpha_j > zero && alpha_j < c {
+        b2
+    } else {
+        (b1 + b2) / two
     }
+}
 
-    let _rng = StdRng::seed_from_u64(seed);
-
-    for _iter in 0..max_iter {
-        let mut num_changed = 0usize;
-
-        for i in 0..n_samples {
-            // Compute error for sample i: E_i = f(x_i) - y_i
-            let mut f_i = bias;
-            for j in 0..n_samples {
-                f_i += alpha[j] * y[j] * k_matrix[[j, i]];
-            }
-            let e_i = f_i - y[i];
-
-            // Check KKT conditions (simplified)
-            let yi_ei = y[i] * e_i;
-            if (yi_ei < -tol && alpha[i] < c) || (yi_ei > tol && alpha[i] > zero) {
-                // Select j != i (use simple heuristic: pick j with max |Ei - Ej|)
-                let mut best_j = if i == 0 { 1 } else { 0 };
-                let mut best_delta = F::zero();
-                for j in 0..n_samples {
-                    if j == i {
-                        continue;
-                    }
-                    let mut f_j = bias;
-                    for k in 0..n_samples {
-                        f_j += alpha[k] * y[k] * k_matrix[[k, j]];
-                    }
-                    let e_j = f_j - y[j];
-                    let delta = (e_i - e_j).abs();
-                    if delta > best_delta {
-                        best_delta = delta;
-                        best_j = j;
-                    }
-                }
-
-                let j = best_j;
-
-                // Compute error for sample j
-                let mut f_j = bias;
-                for k in 0..n_samples {
-                    f_j += alpha[k] * y[k] * k_matrix[[k, j]];
-                }
-                let e_j = f_j - y[j];
-
-                let old_ai = alpha[i];
-                let old_aj = alpha[j];
-
-                // Compute bounds L and H
-                let (l, h) = if (y[i] - y[j]).abs() > F::from_f64(1e-12).unwrap() {
-                    // y_i != y_j
-                    let l_val = if alpha[j] - alpha[i] > zero {
-                        alpha[j] - alpha[i]
-                    } else {
-                        zero
-                    };
-                    let h_val = if c + alpha[j] - alpha[i] < c {
-                        c + alpha[j] - alpha[i]
-                    } else {
-                        c
-                    };
-                    (l_val, h_val)
-                } else {
-                    // y_i == y_j
-                    let l_val = if alpha[i] + alpha[j] - c > zero {
-                        alpha[i] + alpha[j] - c
-                    } else {
-                        zero
-                    };
-                    let h_val = if alpha[i] + alpha[j] < c {
-                        alpha[i] + alpha[j]
-                    } else {
-                        c
-                    };
-                    (l_val, h_val)
-                };
-
-                if (l - h).abs() < F::from_f64(1e-12).unwrap() {
-                    continue;
-                }
-
-                // Compute eta = 2*K(i,j) - K(i,i) - K(j,j)
-                let eta = two * k_matrix[[i, j]] - k_matrix[[i, i]] - k_matrix[[j, j]];
-                if eta >= zero {
-                    continue;
-                }
-
-                // Update alpha_j
-                let mut new_aj = old_aj - y[j] * (e_i - e_j) / eta;
-                // Clip to [L, H]
-                if new_aj > h {
-                    new_aj = h;
-                } else if new_aj < l {
-                    new_aj = l;
-                }
-
-                if (new_aj - old_aj).abs() < F::from_f64(1e-8).unwrap() {
-                    continue;
-                }
-
-                alpha[j] = new_aj;
-                alpha[i] = old_ai + y[i] * y[j] * (old_aj - new_aj);
-
-                // Update bias
-                let b1 = bias - e_i
-                    - y[i] * (alpha[i] - old_ai) * k_matrix[[i, i]]
-                    - y[j] * (alpha[j] - old_aj) * k_matrix[[i, j]];
-                let b2 = bias - e_j
-                    - y[i] * (alpha[i] - old_ai) * k_matrix[[i, j]]
-                    - y[j] * (alpha[j] - old_aj) * k_matrix[[j, j]];
-
-                if alpha[i] > zero && alpha[i] < c {
-                    bias = b1;
-                } else if alpha[j] > zero && alpha[j] < c {
-                    bias = b2;
-                } else {
-                    bias = (b1 + b2) / two;
-                }
-
-                num_changed += 1;
-            }
-        }
-
-        if num_changed == 0 {
-            break;
-        }
-    }
-
-    // Extract support vectors (alpha > 0)
+/// Extract support vectors from the training data where alpha exceeds a threshold.
+///
+/// If no support vectors are found, falls back to using all training points.
+fn extract_support_vectors<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    alpha: &[F],
+    bias: F,
+    kernel: &SvmKernel,
+) -> BinarySvc<F> {
+    let n_samples = x.nrows();
     let sv_threshold = F::from_f64(1e-8).unwrap();
     let sv_indices: Vec<usize> = (0..n_samples)
         .filter(|&i| alpha[i] > sv_threshold)
         .collect();
 
-    let n_sv = sv_indices.len();
-    let n_features = x.ncols();
-
-    if n_sv == 0 {
-        // Fallback: no support vectors found, use all points.
+    if sv_indices.is_empty() {
         let dual_coefs = Array1::from_vec(
             (0..n_samples).map(|i| alpha[i] * y[i]).collect(),
         );
@@ -433,6 +397,8 @@ fn fit_binary_svc<F: Float>(
         };
     }
 
+    let n_features = x.ncols();
+    let n_sv = sv_indices.len();
     let mut support_vectors = Array2::zeros((n_sv, n_features));
     let mut dual_coefs = Array1::zeros(n_sv);
 
@@ -447,6 +413,157 @@ fn fit_binary_svc<F: Float>(
         bias,
         kernel: kernel.clone(),
     }
+}
+
+/// Precompute the symmetric n×n kernel matrix.
+fn precompute_kernel_matrix<F: Float>(x: &Array2<F>, kernel: &SvmKernel) -> Array2<F> {
+    let n_samples = x.nrows();
+    let mut k_matrix = Array2::<F>::zeros((n_samples, n_samples));
+    for i in 0..n_samples {
+        for j in i..n_samples {
+            let val = kernel.compute(&x.row(i), &x.row(j));
+            k_matrix[[i, j]] = val;
+            k_matrix[[j, i]] = val;
+        }
+    }
+    k_matrix
+}
+
+/// Clamp `value` to the interval `[lo, hi]`.
+#[inline]
+fn clip_to_bounds<F: Float>(value: F, lo: F, hi: F) -> F {
+    if value > hi {
+        hi
+    } else if value < lo {
+        lo
+    } else {
+        value
+    }
+}
+
+/// Mutable state for one pass of the simplified SMO algorithm.
+struct SmoState<'a, F: Float> {
+    alpha: &'a mut Vec<F>,
+    bias: &'a mut F,
+    y: &'a Array1<F>,
+    k_matrix: &'a Array2<F>,
+    c: F,
+    tol: F,
+}
+
+impl<F: Float> SmoState<'_, F> {
+    /// Attempt one SMO step for sample `i`. Returns `true` if alphas changed.
+    fn step(&mut self, i: usize) -> bool {
+        let zero = F::zero();
+        let two = F::from_f64(2.0).unwrap();
+        let near_zero = F::from_f64(1e-12).unwrap();
+        let alpha_tol = F::from_f64(1e-8).unwrap();
+
+        let f_i = compute_decision_value(self.alpha, self.y, self.k_matrix, *self.bias, i);
+        let e_i = f_i - self.y[i];
+
+        // Check KKT conditions (simplified)
+        let yi_ei = self.y[i] * e_i;
+        if !((yi_ei < -self.tol && self.alpha[i] < self.c)
+            || (yi_ei > self.tol && self.alpha[i] > zero))
+        {
+            return false;
+        }
+
+        let j = select_second_alpha(i, e_i, self.alpha, self.y, self.k_matrix, *self.bias);
+        let f_j = compute_decision_value(self.alpha, self.y, self.k_matrix, *self.bias, j);
+        let e_j = f_j - self.y[j];
+
+        let old_ai = self.alpha[i];
+        let old_aj = self.alpha[j];
+
+        let (l, h) = compute_alpha_bounds(
+            self.alpha[i],
+            self.alpha[j],
+            self.y[i],
+            self.y[j],
+            self.c,
+        );
+        if (l - h).abs() < near_zero {
+            return false;
+        }
+
+        // Compute eta = 2*K(i,j) - K(i,i) - K(j,j)
+        let eta =
+            two * self.k_matrix[[i, j]] - self.k_matrix[[i, i]] - self.k_matrix[[j, j]];
+        if eta >= zero {
+            return false;
+        }
+
+        // Update alpha_j, clipped to [L, H]
+        let new_aj = clip_to_bounds(old_aj - self.y[j] * (e_i - e_j) / eta, l, h);
+
+        if (new_aj - old_aj).abs() < alpha_tol {
+            return false;
+        }
+
+        self.alpha[j] = new_aj;
+        self.alpha[i] = old_ai + self.y[i] * self.y[j] * (old_aj - new_aj);
+
+        *self.bias = update_bias(
+            *self.bias,
+            e_i,
+            e_j,
+            self.alpha[i],
+            old_ai,
+            self.alpha[j],
+            old_aj,
+            self.y[i],
+            self.y[j],
+            self.k_matrix[[i, i]],
+            self.k_matrix[[i, j]],
+            self.k_matrix[[j, j]],
+            self.c,
+        );
+
+        true
+    }
+}
+
+/// Train a single binary SVC using simplified SMO.
+///
+/// Labels must be +1/-1 encoded.
+fn fit_binary_svc<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    kernel: &SvmKernel,
+    c: F,
+    max_iter: usize,
+    tol: F,
+    _seed: u64,
+) -> BinarySvc<F> {
+    let n_samples = x.nrows();
+    let mut alpha = vec![F::zero(); n_samples];
+    let mut bias = F::zero();
+    let k_matrix = precompute_kernel_matrix(x, kernel);
+
+    let mut state = SmoState {
+        alpha: &mut alpha,
+        bias: &mut bias,
+        y,
+        k_matrix: &k_matrix,
+        c,
+        tol,
+    };
+
+    for _iter in 0..max_iter {
+        let mut num_changed = 0usize;
+        for i in 0..n_samples {
+            if state.step(i) {
+                num_changed += 1;
+            }
+        }
+        if num_changed == 0 {
+            break;
+        }
+    }
+
+    extract_support_vectors(x, y, &alpha, bias, kernel)
 }
 
 impl<F: Float> Fit<F> for Svc {

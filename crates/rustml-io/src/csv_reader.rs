@@ -53,6 +53,138 @@ impl CsvReadOptions {
     }
 }
 
+/// Parse a single CSV record into a vector of floats.
+fn parse_record_to_floats<F: Float + FromStr>(
+    record: &csv::StringRecord,
+    row_idx: usize,
+) -> Result<Vec<F>, CsvError> {
+    record
+        .iter()
+        .enumerate()
+        .map(|(col_idx, field)| {
+            let trimmed = field.trim();
+            F::from_str(trimmed).map_err(|_| {
+                CsvError::Parse(format!(
+                    "cannot parse '{}' as float at row {}, col {}",
+                    trimmed, row_idx, col_idx
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Validate that every row in `all_values` has exactly `n_cols` columns.
+fn validate_column_consistency<F: Float>(
+    all_values: &[Vec<F>],
+    n_cols: usize,
+) -> Result<(), CsvError> {
+    for (i, row) in all_values.iter().enumerate() {
+        if row.len() != n_cols {
+            return Err(CsvError::Parse(format!(
+                "row {} has {} columns, expected {}",
+                i,
+                row.len(),
+                n_cols
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Split the parsed values into a feature matrix and target vector by
+/// extracting the column at `target_col`.
+fn split_features_and_target<F: Float>(
+    all_values: Vec<Vec<F>>,
+    target_col: usize,
+    n_rows: usize,
+    n_cols: usize,
+) -> Result<(Array2<F>, Array1<F>), CsvError> {
+    if target_col >= n_cols {
+        return Err(CsvError::Parse(format!(
+            "target_column {} out of range (file has {} columns)",
+            target_col, n_cols
+        )));
+    }
+
+    let feature_cols = n_cols - 1;
+    let mut x_data = Vec::with_capacity(n_rows * feature_cols);
+    let mut y_data = Vec::with_capacity(n_rows);
+
+    for row in &all_values {
+        y_data.push(row[target_col]);
+        for (j, &val) in row.iter().enumerate() {
+            if j != target_col {
+                x_data.push(val);
+            }
+        }
+    }
+
+    let x = Array2::from_shape_vec((n_rows, feature_cols), x_data)
+        .map_err(|e| CsvError::Parse(e.to_string()))?;
+    let y = Array1::from_vec(y_data);
+
+    Ok((x, y))
+}
+
+/// Parse header names from the reader, if configured.
+fn parse_headers(
+    reader: &mut csv::Reader<std::fs::File>,
+    has_header: bool,
+) -> Result<Option<Vec<String>>, CsvError> {
+    if has_header {
+        Ok(Some(
+            reader
+                .headers()
+                .map_err(|e| CsvError::Io(e.to_string()))?
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Read all CSV records into a vector of parsed float rows.
+fn read_all_records<F: Float + FromStr>(
+    reader: &mut csv::Reader<std::fs::File>,
+) -> Result<Vec<Vec<F>>, CsvError> {
+    let mut all_values: Vec<Vec<F>> = Vec::new();
+    for (row_idx, result) in reader.records().enumerate() {
+        let record = result.map_err(|e| CsvError::Parse(format!("row {}: {}", row_idx, e)))?;
+        all_values.push(parse_record_to_floats(&record, row_idx)?);
+    }
+    if all_values.is_empty() {
+        return Err(CsvError::Empty);
+    }
+    Ok(all_values)
+}
+
+/// Validate columns and assemble the final result, optionally splitting
+/// a target column out of the feature matrix.
+fn assemble_result<F: Float>(
+    all_values: Vec<Vec<F>>,
+    target_column: Option<usize>,
+    headers: Option<Vec<String>>,
+) -> CsvReadResult<F> {
+    let n_rows = all_values.len();
+    let n_cols = all_values[0].len();
+    validate_column_consistency(&all_values, n_cols)?;
+
+    match target_column {
+        Some(target_col) => {
+            let (x, y) = split_features_and_target(all_values, target_col, n_rows, n_cols)?;
+            Ok((x, Some(y), headers))
+        }
+        None => {
+            let flat: Vec<F> = all_values.into_iter().flatten().collect();
+            let x = Array2::from_shape_vec((n_rows, n_cols), flat)
+                .map_err(|e| CsvError::Parse(e.to_string()))?;
+            Ok((x, None, headers))
+        }
+    }
+}
+
 /// Read a CSV file into an ndarray feature matrix (and optionally a target vector).
 ///
 /// Returns `(X, Option<y>, Option<header_names>)`.
@@ -74,93 +206,9 @@ where
         .from_path(path.as_ref())
         .map_err(|e| CsvError::Io(e.to_string()))?;
 
-    let headers = if options.has_header {
-        Some(
-            reader
-                .headers()
-                .map_err(|e| CsvError::Io(e.to_string()))?
-                .iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        None
-    };
-
-    let mut all_values: Vec<Vec<F>> = Vec::new();
-
-    for (row_idx, result) in reader.records().enumerate() {
-        let record = result.map_err(|e| CsvError::Parse(format!("row {}: {}", row_idx, e)))?;
-        let row: Vec<F> = record
-            .iter()
-            .enumerate()
-            .map(|(col_idx, field)| {
-                let trimmed = field.trim();
-                F::from_str(trimmed).map_err(|_| {
-                    CsvError::Parse(format!(
-                        "cannot parse '{}' as float at row {}, col {}",
-                        trimmed, row_idx, col_idx
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        all_values.push(row);
-    }
-
-    if all_values.is_empty() {
-        return Err(CsvError::Empty);
-    }
-
-    let n_rows = all_values.len();
-    let n_cols = all_values[0].len();
-
-    // Validate all rows have the same number of columns
-    for (i, row) in all_values.iter().enumerate() {
-        if row.len() != n_cols {
-            return Err(CsvError::Parse(format!(
-                "row {} has {} columns, expected {}",
-                i,
-                row.len(),
-                n_cols
-            )));
-        }
-    }
-
-    match options.target_column {
-        Some(target_col) => {
-            if target_col >= n_cols {
-                return Err(CsvError::Parse(format!(
-                    "target_column {} out of range (file has {} columns)",
-                    target_col, n_cols
-                )));
-            }
-
-            let feature_cols = n_cols - 1;
-            let mut x_data = Vec::with_capacity(n_rows * feature_cols);
-            let mut y_data = Vec::with_capacity(n_rows);
-
-            for row in &all_values {
-                y_data.push(row[target_col]);
-                for (j, &val) in row.iter().enumerate() {
-                    if j != target_col {
-                        x_data.push(val);
-                    }
-                }
-            }
-
-            let x = Array2::from_shape_vec((n_rows, feature_cols), x_data)
-                .map_err(|e| CsvError::Parse(e.to_string()))?;
-            let y = Array1::from_vec(y_data);
-
-            Ok((x, Some(y), headers))
-        }
-        None => {
-            let flat: Vec<F> = all_values.into_iter().flatten().collect();
-            let x = Array2::from_shape_vec((n_rows, n_cols), flat)
-                .map_err(|e| CsvError::Parse(e.to_string()))?;
-            Ok((x, None, headers))
-        }
-    }
+    let headers = parse_headers(&mut reader, options.has_header)?;
+    let all_values = read_all_records(&mut reader)?;
+    assemble_result(all_values, options.target_column, headers)
 }
 
 /// Convenience function: read a CSV file with headers, returning only the
