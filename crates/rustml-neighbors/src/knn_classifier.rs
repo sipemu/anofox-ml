@@ -2,7 +2,7 @@ use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 
-use crate::distance::{compute_distance, DistanceMetric};
+use crate::distance::{compute_distances_batch, DistanceMetric};
 use crate::kdtree::KdTree;
 
 /// Weighting strategy for KNN.
@@ -154,17 +154,12 @@ impl<F: Float> FittedKnnClassifier<F> {
                 .map(|(dist, idx)| (dist, self.y_train[idx]))
                 .collect()
         } else {
-            // Brute-force path
+            // Brute-force path — batch distance is faster than per-row calls.
             let query_view = ndarray::ArrayView1::from(query);
-            let mut distances: Vec<(F, F)> = self
-                .x_train
-                .rows()
+            let dists = compute_distances_batch(&query_view, &self.x_train, self.metric);
+            let mut distances: Vec<(F, F)> = dists
                 .into_iter()
-                .zip(self.y_train.iter())
-                .map(|(train_row, &label)| {
-                    let dist = compute_distance(&query_view, &train_row, self.metric);
-                    (dist, label)
-                })
+                .zip(self.y_train.iter().copied())
                 .collect();
             distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
             distances.truncate(self.n_neighbors);

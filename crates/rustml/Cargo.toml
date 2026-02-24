@@ -21,6 +21,7 @@ rustml-ensemble = { path = "../rustml-ensemble" }
 rustml-cluster = { path = "../rustml-cluster" }
 rustml-naive-bayes = { path = "../rustml-naive-bayes" }
 rustml-io = { path = "../rustml-io" }
+rustml-svm = { path = "../rustml-svm" }
 ndarray = { workspace = true }
 num-traits = { workspace = true }
 

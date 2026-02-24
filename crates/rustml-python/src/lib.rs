@@ -552,6 +552,341 @@ impl GaussianNB {
 }
 
 // ---------------------------------------------------------------------------
+// DBSCAN
+// ---------------------------------------------------------------------------
+#[pyclass]
+struct Dbscan {
+    inner: rustml_cluster::Dbscan,
+    fitted: Option<rustml_cluster::FittedDbscan<f64>>,
+}
+
+#[pymethods]
+impl Dbscan {
+    #[new]
+    #[pyo3(signature = (eps=0.5, min_samples=5))]
+    fn new(eps: f64, min_samples: usize) -> Self {
+        Self {
+            inner: rustml_cluster::Dbscan::new(eps, min_samples),
+            fitted: None,
+        }
+    }
+
+    fn fit<'py>(&mut self, x: PyReadonlyArray2<'py, f64>) -> PyResult<()> {
+        let arr = to_array2(x);
+        let fitted = FitUnsupervised::fit(&self.inner, &arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        self.fitted = Some(fitted);
+        Ok(())
+    }
+
+    fn predict<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        let arr = to_array2(x);
+        let result = fitted
+            .predict(&arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyArray1::from_owned_array(py, result))
+    }
+
+    #[getter]
+    fn labels<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        Ok(PyArray1::from_owned_array(py, fitted.labels().clone()))
+    }
+
+    #[getter]
+    fn n_clusters(&self) -> PyResult<usize> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        Ok(fitted.n_clusters())
+    }
+
+    #[getter]
+    fn core_sample_indices(&self) -> PyResult<Vec<usize>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        Ok(fitted.core_sample_indices().to_vec())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gradient Boosting Classifier
+// ---------------------------------------------------------------------------
+#[pyclass]
+struct GradientBoostingClassifier {
+    inner: rustml_ensemble::GradientBoostingClassifier,
+    fitted: Option<rustml_ensemble::FittedGradientBoostingClassifier<f64>>,
+}
+
+#[pymethods]
+impl GradientBoostingClassifier {
+    #[new]
+    #[pyo3(signature = (n_estimators=100, learning_rate=0.1, max_depth=3, subsample=1.0, seed=0))]
+    fn new(
+        n_estimators: usize,
+        learning_rate: f64,
+        max_depth: usize,
+        subsample: f64,
+        seed: u64,
+    ) -> Self {
+        Self {
+            inner: rustml_ensemble::GradientBoostingClassifier::new()
+                .with_n_estimators(n_estimators)
+                .with_learning_rate(learning_rate)
+                .with_max_depth(Some(max_depth))
+                .with_subsample(subsample)
+                .with_seed(seed),
+            fitted: None,
+        }
+    }
+
+    fn fit<'py>(
+        &mut self,
+        x: PyReadonlyArray2<'py, f64>,
+        y: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<()> {
+        let x_arr = to_array2(x);
+        let y_arr = to_array1(y);
+        let fitted = Fit::fit(&self.inner, &x_arr, &y_arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        self.fitted = Some(fitted);
+        Ok(())
+    }
+
+    fn predict<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        let arr = to_array2(x);
+        let result = fitted
+            .predict(&arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyArray1::from_owned_array(py, result))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gradient Boosting Regressor
+// ---------------------------------------------------------------------------
+#[pyclass]
+struct GradientBoostingRegressor {
+    inner: rustml_ensemble::GradientBoostingRegressor,
+    fitted: Option<rustml_ensemble::FittedGradientBoostingRegressor<f64>>,
+}
+
+#[pymethods]
+impl GradientBoostingRegressor {
+    #[new]
+    #[pyo3(signature = (n_estimators=100, learning_rate=0.1, max_depth=3, subsample=1.0, seed=0))]
+    fn new(
+        n_estimators: usize,
+        learning_rate: f64,
+        max_depth: usize,
+        subsample: f64,
+        seed: u64,
+    ) -> Self {
+        Self {
+            inner: rustml_ensemble::GradientBoostingRegressor::new()
+                .with_n_estimators(n_estimators)
+                .with_learning_rate(learning_rate)
+                .with_max_depth(Some(max_depth))
+                .with_subsample(subsample)
+                .with_seed(seed),
+            fitted: None,
+        }
+    }
+
+    fn fit<'py>(
+        &mut self,
+        x: PyReadonlyArray2<'py, f64>,
+        y: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<()> {
+        let x_arr = to_array2(x);
+        let y_arr = to_array1(y);
+        let fitted = Fit::fit(&self.inner, &x_arr, &y_arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        self.fitted = Some(fitted);
+        Ok(())
+    }
+
+    fn predict<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        let arr = to_array2(x);
+        let result = fitted
+            .predict(&arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyArray1::from_owned_array(py, result))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VarianceThreshold
+// ---------------------------------------------------------------------------
+#[pyclass]
+struct VarianceThreshold {
+    inner: rustml_preprocessing::VarianceThreshold,
+    fitted: Option<rustml_preprocessing::FittedVarianceThreshold<f64>>,
+}
+
+#[pymethods]
+impl VarianceThreshold {
+    #[new]
+    #[pyo3(signature = (threshold=0.0))]
+    fn new(threshold: f64) -> Self {
+        Self {
+            inner: rustml_preprocessing::VarianceThreshold::new(threshold),
+            fitted: None,
+        }
+    }
+
+    fn fit<'py>(&mut self, x: PyReadonlyArray2<'py, f64>) -> PyResult<()> {
+        let arr = to_array2(x);
+        let fitted = FitUnsupervised::fit(&self.inner, &arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        self.fitted = Some(fitted);
+        Ok(())
+    }
+
+    fn transform<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        let arr = to_array2(x);
+        let result = fitted
+            .transform(&arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyArray2::from_owned_array(py, result))
+    }
+
+    fn fit_transform<'py>(
+        &mut self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        self.fit(x.clone())?;
+        self.transform(py, x)
+    }
+
+    #[getter]
+    fn variances<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        Ok(PyArray1::from_owned_array(py, fitted.variances().clone()))
+    }
+
+    #[getter]
+    fn selected_indices(&self) -> PyResult<Vec<usize>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        Ok(fitted.selected_indices().to_vec())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MutualInformationSelector
+// ---------------------------------------------------------------------------
+#[pyclass]
+struct MutualInformationSelector {
+    inner: rustml_preprocessing::MutualInformationSelector,
+    fitted: Option<rustml_preprocessing::FittedMutualInformationSelector<f64>>,
+}
+
+#[pymethods]
+impl MutualInformationSelector {
+    #[new]
+    #[pyo3(signature = (n_features_to_select, n_bins=10))]
+    fn new(n_features_to_select: usize, n_bins: usize) -> Self {
+        Self {
+            inner: rustml_preprocessing::MutualInformationSelector::new(n_features_to_select)
+                .with_n_bins(n_bins),
+            fitted: None,
+        }
+    }
+
+    fn fit<'py>(
+        &mut self,
+        x: PyReadonlyArray2<'py, f64>,
+        y: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<()> {
+        let x_arr = to_array2(x);
+        let y_arr = to_array1(y);
+        let fitted = Fit::fit(&self.inner, &x_arr, &y_arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        self.fitted = Some(fitted);
+        Ok(())
+    }
+
+    fn transform<'py>(
+        &self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        let arr = to_array2(x);
+        let result = fitted
+            .transform(&arr)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyArray2::from_owned_array(py, result))
+    }
+
+    #[getter]
+    fn mi_scores<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        Ok(PyArray1::from_owned_array(py, fitted.mi_scores().clone()))
+    }
+
+    #[getter]
+    fn selected_indices(&self) -> PyResult<Vec<usize>> {
+        let fitted = self
+            .fitted
+            .as_ref()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted"))?;
+        Ok(fitted.selected_indices().to_vec())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Metrics (free functions)
 // ---------------------------------------------------------------------------
 #[pyfunction]
@@ -587,22 +922,104 @@ fn r2_score<'py>(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
 }
 
+#[pyfunction]
+fn mae<'py>(
+    y_true: PyReadonlyArray1<'py, f64>,
+    y_pred: PyReadonlyArray1<'py, f64>,
+) -> PyResult<f64> {
+    let yt = to_array1(y_true);
+    let yp = to_array1(y_pred);
+    rustml_metrics::mae(&yt, &yp)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+/// Convert a Python string average mode to the Rust `Average` enum.
+fn parse_average(average: &str) -> PyResult<rustml_metrics::Average> {
+    match average {
+        "macro" => Ok(rustml_metrics::Average::Macro),
+        "micro" => Ok(rustml_metrics::Average::Micro),
+        "weighted" => Ok(rustml_metrics::Average::Weighted),
+        other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unknown average mode '{}'; expected 'macro', 'micro', or 'weighted'",
+            other
+        ))),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (y_true, y_pred, average="macro"))]
+fn precision_score<'py>(
+    y_true: PyReadonlyArray1<'py, f64>,
+    y_pred: PyReadonlyArray1<'py, f64>,
+    average: &str,
+) -> PyResult<f64> {
+    let yt = to_array1(y_true);
+    let yp = to_array1(y_pred);
+    let avg = parse_average(average)?;
+    rustml_metrics::precision_score(&yt, &yp, avg)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (y_true, y_pred, average="macro"))]
+fn recall_score<'py>(
+    y_true: PyReadonlyArray1<'py, f64>,
+    y_pred: PyReadonlyArray1<'py, f64>,
+    average: &str,
+) -> PyResult<f64> {
+    let yt = to_array1(y_true);
+    let yp = to_array1(y_pred);
+    let avg = parse_average(average)?;
+    rustml_metrics::recall_score(&yt, &yp, avg)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (y_true, y_pred, average="macro"))]
+fn f1_score<'py>(
+    y_true: PyReadonlyArray1<'py, f64>,
+    y_pred: PyReadonlyArray1<'py, f64>,
+    average: &str,
+) -> PyResult<f64> {
+    let yt = to_array1(y_true);
+    let yp = to_array1(y_pred);
+    let avg = parse_average(average)?;
+    rustml_metrics::f1_score_avg(&yt, &yp, avg)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 #[pymodule]
 fn rustml_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Preprocessing
     m.add_class::<StandardScaler>()?;
+    m.add_class::<VarianceThreshold>()?;
+    m.add_class::<MutualInformationSelector>()?;
+    // Neighbors
     m.add_class::<KnnClassifier>()?;
     m.add_class::<KnnRegressor>()?;
+    // Trees
     m.add_class::<DecisionTreeClassifier>()?;
     m.add_class::<DecisionTreeRegressor>()?;
+    // Ensemble
     m.add_class::<RandomForestClassifier>()?;
     m.add_class::<RandomForestRegressor>()?;
+    m.add_class::<GradientBoostingClassifier>()?;
+    m.add_class::<GradientBoostingRegressor>()?;
+    // Clustering
     m.add_class::<KMeans>()?;
+    m.add_class::<Dbscan>()?;
+    // Naive Bayes
     m.add_class::<GaussianNB>()?;
+    // Metrics
     m.add_function(wrap_pyfunction!(accuracy_score, m)?)?;
     m.add_function(wrap_pyfunction!(mse, m)?)?;
     m.add_function(wrap_pyfunction!(r2_score, m)?)?;
+    m.add_function(wrap_pyfunction!(mae, m)?)?;
+    m.add_function(wrap_pyfunction!(precision_score, m)?)?;
+    m.add_function(wrap_pyfunction!(recall_score, m)?)?;
+    m.add_function(wrap_pyfunction!(f1_score, m)?)?;
     Ok(())
 }

@@ -59,6 +59,11 @@ pub mod naive_bayes {
     pub use rustml_naive_bayes::*;
 }
 
+/// Support Vector Machine classifiers.
+pub mod svm {
+    pub use rustml_svm::*;
+}
+
 /// Data I/O utilities (CSV reading).
 pub mod io {
     pub use rustml_io::*;
@@ -67,7 +72,8 @@ pub mod io {
 /// Convenient prelude importing the most commonly used items.
 pub mod prelude {
     pub use rustml_core::{
-        cross_val_score, train_test_split, Fit, FitUnsupervised, FittedPipeline, Float,
+        cross_val_score, cross_val_score_stratified, grid_search_cv, stratified_k_fold,
+        train_test_split, Fit, FitUnsupervised, FittedPipeline, Float, GridSearchResult,
         InverseTransform, Pipeline, Predict, Transform,
     };
 
@@ -92,4 +98,6 @@ pub mod prelude {
     pub use rustml_cluster::{Dbscan, KMeans};
 
     pub use rustml_naive_bayes::GaussianNB;
+
+    pub use rustml_svm::{LinearSvc, Svc, SvmKernel};
 }

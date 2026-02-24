@@ -10,6 +10,7 @@ members = [
     "crates/rustml-cluster",
     "crates/rustml-naive-bayes",
     "crates/rustml-io",
+    "crates/rustml-svm",
     "crates/rustml-python",
     "crates/rustml",
 ]

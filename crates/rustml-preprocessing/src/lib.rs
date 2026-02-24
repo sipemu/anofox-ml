@@ -1,3 +1,34 @@
+//! Feature preprocessing, scaling, and dimensionality reduction.
+//!
+//! This crate provides transformers for preparing data before model training,
+//! including [`StandardScaler`] (z-score normalization), [`MinMaxScaler`]
+//! (min-max normalization), [`Pca`] (principal component analysis),
+//! [`VarianceThreshold`] (low-variance feature removal), and
+//! [`MutualInformationSelector`] (feature selection by mutual information).
+//!
+//! All transformers follow the type-state pattern: call
+//! [`FitUnsupervised::fit`](rustml_core::FitUnsupervised::fit) to learn
+//! parameters, then [`Transform::transform`](rustml_core::Transform::transform)
+//! on the fitted result to apply the transformation.
+//!
+//! # Examples
+//!
+//! ```
+//! use ndarray::array;
+//! use rustml_core::{FitUnsupervised, Transform};
+//! use rustml_preprocessing::StandardScaler;
+//!
+//! let x = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
+//!
+//! let scaler = StandardScaler::new();
+//! let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
+//! let x_scaled = fitted.transform(&x).unwrap();
+//!
+//! // Each column now has mean ~0 and std ~1
+//! let col0_mean: f64 = x_scaled.column(0).sum() / 3.0;
+//! assert!(col0_mean.abs() < 1e-10);
+//! ```
+
 pub mod minmax_scaler;
 pub mod mutual_information;
 pub mod pca;
