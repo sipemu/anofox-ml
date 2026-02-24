@@ -139,6 +139,37 @@ fn nearest_centroid<F: Float>(point: &[F], centroids: &Array2<F>) -> (usize, F) 
     (best_idx, best_dist)
 }
 
+/// Update each point's minimum distance given a newly added centroid.
+fn update_min_distances<F: Float>(
+    x: &Array2<F>,
+    min_dists: &mut Array1<F>,
+    centroid: ndarray::ArrayView1<F>,
+) {
+    let centroid_slice = centroid.as_slice().unwrap();
+    for i in 0..x.nrows() {
+        let dist = squared_euclidean(x.row(i).as_slice().unwrap(), centroid_slice);
+        if dist < min_dists[i] {
+            min_dists[i] = dist;
+        }
+    }
+}
+
+/// Sample a point index proportional to distance squared (roulette-wheel selection).
+fn weighted_random_choice<F: Float>(min_dists: &Array1<F>, rng: &mut StdRng) -> usize {
+    let total: F = min_dists.iter().copied().fold(F::zero(), |acc, v| acc + v);
+    let threshold = F::from_f64(rng.gen_range(0.0..1.0)).unwrap() * total;
+    let mut cumulative = F::zero();
+    let mut chosen = min_dists.len() - 1;
+    for i in 0..min_dists.len() {
+        cumulative += min_dists[i];
+        if cumulative >= threshold {
+            chosen = i;
+            break;
+        }
+    }
+    chosen
+}
+
 /// Initialize centroids using the k-means++ algorithm.
 fn kmeans_plus_plus<F: Float>(
     x: &Array2<F>,
@@ -158,37 +189,18 @@ fn kmeans_plus_plus<F: Float>(
 
     for k in 1..n_clusters {
         // Update min distances with the centroid just added (index k-1).
-        let prev_centroid = centroids.row(k - 1);
-        for i in 0..n_samples {
-            let dist = squared_euclidean(
-                x.row(i).as_slice().unwrap(),
-                prev_centroid.as_slice().unwrap(),
-            );
-            if dist < min_dists[i] {
-                min_dists[i] = dist;
-            }
-        }
+        update_min_distances(x, &mut min_dists, centroids.row(k - 1));
 
-        // Compute cumulative distribution of distances.
+        // All remaining points coincide with existing centroids; pick randomly.
         let total: F = min_dists.iter().copied().fold(F::zero(), |acc, v| acc + v);
         if total == F::zero() {
-            // All remaining points coincide with existing centroids; pick randomly.
             let idx = rng.gen_range(0..n_samples);
             centroids.row_mut(k).assign(&x.row(idx));
             continue;
         }
 
-        // Sample proportional to distance squared.
-        let threshold = F::from_f64(rng.gen_range(0.0..1.0)).unwrap() * total;
-        let mut cumulative = F::zero();
-        let mut chosen = n_samples - 1;
-        for i in 0..n_samples {
-            cumulative += min_dists[i];
-            if cumulative >= threshold {
-                chosen = i;
-                break;
-            }
-        }
+        // Sample next centroid proportional to distance squared.
+        let chosen = weighted_random_choice(&min_dists, rng);
         centroids.row_mut(k).assign(&x.row(chosen));
     }
 

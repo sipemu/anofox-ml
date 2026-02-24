@@ -13,6 +13,12 @@ pub enum RustMlError {
 
     #[error("Empty input: {0}")]
     EmptyInput(String),
+
+    #[error("IO error: {0}")]
+    Io(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
 }
 
 pub type Result<T> = std::result::Result<T, RustMlError>;

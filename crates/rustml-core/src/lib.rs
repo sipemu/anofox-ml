@@ -31,6 +31,7 @@
 
 pub mod error;
 pub mod float;
+pub mod persistence;
 pub mod pipeline;
 pub mod traits;
 pub mod utils;

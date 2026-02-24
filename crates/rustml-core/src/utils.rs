@@ -67,6 +67,24 @@ fn select_elements<F: Float>(y: &Array1<F>, indices: &[usize]) -> Array1<F> {
     Array1::from_vec(indices.iter().map(|&i| y[i]).collect())
 }
 
+/// Evaluate a single fold: split data by the given indices, fit, predict, and score.
+fn evaluate_fold<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    train_indices: &[usize],
+    test_indices: &[usize],
+    fit_predict: &impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+    scorer: &impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
+) -> Result<F> {
+    let x_train = select_rows(x, train_indices);
+    let y_train = select_elements(y, train_indices);
+    let x_test = select_rows(x, test_indices);
+    let y_test = select_elements(y, test_indices);
+
+    let y_pred = fit_predict(&x_train, &y_train, &x_test)?;
+    scorer(&y_test, &y_pred)
+}
+
 /// K-fold cross-validation score.
 ///
 /// Splits data into `k` folds, trains on k-1 folds, evaluates on the held-out fold.
@@ -112,17 +130,39 @@ pub fn cross_val_score<F: Float>(
         let test_indices: Vec<usize> = (test_start..test_end).collect();
         let train_indices: Vec<usize> = (0..test_start).chain(test_end..n).collect();
 
-        let x_train = select_rows(x, &train_indices);
-        let y_train = select_elements(y, &train_indices);
-        let x_test = select_rows(x, &test_indices);
-        let y_test = select_elements(y, &test_indices);
-
-        let y_pred = fit_predict(&x_train, &y_train, &x_test)?;
-        let score = scorer(&y_test, &y_pred)?;
+        let score = evaluate_fold(x, y, &train_indices, &test_indices, &fit_predict, &scorer)?;
         scores.push(score);
     }
 
     Ok(scores)
+}
+
+/// Group sample indices by their class label (string representation of the float value).
+fn group_indices_by_class<F: Float>(
+    y: &Array1<F>,
+    n: usize,
+) -> std::collections::BTreeMap<String, Vec<usize>> {
+    let mut class_indices: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..n {
+        let label = format!("{}", y[i]);
+        class_indices.entry(label).or_default().push(i);
+    }
+    class_indices
+}
+
+/// Distribute class indices across `k` folds in round-robin order.
+fn distribute_round_robin(
+    class_indices: &std::collections::BTreeMap<String, Vec<usize>>,
+    k: usize,
+) -> Vec<Vec<usize>> {
+    let mut folds: Vec<Vec<usize>> = vec![Vec::new(); k];
+    for indices in class_indices.values() {
+        for (i, &idx) in indices.iter().enumerate() {
+            folds[i % k].push(idx);
+        }
+    }
+    folds
 }
 
 /// Generate stratified k-fold cross-validation splits.
@@ -163,14 +203,7 @@ pub fn stratified_k_fold<F: Float>(
 
     let n = x.nrows();
 
-    // Group sample indices by class label.
-    // We use the string representation of the float as a key to group by class.
-    let mut class_indices: std::collections::BTreeMap<String, Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for i in 0..n {
-        let label = format!("{}", y[i]);
-        class_indices.entry(label).or_default().push(i);
-    }
+    let mut class_indices = group_indices_by_class(y, n);
 
     // Shuffle within each class group.
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
@@ -178,13 +211,7 @@ pub fn stratified_k_fold<F: Float>(
         indices.shuffle(&mut rng);
     }
 
-    // Distribute indices round-robin across folds.
-    let mut folds: Vec<Vec<usize>> = vec![Vec::new(); k];
-    for indices in class_indices.values() {
-        for (i, &idx) in indices.iter().enumerate() {
-            folds[i % k].push(idx);
-        }
-    }
+    let folds = distribute_round_robin(&class_indices, k);
 
     // Build (train, test) pairs.
     let mut result = Vec::with_capacity(k);
@@ -221,13 +248,7 @@ pub fn cross_val_score_stratified<F: Float>(
     let mut scores = Vec::with_capacity(k);
 
     for (train_indices, test_indices) in &folds {
-        let x_train = select_rows(x, train_indices);
-        let y_train = select_elements(y, train_indices);
-        let x_test = select_rows(x, test_indices);
-        let y_test = select_elements(y, test_indices);
-
-        let y_pred = fit_predict(&x_train, &y_train, &x_test)?;
-        let score = scorer(&y_test, &y_pred)?;
+        let score = evaluate_fold(x, y, train_indices, test_indices, &fit_predict, &scorer)?;
         scores.push(score);
     }
 
@@ -283,13 +304,8 @@ pub fn grid_search_cv<F: Float>(
     for fit_predict in param_configs {
         let mut fold_scores = Vec::with_capacity(k);
         for (train_indices, test_indices) in &folds {
-            let x_train = select_rows(x, train_indices);
-            let y_train = select_elements(y, train_indices);
-            let x_test = select_rows(x, test_indices);
-            let y_test = select_elements(y, test_indices);
-
-            let y_pred = fit_predict(&x_train, &y_train, &x_test)?;
-            let score = scorer(&y_test, &y_pred)?;
+            let score =
+                evaluate_fold(x, y, train_indices, test_indices, fit_predict, &scorer)?;
             fold_scores.push(score);
         }
         cv_scores.push(fold_scores);

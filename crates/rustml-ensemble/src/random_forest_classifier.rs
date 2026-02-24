@@ -182,14 +182,15 @@ impl<F: Float> Predict<F> for FittedRandomForestClassifier<F> {
         let n_samples = x.nrows();
         let n_trees = self.trees.len();
 
-        // Collect all tree predictions in batch: one predict call per tree
-        // instead of n_samples × n_trees individual calls.
-        let mut all_preds: Vec<Array1<F>> = Vec::with_capacity(n_trees);
-        for forest_tree in &self.trees {
-            let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
-            let tree_preds = forest_tree.tree.predict(&sub_x)?;
-            all_preds.push(tree_preds);
-        }
+        // Collect all tree predictions in parallel
+        let all_preds: Result<Vec<Array1<F>>> = self.trees
+            .par_iter()
+            .map(|forest_tree| {
+                let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
+                forest_tree.tree.predict(&sub_x)
+            })
+            .collect();
+        let all_preds = all_preds?;
 
         // Aggregate votes per sample
         let mut predictions = Vec::with_capacity(n_samples);

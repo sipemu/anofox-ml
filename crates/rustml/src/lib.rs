@@ -64,6 +64,11 @@ pub mod svm {
     pub use rustml_svm::*;
 }
 
+/// Neural network models (MLP).
+pub mod neural_networks {
+    pub use rustml_neural_networks::*;
+}
+
 /// Data I/O utilities (CSV reading).
 pub mod io {
     pub use rustml_io::*;
@@ -100,4 +105,10 @@ pub mod prelude {
     pub use rustml_naive_bayes::GaussianNB;
 
     pub use rustml_svm::{LinearSvc, Svc, SvmKernel};
+
+    pub use rustml_neural_networks::{MlpClassifier, MlpRegressor};
+
+    pub use rustml_core::persistence::{
+        load_bincode, load_json, save_bincode, save_json,
+    };
 }
