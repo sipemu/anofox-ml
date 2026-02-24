@@ -161,8 +161,8 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
             // Step 2a: Compute residuals (negative gradient of squared error loss).
             let residuals = y - &predictions;
 
-            // Step 2b: Subsample if needed.
-            let (x_sub, residuals_sub) = if subsample_size < n_samples {
+            // Step 2b+c: Fit a tree to (subsampled) residuals.
+            let fitted_tree: FittedDecisionTreeRegressor<F> = if subsample_size < n_samples {
                 let mut indices: Vec<usize> = (0..n_samples).collect();
                 indices.shuffle(&mut rng);
                 indices.truncate(subsample_size);
@@ -170,14 +170,10 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
 
                 let x_sub = build_sub_rows(x, &indices);
                 let r_sub = Array1::from_vec(indices.iter().map(|&i| residuals[i]).collect());
-                (x_sub, r_sub)
+                tree_params.fit(&x_sub, &r_sub)?
             } else {
-                (x.clone(), residuals)
+                tree_params.fit(x, &residuals)?
             };
-
-            // Step 2c: Fit a tree to the residuals.
-            let fitted_tree: FittedDecisionTreeRegressor<F> =
-                tree_params.fit(&x_sub, &residuals_sub)?;
 
             // Step 2d: Update predictions on the full training set.
             let tree_preds = fitted_tree.predict(x)?;

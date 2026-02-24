@@ -122,6 +122,7 @@ impl<F: Float> Fit<F> for MlpRegressor {
         let alpha = F::from_f64(self.alpha).unwrap();
         let tol = F::from_f64(self.tol).unwrap();
         let batch_size = self.batch_size.unwrap_or(n_samples).min(n_samples);
+        let full_batch = batch_size >= n_samples;
 
         // Reshape y to (n_samples, 1)
         let y_2d = y.clone().insert_axis(Axis(1));
@@ -135,18 +136,25 @@ impl<F: Float> Fit<F> for MlpRegressor {
             let mut n_batches = 0;
 
             for chunk in indices.chunks(batch_size) {
-                let x_batch = select_rows(x, chunk);
-                let y_batch = select_rows(&y_2d, chunk);
+                // When the batch covers the full dataset, avoid copying.
+                let (x_batch_owned, y_batch_owned);
+                let (x_b, y_b) = if full_batch {
+                    (x, &y_2d)
+                } else {
+                    x_batch_owned = select_rows(x, chunk);
+                    y_batch_owned = select_rows(&y_2d, chunk);
+                    (&x_batch_owned, &y_batch_owned)
+                };
 
                 // Forward
-                let (output, caches) = forward_pass(&layers, self.activation, &x_batch);
+                let (output, caches) = forward_pass(&layers, self.activation, x_b);
 
                 // Loss
-                epoch_loss += mse_loss(&output, &y_batch);
+                epoch_loss += mse_loss(&output, y_b);
                 n_batches += 1;
 
                 // Backward: MSE gradient: (y_pred - y_true) / n_outputs
-                let output_delta = (&output - &y_batch)
+                let output_delta = (&output - y_b)
                     * (F::from_f64(2.0).unwrap() / F::from_usize(output.nrows()).unwrap());
                 let gradients =
                     backward_pass(&layers, &caches, self.activation, output_delta, alpha);

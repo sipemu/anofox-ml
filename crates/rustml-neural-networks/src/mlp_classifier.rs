@@ -157,6 +157,7 @@ impl<F: Float> Fit<F> for MlpClassifier {
         let alpha = F::from_f64(self.alpha).unwrap();
         let tol = F::from_f64(self.tol).unwrap();
         let batch_size = self.batch_size.unwrap_or(n_samples).min(n_samples);
+        let full_batch = batch_size >= n_samples;
 
         let y_onehot = one_hot_encode(y, &class_labels);
         let mut indices: Vec<usize> = (0..n_samples).collect();
@@ -169,19 +170,26 @@ impl<F: Float> Fit<F> for MlpClassifier {
             let mut n_batches = 0;
 
             for chunk in indices.chunks(batch_size) {
-                let x_batch = select_rows(x, chunk);
-                let y_batch_onehot = select_rows(&y_onehot, chunk);
+                // When the batch covers the full dataset, avoid copying.
+                let (x_batch_owned, y_batch_owned);
+                let (x_b, y_b) = if full_batch {
+                    (x, &y_onehot)
+                } else {
+                    x_batch_owned = select_rows(x, chunk);
+                    y_batch_owned = select_rows(&y_onehot, chunk);
+                    (&x_batch_owned, &y_batch_owned)
+                };
 
                 // Forward
-                let (logits, caches) = forward_pass(&layers, self.activation, &x_batch);
+                let (logits, caches) = forward_pass(&layers, self.activation, x_b);
                 let probs = softmax(&logits);
 
                 // Loss
-                epoch_loss += cross_entropy_loss(&probs, &y_batch_onehot);
+                epoch_loss += cross_entropy_loss(&probs, y_b);
                 n_batches += 1;
 
                 // Backward: output delta = probs - y_onehot
-                let output_delta = &probs - &y_batch_onehot;
+                let output_delta = &probs - y_b;
                 let gradients = backward_pass(&layers, &caches, self.activation, output_delta, alpha);
 
                 // Update

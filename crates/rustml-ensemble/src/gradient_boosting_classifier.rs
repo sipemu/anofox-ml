@@ -230,8 +230,8 @@ impl GradientBoostingClassifier {
             // Pseudo-residuals: negative gradient of log loss = y - p(x).
             let residuals = &binary_y - &probs;
 
-            // Subsample if needed.
-            let (x_sub, residuals_sub) = if subsample_size < n_samples {
+            // Fit tree to (subsampled) pseudo-residuals.
+            let fitted_tree: FittedDecisionTreeRegressor<F> = if subsample_size < n_samples {
                 let mut indices: Vec<usize> = (0..n_samples).collect();
                 indices.shuffle(&mut rng);
                 indices.truncate(subsample_size);
@@ -239,14 +239,10 @@ impl GradientBoostingClassifier {
 
                 let x_sub = build_sub_rows(x, &indices);
                 let r_sub = Array1::from_vec(indices.iter().map(|&i| residuals[i]).collect());
-                (x_sub, r_sub)
+                tree_params.fit(&x_sub, &r_sub)?
             } else {
-                (x.clone(), residuals)
+                tree_params.fit(x, &residuals)?
             };
-
-            // Fit tree to pseudo-residuals.
-            let fitted_tree: FittedDecisionTreeRegressor<F> =
-                tree_params.fit(&x_sub, &residuals_sub)?;
 
             // Update log-odds on full training set.
             let tree_preds = fitted_tree.predict(x)?;

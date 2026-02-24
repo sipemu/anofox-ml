@@ -60,22 +60,25 @@ pub(crate) fn forward_pass<F: Float>(
 ) -> (Array2<F>, Vec<LayerCache<F>>) {
     let mut current = x.clone();
     let mut caches = Vec::with_capacity(layers.len());
+    let last = layers.len() - 1;
 
     for (i, layer) in layers.iter().enumerate() {
         let z = layer.linear(&current);
-        let a = if i < layers.len() - 1 {
-            // Hidden layers use the activation function
-            activation.forward(&z)
-        } else {
-            // Output layer: raw logits (caller applies softmax / identity)
-            z.clone()
-        };
 
-        caches.push(LayerCache {
-            input: current,
-            z,
-        });
-        current = a;
+        if i < last {
+            let a = activation.forward(&z);
+            caches.push(LayerCache { input: current, z });
+            current = a;
+        } else {
+            // Output layer: z IS the output. The backward pass never reads
+            // caches[last].z, so store a zero-size placeholder and move z
+            // directly to avoid cloning.
+            caches.push(LayerCache {
+                input: current,
+                z: Array2::zeros((0, 0)),
+            });
+            current = z;
+        }
     }
 
     (current, caches)
