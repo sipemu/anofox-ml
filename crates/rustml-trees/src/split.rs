@@ -120,6 +120,10 @@ trait SplitAccumulator<F: Float> {
     fn move_to_left(&mut self, y: &Array1<F>, idx: usize);
     /// Compute weighted impurity: (n_left/n)*left + (n_right/n)*right.
     fn weighted_impurity(&self, n: usize) -> F;
+    /// Number of samples currently in the left partition.
+    fn n_left(&self) -> usize;
+    /// Number of samples currently in the right partition.
+    fn n_right(&self) -> usize;
 }
 
 /// Classification accumulator using incremental class counts.
@@ -171,13 +175,6 @@ impl<F: Float> SplitAccumulator<F> for ClassificationAccumulator<F> {
         let right_imp = impurity_from_counts(&self.right_counts, self.n_right, self.criterion);
         (nl / n_f) * left_imp + (nr / n_f) * right_imp
     }
-}
-
-impl<F: Float> ClassificationAccumulator<F> {
-    fn with_criterion(mut self, criterion: SplitCriterion) -> Self {
-        self.criterion = criterion;
-        self
-    }
 
     fn n_left(&self) -> usize {
         self.n_left
@@ -185,6 +182,13 @@ impl<F: Float> ClassificationAccumulator<F> {
 
     fn n_right(&self) -> usize {
         self.n_right
+    }
+}
+
+impl<F: Float> ClassificationAccumulator<F> {
+    fn with_criterion(mut self, criterion: SplitCriterion) -> Self {
+        self.criterion = criterion;
+        self
     }
 }
 
@@ -237,9 +241,7 @@ impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
         let right_mse = self.right_sum_sq / nr - (self.right_sum / nr) * (self.right_sum / nr);
         (nl / n_f) * left_mse + (nr / n_f) * right_mse
     }
-}
 
-impl<F: Float> RegressionAccumulator<F> {
     fn n_left(&self) -> usize {
         self.n_left
     }
@@ -247,6 +249,34 @@ impl<F: Float> RegressionAccumulator<F> {
     fn n_right(&self) -> usize {
         self.n_right
     }
+}
+
+/// Evaluate a candidate split point between `cur_val` and `next_val`.
+///
+/// Returns `Some((threshold, improvement))` when the split passes the
+/// distinct-value and min-samples-leaf gates, or `None` otherwise.
+#[inline]
+fn evaluate_candidate_split<F: Float, A: SplitAccumulator<F>>(
+    acc: &A,
+    n: usize,
+    min_samples_leaf: usize,
+    cur_val: F,
+    next_val: F,
+    parent_impurity: F,
+) -> Option<(F, F)> {
+    // Only consider a split between distinct values.
+    if (next_val - cur_val).abs() < F::from_f64(1e-15).unwrap() {
+        return None;
+    }
+
+    // Check min_samples_leaf constraint.
+    if acc.n_left() < min_samples_leaf || acc.n_right() < min_samples_leaf {
+        return None;
+    }
+
+    let threshold = (cur_val + next_val) / (F::one() + F::one());
+    let improvement = parent_impurity - acc.weighted_impurity(n);
+    Some((threshold, improvement))
 }
 
 /// Unified split-finding loop parameterised by accumulator type.
@@ -263,8 +293,6 @@ fn find_best_split_inner<F, A>(
     n: usize,
     parent_impurity: F,
     acc_init: impl Fn() -> A,
-    n_left_fn: impl Fn(&A) -> usize,
-    n_right_fn: impl Fn(&A) -> usize,
 ) -> Option<BestSplit<F>>
 where
     F: Float,
@@ -284,29 +312,20 @@ where
             let (cur_val, cur_idx) = sorted_pairs[pos];
             acc.move_to_left(y, cur_idx);
 
-            // Only consider a split between distinct values
             let next_val = sorted_pairs[pos + 1].0;
-            if (next_val - cur_val).abs() < F::from_f64(1e-15).unwrap() {
-                continue;
+            if let Some((threshold, improvement)) =
+                evaluate_candidate_split(&acc, n, min_samples_leaf, cur_val, next_val, parent_impurity)
+            {
+                try_update_best_split(
+                    improvement,
+                    &mut best_improvement,
+                    &mut best,
+                    feature,
+                    threshold,
+                    &sorted_pairs,
+                    pos,
+                );
             }
-
-            // Check min_samples_leaf constraint
-            if n_left_fn(&acc) < min_samples_leaf || n_right_fn(&acc) < min_samples_leaf {
-                continue;
-            }
-
-            let threshold = (cur_val + next_val) / (F::one() + F::one());
-            let improvement = parent_impurity - acc.weighted_impurity(n);
-
-            try_update_best_split(
-                improvement,
-                &mut best_improvement,
-                &mut best,
-                feature,
-                threshold,
-                &sorted_pairs,
-                pos,
-            );
         }
     }
 
@@ -334,8 +353,6 @@ fn find_best_split_classification<F: Float>(
         n,
         parent_impurity,
         || ClassificationAccumulator::<F>::new(y, indices).with_criterion(criterion),
-        |acc| acc.n_left(),
-        |acc| acc.n_right(),
     )
 }
 
@@ -358,8 +375,6 @@ fn find_best_split_regression<F: Float>(
         n,
         parent_impurity,
         || RegressionAccumulator::<F>::new(y, indices),
-        |acc| acc.n_left(),
-        |acc| acc.n_right(),
     )
 }
 

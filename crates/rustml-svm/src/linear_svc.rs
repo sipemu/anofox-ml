@@ -212,6 +212,83 @@ fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
     labels
 }
 
+/// Clamp `val` to the interval `[zero, c]`.
+#[inline]
+fn clamp_alpha<F: Float>(val: F, zero: F, c: F) -> F {
+    if val < zero {
+        zero
+    } else if val > c {
+        c
+    } else {
+        val
+    }
+}
+
+/// Perform a single coordinate descent update for sample `i`.
+///
+/// Returns `Some((new_alpha, delta))` when an update is possible,
+/// or `None` when the denominator is near-zero and the step must be
+/// skipped.
+#[inline]
+fn coordinate_descent_step<F: Float>(
+    old_alpha: F,
+    xi: ndarray::ArrayView1<'_, F>,
+    yi: F,
+    w: &Array1<F>,
+    bias: F,
+    sq_norm: F,
+    c: F,
+) -> Option<(F, F)> {
+    let one = F::one();
+    let zero = F::zero();
+
+    let denom = sq_norm + one / c;
+    if denom.abs() < F::from_f64(1e-15).unwrap() {
+        return None;
+    }
+
+    let prediction = xi.dot(w) + bias;
+    let new_alpha_unclamped = old_alpha + (one - yi * prediction) / denom;
+    let new_alpha = clamp_alpha(new_alpha_unclamped, zero, c);
+    let delta = new_alpha - old_alpha;
+
+    Some((new_alpha, delta))
+}
+
+/// Apply one coordinate descent update for sample `i`.
+///
+/// Computes the step, clamps alpha, and updates weight vector + bias
+/// in-place. Returns the absolute change in alpha (zero if the step
+/// was skipped).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn apply_cd_update<F: Float>(
+    i: usize,
+    alpha: &mut [F],
+    w: &mut Array1<F>,
+    bias: &mut F,
+    x_row: ndarray::ArrayView1<'_, F>,
+    y_i: F,
+    sq_norm: F,
+    c: F,
+) -> F {
+    let Some((new_alpha, delta)) =
+        coordinate_descent_step(alpha[i], x_row, y_i, w, *bias, sq_norm, c)
+    else {
+        return F::zero();
+    };
+
+    let abs_delta = delta.abs();
+    if abs_delta > F::from_f64(1e-15).unwrap() {
+        alpha[i] = new_alpha;
+        let scaled = &x_row * (delta * y_i);
+        *w += &scaled.to_owned();
+        *bias += delta * y_i;
+    }
+
+    abs_delta
+}
+
 /// Train a single binary linear SVC using coordinate descent on
 /// the dual formulation of hinge loss + L2 regularization.
 ///
@@ -227,73 +304,26 @@ fn fit_binary_linear_svc<F: Float>(
     let n_samples = x.nrows();
     let n_features = x.ncols();
 
-    // Dual variables (alpha), initialized to zero.
     let mut alpha = vec![F::zero(); n_samples];
-
-    // Primal weight vector: w = sum_i alpha_i * y_i * x_i
     let mut w = Array1::<F>::zeros(n_features);
     let mut bias = F::zero();
 
-    // Precompute squared norms of each sample.
     let sq_norms: Vec<F> = x
         .rows()
         .into_iter()
         .map(|row| row.dot(&row))
         .collect();
 
-    // Coordinate descent on the dual.
     let mut rng = StdRng::seed_from_u64(seed);
     let mut indices: Vec<usize> = (0..n_samples).collect();
 
-    let zero = F::zero();
-    let one = F::one();
-
     for _ in 0..max_iter {
-        let mut max_change = F::zero();
         indices.shuffle(&mut rng);
 
-        for &i in &indices {
-            let yi = y[i];
-            let xi = x.row(i);
-
-            // Compute prediction: w . xi + bias
-            let prediction = xi.dot(&w) + bias;
-
-            // Gradient of the hinge loss dual:
-            // We want to maximize: alpha_i - 0.5 * alpha_i^2 * ||xi||^2 - ...
-            // The update step for coordinate descent:
-            // alpha_i_new = clamp(alpha_i + (1 - yi * prediction) / (||xi||^2 + 1/C), 0, C)
-            let denom = sq_norms[i] + one / c;
-            if denom.abs() < F::from_f64(1e-15).unwrap() {
-                continue;
-            }
-
-            let old_alpha = alpha[i];
-            let new_alpha_unclamped = old_alpha + (one - yi * prediction) / denom;
-
-            // Clamp to [0, C]
-            let new_alpha = if new_alpha_unclamped < zero {
-                zero
-            } else if new_alpha_unclamped > c {
-                c
-            } else {
-                new_alpha_unclamped
-            };
-
-            let delta = new_alpha - old_alpha;
-            if delta.abs() > max_change {
-                max_change = delta.abs();
-            }
-
-            if delta.abs() > F::from_f64(1e-15).unwrap() {
-                alpha[i] = new_alpha;
-                // Update w: w += delta * y_i * x_i
-                let scaled = &xi * (delta * yi);
-                w += &scaled.to_owned();
-                // Update bias
-                bias += delta * yi;
-            }
-        }
+        let max_change = indices.iter().fold(F::zero(), |mc, &i| {
+            let change = apply_cd_update(i, &mut alpha, &mut w, &mut bias, x.row(i), y[i], sq_norms[i], c);
+            if change > mc { change } else { mc }
+        });
 
         if max_change < tol {
             break;
