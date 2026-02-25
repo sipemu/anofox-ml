@@ -86,8 +86,6 @@ struct CandidateSplit<F: Float> {
     feature: usize,
     threshold: F,
     improvement: F,
-    /// Split position in the feature-sorted order: left = [..=pos], right = [pos+1..].
-    pos: usize,
 }
 
 /// If `improvement` beats `best_improvement`, record the candidate.
@@ -101,7 +99,6 @@ fn try_update_best_split<F: Float>(
     best: &mut Option<CandidateSplit<F>>,
     feature: usize,
     threshold: F,
-    pos: usize,
 ) {
     if improvement > *best_improvement {
         *best_improvement = improvement;
@@ -109,7 +106,6 @@ fn try_update_best_split<F: Float>(
             feature,
             threshold,
             improvement,
-            pos,
         });
     }
 }
@@ -117,8 +113,8 @@ fn try_update_best_split<F: Float>(
 /// Accumulator that tracks split impurity incrementally as samples move
 /// from the "right" partition to the "left" partition.
 trait SplitAccumulator<F: Float> {
-    /// Create a new accumulator with all samples in "right".
-    fn new(y: &Array1<F>, indices: &[usize]) -> Self;
+    /// Reset the accumulator with all samples in "right".
+    fn reset(&mut self, y: &Array1<F>, indices: &[usize]);
     /// Move sample `idx` from right to left.
     fn move_to_left(&mut self, y: &Array1<F>, idx: usize);
     /// Compute weighted impurity: (n_left/n)*left + (n_right/n)*right.
@@ -140,7 +136,8 @@ struct ClassificationAccumulator<F: Float> {
     _marker: std::marker::PhantomData<F>,
 }
 
-impl<F: Float> SplitAccumulator<F> for ClassificationAccumulator<F> {
+impl<F: Float> ClassificationAccumulator<F> {
+    /// Create a new accumulator, building the class_map once.
     fn new(y: &Array1<F>, indices: &[usize]) -> Self {
         let class_map = build_class_map(y, indices);
         let n_classes = class_map.len();
@@ -156,10 +153,24 @@ impl<F: Float> SplitAccumulator<F> for ClassificationAccumulator<F> {
             right_counts: total_counts,
             n_left: 0,
             n_right: indices.len(),
-            criterion: SplitCriterion::Gini, // overwritten by with_criterion
+            criterion: SplitCriterion::Gini,
             class_map,
             _marker: std::marker::PhantomData,
         }
+    }
+}
+
+impl<F: Float> SplitAccumulator<F> for ClassificationAccumulator<F> {
+    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+        // Reuse existing Vecs — just zero and refill counts.
+        self.left_counts.fill(0);
+        self.right_counts.fill(0);
+        for &i in indices {
+            let cls = self.class_map[&float_key(y[i])];
+            self.right_counts[cls] += 1;
+        }
+        self.n_left = 0;
+        self.n_right = indices.len();
     }
 
     fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
@@ -205,7 +216,7 @@ struct RegressionAccumulator<F: Float> {
     n_right: usize,
 }
 
-impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
+impl<F: Float> RegressionAccumulator<F> {
     fn new(y: &Array1<F>, indices: &[usize]) -> Self {
         let mut total_sum = F::zero();
         let mut total_sum_sq = F::zero();
@@ -223,6 +234,22 @@ impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
             n_left: 0,
             n_right: indices.len(),
         }
+    }
+}
+
+impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
+    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+        self.left_sum = F::zero();
+        self.left_sum_sq = F::zero();
+        self.right_sum = F::zero();
+        self.right_sum_sq = F::zero();
+        for &i in indices {
+            let v = y[i];
+            self.right_sum += v;
+            self.right_sum_sq += v * v;
+        }
+        self.n_left = 0;
+        self.n_right = indices.len();
     }
 
     fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
@@ -286,6 +313,8 @@ fn evaluate_candidate_split<F: Float, A: SplitAccumulator<F>>(
 ///
 /// Scans each feature's sorted values, moving samples from right to left
 /// and evaluating candidate splits via the accumulator's impurity method.
+/// The accumulator is created once and reset per feature to avoid repeated
+/// allocations (e.g. HashMap/Vec for class counts).
 #[allow(clippy::too_many_arguments)]
 fn find_best_split_inner<F, A>(
     x: &Array2<F>,
@@ -295,7 +324,7 @@ fn find_best_split_inner<F, A>(
     n_features: usize,
     n: usize,
     parent_impurity: F,
-    acc_init: impl Fn() -> A,
+    mut acc: A,
 ) -> Option<BestSplit<F>>
 where
     F: Float,
@@ -309,7 +338,7 @@ where
     for feature in 0..n_features {
         sort_feature_pairs(x, indices, feature, &mut sorted_pairs);
 
-        let mut acc = acc_init();
+        acc.reset(y, indices);
 
         for pos in 0..n - 1 {
             let (cur_val, cur_idx) = sorted_pairs[pos];
@@ -325,23 +354,22 @@ where
                     &mut best,
                     feature,
                     threshold,
-                    pos,
                 );
             }
         }
     }
 
-    // Reconstruct index vectors only for the winning split.
+    // Reconstruct index vectors only for the winning split via O(n) partition.
     best.map(|candidate| {
-        sort_feature_pairs(x, indices, candidate.feature, &mut sorted_pairs);
-        let left_indices: Vec<usize> = sorted_pairs[..=candidate.pos]
-            .iter()
-            .map(|&(_, idx)| idx)
-            .collect();
-        let right_indices: Vec<usize> = sorted_pairs[candidate.pos + 1..]
-            .iter()
-            .map(|&(_, idx)| idx)
-            .collect();
+        let mut left_indices = Vec::with_capacity(n);
+        let mut right_indices = Vec::with_capacity(n);
+        for &i in indices {
+            if x[[i, candidate.feature]] <= candidate.threshold {
+                left_indices.push(i);
+            } else {
+                right_indices.push(i);
+            }
+        }
         BestSplit {
             feature_index: candidate.feature,
             threshold: candidate.threshold,
@@ -364,6 +392,7 @@ fn find_best_split_classification<F: Float>(
     n: usize,
     parent_impurity: F,
 ) -> Option<BestSplit<F>> {
+    let acc = ClassificationAccumulator::<F>::new(y, indices).with_criterion(criterion);
     find_best_split_inner(
         x,
         y,
@@ -372,7 +401,7 @@ fn find_best_split_classification<F: Float>(
         n_features,
         n,
         parent_impurity,
-        || ClassificationAccumulator::<F>::new(y, indices).with_criterion(criterion),
+        acc,
     )
 }
 
@@ -386,6 +415,7 @@ fn find_best_split_regression<F: Float>(
     n: usize,
     parent_impurity: F,
 ) -> Option<BestSplit<F>> {
+    let acc = RegressionAccumulator::<F>::new(y, indices);
     find_best_split_inner(
         x,
         y,
@@ -394,7 +424,7 @@ fn find_best_split_regression<F: Float>(
         n_features,
         n,
         parent_impurity,
-        || RegressionAccumulator::<F>::new(y, indices),
+        acc,
     )
 }
 

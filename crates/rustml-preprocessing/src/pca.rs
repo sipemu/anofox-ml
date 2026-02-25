@@ -69,29 +69,12 @@ impl<F: Float> FitUnsupervised<F> for Pca {
         // 1. Compute per-feature mean.
         let mean = x.sum_axis(Axis(0)) / n_f;
 
-        // 2. Center the data: X_centered = X - mean.
-        let mut x_centered = x.to_owned();
-        for mut row in x_centered.rows_mut() {
-            for (j, val) in row.iter_mut().enumerate() {
-                *val -= mean[j];
-            }
-        }
+        // 2. Center the data: X_centered = X - mean (broadcasting).
+        let x_centered = x - &mean;
 
-        // 3. Covariance matrix: C = X_centered.T @ X_centered / (n_samples - 1).
-        //    Shape: (n_features, n_features).
+        // 3. Covariance matrix via BLAS: C = X_centered.T @ X_centered / (n-1).
         let n_minus_1 = F::from_usize(n_samples - 1).unwrap();
-        let mut cov = Array2::<F>::zeros((n_features, n_features));
-        for row in x_centered.rows() {
-            for i in 0..n_features {
-                for j in i..n_features {
-                    let prod = row[i] * row[j];
-                    cov[[i, j]] += prod;
-                    if i != j {
-                        cov[[j, i]] += prod;
-                    }
-                }
-            }
-        }
+        let mut cov = x_centered.t().dot(&x_centered);
         cov.mapv_inplace(|v| v / n_minus_1);
 
         // 4. Power iteration with deflation to extract top-k eigenpairs.
@@ -170,12 +153,10 @@ impl<F: Float> FitUnsupervised<F> for Pca {
             let eigenvalue = v.dot(&cv);
             let eigenvalue = if eigenvalue < F::zero() { F::zero() } else { eigenvalue };
 
-            // (d) Deflate: C = C - eigenvalue * v v^T.
-            for i in 0..n_features {
-                for j in 0..n_features {
-                    cov[[i, j]] -= eigenvalue * v[i] * v[j];
-                }
-            }
+            // (d) Deflate: C = C - eigenvalue * v v^T (outer product).
+            let v_col = v.view().insert_axis(Axis(1));
+            let v_row = v.view().insert_axis(Axis(0));
+            cov -= &(v_col.dot(&v_row) * eigenvalue);
 
             // (e) Store results.
             components.row_mut(k).assign(&v);
@@ -202,12 +183,7 @@ impl<F: Float> Transform<F> for FittedPca<F> {
         }
 
         // Center and project: (X - mean) @ components.T
-        let mut centered = x.to_owned();
-        for mut row in centered.rows_mut() {
-            for (j, val) in row.iter_mut().enumerate() {
-                *val -= self.mean[j];
-            }
-        }
+        let centered = x - &self.mean;
         Ok(centered.dot(&self.components.t()))
     }
 }
@@ -224,13 +200,7 @@ impl<F: Float> InverseTransform<F> for FittedPca<F> {
         }
 
         // Reconstruct: X_reduced @ components + mean
-        let mut result = x.dot(&self.components);
-        for mut row in result.rows_mut() {
-            for (j, val) in row.iter_mut().enumerate() {
-                *val += self.mean[j];
-            }
-        }
-        Ok(result)
+        Ok(x.dot(&self.components) + &self.mean)
     }
 }
 

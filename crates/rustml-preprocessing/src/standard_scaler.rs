@@ -63,10 +63,12 @@ impl<F: Float> FitUnsupervised<F> for StandardScaler {
         let mean = x.sum_axis(Axis(0)) / n;
 
         let std = if self.with_std {
+            // Single-pass variance: no intermediate array allocations.
             let mut s = Array1::<F>::zeros(x.ncols());
             for row in x.rows() {
-                for (j, (&val, &m)) in row.iter().zip(mean.iter()).enumerate() {
-                    s[j] += (val - m) * (val - m);
+                for (s_j, (&val, &m)) in s.iter_mut().zip(row.iter().zip(mean.iter())) {
+                    let d = val - m;
+                    *s_j += d * d;
                 }
             }
             s.mapv(|v| (v / n).sqrt())

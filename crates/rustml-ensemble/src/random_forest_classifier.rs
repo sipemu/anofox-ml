@@ -264,6 +264,7 @@ fn build_sub_matrix<F: Float>(
     row_indices: &[usize],
     col_indices: &[usize],
 ) -> Array2<F> {
+    // Select rows first (produces C-contiguous), then columns.
     let n_rows = row_indices.len();
     let n_cols = col_indices.len();
     let mut data = Vec::with_capacity(n_rows * n_cols);
@@ -276,6 +277,8 @@ fn build_sub_matrix<F: Float>(
 }
 
 /// Build a sub-matrix selecting all rows but only specific columns from `x`.
+/// Produces a guaranteed C-contiguous (standard layout) array so that
+/// `row.as_slice()` works in downstream predict calls.
 fn build_sub_matrix_cols<F: Float>(
     x: &Array2<F>,
     col_indices: &[usize],

@@ -223,16 +223,22 @@ impl GradientBoostingClassifier {
         let mut trees = Vec::with_capacity(self.n_estimators);
         let subsample_size = ((self.subsample * n_samples as f64).round() as usize).max(1);
 
-        for _ in 0..self.n_estimators {
-            // Compute probabilities via sigmoid.
-            let probs = log_odds.mapv(sigmoid);
+        // Pre-allocate reusable buffers outside the boosting loop.
+        let mut probs = Array1::<F>::zeros(n_samples);
+        let mut residuals = Array1::<F>::zeros(n_samples);
+        let mut indices: Vec<usize> = (0..n_samples).collect();
 
-            // Pseudo-residuals: negative gradient of log loss = y - p(x).
-            let residuals = &binary_y - &probs;
+        for _ in 0..self.n_estimators {
+            // Compute probabilities and residuals in-place.
+            for i in 0..n_samples {
+                probs[i] = sigmoid(log_odds[i]);
+                residuals[i] = binary_y[i] - probs[i];
+            }
 
             // Fit tree to (subsampled) pseudo-residuals.
             let fitted_tree: FittedDecisionTreeRegressor<F> = if subsample_size < n_samples {
-                let mut indices: Vec<usize> = (0..n_samples).collect();
+                indices.clear();
+                indices.extend(0..n_samples);
                 indices.shuffle(&mut rng);
                 indices.truncate(subsample_size);
                 indices.sort_unstable();
@@ -365,15 +371,7 @@ fn unique_sorted<F: Float>(arr: &Array1<F>) -> Vec<F> {
 
 /// Build a sub-matrix selecting specific rows from `x`.
 fn build_sub_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
-    let n_rows = row_indices.len();
-    let n_cols = x.ncols();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for &ri in row_indices {
-        for c in 0..n_cols {
-            data.push(x[[ri, c]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
+    x.select(ndarray::Axis(0), row_indices)
 }
 
 #[cfg(test)]

@@ -26,14 +26,14 @@ impl Activation {
     pub fn backward<F: Float>(&self, z: &Array2<F>) -> Array2<F> {
         match self {
             Activation::Relu => z.mapv(|v| if v > F::zero() { F::one() } else { F::zero() }),
-            Activation::Tanh => {
-                let t = z.mapv(|v| v.tanh());
-                t.mapv(|v| F::one() - v * v)
-            }
-            Activation::Sigmoid => {
-                let s = z.mapv(|v| F::one() / (F::one() + (-v).exp()));
-                &s * &s.mapv(|v| F::one() - v)
-            }
+            Activation::Tanh => z.mapv(|v| {
+                let t = v.tanh();
+                F::one() - t * t
+            }),
+            Activation::Sigmoid => z.mapv(|v| {
+                let s = F::one() / (F::one() + (-v).exp());
+                s * (F::one() - s)
+            }),
             Activation::Identity => Array2::ones(z.raw_dim()),
         }
     }
