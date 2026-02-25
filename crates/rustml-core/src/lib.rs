@@ -30,6 +30,7 @@
 //! ```
 
 pub mod error;
+pub mod feature_union;
 pub mod float;
 pub mod persistence;
 pub mod pipeline;
@@ -38,6 +39,7 @@ pub mod utils;
 
 pub use error::{Result, RustMlError};
 pub use float::Float;
+pub use feature_union::{FeatureUnion, FittedFeatureUnion};
 pub use pipeline::{FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep};
 pub use traits::{Fit, FitUnsupervised, InverseTransform, Predict, Transform};
 pub use utils::{

@@ -78,8 +78,8 @@ pub mod io {
 pub mod prelude {
     pub use rustml_core::{
         cross_val_score, cross_val_score_stratified, grid_search_cv, stratified_k_fold,
-        train_test_split, Fit, FitUnsupervised, FittedPipeline, Float, GridSearchResult,
-        InverseTransform, Pipeline, Predict, Transform,
+        train_test_split, FeatureUnion, Fit, FitUnsupervised, FittedPipeline, Float,
+        GridSearchResult, InverseTransform, Pipeline, Predict, Transform,
     };
 
     pub use rustml_metrics::{

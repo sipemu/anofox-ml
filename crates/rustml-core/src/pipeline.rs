@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use ndarray::{Array1, Array2};
 
 use crate::error::{Result, RustMlError};
@@ -12,6 +14,7 @@ pub trait FitTransform<F: Float>: Send + Sync {
 /// A fitted transformer step that can transform new data.
 pub trait TransformStep<F: Float>: Send + Sync {
     fn transform(&self, x: &Array2<F>) -> Result<Array2<F>>;
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// A supervised estimator that can be fit and then predict.
@@ -26,6 +29,7 @@ pub trait FitPredict<F: Float>: Send + Sync {
 /// A fitted estimator step that can predict.
 pub trait PredictStep<F: Float>: Send + Sync {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>>;
+    fn as_any(&self) -> &dyn Any;
 }
 
 // --- Blanket implementations ---
@@ -50,9 +54,14 @@ struct FittedTransformWrapper<T>(T);
 unsafe impl<T: Send> Send for FittedTransformWrapper<T> {}
 unsafe impl<T: Sync> Sync for FittedTransformWrapper<T> {}
 
-impl<F: Float, T: Transform<F> + Send + Sync> TransformStep<F> for FittedTransformWrapper<T> {
+impl<F: Float, T: Transform<F> + Send + Sync + 'static> TransformStep<F>
+    for FittedTransformWrapper<T>
+{
     fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
         self.0.transform(x)
+    }
+    fn as_any(&self) -> &dyn Any {
+        &self.0
     }
 }
 
@@ -78,9 +87,14 @@ struct FittedPredictWrapper<T>(T);
 unsafe impl<T: Send> Send for FittedPredictWrapper<T> {}
 unsafe impl<T: Sync> Sync for FittedPredictWrapper<T> {}
 
-impl<F: Float, T: Predict<F> + Send + Sync> PredictStep<F> for FittedPredictWrapper<T> {
+impl<F: Float, T: Predict<F> + Send + Sync + 'static> PredictStep<F>
+    for FittedPredictWrapper<T>
+{
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
         self.0.predict(x)
+    }
+    fn as_any(&self) -> &dyn Any {
+        &self.0
     }
 }
 
@@ -198,6 +212,34 @@ impl<F: Float> FittedPipeline<F> {
         }
     }
 
+    /// Downcast a named transformer step to its concrete fitted type.
+    pub fn get_transformer<T: 'static>(&self, name: &str) -> Result<&T> {
+        let step = self
+            .transformers
+            .iter()
+            .find(|(n, _)| n == name)
+            .ok_or_else(|| {
+                RustMlError::NotFitted(format!("No transformer step named '{name}'"))
+            })?;
+        step.1.as_any().downcast_ref::<T>().ok_or_else(|| {
+            RustMlError::NotFitted(format!(
+                "Transformer '{name}' could not be downcast to the requested type"
+            ))
+        })
+    }
+
+    /// Downcast the final estimator to its concrete fitted type.
+    pub fn get_estimator<T: 'static>(&self) -> Result<&T> {
+        let (_, estimator) = self.estimator.as_ref().ok_or_else(|| {
+            RustMlError::NotFitted("Pipeline has no estimator set".into())
+        })?;
+        estimator.as_any().downcast_ref::<T>().ok_or_else(|| {
+            RustMlError::NotFitted(
+                "Estimator could not be downcast to the requested type".into(),
+            )
+        })
+    }
+
     /// Get the names of all steps in the pipeline.
     pub fn step_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
@@ -235,6 +277,9 @@ mod tests {
         fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
             Ok(x.mapv(|v| v * 2.0))
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     // A simple test estimator that predicts the mean of features
@@ -254,6 +299,9 @@ mod tests {
     impl PredictStep<f64> for FittedMeanPredictor {
         fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
             Ok(x.mean_axis(ndarray::Axis(1)).unwrap())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
@@ -297,6 +345,61 @@ mod tests {
 
         let fitted = pipeline.fit(&x, &y).unwrap();
         assert_eq!(fitted.step_names(), vec!["step1", "step2", "classifier"]);
+    }
+
+    #[test]
+    fn test_get_transformer_success() {
+        let pipeline = Pipeline::<f64>::new()
+            .push_transformer("doubler", Doubler)
+            .set_estimator("mean", MeanPredictor);
+
+        let x = array![[1.0, 2.0], [3.0, 4.0]];
+        let y = array![0.0, 1.0];
+        let fitted = pipeline.fit(&x, &y).unwrap();
+
+        let _doubler: &FittedDoubler = fitted.get_transformer("doubler").unwrap();
+    }
+
+    #[test]
+    fn test_get_transformer_wrong_name() {
+        let pipeline = Pipeline::<f64>::new()
+            .push_transformer("doubler", Doubler)
+            .set_estimator("mean", MeanPredictor);
+
+        let x = array![[1.0, 2.0], [3.0, 4.0]];
+        let y = array![0.0, 1.0];
+        let fitted = pipeline.fit(&x, &y).unwrap();
+
+        assert!(fitted.get_transformer::<FittedDoubler>("wrong_name").is_err());
+    }
+
+    #[test]
+    fn test_get_transformer_wrong_type() {
+        let pipeline = Pipeline::<f64>::new()
+            .push_transformer("doubler", Doubler)
+            .set_estimator("mean", MeanPredictor);
+
+        let x = array![[1.0, 2.0], [3.0, 4.0]];
+        let y = array![0.0, 1.0];
+        let fitted = pipeline.fit(&x, &y).unwrap();
+
+        // FittedMeanPredictor is the wrong type for a transformer step
+        assert!(fitted
+            .get_transformer::<FittedMeanPredictor>("doubler")
+            .is_err());
+    }
+
+    #[test]
+    fn test_get_estimator_success() {
+        let pipeline = Pipeline::<f64>::new()
+            .push_transformer("doubler", Doubler)
+            .set_estimator("mean", MeanPredictor);
+
+        let x = array![[1.0, 2.0], [3.0, 4.0]];
+        let y = array![0.0, 1.0];
+        let fitted = pipeline.fit(&x, &y).unwrap();
+
+        let _estimator: &FittedMeanPredictor = fitted.get_estimator().unwrap();
     }
 
     #[test]
