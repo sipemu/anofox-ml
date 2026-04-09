@@ -38,8 +38,18 @@
 
 mod kernel;
 mod linear_svc;
+mod linear_svr;
+mod nu_svc;
+mod nu_svr;
+mod one_class_svm;
 mod svc;
+mod svr;
 
 pub use kernel::SvmKernel;
 pub use linear_svc::{FittedLinearSvc, LinearSvc};
+pub use linear_svr::{FittedLinearSvr, LinearSvr};
+pub use nu_svc::{FittedNuSvc, NuSvc};
+pub use nu_svr::{FittedNuSvr, NuSvr};
+pub use one_class_svm::{FittedOneClassSvm, OneClassSvm};
 pub use svc::{FittedSvc, Svc};
+pub use svr::{FittedSvr, Svr};
