@@ -26,10 +26,24 @@
 //! ```
 
 pub mod classification;
+pub mod classification_extended;
+pub mod classification_extra;
+pub mod clustering;
+pub mod clustering_extra;
+pub mod curves;
 pub mod regression;
+pub mod regression_extended;
+pub mod regression_extra;
 
 pub use classification::{
     accuracy_score, confusion_matrix, f1_score, f1_score_avg, precision, precision_score, recall,
     recall_score, Average,
 };
+pub use classification_extended::{average_precision_score, matthews_corrcoef, roc_auc_score};
+pub use classification_extra::{balanced_accuracy_score, cohen_kappa_score, log_loss};
+pub use clustering::silhouette_score;
+pub use clustering_extra::{adjusted_rand_score, normalized_mutual_info_score};
+pub use curves::{brier_score_loss, precision_recall_curve, roc_curve};
 pub use regression::{mae, mse, r2_score};
+pub use regression_extended::{explained_variance_score, max_error, mean_absolute_percentage_error};
+pub use regression_extra::{mean_squared_log_error, median_absolute_error};
