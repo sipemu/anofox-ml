@@ -51,21 +51,19 @@ fn test_parity_nu_svr_linear() {
     let our_preds = fitted.predict(&x).unwrap();
     let our_r2 = r2(&our_preds, &y);
 
-    // R² should be within 0.001 of sklearn.
+    // With the libsvm-style SMO port, R² matches sklearn to ~1e-5.
     assert!(
-        (our_r2 - sk_r2).abs() < 0.001,
+        (our_r2 - sk_r2).abs() < 1e-4,
         "NuSVR R² parity: ours={:.6}, sklearn={:.6}",
         our_r2,
         sk_r2
     );
 
-    // Per-point predictions should be within 0.5 of sklearn (our FISTA solver
-    // reaches a slightly different optimum than libsvm's SMO but the final
-    // predictions are close).
+    // Per-point predictions should match sklearn to ~1e-3.
     for (i, (&o, &s)) in our_preds.iter().zip(sk_preds.iter()).enumerate() {
         assert!(
-            (o - s).abs() < 0.5,
-            "NuSVR pred[{}]: ours={:.4}, sklearn={:.4}",
+            (o - s).abs() < 1e-2,
+            "NuSVR pred[{}]: ours={:.6}, sklearn={:.6}",
             i,
             o,
             s
@@ -83,25 +81,38 @@ fn test_parity_nu_svr_rbf() {
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
+    let sk_preds = json_to_array1(&case["predictions"]);
     let sk_r2 = case["r2"].as_f64().unwrap();
 
     let fitted: rustml::svm::FittedNuSvr<f64> = NuSvr::new()
         .with_nu(0.5)
         .with_c(10.0)
         .with_kernel(SvmKernel::Rbf { gamma: 0.1 })
-        .with_max_iter(5000)
+        .with_max_iter(20000)
         .fit(&x, &y)
         .unwrap();
 
     let our_preds = fitted.predict(&x).unwrap();
     let our_r2 = r2(&our_preds, &y);
 
+    // libsvm-style SMO matches sklearn's R² to ~1e-4 on this RBF case.
     assert!(
-        our_r2 >= sk_r2 - 0.1,
+        (our_r2 - sk_r2).abs() < 1e-3,
         "NuSVR RBF R² parity: ours={:.6}, sklearn={:.6}",
         our_r2,
         sk_r2
     );
+
+    // Per-point predictions match sklearn to ~1e-3.
+    for (i, (&o, &s)) in our_preds.iter().zip(sk_preds.iter()).enumerate() {
+        assert!(
+            (o - s).abs() < 5e-3,
+            "NuSVR RBF pred[{}]: ours={:.6}, sklearn={:.6}",
+            i,
+            o,
+            s
+        );
+    }
 }
 
 #[test]

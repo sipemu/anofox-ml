@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn json_roundtrip_file() {
         let model = sample_model();
-        let dir = tempfile();
+        let dir = tempfile("json_roundtrip_file");
         let path = dir.join("model.json");
 
         save_json(&model, &path).unwrap();
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn bincode_roundtrip_file() {
         let model = sample_model();
-        let dir = tempfile();
+        let dir = tempfile("bincode_roundtrip_file");
         let path = dir.join("model.bin");
 
         save_bincode(&model, &path).unwrap();
@@ -161,8 +161,15 @@ mod tests {
         assert!(result.is_err());
     }
 
-    fn tempfile() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("rustml_test_{}", std::process::id()));
+    /// Per-test temp directory. Must be unique across tests in this file
+    /// because cargo runs tests in parallel threads of a single process, so
+    /// keying only on PID causes races between file roundtrip tests.
+    fn tempfile(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rustml_test_{}_{}",
+            std::process::id(),
+            test_name
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
