@@ -134,6 +134,27 @@ impl<F: Float> FittedSvr<F> {
     pub fn bias(&self) -> F {
         self.bias
     }
+
+    /// Construct a [`FittedSvr`] directly from its components.
+    ///
+    /// Used by alternative solvers (e.g. the direct nu-SVR SMO solver)
+    /// that produce support vectors and dual coefficients through a
+    /// different optimization routine.
+    pub fn from_parts(
+        support_vectors: Array2<F>,
+        dual_coefs: Array1<F>,
+        bias: F,
+        kernel: SvmKernel,
+        n_features: usize,
+    ) -> Self {
+        Self {
+            support_vectors,
+            dual_coefs,
+            bias,
+            kernel,
+            n_features,
+        }
+    }
 }
 
 impl<F: Float> Predict<F> for FittedSvr<F> {
