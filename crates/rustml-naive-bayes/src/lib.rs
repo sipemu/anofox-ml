@@ -1,9 +1,10 @@
-//! Gaussian Naive Bayes classifier.
+//! Naive Bayes classifiers.
 //!
-//! This crate implements the Gaussian Naive Bayes algorithm, which assumes
-//! that features within each class follow a normal distribution. It is
-//! particularly effective for high-dimensional data and serves as a fast,
-//! probabilistic baseline classifier.
+//! This crate implements several Naive Bayes algorithms:
+//!
+//! - [`GaussianNB`] — assumes features follow a normal distribution within each class.
+//! - [`MultinomialNB`] — for count-based or TF-IDF features (non-negative values).
+//! - [`BernoulliNB`] — for binary/boolean features, with automatic binarization.
 //!
 //! # Examples
 //!
@@ -32,6 +33,10 @@
 //! assert!((preds[1] - 1.0_f64).abs() < 1e-10);
 //! ```
 
+mod bernoulli_nb;
 mod gaussian_nb;
+mod multinomial_nb;
 
+pub use bernoulli_nb::{BernoulliNB, FittedBernoulliNB};
 pub use gaussian_nb::{FittedGaussianNB, GaussianNB};
+pub use multinomial_nb::{FittedMultinomialNB, MultinomialNB};
