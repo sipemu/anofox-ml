@@ -5,6 +5,8 @@ use rayon::prelude::*;
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 use rustml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 
+use rustml_trees::SplitCriterion;
+
 /// Random forest regressor parameters (unfitted state).
 ///
 /// Trains an ensemble of decision tree regressors, each on a bootstrap sample
@@ -22,6 +24,15 @@ pub struct RandomForestRegressor {
     pub min_samples_leaf: usize,
     /// Number of features to consider per tree. If `None`, all features are used.
     pub max_features: Option<usize>,
+    /// Split criterion for each tree. Default: MSE.
+    pub criterion: SplitCriterion,
+    /// Whether to use bootstrap sampling. Default: true.
+    pub bootstrap: bool,
+    /// Fraction of samples to draw for each tree (when bootstrap=true).
+    /// If `None`, draws n_samples (with replacement). Value in (0, 1].
+    pub max_samples: Option<f64>,
+    /// Whether to compute out-of-bag score after fitting.
+    pub oob_score: bool,
     /// Random seed for reproducibility.
     pub seed: u64,
 }
@@ -35,35 +46,46 @@ impl RandomForestRegressor {
             min_samples_split: 2,
             min_samples_leaf: 1,
             max_features: None,
+            criterion: SplitCriterion::Mse,
+            bootstrap: true,
+            max_samples: None,
+            oob_score: false,
             seed: 0,
         }
     }
 
-    /// Set the maximum depth of each tree.
     pub fn with_max_depth(mut self, max_depth: Option<usize>) -> Self {
         self.max_depth = max_depth;
         self
     }
-
-    /// Set the minimum number of samples required to split a node.
     pub fn with_min_samples_split(mut self, min_samples_split: usize) -> Self {
         self.min_samples_split = min_samples_split;
         self
     }
-
-    /// Set the minimum number of samples required in a leaf node.
     pub fn with_min_samples_leaf(mut self, min_samples_leaf: usize) -> Self {
         self.min_samples_leaf = min_samples_leaf;
         self
     }
-
-    /// Set the number of features to consider per tree.
     pub fn with_max_features(mut self, max_features: Option<usize>) -> Self {
         self.max_features = max_features;
         self
     }
-
-    /// Set the random seed for reproducibility.
+    pub fn with_criterion(mut self, criterion: SplitCriterion) -> Self {
+        self.criterion = criterion;
+        self
+    }
+    pub fn with_bootstrap(mut self, bootstrap: bool) -> Self {
+        self.bootstrap = bootstrap;
+        self
+    }
+    pub fn with_max_samples(mut self, max_samples: Option<f64>) -> Self {
+        self.max_samples = max_samples;
+        self
+    }
+    pub fn with_oob_score(mut self, oob_score: bool) -> Self {
+        self.oob_score = oob_score;
+        self
+    }
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
@@ -93,6 +115,8 @@ struct ForestTree<F: Float> {
 pub struct FittedRandomForestRegressor<F: Float> {
     trees: Vec<ForestTree<F>>,
     n_features: usize,
+    /// OOB R² score (only set when oob_score=true).
+    oob_score_value: Option<f64>,
 }
 
 impl<F: Float> Fit<F> for RandomForestRegressor {
@@ -128,43 +152,74 @@ impl<F: Float> Fit<F> for RandomForestRegressor {
 
         let mut rng = StdRng::seed_from_u64(self.seed);
 
+        let draw_size = if let Some(frac) = self.max_samples {
+            if frac <= 0.0 || frac > 1.0 {
+                return Err(RustMlError::InvalidParameter(
+                    "max_samples must be in (0, 1]".into(),
+                ));
+            }
+            (n_samples as f64 * frac).ceil() as usize
+        } else {
+            n_samples
+        };
+
         let tree_params = DecisionTreeRegressor {
             max_depth: self.max_depth,
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
+            max_features: None,
+            sample_weight: None,
         };
 
-        // Pre-generate bootstrap and feature indices for determinism
+        // Pre-generate row and feature indices for determinism
         let sample_plans: Vec<(Vec<usize>, Vec<usize>)> = (0..self.n_estimators)
             .map(|_| {
-                let bootstrap_indices: Vec<usize> = (0..n_samples)
-                    .map(|_| rng.gen_range(0..n_samples))
-                    .collect();
+                let row_indices: Vec<usize> = if self.bootstrap {
+                    (0..draw_size)
+                        .map(|_| rng.gen_range(0..n_samples))
+                        .collect()
+                } else {
+                    (0..n_samples).collect()
+                };
                 let feature_indices = select_features(n_features, self.max_features, &mut rng);
-                (bootstrap_indices, feature_indices)
+                (row_indices, feature_indices)
             })
             .collect();
+
+        let all_row_indices: Vec<Vec<usize>> = if self.oob_score {
+            sample_plans.iter().map(|(ri, _)| ri.clone()).collect()
+        } else {
+            Vec::new()
+        };
 
         // Train trees in parallel
         let trees: Result<Vec<ForestTree<F>>> = sample_plans
             .into_par_iter()
-            .map(|(bootstrap_indices, feature_indices)| {
-                let x_bootstrap = build_sub_matrix(x, &bootstrap_indices, &feature_indices);
-                let y_bootstrap = Array1::from_vec(
-                    bootstrap_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
+            .map(|(row_indices, feature_indices)| {
+                let x_sub = build_sub_matrix(x, &row_indices, &feature_indices);
+                let y_sub = Array1::from_vec(
+                    row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
                 );
                 let fitted_tree: FittedDecisionTreeRegressor<F> =
-                    tree_params.fit(&x_bootstrap, &y_bootstrap)?;
+                    tree_params.fit(&x_sub, &y_sub)?;
                 Ok(ForestTree {
                     tree: fitted_tree,
                     feature_indices,
                 })
             })
             .collect();
+        let trees = trees?;
+
+        let oob_score_value = if self.oob_score && self.bootstrap {
+            compute_oob_score_regression(&trees, x, y, n_samples, &all_row_indices)
+        } else {
+            None
+        };
 
         Ok(FittedRandomForestRegressor {
-            trees: trees?,
+            trees,
             n_features,
+            oob_score_value,
         })
     }
 }
@@ -236,6 +291,95 @@ impl<F: Float> FittedRandomForestRegressor<F> {
     pub fn n_estimators(&self) -> usize {
         self.trees.len()
     }
+
+    /// OOB R² score (only available when `oob_score=true` and `bootstrap=true`).
+    pub fn oob_score(&self) -> Option<f64> {
+        self.oob_score_value
+    }
+
+    /// Compute R² score on the given data.
+    pub fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<f64> {
+        let preds = self.predict(x)?;
+        let n = y.len();
+        let y_mean = y.iter().copied().fold(F::zero(), |a, b| a + b) / F::from_usize(n).unwrap();
+        let ss_res: f64 = preds
+            .iter()
+            .zip(y.iter())
+            .map(|(&p, &t)| (p - t).to_f64().unwrap().powi(2))
+            .sum();
+        let ss_tot: f64 = y
+            .iter()
+            .map(|&t| (t - y_mean).to_f64().unwrap().powi(2))
+            .sum();
+        Ok(if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 })
+    }
+}
+
+/// Compute OOB R² score for regression.
+fn compute_oob_score_regression<F: Float>(
+    trees: &[ForestTree<F>],
+    x: &Array2<F>,
+    y: &Array1<F>,
+    n_samples: usize,
+    bootstrap_indices: &[Vec<usize>],
+) -> Option<f64> {
+    use std::collections::HashSet;
+
+    let mut oob_preds = vec![0.0f64; n_samples];
+    let mut oob_counts = vec![0usize; n_samples];
+
+    for (t_idx, forest_tree) in trees.iter().enumerate() {
+        let in_bag: HashSet<usize> = bootstrap_indices[t_idx].iter().copied().collect();
+        for i in 0..n_samples {
+            if in_bag.contains(&i) {
+                continue;
+            }
+            let sub_x = build_sub_matrix_cols_single(x, i, &forest_tree.feature_indices);
+            if let Ok(pred) = forest_tree.tree.predict(&sub_x) {
+                oob_preds[i] += pred[0].to_f64().unwrap();
+                oob_counts[i] += 1;
+            }
+        }
+    }
+
+    let mut ss_res = 0.0;
+    let mut ss_tot = 0.0;
+    let mut y_sum = 0.0;
+    let mut n_eval = 0usize;
+
+    for i in 0..n_samples {
+        if oob_counts[i] > 0 {
+            oob_preds[i] /= oob_counts[i] as f64;
+            y_sum += y[i].to_f64().unwrap();
+            n_eval += 1;
+        }
+    }
+
+    if n_eval == 0 {
+        return None;
+    }
+
+    let y_mean = y_sum / n_eval as f64;
+    for i in 0..n_samples {
+        if oob_counts[i] > 0 {
+            let yi = y[i].to_f64().unwrap();
+            ss_res += (yi - oob_preds[i]).powi(2);
+            ss_tot += (yi - y_mean).powi(2);
+        }
+    }
+
+    Some(if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 })
+}
+
+/// Build a single-row sub-matrix selecting specific columns for one sample.
+fn build_sub_matrix_cols_single<F: Float>(
+    x: &Array2<F>,
+    row: usize,
+    col_indices: &[usize],
+) -> Array2<F> {
+    let n_cols = col_indices.len();
+    let data: Vec<F> = col_indices.iter().map(|&ci| x[[row, ci]]).collect();
+    Array2::from_shape_vec((1, n_cols), data).expect("shape matches data length")
 }
 
 /// Build a sub-matrix selecting all rows but only specific columns from `x`.

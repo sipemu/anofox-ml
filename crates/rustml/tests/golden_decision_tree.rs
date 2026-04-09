@@ -38,6 +38,9 @@ fn test_golden_decision_tree_classifier() {
             min_samples_split,
             min_samples_leaf,
             criterion,
+            max_features: None,
+            sample_weight: None,
+            class_weight: None,
         };
 
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();
@@ -80,6 +83,8 @@ fn test_golden_decision_tree_regressor() {
             max_depth,
             min_samples_split,
             min_samples_leaf,
+            max_features: None,
+            sample_weight: None,
         };
 
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();

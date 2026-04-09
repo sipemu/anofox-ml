@@ -150,6 +150,8 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
             max_depth: self.max_depth,
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
+            max_features: None,
+            sample_weight: None,
         };
 
         let mut rng = StdRng::seed_from_u64(self.seed);
@@ -222,6 +224,32 @@ impl<F: Float> FittedGradientBoostingRegressor<F> {
     /// The initial prediction (mean of training targets).
     pub fn initial_prediction(&self) -> F {
         self.initial_prediction
+    }
+
+    /// Feature importances averaged across all trees, normalized to sum to 1.
+    pub fn feature_importances(&self) -> Array1<F> {
+        let mut importances = vec![F::zero(); self.n_features];
+        let n_trees = self.trees.len();
+
+        if n_trees == 0 {
+            return Array1::zeros(self.n_features);
+        }
+
+        let n_trees_f = F::from_usize(n_trees).unwrap();
+        for tree in &self.trees {
+            let tree_imp = tree.feature_importances();
+            for (j, &imp) in tree_imp.iter().enumerate() {
+                importances[j] += imp / n_trees_f;
+            }
+        }
+
+        // Normalize to sum to 1
+        let sum: F = importances.iter().copied().fold(F::zero(), |a, b| a + b);
+        if sum > F::zero() {
+            Array1::from_vec(importances.into_iter().map(|v| v / sum).collect())
+        } else {
+            Array1::zeros(self.n_features)
+        }
     }
 }
 

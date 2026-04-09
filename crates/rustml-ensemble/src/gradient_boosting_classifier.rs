@@ -217,6 +217,8 @@ impl GradientBoostingClassifier {
             max_depth: self.max_depth,
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
+            max_features: None,
+            sample_weight: None,
         };
 
         let mut rng = StdRng::seed_from_u64(self.seed);
@@ -324,6 +326,99 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
     /// The unique classes discovered during training.
     pub fn classes(&self) -> &[F] {
         &self.classes
+    }
+
+    /// Predict class probabilities for each sample.
+    ///
+    /// For binary classification, returns shape `(n_samples, 2)` with columns
+    /// `[P(class_0), P(class_1)]`. For multi-class, returns `(n_samples, n_classes)`
+    /// using softmax over the OVR log-odds.
+    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+
+        let n_samples = x.nrows();
+        let n_classes = self.classes.len();
+
+        if n_classes == 2 {
+            // Binary: sigmoid of log-odds
+            let log_odds = self.predict_log_odds(x, 0)?;
+            let mut proba = Array2::<F>::zeros((n_samples, 2));
+            for i in 0..n_samples {
+                let p1 = sigmoid(log_odds[i]);
+                proba[[i, 0]] = F::one() - p1;
+                proba[[i, 1]] = p1;
+            }
+            Ok(proba)
+        } else {
+            // Multi-class: softmax over OVR log-odds
+            let mut all_log_odds = Vec::with_capacity(n_classes);
+            for k in 0..n_classes {
+                all_log_odds.push(self.predict_log_odds(x, k)?);
+            }
+
+            let mut proba = Array2::<F>::zeros((n_samples, n_classes));
+            for i in 0..n_samples {
+                // Find max for numerical stability
+                let mut max_lo = all_log_odds[0][i];
+                for k in 1..n_classes {
+                    if all_log_odds[k][i] > max_lo {
+                        max_lo = all_log_odds[k][i];
+                    }
+                }
+                // Compute exp(lo - max) and sum
+                let mut sum = F::zero();
+                for k in 0..n_classes {
+                    let e = (all_log_odds[k][i] - max_lo).exp();
+                    proba[[i, k]] = e;
+                    sum += e;
+                }
+                // Normalize
+                for k in 0..n_classes {
+                    proba[[i, k]] /= sum;
+                }
+            }
+            Ok(proba)
+        }
+    }
+
+    /// Feature importances averaged across all tree sets, normalized to sum to 1.
+    ///
+    /// Each tree's importances are accumulated and weighted by the number of
+    /// boosting rounds.
+    pub fn feature_importances(&self) -> Array1<F> {
+        let mut importances = vec![F::zero(); self.n_features];
+        let mut total_trees = 0usize;
+
+        for tree_set in &self.tree_sets {
+            for tree in tree_set {
+                let tree_imp = tree.feature_importances();
+                for (j, &imp) in tree_imp.iter().enumerate() {
+                    importances[j] += imp;
+                }
+                total_trees += 1;
+            }
+        }
+
+        if total_trees > 0 {
+            let total_f = F::from_usize(total_trees).unwrap();
+            for imp in &mut importances {
+                *imp /= total_f;
+            }
+        }
+
+        // Normalize to sum to 1
+        let sum: F = importances.iter().copied().fold(F::zero(), |a, b| a + b);
+        if sum > F::zero() {
+            Array1::from_vec(importances.into_iter().map(|v| v / sum).collect())
+        } else {
+            Array1::zeros(self.n_features)
+        }
     }
 
     /// Compute raw log-odds for the k-th tree set.
