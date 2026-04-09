@@ -1,0 +1,23 @@
+[package]
+name = "rustml-regression"
+version = "0.1.0"
+edition = "2021"
+description = "Classical regression models (OLS, Ridge, Elastic Net, GLM) for the RustML library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sipemu/rustml"
+documentation = "https://docs.rs/rustml-regression"
+readme = "../../README.md"
+keywords = ["machine-learning", "regression", "ols", "ridge", "glm"]
+categories = ["science", "algorithms"]
+rust-version = "1.70"
+
+[dependencies]
+rustml-core = { path = "../rustml-core" }
+rustml-metrics = { path = "../rustml-metrics" }
+anofox-regression = "0.5"
+faer = "0.23"
+ndarray = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+proptest = { workspace = true }

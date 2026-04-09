@@ -12,6 +12,8 @@ members = [
     "crates/rustml-io",
     "crates/rustml-svm",
     "crates/rustml-neural-networks",
+    "crates/rustml-regression",
+    "crates/rustml-linear",
     "crates/rustml-python",
     "crates/rustml",
 ]
