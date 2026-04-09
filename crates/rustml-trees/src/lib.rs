@@ -31,4 +31,4 @@ pub mod split;
 pub use classifier::{DecisionTreeClassifier, FittedDecisionTreeClassifier};
 pub use node::TreeNode;
 pub use regressor::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
-pub use split::SplitCriterion;
+pub use split::{ClassWeight, MaxFeatures, SplitCriterion, SplitStrategy};

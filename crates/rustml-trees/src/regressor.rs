@@ -2,7 +2,11 @@ use ndarray::{Array1, Array2};
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 
 use crate::node::TreeNode;
-use crate::split::{compute_impurity, find_best_split, leaf_value, SplitCriterion};
+use crate::split::{
+    compute_impurity, compute_weighted_impurity, find_best_split_weighted,
+    find_best_split_with_features, leaf_value, select_feature_subset, weighted_leaf_value,
+    MaxFeatures, SplitCriterion,
+};
 
 /// Decision tree regressor parameters (unfitted state).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -10,6 +14,11 @@ pub struct DecisionTreeRegressor {
     pub max_depth: Option<usize>,
     pub min_samples_split: usize,
     pub min_samples_leaf: usize,
+    /// Maximum number of features to consider at each split.
+    pub max_features: Option<MaxFeatures>,
+    /// Per-sample weights.
+    #[serde(skip)]
+    pub sample_weight: Option<Array1<f64>>,
 }
 
 impl DecisionTreeRegressor {
@@ -19,6 +28,8 @@ impl DecisionTreeRegressor {
             max_depth: None,
             min_samples_split: 2,
             min_samples_leaf: 1,
+            max_features: None,
+            sample_weight: None,
         }
     }
 
@@ -37,6 +48,18 @@ impl DecisionTreeRegressor {
     /// Set the minimum number of samples required in a leaf node.
     pub fn with_min_samples_leaf(mut self, min_samples_leaf: usize) -> Self {
         self.min_samples_leaf = min_samples_leaf;
+        self
+    }
+
+    /// Set the maximum number of features to consider at each split.
+    pub fn with_max_features(mut self, max_features: Option<MaxFeatures>) -> Self {
+        self.max_features = max_features;
+        self
+    }
+
+    /// Set per-sample weights.
+    pub fn with_sample_weight(mut self, sample_weight: Option<Array1<f64>>) -> Self {
+        self.sample_weight = sample_weight;
         self
     }
 }
@@ -71,6 +94,11 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
         }
 
         let indices: Vec<usize> = (0..x.nrows()).collect();
+        let n_features = x.ncols();
+        let max_features_k = self.max_features.map(|mf| mf.resolve(n_features));
+        let effective_weights: Option<Array1<F>> = self.sample_weight.as_ref().map(|sw| {
+            sw.mapv(|v| F::from_f64(v).unwrap())
+        });
         let tree = build_tree(
             x,
             y,
@@ -79,11 +107,15 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
             self.max_depth,
             self.min_samples_split,
             self.min_samples_leaf,
+            max_features_k,
+            n_features,
+            0,
+            effective_weights.as_ref(),
         );
 
         Ok(FittedDecisionTreeRegressor {
             tree,
-            n_features: x.ncols(),
+            n_features,
         })
     }
 }
@@ -126,6 +158,7 @@ impl<F: Float> FittedDecisionTreeRegressor<F> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_tree<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
@@ -134,16 +167,26 @@ fn build_tree<F: Float>(
     max_depth: Option<usize>,
     min_samples_split: usize,
     min_samples_leaf: usize,
+    max_features_k: Option<usize>,
+    n_features: usize,
+    node_id: u64,
+    weights: Option<&Array1<F>>,
 ) -> TreeNode<F> {
     let n_samples = indices.len();
-    let impurity = compute_impurity(y, indices, SplitCriterion::Mse);
+    let impurity = match weights {
+        Some(w) => compute_weighted_impurity(y, indices, w, SplitCriterion::Mse),
+        None => compute_impurity(y, indices, SplitCriterion::Mse),
+    };
 
     let should_stop = n_samples < min_samples_split
         || max_depth.is_some_and(|d| depth >= d)
         || impurity < F::from_f64(1e-15).unwrap();
 
     if should_stop {
-        let value = leaf_value(y, indices, SplitCriterion::Mse);
+        let value = match weights {
+            Some(w) => weighted_leaf_value(y, indices, w, SplitCriterion::Mse),
+            None => leaf_value(y, indices, SplitCriterion::Mse),
+        };
         return TreeNode::Leaf {
             value,
             n_samples,
@@ -151,7 +194,39 @@ fn build_tree<F: Float>(
         };
     }
 
-    match find_best_split(x, y, indices, SplitCriterion::Mse, min_samples_leaf) {
+    let feature_subset;
+    let feature_indices: &[usize] = if let Some(k) = max_features_k {
+        let seed = node_id
+            .wrapping_mul(0x517CC1B727220A95)
+            .wrapping_add(depth as u64);
+        feature_subset = select_feature_subset(n_features, k, seed);
+        &feature_subset
+    } else {
+        feature_subset = (0..n_features).collect();
+        &feature_subset
+    };
+
+    let split_result = match weights {
+        Some(w) => find_best_split_weighted(
+            x,
+            y,
+            indices,
+            w,
+            SplitCriterion::Mse,
+            min_samples_leaf,
+            feature_indices,
+        ),
+        None => find_best_split_with_features(
+            x,
+            y,
+            indices,
+            SplitCriterion::Mse,
+            min_samples_leaf,
+            feature_indices,
+        ),
+    };
+
+    match split_result {
         Some(split) => {
             let left = build_tree(
                 x,
@@ -161,6 +236,10 @@ fn build_tree<F: Float>(
                 max_depth,
                 min_samples_split,
                 min_samples_leaf,
+                max_features_k,
+                n_features,
+                node_id.wrapping_mul(2).wrapping_add(1),
+                weights,
             );
             let right = build_tree(
                 x,
@@ -170,6 +249,10 @@ fn build_tree<F: Float>(
                 max_depth,
                 min_samples_split,
                 min_samples_leaf,
+                max_features_k,
+                n_features,
+                node_id.wrapping_mul(2).wrapping_add(2),
+                weights,
             );
 
             TreeNode::Split {
@@ -182,7 +265,10 @@ fn build_tree<F: Float>(
             }
         }
         None => {
-            let value = leaf_value(y, indices, SplitCriterion::Mse);
+            let value = match weights {
+                Some(w) => weighted_leaf_value(y, indices, w, SplitCriterion::Mse),
+                None => leaf_value(y, indices, SplitCriterion::Mse),
+            };
             TreeNode::Leaf {
                 value,
                 n_samples,
