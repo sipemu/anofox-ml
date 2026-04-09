@@ -29,14 +29,44 @@
 //! assert!(col0_mean.abs() < 1e-10);
 //! ```
 
+pub mod binarizer;
+pub mod kbins_discretizer;
+pub mod label_encoder;
+pub mod max_abs_scaler;
 pub mod minmax_scaler;
 pub mod mutual_information;
+pub mod normalizer;
+pub mod one_hot_encoder;
+pub mod ordinal_encoder;
 pub mod pca;
+pub mod polynomial_features;
+pub mod power_transformer;
+pub mod quantile_transformer;
+pub mod robust_scaler;
+pub mod select_from_model;
+pub mod select_k_best;
+pub mod simple_imputer;
 pub mod standard_scaler;
 pub mod variance_threshold;
 
+pub use binarizer::{Binarizer, FittedBinarizer};
+pub use kbins_discretizer::{
+    BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
+};
+pub use label_encoder::{FittedLabelEncoder, LabelEncoder};
+pub use max_abs_scaler::{FittedMaxAbsScaler, MaxAbsScaler};
 pub use minmax_scaler::{FittedMinMaxScaler, MinMaxScaler};
 pub use mutual_information::{FittedMutualInformationSelector, MutualInformationSelector};
+pub use normalizer::{FittedNormalizer, NormType, Normalizer};
+pub use one_hot_encoder::{FittedOneHotEncoder, OneHotEncoder};
+pub use ordinal_encoder::{FittedOrdinalEncoder, OrdinalEncoder};
 pub use pca::{FittedPca, Pca};
+pub use polynomial_features::{FittedPolynomialFeatures, PolynomialFeatures};
+pub use power_transformer::{FittedPowerTransformer, PowerTransformer};
+pub use quantile_transformer::{FittedQuantileTransformer, OutputDistribution, QuantileTransformer};
+pub use robust_scaler::{FittedRobustScaler, RobustScaler};
+pub use select_from_model::{FittedSelectFromModel, SelectFromModel};
+pub use select_k_best::{FittedSelectKBest, SelectKBest};
+pub use simple_imputer::{FittedSimpleImputer, ImputeStrategy, SimpleImputer};
 pub use standard_scaler::{FittedStandardScaler, StandardScaler};
 pub use variance_threshold::{FittedVarianceThreshold, VarianceThreshold};
