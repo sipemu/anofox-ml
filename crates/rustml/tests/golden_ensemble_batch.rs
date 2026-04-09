@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{assert_close, json_to_array1, json_to_array2, load_golden_data};
+use common::{json_to_array1, json_to_array2, load_golden_data};
 use ndarray::Array1;
 use rustml::prelude::*;
 use rustml_trees::{DecisionTreeClassifier, DecisionTreeRegressor};
@@ -118,12 +118,11 @@ fn test_golden_adaboost_regressor_r2() {
     let preds = fitted.predict(&x).unwrap();
     let our_r2 = r2(&preds, &y);
 
-    // Our AdaBoostRegressor uses shallow stumps by default while sklearn uses
-    // deeper base trees — on this tiny dataset sklearn overfits to near-perfect
-    // R² and we land around 0.7. Both are reasonable regressions of the signal.
+    // Now using the same default base estimator as sklearn (max_depth=3),
+    // we should reach near-perfect R² on this tiny linear dataset.
     assert!(
-        our_r2 > 0.5,
-        "AdaBoostRegressor R² {} should be > 0.5 (sklearn: {:.4})",
+        our_r2 >= sklearn_r2 - 0.05,
+        "AdaBoostRegressor R² {:.4} vs sklearn {:.4}",
         our_r2,
         sklearn_r2
     );

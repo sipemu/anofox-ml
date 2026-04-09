@@ -68,12 +68,12 @@ fn test_golden_nu_svr_r2() {
     let preds = fitted.predict(&x).unwrap();
     let our_r2 = r2(&preds, &y);
 
-    // Our NuSVR is documented as a heuristic approximation (nu -> epsilon conversion)
-    // rather than the true nu-SVR formulation sklearn/libsvm use. We only check
-    // that it captures meaningful signal.
+    // NuSVR is implemented via epsilon bisection on our SVR FISTA solver.
+    // On this linearly separable data, both sklearn and rustml should attain
+    // R² essentially equal to 1.0.
     assert!(
-        our_r2 > 0.2,
-        "NuSVR R² {} should be > 0.2 (sklearn: {:.4})",
+        our_r2 >= sklearn_r2 - 0.05,
+        "NuSVR R² {:.4} vs sklearn {:.4}",
         our_r2,
         sklearn_r2
     );

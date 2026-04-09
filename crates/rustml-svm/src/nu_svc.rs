@@ -159,27 +159,87 @@ impl<F: Float> Predict<F> for FittedNuSvc<F> {
     }
 }
 
-/// Convert nu to an equivalent C for binary classification.
-///
-/// For a binary problem with `n_pos` positive and `n_neg` negative samples,
-/// nu is an upper bound on the fraction of margin errors and a lower bound
-/// on the fraction of support vectors. The equivalent C is computed as:
-///   C = 1 / (nu * n_samples_per_minority_class)
-/// clamped to reasonable bounds.
-fn nu_to_c(nu: f64, n_pos: usize, n_neg: usize) -> f64 {
-    let n_min = n_pos.min(n_neg) as f64;
-    // C = 1 / (nu * n_minority) ensures the dual feasibility constraint
-    // sum(alpha) >= nu is satisfiable within the box constraints.
-    let c = 1.0 / (nu * n_min);
-    c.max(1e-6) // floor at a tiny positive value
-}
-
 /// Extract unique sorted class labels from y.
 fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
     let mut labels: Vec<F> = y.to_vec();
     labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
     labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
     labels
+}
+
+/// Bisect C until the C-SVC solution has a fraction of support vectors
+/// approximately equal to nu.
+///
+/// For nu-SVC, `nu` is both an upper bound on the fraction of margin errors
+/// and a lower bound on the fraction of support vectors. At the optimum these
+/// coincide. Since our C-SVC solver uses SMO and returns an SV count via
+/// `FittedSvc::n_support()`, we bisect C until that ratio matches nu. Large
+/// C produces tight margins (few SVs), small C produces loose margins
+/// (many SVs), so the count is monotonic in C and bisection converges.
+fn bisect_c_for_nu<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    nu: f64,
+    kernel: &SvmKernel,
+    max_iter: usize,
+    tol: f64,
+    seed: u64,
+) -> Result<svc::FittedSvc<F>> {
+    let n = x.nrows();
+    let target_svs = (nu * n as f64).round() as usize;
+    let target_svs = target_svs.clamp(1, n);
+
+    let mut c_lo = 1e-4f64;
+    let mut c_hi = 1e4f64;
+
+    let mut best_fitted: Option<svc::FittedSvc<F>> = None;
+    let mut best_diff = usize::MAX;
+
+    for _iter in 0..40 {
+        // Bisect in log-space since C spans several orders of magnitude.
+        let c = (c_lo.ln() * 0.5 + c_hi.ln() * 0.5).exp();
+
+        let svc_model = crate::Svc::new()
+            .with_c(c)
+            .with_kernel(kernel.clone())
+            .with_max_iter(max_iter)
+            .with_tol(tol)
+            .with_seed(seed);
+
+        let fitted: svc::FittedSvc<F> = svc_model.fit(x, y)?;
+        let n_sv = fitted.n_support();
+
+        let diff = if n_sv > target_svs {
+            n_sv - target_svs
+        } else {
+            target_svs - n_sv
+        };
+
+        if diff < best_diff {
+            best_diff = diff;
+            best_fitted = Some(fitted);
+        }
+
+        if diff == 0 {
+            break;
+        }
+
+        // More SVs than target => need larger C (tighter margin).
+        // Fewer SVs => need smaller C (looser margin).
+        if n_sv > target_svs {
+            c_lo = c;
+        } else {
+            c_hi = c;
+        }
+
+        if (c_hi.ln() - c_lo.ln()) < 1e-10 {
+            break;
+        }
+    }
+
+    best_fitted.ok_or_else(|| {
+        RustMlError::InvalidParameter("nu-SVC bisection failed to produce a fit".into())
+    })
 }
 
 impl<F: Float> Fit<F> for NuSvc {
@@ -208,71 +268,35 @@ impl<F: Float> Fit<F> for NuSvc {
             ));
         }
 
-        // Check feasibility: for each binary sub-problem, nu must be feasible.
-        // nu <= 2 * min(n_pos, n_neg) / n_total for binary case.
+        // Feasibility check: nu must be achievable for each binary sub-problem.
+        // For a two-class split, nu <= 2 * min(n_pos, n_neg) / n_total.
         let n_total = y.len();
         let eps = F::from_f64(1e-12).unwrap();
-
-        if class_labels.len() == 2 {
-            let n_pos = y.iter().filter(|&&yi| (yi - class_labels[1]).abs() < eps).count();
+        for label in &class_labels {
+            let n_pos = y.iter().filter(|&&yi| (yi - *label).abs() < eps).count();
             let n_neg = n_total - n_pos;
             let max_nu = 2.0 * (n_pos.min(n_neg) as f64) / (n_total as f64);
-            if self.nu > max_nu {
+            if self.nu > max_nu + 1e-12 {
                 return Err(RustMlError::InvalidParameter(format!(
-                    "nu={} is infeasible for the given class distribution \
-                     (max feasible nu = {:.4})",
-                    self.nu, max_nu
+                    "nu={} is infeasible (class {:?} has max feasible nu = {:.4})",
+                    self.nu, *label, max_nu
                 )));
             }
-
-            let c = nu_to_c(self.nu, n_pos, n_neg);
-            let svc = crate::Svc::new()
-                .with_c(c)
-                .with_kernel(self.kernel.clone())
-                .with_max_iter(self.max_iter)
-                .with_tol(self.tol)
-                .with_seed(self.seed);
-
-            let inner: svc::FittedSvc<F> = svc.fit(x, y)?;
-            Ok(FittedNuSvc { inner })
-        } else {
-            // Multi-class OvR: for each class, create a binary sub-problem
-            // and convert nu to C for that specific sub-problem.
-            // We delegate to Svc for each sub-problem with the per-class C.
-            // Since class sizes may differ, compute C for each OvR split.
-
-            // For OvR, find the per-class C from nu and delegate.
-            // Use the minimum per-class C across all splits for simplicity,
-            // or more accurately, use a single C that works for all splits.
-            let mut min_c = f64::INFINITY;
-            for label in &class_labels {
-                let n_pos = y.iter().filter(|&&yi| (yi - *label).abs() < eps).count();
-                let n_neg = n_total - n_pos;
-                let max_nu = 2.0 * (n_pos.min(n_neg) as f64) / (n_total as f64);
-                if self.nu > max_nu {
-                    return Err(RustMlError::InvalidParameter(format!(
-                        "nu={} is infeasible for class {} (max feasible nu = {:.4})",
-                        self.nu,
-                        label,
-                        max_nu
-                    )));
-                }
-                let c = nu_to_c(self.nu, n_pos, n_neg);
-                if c < min_c {
-                    min_c = c;
-                }
-            }
-
-            let svc = crate::Svc::new()
-                .with_c(min_c)
-                .with_kernel(self.kernel.clone())
-                .with_max_iter(self.max_iter)
-                .with_tol(self.tol)
-                .with_seed(self.seed);
-
-            let inner: svc::FittedSvc<F> = svc.fit(x, y)?;
-            Ok(FittedNuSvc { inner })
         }
+
+        // Bisect C so the resulting C-SVC has a fraction of support vectors
+        // approximately equal to nu. This is the principled equivalence
+        // between nu-SVC and C-SVC that libsvm uses internally.
+        let inner = bisect_c_for_nu(
+            x,
+            y,
+            self.nu,
+            &self.kernel,
+            self.max_iter,
+            self.tol,
+            self.seed,
+        )?;
+        Ok(FittedNuSvc { inner })
     }
 }
 

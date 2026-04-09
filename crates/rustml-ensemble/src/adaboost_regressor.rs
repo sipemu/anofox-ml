@@ -44,12 +44,14 @@ pub struct AdaBoostRegressor {
 }
 
 impl AdaBoostRegressor {
-    /// Create a new `AdaBoostRegressor` with default parameters.
+    /// Create a new `AdaBoostRegressor` with default parameters matching
+    /// scikit-learn: `n_estimators=50`, `learning_rate=1.0`,
+    /// `max_depth=3`, `loss=Linear`.
     pub fn new() -> Self {
         Self {
             n_estimators: 50,
             learning_rate: 1.0,
-            max_depth: Some(1),
+            max_depth: Some(3),
             seed: 0,
             loss: AdaBoostLoss::Linear,
         }

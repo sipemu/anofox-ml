@@ -1,0 +1,176 @@
+//! Tight numerical parity tests against sklearn 1.8.0 for models where we
+//! previously diverged: NuSVR, NuSVC, and AdaBoostRegressor.
+
+mod common;
+
+use common::{json_to_array1, json_to_array2, load_golden_data};
+use ndarray::Array1;
+use rustml::prelude::*;
+
+fn r2(pred: &Array1<f64>, target: &Array1<f64>) -> f64 {
+    let mean = target.iter().sum::<f64>() / target.len() as f64;
+    let ss_res: f64 = pred
+        .iter()
+        .zip(target.iter())
+        .map(|(&p, &t)| (p - t).powi(2))
+        .sum();
+    let ss_tot: f64 = target.iter().map(|&t| (t - mean).powi(2)).sum();
+    1.0 - ss_res / ss_tot
+}
+
+fn accuracy(pred: &Array1<f64>, target: &Array1<f64>) -> f64 {
+    let correct: usize = pred
+        .iter()
+        .zip(target.iter())
+        .filter(|(&p, &t)| (p - t).abs() < 1e-10)
+        .count();
+    correct as f64 / pred.len() as f64
+}
+
+#[test]
+fn test_parity_nu_svr_linear() {
+    let cases = load_golden_data("accuracy_parity.json");
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "nu_svr_exact_linear")
+        .unwrap();
+
+    let x = json_to_array2(&case["X"]);
+    let y = json_to_array1(&case["y"]);
+    let sk_preds = json_to_array1(&case["predictions"]);
+    let sk_r2 = case["r2"].as_f64().unwrap();
+
+    let fitted: rustml::svm::FittedNuSvr<f64> = NuSvr::new()
+        .with_nu(0.5)
+        .with_c(10.0)
+        .with_kernel(SvmKernel::Linear)
+        .with_max_iter(5000)
+        .fit(&x, &y)
+        .unwrap();
+
+    let our_preds = fitted.predict(&x).unwrap();
+    let our_r2 = r2(&our_preds, &y);
+
+    // R² should be within 0.001 of sklearn.
+    assert!(
+        (our_r2 - sk_r2).abs() < 0.001,
+        "NuSVR R² parity: ours={:.6}, sklearn={:.6}",
+        our_r2,
+        sk_r2
+    );
+
+    // Per-point predictions should be within 0.5 of sklearn (our FISTA solver
+    // reaches a slightly different optimum than libsvm's SMO but the final
+    // predictions are close).
+    for (i, (&o, &s)) in our_preds.iter().zip(sk_preds.iter()).enumerate() {
+        assert!(
+            (o - s).abs() < 0.5,
+            "NuSVR pred[{}]: ours={:.4}, sklearn={:.4}",
+            i,
+            o,
+            s
+        );
+    }
+}
+
+#[test]
+fn test_parity_nu_svr_rbf() {
+    let cases = load_golden_data("accuracy_parity.json");
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "nu_svr_exact_rbf")
+        .unwrap();
+
+    let x = json_to_array2(&case["X"]);
+    let y = json_to_array1(&case["y"]);
+    let sk_r2 = case["r2"].as_f64().unwrap();
+
+    let fitted: rustml::svm::FittedNuSvr<f64> = NuSvr::new()
+        .with_nu(0.5)
+        .with_c(10.0)
+        .with_kernel(SvmKernel::Rbf { gamma: 0.1 })
+        .with_max_iter(5000)
+        .fit(&x, &y)
+        .unwrap();
+
+    let our_preds = fitted.predict(&x).unwrap();
+    let our_r2 = r2(&our_preds, &y);
+
+    assert!(
+        our_r2 >= sk_r2 - 0.1,
+        "NuSVR RBF R² parity: ours={:.6}, sklearn={:.6}",
+        our_r2,
+        sk_r2
+    );
+}
+
+#[test]
+fn test_parity_nu_svc_linear() {
+    let cases = load_golden_data("accuracy_parity.json");
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "nu_svc_exact_linear")
+        .unwrap();
+
+    let x = json_to_array2(&case["X"]);
+    let y = json_to_array1(&case["y"]);
+    let sk_preds = json_to_array1(&case["predictions"]);
+    let sk_acc = case["accuracy"].as_f64().unwrap();
+
+    let fitted: rustml::svm::FittedNuSvc<f64> = NuSvc::new()
+        .with_nu(0.5)
+        .with_kernel(SvmKernel::Linear)
+        .with_max_iter(5000)
+        .fit(&x, &y)
+        .unwrap();
+
+    let our_preds = fitted.predict(&x).unwrap();
+    let our_acc = accuracy(&our_preds, &y);
+
+    // Both should reach 100% accuracy on linearly separable data.
+    assert!(
+        (our_acc - sk_acc).abs() < 1e-10,
+        "NuSVC accuracy parity: ours={}, sklearn={}",
+        our_acc,
+        sk_acc
+    );
+
+    // Class predictions should match element-wise.
+    for (i, (&o, &s)) in our_preds.iter().zip(sk_preds.iter()).enumerate() {
+        assert_eq!(
+            o as i64, s as i64,
+            "NuSVC pred[{}]: ours={}, sklearn={}",
+            i, o, s
+        );
+    }
+}
+
+#[test]
+fn test_parity_adaboost_regressor() {
+    let cases = load_golden_data("accuracy_parity.json");
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "adaboost_regressor_exact")
+        .unwrap();
+
+    let x = json_to_array2(&case["X"]);
+    let y = json_to_array1(&case["y"]);
+    let sk_r2 = case["r2"].as_f64().unwrap();
+
+    let fitted = AdaBoostRegressor::new()
+        .with_n_estimators(20)
+        .with_seed(42)
+        .fit(&x, &y)
+        .unwrap();
+
+    let our_preds = fitted.predict(&x).unwrap();
+    let our_r2 = r2(&our_preds, &y);
+
+    // With matching default base tree depth (3), R² should be within 0.05.
+    assert!(
+        our_r2 >= sk_r2 - 0.05,
+        "AdaBoostRegressor R² parity: ours={:.6}, sklearn={:.6}",
+        our_r2,
+        sk_r2
+    );
+}

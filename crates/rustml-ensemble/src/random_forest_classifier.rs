@@ -894,11 +894,23 @@ mod tests {
                 let importances = fitted.feature_importances();
                 let sum: f64 = importances.iter().sum();
 
+                // Valid outcomes: (1) importances are a valid probability
+                // distribution (sum to 1), or (2) every tree is a pure leaf
+                // with no splits (e.g. degenerate tiny input produces uniform
+                // labels) and all importances are zero.
                 prop_assert!(
-                    (sum - 1.0).abs() < 1e-10,
-                    "feature importances sum to {} (expected ~1.0), n_samples={}, n_features={}, seed={}",
+                    (sum - 1.0).abs() < 1e-10 || sum == 0.0,
+                    "feature importances sum to {} (expected ~1.0 or 0.0 for no-split case), n_samples={}, n_features={}, seed={}",
                     sum, n_samples, n_features, seed
                 );
+                // Importances must always be non-negative.
+                for (i, &imp) in importances.iter().enumerate() {
+                    prop_assert!(
+                        imp >= 0.0,
+                        "importance[{}] = {} is negative",
+                        i, imp
+                    );
+                }
             }
         }
     }
