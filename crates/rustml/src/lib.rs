@@ -44,7 +44,7 @@ pub mod trees {
     pub use rustml_trees::*;
 }
 
-/// Ensemble methods (Random Forest, Gradient Boosting).
+/// Ensemble methods (Random Forest, Gradient Boosting, AdaBoost, ExtraTrees).
 pub mod ensemble {
     pub use rustml_ensemble::*;
 }
@@ -69,6 +69,16 @@ pub mod neural_networks {
     pub use rustml_neural_networks::*;
 }
 
+/// Classical regression models (OLS, Ridge, Elastic Net, GLM).
+pub mod regression {
+    pub use rustml_regression::*;
+}
+
+/// SGD-based linear models (SGDClassifier, SGDRegressor).
+pub mod linear {
+    pub use rustml_linear::*;
+}
+
 /// Data I/O utilities (CSV reading).
 pub mod io {
     pub use rustml_io::*;
@@ -77,36 +87,62 @@ pub mod io {
 /// Convenient prelude importing the most commonly used items.
 pub mod prelude {
     pub use rustml_core::{
-        cross_val_score, cross_val_score_stratified, grid_search_cv, stratified_k_fold,
-        train_test_split, FeatureUnion, Fit, FitUnsupervised, FittedPipeline, Float,
-        GridSearchResult, InverseTransform, Pipeline, Predict, Transform,
+        cross_val_predict, cross_val_score, cross_val_score_stratified, cross_validate,
+        grid_search_cv, group_k_fold, k_fold, learning_curve, leave_one_out, leave_p_out,
+        randomized_search_cv, repeated_k_fold, repeated_stratified_k_fold, shuffle_split,
+        stratified_k_fold, stratified_shuffle_split, time_series_split, train_test_split,
+        validation_curve, ColumnSelector, ColumnTransformer, CrossValidateResult, FeatureUnion,
+        Fit, FitUnsupervised, FittedPipeline, Float, FunctionTransformer, GridSearchResult,
+        InverseTransform, Pipeline, Predict, Remainder, Transform,
     };
 
     pub use rustml_metrics::{
-        accuracy_score, confusion_matrix, f1_score, f1_score_avg, mae, mse, precision,
-        precision_score, r2_score, recall, recall_score, Average,
+        accuracy_score, adjusted_rand_score, average_precision_score, balanced_accuracy_score,
+        brier_score_loss, cohen_kappa_score, confusion_matrix, explained_variance_score,
+        f1_score, f1_score_avg, log_loss, mae, matthews_corrcoef, max_error,
+        mean_absolute_percentage_error, mean_squared_log_error, median_absolute_error, mse,
+        normalized_mutual_info_score, precision, precision_recall_curve, precision_score,
+        r2_score, recall, recall_score, roc_auc_score, roc_curve, silhouette_score, Average,
     };
 
     pub use rustml_preprocessing::{
-        MinMaxScaler, MutualInformationSelector, Pca, StandardScaler, VarianceThreshold,
+        BinStrategy, Binarizer, EncodeStrategy, ImputeStrategy, KBinsDiscretizer, LabelEncoder,
+        MaxAbsScaler, MinMaxScaler, MutualInformationSelector, NormType, Normalizer,
+        OneHotEncoder, OrdinalEncoder, OutputDistribution, Pca, PolynomialFeatures,
+        PowerTransformer, QuantileTransformer, RobustScaler, SelectFromModel, SelectKBest,
+        SimpleImputer, StandardScaler, VarianceThreshold,
     };
 
     pub use rustml_neighbors::{DistanceMetric, KnnClassifier, KnnRegressor, WeightFunction};
 
-    pub use rustml_trees::{DecisionTreeClassifier, DecisionTreeRegressor, SplitCriterion};
+    pub use rustml_trees::{
+        ClassWeight, DecisionTreeClassifier, DecisionTreeRegressor, MaxFeatures, SplitCriterion,
+    };
 
     pub use rustml_ensemble::{
-        GradientBoostingClassifier, GradientBoostingRegressor, RandomForestClassifier,
-        RandomForestRegressor,
+        AdaBoostClassifier, AdaBoostRegressor, BaggingClassifier, BaggingRegressor,
+        BoostingType, CalibratedClassifierCV, CalibrationMethod, ExtraTreesClassifier,
+        ExtraTreesRegressor, GradientBoostingClassifier, GradientBoostingRegressor,
+        HistGradientBoostingClassifier, HistGradientBoostingRegressor, LgbmClassWeight,
+        LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor, RandomForestClassifier,
+        RandomForestRegressor, StackingRegressor, VotingClassifier, VotingRegressor,
     };
 
     pub use rustml_cluster::{Dbscan, KMeans};
 
-    pub use rustml_naive_bayes::GaussianNB;
+    pub use rustml_naive_bayes::{BernoulliNB, GaussianNB, MultinomialNB};
 
-    pub use rustml_svm::{LinearSvc, Svc, SvmKernel};
+    pub use rustml_svm::{LinearSvc, LinearSvr, NuSvc, NuSvr, OneClassSvm, Svc, Svr, SvmKernel};
 
     pub use rustml_neural_networks::{MlpClassifier, MlpRegressor};
+
+    pub use rustml_regression::{
+        BinomialRegressor, ElasticNetCrossValidated, ElasticNetRegressor, HuberRegressor,
+        IsotonicRegressor, LassoCrossValidated, LassoRegressor, LogisticRegressor, OlsRegressor,
+        PoissonRegressor, QuantileRegressor, RidgeCrossValidated, RidgeRegressor, WlsRegressor,
+    };
+
+    pub use rustml_linear::{SgdClassifier, SgdRegressor};
 
     pub use rustml_core::persistence::{
         load_bincode, load_json, save_bincode, save_json,

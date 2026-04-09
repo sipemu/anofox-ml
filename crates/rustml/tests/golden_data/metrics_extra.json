@@ -1,0 +1,208 @@
+[
+  {
+    "name": "log_loss_binary",
+    "y_true": [
+      0,
+      0,
+      1,
+      1,
+      0,
+      1,
+      0,
+      1
+    ],
+    "y_prob": [
+      0.1,
+      0.3,
+      0.8,
+      0.9,
+      0.2,
+      0.7,
+      0.4,
+      0.6
+    ],
+    "log_loss": 0.2990011586691898
+  },
+  {
+    "name": "balanced_accuracy_imbalanced",
+    "y_true": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1
+    ],
+    "y_pred": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1
+    ],
+    "balanced_accuracy": 0.75,
+    "accuracy": 0.875
+  },
+  {
+    "name": "balanced_accuracy_multiclass",
+    "y_true": [
+      0,
+      0,
+      1,
+      1,
+      2,
+      2
+    ],
+    "y_pred": [
+      0,
+      0,
+      1,
+      2,
+      2,
+      1
+    ],
+    "balanced_accuracy": 0.6666666666666666
+  },
+  {
+    "name": "cohen_kappa",
+    "y_true": [
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      2,
+      2,
+      2
+    ],
+    "y_pred": [
+      0,
+      0,
+      1,
+      0,
+      1,
+      1,
+      1,
+      2,
+      2
+    ],
+    "cohen_kappa": 0.5
+  },
+  {
+    "name": "silhouette_well_separated",
+    "X": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.1,
+        0.0
+      ],
+      [
+        0.0,
+        0.1
+      ],
+      [
+        5.0,
+        5.0
+      ],
+      [
+        5.1,
+        5.0
+      ],
+      [
+        5.0,
+        5.1
+      ]
+    ],
+    "labels": [
+      0,
+      0,
+      0,
+      1,
+      1,
+      1
+    ],
+    "silhouette_score": 0.9839060124208704
+  },
+  {
+    "name": "regression_extra",
+    "y_true": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
+    "y_pred": [
+      1.1,
+      2.2,
+      2.8,
+      4.5,
+      4.7
+    ],
+    "median_absolute_error": 0.20000000000000018,
+    "mean_squared_log_error": 0.004178347060578697
+  },
+  {
+    "name": "extended_classification",
+    "y_true": [
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0,
+      1
+    ],
+    "y_scores": [
+      0.1,
+      0.2,
+      0.35,
+      0.8,
+      0.75,
+      0.9,
+      0.4,
+      0.6
+    ],
+    "y_pred": [
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0,
+      1
+    ],
+    "roc_auc": 1.0,
+    "average_precision": 1.0,
+    "matthews_corrcoef": 1.0
+  },
+  {
+    "name": "regression_extended",
+    "y_true": [
+      3.0,
+      -0.5,
+      2.0,
+      7.0
+    ],
+    "y_pred": [
+      2.5,
+      0.0,
+      2.0,
+      8.0
+    ],
+    "explained_variance": 0.9571734475374732,
+    "max_error": 1.0,
+    "mape": 0.3273809523809524
+  }
+]

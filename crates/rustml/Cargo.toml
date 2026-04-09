@@ -23,6 +23,8 @@ rustml-naive-bayes = { path = "../rustml-naive-bayes" }
 rustml-io = { path = "../rustml-io" }
 rustml-svm = { path = "../rustml-svm" }
 rustml-neural-networks = { path = "../rustml-neural-networks" }
+rustml-regression = { path = "../rustml-regression" }
+rustml-linear = { path = "../rustml-linear" }
 ndarray = { workspace = true }
 num-traits = { workspace = true }
 
