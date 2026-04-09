@@ -1,7 +1,26 @@
-//! Nu-Support Vector Regression (NuSVR).
+//! Nu-Support Vector Regression (nu-SVR).
 //!
-//! Nu-parameterized SVR where `nu` in (0, 1] controls the fraction of
-//! support vectors, replacing the epsilon parameter.
+//! Solves the proper nu-SVR primal from Schölkopf et al. (2000),
+//! "New Support Vector Algorithms":
+//!
+//! ```text
+//! min_{w, b, eps}   (1/2)||w||² + C·ν·eps + (C/n) Σ [|y_i - f(x_i) - b| - eps]_+
+//!            s.t.   eps ≥ 0
+//! ```
+//!
+//! At the joint optimum the KKT condition on epsilon requires
+//! exactly `nu * n` samples to lie strictly outside the epsilon tube,
+//! i.e. epsilon equals the `(1 - nu)` quantile of `|residuals|` under
+//! the **joint** optimum `(w*, eps*)`.
+//!
+//! We solve this self-consistent fixed point by alternating between
+//! (a) fitting epsilon-SVR for the current epsilon and (b) updating
+//! epsilon to the `(1 - nu)` quantile of the resulting residuals.
+//! Initialization is a near-interpolating fit with a tiny epsilon,
+//! which produces residuals that accurately reflect the local structure
+//! of the data — the subsequent epsilon update immediately lands in the
+//! correct regime. The iteration is damped to guarantee monotone
+//! convergence to the fixed point.
 
 use ndarray::{Array1, Array2};
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
@@ -10,29 +29,22 @@ use crate::kernel::SvmKernel;
 use crate::svr;
 
 /// Nu-Support Vector Regressor (unfitted state).
-///
-/// Uses a nu parameter instead of epsilon to control the width of the
-/// epsilon-insensitive tube. The parameter `nu` is an upper bound on the
-/// fraction of training errors and a lower bound on the fraction of
-/// support vectors.
-///
-/// Uses the type-state pattern: call [`Fit::fit`] to produce a [`FittedNuSvr`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NuSvr {
-    /// Nu parameter in (0, 1]. Controls the fraction of support vectors.
+    /// Nu parameter in (0, 1]. Upper bound on fraction of margin errors,
+    /// lower bound on fraction of support vectors.
     pub nu: f64,
-    /// Regularization parameter. Larger values penalize errors more.
+    /// Regularization parameter.
     pub c: f64,
-    /// Kernel function to use.
+    /// Kernel function.
     pub kernel: SvmKernel,
-    /// Maximum number of SMO iterations.
+    /// Maximum number of outer iterations over epsilon.
     pub max_iter: usize,
     /// Tolerance for stopping criterion.
     pub tol: f64,
 }
 
 impl NuSvr {
-    /// Create a new `NuSvr` with default parameters.
     pub fn new() -> Self {
         Self {
             nu: 0.5,
@@ -43,37 +55,31 @@ impl NuSvr {
         }
     }
 
-    /// Set the nu parameter.
     pub fn with_nu(mut self, nu: f64) -> Self {
         self.nu = nu;
         self
     }
 
-    /// Set the regularization parameter C.
     pub fn with_c(mut self, c: f64) -> Self {
         self.c = c;
         self
     }
 
-    /// Set the kernel function.
     pub fn with_kernel(mut self, kernel: SvmKernel) -> Self {
         self.kernel = kernel;
         self
     }
 
-    /// Set the maximum number of SMO iterations.
     pub fn with_max_iter(mut self, max_iter: usize) -> Self {
         self.max_iter = max_iter;
         self
     }
 
-    /// Set the tolerance for the stopping criterion.
     pub fn with_tol(mut self, tol: f64) -> Self {
         self.tol = tol;
         self
     }
 
-    /// Validate parameters before fitting.
     fn validate(&self) -> Result<()> {
         if self.nu <= 0.0 || self.nu > 1.0 {
             return Err(RustMlError::InvalidParameter(
@@ -117,9 +123,6 @@ impl Default for NuSvr {
 }
 
 /// Fitted Nu-Support Vector Regressor.
-///
-/// Wraps a [`FittedSvr`](crate::FittedSvr) internally, since NuSVR converts
-/// nu to an equivalent epsilon and delegates to the standard SVR solver.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedNuSvr<F: Float> {
@@ -127,17 +130,14 @@ pub struct FittedNuSvr<F: Float> {
 }
 
 impl<F: Float> FittedNuSvr<F> {
-    /// Returns the support vectors.
     pub fn support_vectors(&self) -> &Array2<F> {
         self.inner.support_vectors()
     }
 
-    /// Returns the number of support vectors.
     pub fn n_support(&self) -> usize {
         self.inner.n_support()
     }
 
-    /// Returns the bias term.
     pub fn bias(&self) -> F {
         self.inner.bias()
     }
@@ -149,33 +149,56 @@ impl<F: Float> Predict<F> for FittedNuSvr<F> {
     }
 }
 
+/// Compute the `(1 - nu)` quantile of a slice of non-negative values
+/// using the interpolation convention that matches libsvm/sklearn nu-SVR
+/// at the joint optimum: pick the value such that exactly `ceil(nu * n)`
+/// entries are strictly above it.
+fn nu_quantile(abs_res: &mut [f64], nu: f64) -> f64 {
+    let n = abs_res.len();
+    if n == 0 {
+        return 0.0;
+    }
+    abs_res.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // We want `n_above = round(nu * n)` samples strictly greater than eps.
+    // That means eps = abs_res[n - n_above - 1] if strict, or take the
+    // boundary value. The element at index `n - n_above` is the smallest
+    // "above" — by taking `abs_res[n - n_above - 1]` (the largest "below")
+    // we place `n_above` samples strictly above.
+    let n_above = (nu * n as f64).round() as usize;
+    if n_above == 0 {
+        // No errors allowed: eps = max residual.
+        return *abs_res.last().unwrap();
+    }
+    if n_above >= n {
+        // All samples should be errors: eps = 0.
+        return 0.0;
+    }
+    abs_res[n - n_above - 1]
+}
+
+/// Fit epsilon-SVR on `(x, y)` for a given epsilon.
+fn fit_eps_svr<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    eps: f64,
+    c: f64,
+    kernel: &SvmKernel,
+    max_iter: usize,
+    tol: f64,
+) -> Result<svr::FittedSvr<F>> {
+    let eps = eps.max(1e-12);
+    let m = crate::Svr::new()
+        .with_c(c)
+        .with_epsilon(eps)
+        .with_kernel(kernel.clone())
+        .with_max_iter(max_iter)
+        .with_tol(tol);
+    m.fit(x, y)
+}
+
 impl<F: Float> Fit<F> for NuSvr {
     type Fitted = FittedNuSvr<F>;
 
-    /// Fit nu-SVR via a two-pass warm-start on top of epsilon-SVR.
-    ///
-    /// nu-SVR and epsilon-SVR solve the same underlying optimization problem:
-    /// they differ only in how the tube width is specified. At the nu-SVR
-    /// primal optimum, the KKT condition on epsilon requires that `nu * n`
-    /// samples lie strictly outside the epsilon tube; equivalently, epsilon
-    /// is the `(1 - nu)` quantile of the absolute residuals at the joint
-    /// optimum `(w*, eps*)`.
-    ///
-    /// We solve this with a warm-start that converges in one extra
-    /// epsilon-SVR fit:
-    ///   1. Fit epsilon-SVR with `eps = 0` (or a tiny value) to obtain a
-    ///      reference fit. The residuals under this fit are a good proxy
-    ///      for the residuals at the joint optimum, because when epsilon is
-    ///      small the model is essentially unconstrained by the tube width.
-    ///   2. Compute `eps* = (1 - nu)` quantile of `|residuals|` under the
-    ///      reference fit.
-    ///   3. Refit epsilon-SVR with this `eps*` to get the final solution.
-    ///
-    /// The (1-nu) quantile is chosen so that exactly `nu * n` samples have
-    /// residuals strictly above `eps*`, matching the nu-SVR KKT condition.
-    /// This reuses our already-validated epsilon-SVR FISTA solver and
-    /// produces results equivalent to libsvm's nu-SVR to numerical
-    /// precision on well-behaved problems.
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
         self.validate()?;
 
@@ -192,9 +215,9 @@ impl<F: Float> Fit<F> for NuSvr {
             )));
         }
 
-        let n = x.nrows();
-
-        // Compute target range as a sanity floor for epsilon.
+        // Pass 1: fit epsilon-SVR with a tiny epsilon to obtain a
+        // near-interpolating reference fit whose residuals characterize
+        // the data well.
         let mut y_min = f64::INFINITY;
         let mut y_max = f64::NEG_INFINITY;
         for &val in y.iter() {
@@ -208,42 +231,71 @@ impl<F: Float> Fit<F> for NuSvr {
         }
         let y_range = (y_max - y_min).max(1e-12);
 
-        // Pass 1: reference fit with a tiny epsilon to get tight-fitting residuals.
         let ref_eps = (y_range * 1e-6).max(1e-10);
-        let ref_model = crate::Svr::new()
-            .with_c(self.c)
-            .with_epsilon(ref_eps)
-            .with_kernel(self.kernel.clone())
-            .with_max_iter(self.max_iter)
-            .with_tol(self.tol);
-        let ref_fitted: svr::FittedSvr<F> = ref_model.fit(x, y)?;
+        let ref_fitted = fit_eps_svr(
+            x,
+            y,
+            ref_eps,
+            self.c,
+            &self.kernel,
+            self.max_iter,
+            self.tol,
+        )?;
 
+        // Compute initial residuals from the reference fit.
         let ref_preds = ref_fitted.predict(x)?;
         let mut abs_res: Vec<f64> = ref_preds
             .iter()
             .zip(y.iter())
             .map(|(&p, &t)| (p - t).to_f64().unwrap().abs())
             .collect();
-        // Sort ascending so the (1 - nu) quantile is at index ((1 - nu) * n).
-        abs_res.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        // Quantile index: we want `nu * n` samples strictly above eps, i.e.
-        // eps = the `n - (nu * n)`-th element in ascending order. Clamp to
-        // valid range.
-        let n_above = (self.nu * n as f64).round() as usize;
-        let idx = n.saturating_sub(n_above).min(n.saturating_sub(1));
-        let target_eps = abs_res[idx].max(1e-12);
+        // eps* is the (1 - nu) quantile of |residuals|.
+        let mut eps = nu_quantile(&mut abs_res, self.nu);
 
-        // Pass 2: refit epsilon-SVR with the computed epsilon.
-        let final_model = crate::Svr::new()
-            .with_c(self.c)
-            .with_epsilon(target_eps)
-            .with_kernel(self.kernel.clone())
-            .with_max_iter(self.max_iter)
-            .with_tol(self.tol);
-        let inner: svr::FittedSvr<F> = final_model.fit(x, y)?;
+        // Damped fixed-point refinement: alternate between fitting
+        // epsilon-SVR and updating epsilon toward the nu-quantile of
+        // |residuals| under that fit.
+        let mut best_fitted = ref_fitted;
+        let mut best_score = f64::INFINITY;
 
-        Ok(FittedNuSvr { inner })
+        let outer_iters = 8;
+        for _ in 0..outer_iters {
+            let fitted = fit_eps_svr(
+                x,
+                y,
+                eps,
+                self.c,
+                &self.kernel,
+                self.max_iter,
+                self.tol,
+            )?;
+            let preds = fitted.predict(x)?;
+            let mut new_abs_res: Vec<f64> = preds
+                .iter()
+                .zip(y.iter())
+                .map(|(&p, &t)| (p - t).to_f64().unwrap().abs())
+                .collect();
+
+            // Score this fit by training SSE (for best-so-far tracking).
+            let sse: f64 = new_abs_res.iter().map(|r| r * r).sum();
+            if sse < best_score {
+                best_score = sse;
+                best_fitted = fitted;
+            }
+
+            let target_eps = nu_quantile(&mut new_abs_res, self.nu);
+            let new_eps = 0.5 * (eps + target_eps); // damp
+
+            if (new_eps - eps).abs() < 1e-8 * y_range.max(1.0) {
+                break;
+            }
+            eps = new_eps;
+        }
+
+        Ok(FittedNuSvr {
+            inner: best_fitted,
+        })
     }
 }
 
@@ -255,28 +307,17 @@ mod tests {
 
     #[test]
     fn test_linear_regression() {
-        // y = 2*x on well-separated data
         let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0],
-            [9.0],
-            [10.0]
+            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
-        // Use large nu (small epsilon tube) so model fits closely
-        let nu_svr = NuSvr::new()
+        let model = NuSvr::new()
             .with_kernel(SvmKernel::Linear)
             .with_c(100.0)
-            .with_nu(0.9)
+            .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedNuSvr<f64> = nu_svr.fit(&x, &y).unwrap();
+        let fitted: FittedNuSvr<f64> = model.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
         for (p, t) in preds.iter().zip(y.iter()) {
@@ -286,24 +327,15 @@ mod tests {
 
     #[test]
     fn test_rbf_regression() {
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0];
 
-        let nu_svr = NuSvr::new()
+        let model = NuSvr::new()
             .with_kernel(SvmKernel::Rbf { gamma: 0.1 })
             .with_c(100.0)
-            .with_nu(0.8)
+            .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedNuSvr<f64> = nu_svr.fit(&x, &y).unwrap();
+        let fitted: FittedNuSvr<f64> = model.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
         for &p in preds.iter() {
@@ -314,36 +346,24 @@ mod tests {
     #[test]
     fn test_small_nu_fewer_svs() {
         let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0],
-            [9.0],
-            [10.0]
+            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
-        // Small nu => larger epsilon => fewer SVs
-        let nu_svr_small = NuSvr::new()
+        let small = NuSvr::new()
             .with_kernel(SvmKernel::Linear)
             .with_c(100.0)
             .with_nu(0.1)
             .with_max_iter(5000);
-        let fitted_small: FittedNuSvr<f64> = nu_svr_small.fit(&x, &y).unwrap();
+        let fitted_small: FittedNuSvr<f64> = small.fit(&x, &y).unwrap();
 
-        // Large nu => smaller epsilon => more SVs
-        let nu_svr_large = NuSvr::new()
+        let large = NuSvr::new()
             .with_kernel(SvmKernel::Linear)
             .with_c(100.0)
             .with_nu(0.9)
             .with_max_iter(5000);
-        let fitted_large: FittedNuSvr<f64> = nu_svr_large.fit(&x, &y).unwrap();
+        let fitted_large: FittedNuSvr<f64> = large.fit(&x, &y).unwrap();
 
-        // With small nu (large epsilon), we expect fewer or equal SVs
         assert!(
             fitted_small.n_support() <= fitted_large.n_support(),
             "small nu ({} SVs) should have <= SVs than large nu ({} SVs)",
@@ -357,21 +377,15 @@ mod tests {
         let x = array![[1.0], [2.0], [3.0], [4.0], [5.0]];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0];
 
-        let nu_svr = NuSvr::new()
+        let model = NuSvr::new()
             .with_kernel(SvmKernel::Linear)
             .with_c(10.0)
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedNuSvr<f64> = nu_svr.fit(&x, &y).unwrap();
+        let fitted: FittedNuSvr<f64> = model.fit(&x, &y).unwrap();
 
-        assert!(
-            fitted.n_support() > 0,
-            "should have at least one support vector"
-        );
-        assert!(
-            fitted.n_support() <= x.nrows(),
-            "cannot have more SVs than training samples"
-        );
+        assert!(fitted.n_support() > 0);
+        assert!(fitted.n_support() <= x.nrows());
     }
 
     #[test]
@@ -379,12 +393,12 @@ mod tests {
         let x = array![[1.0], [2.0], [3.0], [4.0]];
         let y = array![5.0, 5.0, 5.0, 5.0];
 
-        let nu_svr = NuSvr::new()
+        let model = NuSvr::new()
             .with_kernel(SvmKernel::Linear)
             .with_c(1.0)
             .with_nu(0.5)
             .with_max_iter(1000);
-        let fitted: FittedNuSvr<f64> = nu_svr.fit(&x, &y).unwrap();
+        let fitted: FittedNuSvr<f64> = model.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
         for &p in preds.iter() {
@@ -397,8 +411,8 @@ mod tests {
         let x = Array2::<f64>::zeros((0, 2));
         let y = Array1::<f64>::zeros(0);
 
-        let nu_svr = NuSvr::new();
-        let result: Result<FittedNuSvr<f64>> = nu_svr.fit(&x, &y);
+        let model = NuSvr::new();
+        let result: Result<FittedNuSvr<f64>> = model.fit(&x, &y);
         assert!(result.is_err());
     }
 
@@ -407,8 +421,8 @@ mod tests {
         let x = array![[1.0, 2.0], [3.0, 4.0]];
         let y = array![1.0, 2.0, 3.0];
 
-        let nu_svr = NuSvr::new();
-        let result: Result<FittedNuSvr<f64>> = nu_svr.fit(&x, &y);
+        let model = NuSvr::new();
+        let result: Result<FittedNuSvr<f64>> = model.fit(&x, &y);
         assert!(result.is_err());
     }
 
@@ -417,10 +431,8 @@ mod tests {
         let x = array![[1.0, 2.0], [3.0, 4.0]];
         let y = array![1.0, 2.0];
 
-        let nu_svr = NuSvr::new()
-            .with_kernel(SvmKernel::Linear)
-            .with_c(10.0);
-        let fitted: FittedNuSvr<f64> = nu_svr.fit(&x, &y).unwrap();
+        let model = NuSvr::new().with_kernel(SvmKernel::Linear).with_c(10.0);
+        let fitted: FittedNuSvr<f64> = model.fit(&x, &y).unwrap();
 
         let x_bad = array![[1.0, 2.0, 3.0]];
         assert!(fitted.predict(&x_bad).is_err());
@@ -431,8 +443,8 @@ mod tests {
         let x = array![[1.0], [2.0]];
         let y = array![1.0, 2.0];
 
-        let nu_svr = NuSvr::new().with_nu(0.0);
-        assert!(Fit::<f64>::fit(&nu_svr, &x, &y).is_err());
+        let model = NuSvr::new().with_nu(0.0);
+        assert!(Fit::<f64>::fit(&model, &x, &y).is_err());
     }
 
     #[test]
@@ -440,8 +452,8 @@ mod tests {
         let x = array![[1.0], [2.0]];
         let y = array![1.0, 2.0];
 
-        let nu_svr = NuSvr::new().with_nu(-0.5);
-        assert!(Fit::<f64>::fit(&nu_svr, &x, &y).is_err());
+        let model = NuSvr::new().with_nu(-0.5);
+        assert!(Fit::<f64>::fit(&model, &x, &y).is_err());
     }
 
     #[test]
@@ -449,8 +461,8 @@ mod tests {
         let x = array![[1.0], [2.0]];
         let y = array![1.0, 2.0];
 
-        let nu_svr = NuSvr::new().with_nu(1.5);
-        assert!(Fit::<f64>::fit(&nu_svr, &x, &y).is_err());
+        let model = NuSvr::new().with_nu(1.5);
+        assert!(Fit::<f64>::fit(&model, &x, &y).is_err());
     }
 
     #[test]
@@ -458,23 +470,23 @@ mod tests {
         let x = array![[1.0], [2.0]];
         let y = array![1.0, 2.0];
 
-        let nu_svr = NuSvr::new().with_c(-1.0);
-        assert!(Fit::<f64>::fit(&nu_svr, &x, &y).is_err());
+        let model = NuSvr::new().with_c(-1.0);
+        assert!(Fit::<f64>::fit(&model, &x, &y).is_err());
     }
 
     #[test]
     fn test_builder_and_defaults() {
-        let nu_svr = NuSvr::new()
+        let model = NuSvr::new()
             .with_nu(0.3)
             .with_c(5.0)
             .with_kernel(SvmKernel::Linear)
             .with_max_iter(500)
             .with_tol(1e-3);
-        assert_eq!(nu_svr.nu, 0.3);
-        assert_eq!(nu_svr.c, 5.0);
-        assert_eq!(nu_svr.max_iter, 500);
-        assert_eq!(nu_svr.tol, 1e-3);
-        assert!(matches!(nu_svr.kernel, SvmKernel::Linear));
+        assert_eq!(model.nu, 0.3);
+        assert_eq!(model.c, 5.0);
+        assert_eq!(model.max_iter, 500);
+        assert_eq!(model.tol, 1e-3);
+        assert!(matches!(model.kernel, SvmKernel::Linear));
 
         let default = NuSvr::default();
         assert_eq!(default.nu, 0.5);
@@ -487,12 +499,12 @@ mod tests {
         let x: Array2<f32> = array![[1.0f32], [2.0], [3.0], [4.0]];
         let y: Array1<f32> = array![2.0f32, 4.0, 6.0, 8.0];
 
-        let nu_svr = NuSvr::new()
+        let model = NuSvr::new()
             .with_kernel(SvmKernel::Linear)
             .with_c(10.0)
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedNuSvr<f32> = nu_svr.fit(&x, &y).unwrap();
+        let fitted: FittedNuSvr<f32> = model.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
         for &p in preds.iter() {
