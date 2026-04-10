@@ -39,10 +39,16 @@ struct FeatureBins {
 }
 
 /// Bin features into u8 indices. NaN maps to `MISSING_BIN` (255).
+///
+/// `min_data_in_bin` controls the minimum number of samples per bin (LightGBM
+/// default: 3).  Bins with fewer samples are merged with their neighbours,
+/// reducing the effective split resolution and preventing overfitting on small
+/// datasets.
 fn compute_bins(
     x: &Array2<f64>,
     max_bins: usize,
     categorical_features: &[usize],
+    min_data_in_bin: usize,
 ) -> (Array2<u8>, Vec<FeatureBins>) {
     let n = x.nrows();
     let p = x.ncols();
@@ -55,29 +61,77 @@ fn compute_bins(
     for j in 0..p {
         let is_categorical = cat_set.contains(&j);
 
-        let mut col: Vec<f64> = (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
-        col.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        col.dedup();
-
-        // Limit to max_bins - 1 (reserve one for missing)
-        let n_edges = col.len().min(max_bins - 1);
-        let mut edges = Vec::with_capacity(n_edges);
+        let mut edges = Vec::new();
 
         if is_categorical {
             // For categorical features, bin edges are the unique values themselves.
-            // Each distinct value gets its own bin.
+            let mut col: Vec<f64> =
+                (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
+            col.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            col.dedup();
             for &v in col.iter().take(max_bins - 1) {
                 edges.push(v);
             }
         } else {
-            // Quantile-based bin edges for numeric features.
-            for k in 1..=n_edges {
-                let idx = (k * col.len() / (n_edges + 1)).min(col.len() - 1);
-                let edge = col[idx];
-                if edges.last().map_or(true, |&last: &f64| edge > last) {
-                    edges.push(edge);
+            // Greedy binning matching LightGBM: collect distinct values with
+            // sample counts, then greedily fill bins so each has at least
+            // `min_data_in_bin` samples.  Bin boundaries are placed at the
+            // midpoint between the last value of one group and the first of
+            // the next.
+            let mut raw: Vec<f64> =
+                (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
+            raw.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+            // Distinct values with counts.
+            let mut distinct: Vec<(f64, usize)> = Vec::new();
+            if !raw.is_empty() {
+                let mut cur = raw[0];
+                let mut cnt = 1usize;
+                for &v in &raw[1..] {
+                    if v == cur {
+                        cnt += 1;
+                    } else {
+                        distinct.push((cur, cnt));
+                        cur = v;
+                        cnt = 1;
+                    }
+                }
+                distinct.push((cur, cnt));
+            }
+
+            if distinct.len() > 1 {
+                let max_n_bins = max_bins - 1; // reserve one for missing
+                let min_per = min_data_in_bin.max(1);
+
+                // group_ends[k] = exclusive end-index into `distinct` for group k.
+                let mut group_ends: Vec<usize> = Vec::new();
+                let mut cur_count = 0usize;
+                for (idx, &(_, count)) in distinct.iter().enumerate() {
+                    cur_count += count;
+                    if cur_count >= min_per {
+                        group_ends.push(idx + 1);
+                        cur_count = 0;
+                        if group_ends.len() >= max_n_bins {
+                            break;
+                        }
+                    }
+                }
+                // Remaining values go into the last group.
+                if cur_count > 0 || group_ends.is_empty() {
+                    group_ends.push(distinct.len());
+                } else if let Some(last) = group_ends.last_mut() {
+                    // Make sure the last group extends to the end.
+                    *last = distinct.len();
+                }
+
+                // Edges are midpoints between consecutive groups.
+                for k in 0..group_ends.len() - 1 {
+                    let last_in_k = distinct[group_ends[k] - 1].0;
+                    let first_in_next = distinct[group_ends[k]].0;
+                    edges.push(0.5 * (last_in_k + first_in_next));
                 }
             }
+            // If 0 or 1 distinct value → no edges, everything goes to bin 0.
         }
 
         for i in 0..n {
@@ -295,10 +349,14 @@ fn find_best_split(
                     continue;
                 }
                 let right_count = total_count - left_count;
-                let right_grad = total_grad - left_grad
-                    + (if missing_left { 0.0 } else { -hist.missing_grad });
-                let right_hess = total_hess - left_hess
-                    + (if missing_left { 0.0 } else { -hist.missing_hess });
+                // total_grad/hess include all samples (including missing).
+                // When missing_left=true, left already includes missing →
+                //   right = total - left (missing is NOT in right).
+                // When missing_left=false, left does NOT include missing →
+                //   right = total - left (missing IS in right, via total).
+                // In both cases the formula is the same.
+                let right_grad = total_grad - left_grad;
+                let right_hess = total_hess - left_hess;
 
                 if right_count < min_child_samples || right_hess < min_child_weight {
                     continue;
@@ -754,6 +812,10 @@ pub struct LgbmRegressor {
     pub subsample: f64,
     pub colsample_bytree: f64,
     pub max_bins: usize,
+    /// Minimum number of training samples per histogram bin.  Bins with fewer
+    /// samples are merged with their neighbours, reducing the effective split
+    /// resolution.  Matches LightGBM's `min_data_in_bin` (default: 3).
+    pub min_data_in_bin: usize,
     pub boosting_type: BoostingType,
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
@@ -782,6 +844,7 @@ impl LgbmRegressor {
             subsample: 1.0,
             colsample_bytree: 1.0,
             max_bins: DEFAULT_MAX_BINS,
+            min_data_in_bin: 3,
             boosting_type: BoostingType::Gbdt,
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
@@ -806,6 +869,7 @@ impl LgbmRegressor {
     pub fn with_reg_lambda(mut self, l: f64) -> Self { self.reg_lambda = l; self }
     pub fn with_subsample(mut self, s: f64) -> Self { self.subsample = s; self }
     pub fn with_colsample_bytree(mut self, c: f64) -> Self { self.colsample_bytree = c; self }
+    pub fn with_min_data_in_bin(mut self, n: usize) -> Self { self.min_data_in_bin = n; self }
     pub fn with_boosting_type(mut self, b: BoostingType) -> Self { self.boosting_type = b; self }
     pub fn with_goss_rates(mut self, top: f64, other: f64) -> Self {
         self.goss_top_rate = top;
@@ -1024,7 +1088,8 @@ impl LgbmRegressor {
 
         let n = x.nrows();
         let p = x.ncols();
-        let (binned_x, bins) = compute_bins(x, self.max_bins, &self.categorical_features);
+        let (binned_x, bins) =
+            compute_bins(x, self.max_bins, &self.categorical_features, self.min_data_in_bin);
 
         // Baseline / init_score
         let mean_y: f64 = y.iter().sum::<f64>() / n as f64;
@@ -1047,7 +1112,7 @@ impl LgbmRegressor {
 
         // Prepare eval set predictions if present
         let eval_binned = opts.eval_set.as_ref().map(|(xe, _)| {
-            let (b, _) = compute_bins(xe, self.max_bins, &self.categorical_features);
+            let (b, _) = compute_bins(xe, self.max_bins, &self.categorical_features, self.min_data_in_bin);
             b
         });
         let mut eval_preds: Option<Vec<f64>> = opts.eval_set.as_ref().map(|(xe, _)| {
@@ -1275,6 +1340,7 @@ pub struct LgbmClassifier {
     pub subsample: f64,
     pub colsample_bytree: f64,
     pub max_bins: usize,
+    pub min_data_in_bin: usize,
     pub boosting_type: BoostingType,
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
@@ -1300,6 +1366,7 @@ impl LgbmClassifier {
             subsample: 1.0,
             colsample_bytree: 1.0,
             max_bins: DEFAULT_MAX_BINS,
+            min_data_in_bin: 3,
             boosting_type: BoostingType::Gbdt,
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
@@ -1321,6 +1388,7 @@ impl LgbmClassifier {
     pub fn with_reg_lambda(mut self, l: f64) -> Self { self.reg_lambda = l; self }
     pub fn with_subsample(mut self, s: f64) -> Self { self.subsample = s; self }
     pub fn with_colsample_bytree(mut self, c: f64) -> Self { self.colsample_bytree = c; self }
+    pub fn with_min_data_in_bin(mut self, n: usize) -> Self { self.min_data_in_bin = n; self }
     pub fn with_boosting_type(mut self, b: BoostingType) -> Self { self.boosting_type = b; self }
     pub fn with_categorical_features(mut self, feats: Vec<usize>) -> Self {
         self.categorical_features = feats;
@@ -1498,7 +1566,8 @@ impl LgbmClassifier {
 
         let n = x.nrows();
         let p = x.ncols();
-        let (binned_x, bins) = compute_bins(x, self.max_bins, &self.categorical_features);
+        let (binned_x, bins) =
+            compute_bins(x, self.max_bins, &self.categorical_features, self.min_data_in_bin);
 
         let mut classes: Vec<f64> = y.iter().copied().collect();
         classes.sort_by(|a, b| a.partial_cmp(b).unwrap());

@@ -85,17 +85,24 @@ fn test_golden_lgbm_regressor_linear() {
     let preds = fitted.predict(&x).unwrap();
     let our_mse = mse(&preds, &y);
 
-    // Our MSE should be in the same order of magnitude as LightGBM's.
-    // On this tiny dataset LightGBM gets MSE=2.4; we should be within 3x.
+    // With min_data_in_bin=3 matching LightGBM's default, our MSE should be
+    // within a few percent of theirs.
     assert!(
-        our_mse < lgbm_mse * 5.0 + 5.0,
-        "Our MSE {:.4} is much worse than LightGBM's {:.4}",
+        (our_mse - lgbm_mse).abs() < lgbm_mse * 0.05 + 0.01,
+        "Our MSE {:.6} differs from LightGBM's {:.6}",
         our_mse,
         lgbm_mse
     );
-    // And predictions should be reasonable
-    for &p in preds.iter() {
-        assert!(p.is_finite());
+    // Per-point predictions should be close.
+    let lgbm_preds = json_to_array1(&case["predictions"]);
+    for (i, (&o, &s)) in preds.iter().zip(lgbm_preds.iter()).enumerate() {
+        assert!(
+            (o - s).abs() < 0.5,
+            "pred[{}]: ours={:.4}, lgbm={:.4}",
+            i,
+            o,
+            s
+        );
     }
 }
 
@@ -234,10 +241,11 @@ fn test_golden_lgbm_regressor_nan_handling() {
     }
 
     let our_mse = mse(&preds, &y);
-    // Our NaN handling should give a reasonable MSE — within an order of magnitude
+    // With the fixed missing-value gradient accounting, our MSE should be
+    // within a few percent of LightGBM's.
     assert!(
-        our_mse < lgbm_mse * 10.0 + 10.0,
-        "NaN-handling MSE {:.4} much worse than LightGBM's {:.4}",
+        (our_mse - lgbm_mse).abs() < lgbm_mse * 0.10 + 0.5,
+        "NaN-handling MSE {:.6} differs from LightGBM's {:.6}",
         our_mse,
         lgbm_mse
     );
@@ -266,10 +274,11 @@ fn test_golden_lgbm_regressor_l2_regularization() {
     let preds = fitted.predict(&x).unwrap();
     let our_r2 = r2(&preds, &y);
 
-    // On a meaningful dataset, our R² should be decent even with L2 regularization
+    // With min_data_in_bin matching LightGBM, our R² should be close.
+    // On a 50-sample dataset, minor bin boundary differences cause a small gap.
     assert!(
-        our_r2 > 0.5,
-        "R² {:.4} too low (LightGBM: {:.4})",
+        (our_r2 - lgbm_r2).abs() < 0.03,
+        "R² {:.6} differs from LightGBM's {:.6}",
         our_r2,
         lgbm_r2
     );
