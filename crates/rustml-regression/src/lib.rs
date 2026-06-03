@@ -11,6 +11,7 @@
 //! All models operate on `f64` (not generic over `Float`) because the
 //! underlying `anofox-regression` crate only supports `f64`.
 
+pub mod bayesian_ridge;
 pub mod convert;
 pub mod elastic_net;
 pub mod elastic_net_cv;
@@ -22,13 +23,18 @@ pub mod lasso;
 pub mod lasso_cv;
 pub mod logistic;
 pub mod ols;
+pub mod omp;
 pub mod quantile;
 pub mod ridge;
+pub mod robust;
 pub mod ridge_cv;
 pub mod transformed_target;
 pub mod tweedie;
 pub mod wls;
 
+pub use bayesian_ridge::{
+    ARDRegression, BayesianRidge, FittedARDRegression, FittedBayesianRidge,
+};
 pub use elastic_net::{ElasticNetRegressor, FittedElasticNetRegressor};
 pub use elastic_net_cv::{ElasticNetCrossValidated, FittedElasticNetCrossValidated};
 pub use glm::{BinomialRegressor, FittedBinomialRegressor, FittedPoissonRegressor, PoissonRegressor};
@@ -39,8 +45,12 @@ pub use lasso::{FittedLassoRegressor, LassoRegressor};
 pub use lasso_cv::{FittedLassoCrossValidated, LassoCrossValidated};
 pub use logistic::{FittedLogisticRegressor, LogisticRegressor};
 pub use ols::{FittedOlsRegressor, OlsRegressor};
+pub use omp::{FittedOrthogonalMatchingPursuit, OrthogonalMatchingPursuit};
 pub use quantile::{FittedQuantileRegressor, QuantileRegressor};
 pub use ridge::{FittedRidgeRegressor, RidgeRegressor};
+pub use robust::{
+    FittedRansacRegressor, FittedTheilSenRegressor, RansacRegressor, TheilSenRegressor,
+};
 pub use ridge_cv::{FittedRidgeCrossValidated, RidgeCrossValidated};
 pub use transformed_target::{FittedTransformedTargetRegressor, TransformedTargetRegressor};
 pub use tweedie::{

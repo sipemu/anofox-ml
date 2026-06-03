@@ -115,7 +115,8 @@ pub mod prelude {
         MaxAbsScaler, MinMaxScaler, MutualInformationSelector, NormType, Normalizer,
         OneHotEncoder, OrdinalEncoder, OutputDistribution, Pca, PolynomialFeatures,
         PowerTransformer, QuantileTransformer, RobustScaler, SelectFromModel, SelectKBest,
-        SimpleImputer, StandardScaler, VarianceThreshold,
+        Rfe, SequentialFeatureSelector, SimpleImputer, StandardScaler, TruncatedSvd,
+        VarianceThreshold,
     };
 
     pub use rustml_neighbors::{DistanceMetric, KnnClassifier, KnnRegressor, WeightFunction};
@@ -148,11 +149,12 @@ pub mod prelude {
     pub use rustml_neural_networks::{MlpClassifier, MlpRegressor};
 
     pub use rustml_regression::{
-        BinomialRegressor, ElasticNetCrossValidated, ElasticNetRegressor, GammaRegressor,
-        HuberRegressor, IsotonicRegressor, KernelRidge, LassoCrossValidated, LassoRegressor,
-        LogisticRegressor, OlsRegressor, PoissonRegressor, QuantileRegressor,
-        RidgeCrossValidated, RidgeRegressor, TransformedTargetRegressor, TweedieRegressor,
-        WlsRegressor,
+        ARDRegression, BayesianRidge, BinomialRegressor, ElasticNetCrossValidated,
+        ElasticNetRegressor, GammaRegressor, HuberRegressor, IsotonicRegressor, KernelRidge,
+        LassoCrossValidated, LassoRegressor, LogisticRegressor, OlsRegressor,
+        OrthogonalMatchingPursuit, PoissonRegressor, QuantileRegressor, RansacRegressor,
+        RidgeCrossValidated, RidgeRegressor, TheilSenRegressor, TransformedTargetRegressor,
+        TweedieRegressor, WlsRegressor,
     };
 
     pub use rustml_linear::{
