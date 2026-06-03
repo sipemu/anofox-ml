@@ -17,6 +17,7 @@ pub mod elastic_net_cv;
 pub mod glm;
 pub mod huber;
 pub mod isotonic;
+pub mod kernel_ridge;
 pub mod lasso;
 pub mod lasso_cv;
 pub mod logistic;
@@ -24,6 +25,8 @@ pub mod ols;
 pub mod quantile;
 pub mod ridge;
 pub mod ridge_cv;
+pub mod transformed_target;
+pub mod tweedie;
 pub mod wls;
 
 pub use elastic_net::{ElasticNetRegressor, FittedElasticNetRegressor};
@@ -31,6 +34,7 @@ pub use elastic_net_cv::{ElasticNetCrossValidated, FittedElasticNetCrossValidate
 pub use glm::{BinomialRegressor, FittedBinomialRegressor, FittedPoissonRegressor, PoissonRegressor};
 pub use huber::{FittedHuberRegressor, HuberRegressor};
 pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor};
+pub use kernel_ridge::{FittedKernelRidge, KernelRidge};
 pub use lasso::{FittedLassoRegressor, LassoRegressor};
 pub use lasso_cv::{FittedLassoCrossValidated, LassoCrossValidated};
 pub use logistic::{FittedLogisticRegressor, LogisticRegressor};
@@ -38,4 +42,8 @@ pub use ols::{FittedOlsRegressor, OlsRegressor};
 pub use quantile::{FittedQuantileRegressor, QuantileRegressor};
 pub use ridge::{FittedRidgeRegressor, RidgeRegressor};
 pub use ridge_cv::{FittedRidgeCrossValidated, RidgeCrossValidated};
+pub use transformed_target::{FittedTransformedTargetRegressor, TransformedTargetRegressor};
+pub use tweedie::{
+    gamma_regressor, FittedGammaRegressor, FittedTweedieRegressor, GammaRegressor, TweedieRegressor,
+};
 pub use wls::{FittedWlsRegressor, WlsRegressor};

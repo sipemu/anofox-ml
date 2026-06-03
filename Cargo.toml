@@ -9,6 +9,7 @@ members = [
     "crates/rustml-ensemble",
     "crates/rustml-cluster",
     "crates/rustml-naive-bayes",
+    "crates/rustml-discriminant",
     "crates/rustml-io",
     "crates/rustml-svm",
     "crates/rustml-neural-networks",

@@ -37,6 +37,8 @@
 
 pub mod dbscan;
 pub mod kmeans;
+pub mod mini_batch_kmeans;
 
 pub use dbscan::{Dbscan, FittedDbscan};
 pub use kmeans::{FittedKMeans, KMeans};
+pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchKMeans};

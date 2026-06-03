@@ -20,6 +20,7 @@ rustml-trees = { path = "../rustml-trees" }
 rustml-ensemble = { path = "../rustml-ensemble" }
 rustml-cluster = { path = "../rustml-cluster" }
 rustml-naive-bayes = { path = "../rustml-naive-bayes" }
+rustml-discriminant = { path = "../rustml-discriminant" }
 rustml-io = { path = "../rustml-io" }
 rustml-svm = { path = "../rustml-svm" }
 rustml-neural-networks = { path = "../rustml-neural-networks" }

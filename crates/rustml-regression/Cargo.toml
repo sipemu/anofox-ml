@@ -14,6 +14,7 @@ rust-version = "1.70"
 [dependencies]
 rustml-core = { path = "../rustml-core" }
 rustml-metrics = { path = "../rustml-metrics" }
+rustml-svm = { path = "../rustml-svm" }
 anofox-regression = "0.5"
 faer = "0.23"
 ndarray = { workspace = true }

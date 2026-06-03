@@ -59,6 +59,11 @@ pub mod naive_bayes {
     pub use rustml_naive_bayes::*;
 }
 
+/// Linear and Quadratic Discriminant Analysis.
+pub mod discriminant {
+    pub use rustml_discriminant::*;
+}
+
 /// Support Vector Machine classifiers.
 pub mod svm {
     pub use rustml_svm::*;
@@ -125,24 +130,34 @@ pub mod prelude {
         ExtraTreesRegressor, GradientBoostingClassifier, GradientBoostingRegressor,
         HistGradientBoostingClassifier, HistGradientBoostingRegressor, LgbmClassWeight,
         LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor, RandomForestClassifier,
-        RandomForestRegressor, StackingRegressor, VotingClassifier, VotingRegressor,
+        RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier,
+        VotingRegressor,
     };
 
-    pub use rustml_cluster::{Dbscan, KMeans};
+    pub use rustml_cluster::{Dbscan, KMeans, MiniBatchKMeans};
 
     pub use rustml_naive_bayes::{BernoulliNB, GaussianNB, MultinomialNB};
+
+    pub use rustml_discriminant::{
+        FittedLinearDiscriminantAnalysis, FittedQuadraticDiscriminantAnalysis,
+        LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis,
+    };
 
     pub use rustml_svm::{LinearSvc, LinearSvr, NuSvc, NuSvr, OneClassSvm, Svc, Svr, SvmKernel};
 
     pub use rustml_neural_networks::{MlpClassifier, MlpRegressor};
 
     pub use rustml_regression::{
-        BinomialRegressor, ElasticNetCrossValidated, ElasticNetRegressor, HuberRegressor,
-        IsotonicRegressor, LassoCrossValidated, LassoRegressor, LogisticRegressor, OlsRegressor,
-        PoissonRegressor, QuantileRegressor, RidgeCrossValidated, RidgeRegressor, WlsRegressor,
+        BinomialRegressor, ElasticNetCrossValidated, ElasticNetRegressor, GammaRegressor,
+        HuberRegressor, IsotonicRegressor, KernelRidge, LassoCrossValidated, LassoRegressor,
+        LogisticRegressor, OlsRegressor, PoissonRegressor, QuantileRegressor,
+        RidgeCrossValidated, RidgeRegressor, TransformedTargetRegressor, TweedieRegressor,
+        WlsRegressor,
     };
 
-    pub use rustml_linear::{SgdClassifier, SgdRegressor};
+    pub use rustml_linear::{
+        PassiveAggressiveClassifier, PassiveAggressiveRegressor, SgdClassifier, SgdRegressor,
+    };
 
     pub use rustml_core::persistence::{
         load_bincode, load_json, save_bincode, save_json,

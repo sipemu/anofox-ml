@@ -34,6 +34,8 @@ pub mod error;
 pub mod feature_union;
 pub mod float;
 pub mod function_transformer;
+pub mod inspection;
+pub mod multi_output;
 pub mod persistence;
 pub mod pipeline;
 pub mod traits;
@@ -44,6 +46,8 @@ pub use error::{Result, RustMlError};
 pub use float::Float;
 pub use feature_union::{FeatureUnion, FittedFeatureUnion};
 pub use function_transformer::FunctionTransformer;
+pub use inspection::{permutation_importance, PermutationImportance};
+pub use multi_output::{FittedMultiOutputRegressor, MultiOutputRegressor};
 pub use pipeline::{FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep};
 pub use traits::{Fit, FitUnsupervised, InverseTransform, Predict, Transform};
 pub use utils::{

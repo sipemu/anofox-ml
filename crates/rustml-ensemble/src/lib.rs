@@ -55,6 +55,7 @@ pub mod lgbm;
 pub mod gradient_boosting_regressor;
 pub mod random_forest_classifier;
 pub mod random_forest_regressor;
+pub mod stacking_classifier;
 pub mod stacking_regressor;
 pub mod voting_classifier;
 pub mod voting_regressor;
@@ -84,6 +85,7 @@ pub use gradient_boosting_regressor::{
 };
 pub use random_forest_classifier::{FittedRandomForestClassifier, RandomForestClassifier};
 pub use random_forest_regressor::{FittedRandomForestRegressor, RandomForestRegressor};
+pub use stacking_classifier::{FittedStackingClassifier, StackingClassifier};
 pub use stacking_regressor::StackingRegressor;
 pub use voting_classifier::VotingClassifier;
 pub use voting_regressor::VotingRegressor;
