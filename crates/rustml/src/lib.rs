@@ -119,7 +119,9 @@ pub mod prelude {
         VarianceThreshold,
     };
 
-    pub use rustml_neighbors::{DistanceMetric, KnnClassifier, KnnRegressor, WeightFunction};
+    pub use rustml_neighbors::{
+        DistanceMetric, KnnClassifier, KnnRegressor, LocalOutlierFactor, WeightFunction,
+    };
 
     pub use rustml_trees::{
         ClassWeight, DecisionTreeClassifier, DecisionTreeRegressor, MaxFeatures, SplitCriterion,
@@ -129,13 +131,16 @@ pub mod prelude {
         AdaBoostClassifier, AdaBoostRegressor, BaggingClassifier, BaggingRegressor,
         BoostingType, CalibratedClassifierCV, CalibrationMethod, ExtraTreesClassifier,
         ExtraTreesRegressor, GradientBoostingClassifier, GradientBoostingRegressor,
-        HistGradientBoostingClassifier, HistGradientBoostingRegressor, LgbmClassWeight,
-        LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor, RandomForestClassifier,
-        RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier,
-        VotingRegressor,
+        HistGradientBoostingClassifier, HistGradientBoostingRegressor, IsolationForest,
+        LgbmClassWeight, LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor,
+        RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor,
+        VotingClassifier, VotingRegressor,
     };
 
-    pub use rustml_cluster::{Dbscan, KMeans, MiniBatchKMeans};
+    pub use rustml_cluster::{
+        AgglomerativeClustering, CovarianceType, Dbscan, GaussianMixture, KMeans, Linkage,
+        MiniBatchKMeans,
+    };
 
     pub use rustml_naive_bayes::{BernoulliNB, GaussianNB, MultinomialNB};
 

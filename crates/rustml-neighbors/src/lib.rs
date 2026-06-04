@@ -36,7 +36,9 @@ pub mod distance;
 pub mod kdtree;
 pub mod knn_classifier;
 pub mod knn_regressor;
+pub mod lof;
 
 pub use distance::DistanceMetric;
 pub use knn_classifier::{FittedKnnClassifier, KnnClassifier, WeightFunction};
 pub use knn_regressor::{FittedKnnRegressor, KnnRegressor};
+pub use lof::{FittedLocalOutlierFactor, LocalOutlierFactor};

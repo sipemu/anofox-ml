@@ -51,6 +51,7 @@ pub mod extra_trees_classifier;
 pub mod extra_trees_regressor;
 pub mod gradient_boosting_classifier;
 pub mod hist_gradient_boosting;
+pub mod isolation_forest;
 pub mod lgbm;
 pub mod gradient_boosting_regressor;
 pub mod random_forest_classifier;
@@ -76,6 +77,7 @@ pub use hist_gradient_boosting::{
     FittedHistGradientBoostingClassifier, FittedHistGradientBoostingRegressor,
     HistGradientBoostingClassifier, HistGradientBoostingRegressor,
 };
+pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{
     BoostingType, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassWeight, LgbmClassifier,
     LgbmFitOptions, LgbmObjective, LgbmRegressor,

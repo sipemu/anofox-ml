@@ -13,6 +13,7 @@ rust-version = "1.70"
 
 [dependencies]
 rustml-core = { path = "../rustml-core" }
+faer = "0.23"
 ndarray = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
