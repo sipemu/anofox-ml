@@ -10,7 +10,7 @@
 use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
-use rustml_core::{Fit, Predict, Result, RustMlError};
+use rustml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use rustml_svm::SvmKernel;
 
 /// Kernel ridge regression estimator.
@@ -110,6 +110,79 @@ impl Fit<f64> for KernelRidge {
     }
 }
 
+impl FitWeighted<f64> for KernelRidge {
+    type Fitted = FittedKernelRidge;
+
+    fn fit_weighted(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
+    ) -> Result<Self::Fitted> {
+        if x.nrows() != y.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "X has {} rows but y has {} elements", x.nrows(), y.len()
+            )));
+        }
+        if x.is_empty() {
+            return Err(RustMlError::EmptyInput("training data is empty".into()));
+        }
+        if self.alpha < 0.0 {
+            return Err(RustMlError::InvalidParameter("alpha must be non-negative".into()));
+        }
+        if let Some(w) = sample_weight {
+            if w.len() != y.len() {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "sample_weight len {} != y len {}", w.len(), y.len()
+                )));
+            }
+            for &wi in w.iter() {
+                if !wi.is_finite() || wi < 0.0 {
+                    return Err(RustMlError::InvalidParameter(
+                        "sample_weight must be non-negative finite".into(),
+                    ));
+                }
+            }
+        }
+
+        let n = x.nrows();
+        let mut k = build_gram(x, x, &self.kernel);
+        // sklearn KernelRidge with sample_weight w solves (K W + α I) α = W y.
+        // Use the symmetric reformulation: K' = √W K √W, y' = √W y, then
+        // solve (K' + α I) α' = y' and back-transform α_dual = √W α'.
+        if let Some(w) = sample_weight {
+            let sqrtw: Vec<f64> = w.iter().map(|v| v.sqrt()).collect();
+            for i in 0..n {
+                for j in 0..n {
+                    k[[i, j]] *= sqrtw[i] * sqrtw[j];
+                }
+            }
+        }
+        for i in 0..n {
+            k[[i, i]] += self.alpha;
+        }
+        let k_mat = Mat::from_fn(n, n, |i, j| k[[i, j]]);
+        let llt = faer::linalg::solvers::Llt::new(k_mat.as_ref(), Side::Lower)
+            .map_err(|e| RustMlError::InvalidParameter(format!("Cholesky failed: {e:?}")))?;
+        let rhs: Vec<f64> = match sample_weight {
+            Some(w) => (0..n).map(|i| w[i].sqrt() * y[i]).collect(),
+            None => y.iter().copied().collect(),
+        };
+        let y_mat = Mat::from_fn(n, 1, |i, _| rhs[i]);
+        let sol = llt.solve(&y_mat);
+        let dual = match sample_weight {
+            Some(w) => Array1::from_vec((0..n).map(|i| w[i].sqrt() * sol[(i, 0)]).collect()),
+            None => Array1::from_vec((0..n).map(|i| sol[(i, 0)]).collect()),
+        };
+
+        Ok(FittedKernelRidge {
+            x_train: x.clone(),
+            dual_coef: dual,
+            kernel: self.kernel.clone(),
+        })
+    }
+}
+
 impl Predict<f64> for FittedKernelRidge {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.x_train.ncols() {
@@ -171,5 +244,38 @@ mod tests {
         let x = array![[1.0]];
         let y = array![1.0];
         assert!(KernelRidge::new().with_alpha(-1.0).fit(&x, &y).is_err());
+    }
+
+    use rustml_core::FitWeighted;
+
+    #[test]
+    fn test_kernel_ridge_uniform_weights_match_unweighted() {
+        let x = array![[0.0, 1.0], [1.0, 0.0], [1.0, 1.0], [2.0, 3.0]];
+        let y = array![1.0, 2.0, 3.0, 4.0];
+        let kr = KernelRidge::new()
+            .with_alpha(0.5)
+            .with_kernel(SvmKernel::Rbf { gamma: 0.5 });
+        let unw = kr.fit(&x, &y).unwrap();
+        let ones = Array1::<f64>::ones(4);
+        let w = kr.fit_weighted(&x, &y, Some(&ones)).unwrap();
+        // Under uniform weights and the √W α' substitution, dual_coef should
+        // match unweighted exactly (weights of 1 cancel out).
+        for i in 0..4 {
+            assert_abs_diff_eq!(unw.dual_coef[i], w.dual_coef[i], epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_kernel_ridge_high_weight_dominates() {
+        // 5 noisy points + 1 high-weight anchor; the fit must hug the anchor.
+        let x = array![[0.0], [1.0], [2.0], [3.0], [4.0], [10.0]];
+        let y = array![0.0, 0.5, 0.5, 0.0, 0.0, 100.0];
+        let kr = KernelRidge::new()
+            .with_alpha(1e-3)
+            .with_kernel(SvmKernel::Rbf { gamma: 0.5 });
+        let w = array![1.0, 1.0, 1.0, 1.0, 1.0, 1e6];
+        let fitted = kr.fit_weighted(&x, &y, Some(&w)).unwrap();
+        let p = fitted.predict(&array![[10.0]]).unwrap();
+        assert!((p[0] - 100.0).abs() < 1.0, "high-weight anchor pred={}", p[0]);
     }
 }

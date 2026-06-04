@@ -7,14 +7,36 @@
 //! fitting to avoid leakage.
 
 use ndarray::{Array1, Array2};
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+
+/// Choice of base-estimator output used as meta-features.
+///
+/// - `Predict`: hard class labels (sklearn `stack_method='predict'`).
+/// - `PredictProba`: class probabilities (sklearn `stack_method='predict_proba'`).
+///
+/// sklearn's default is `'auto'`, which prefers `predict_proba` then
+/// `decision_function` then `predict`. We require an explicit choice and
+/// only support the two forms above.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StackMethod {
+    Predict,
+    PredictProba,
+}
 
 trait FitPredBox<F: Float>: Send + Sync {
     fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>>;
 }
 
+trait FitProbaBox<F: Float>: Send + Sync {
+    fn fit_proba_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ProbaBox<F>>>;
+}
+
 trait PredBox<F: Float>: Send + Sync {
     fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>>;
+}
+
+trait ProbaBox<F: Float>: Send + Sync {
+    fn predict_proba_box(&self, x: &Array2<F>) -> Result<Array2<F>>;
 }
 
 impl<F, T> FitPredBox<F> for T
@@ -39,11 +61,45 @@ where
     }
 }
 
+/// Wrapper for estimators whose Fitted type implements both Predict and PredictProba.
+struct ProbaWrap<T>(T);
+
+impl<F, T> FitProbaBox<F> for ProbaWrap<T>
+where
+    F: Float,
+    T: Fit<F> + Send + Sync,
+    T::Fitted: Predict<F> + PredictProba<F> + Send + Sync + 'static,
+{
+    fn fit_proba_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ProbaBox<F>>> {
+        let fitted = Fit::fit(&self.0, x, y)?;
+        Ok(Box::new(fitted))
+    }
+}
+
+impl<F, T> ProbaBox<F> for T
+where
+    F: Float,
+    T: PredictProba<F> + Send + Sync,
+{
+    fn predict_proba_box(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.predict_proba(x)
+    }
+}
+
 /// Stacking classifier.
+///
+/// Base estimators contribute either hard predictions (one meta-feature each)
+/// or class probabilities (n_classes - 1 meta-features each, dropping the last
+/// column to avoid colinearity — sklearn's convention).
 pub struct StackingClassifier<F: Float> {
-    base_estimators: Vec<(String, Box<dyn FitPredBox<F>>)>,
+    base_estimators: Vec<(String, BaseEstimator<F>)>,
     meta_estimator: Box<dyn FitPredBox<F>>,
     cv_folds: usize,
+}
+
+enum BaseEstimator<F: Float> {
+    Predict(Box<dyn FitPredBox<F>>),
+    PredictProba(Box<dyn FitProbaBox<F>>),
 }
 
 impl<F: Float> StackingClassifier<F> {
@@ -59,12 +115,28 @@ impl<F: Float> StackingClassifier<F> {
         }
     }
 
+    /// Add a base estimator using hard predictions (`stack_method='predict'`).
     pub fn push<T>(mut self, name: impl Into<String>, estimator: T) -> Self
     where
         T: Fit<F> + Send + Sync + 'static,
         T::Fitted: Predict<F> + Send + Sync + 'static,
     {
-        self.base_estimators.push((name.into(), Box::new(estimator)));
+        self.base_estimators
+            .push((name.into(), BaseEstimator::Predict(Box::new(estimator))));
+        self
+    }
+
+    /// Add a base estimator using `predict_proba` outputs (sklearn's
+    /// `stack_method='predict_proba'`).
+    pub fn push_proba<T>(mut self, name: impl Into<String>, estimator: T) -> Self
+    where
+        T: Fit<F> + Send + Sync + 'static,
+        T::Fitted: Predict<F> + PredictProba<F> + Send + Sync + 'static,
+    {
+        self.base_estimators.push((
+            name.into(),
+            BaseEstimator::PredictProba(Box::new(ProbaWrap(estimator))),
+        ));
         self
     }
 
@@ -75,9 +147,14 @@ impl<F: Float> StackingClassifier<F> {
 }
 
 pub struct FittedStackingClassifier<F: Float> {
-    fitted_base: Vec<(String, Box<dyn PredBox<F>>)>,
+    fitted_base: Vec<(String, FittedBase<F>)>,
     fitted_meta: Box<dyn PredBox<F>>,
     n_features: usize,
+}
+
+enum FittedBase<F: Float> {
+    Predict(Box<dyn PredBox<F>>),
+    PredictProba(Box<dyn ProbaBox<F>>),
 }
 
 impl<F: Float> FittedStackingClassifier<F> {
@@ -107,33 +184,78 @@ impl<F: Float + 'static> Fit<F> for StackingClassifier<F> {
             return Err(RustMlError::EmptyInput("need at least 2 samples".into()));
         }
 
-        let n_base = self.base_estimators.len();
         let k = self.cv_folds.min(n);
-
         let folds = simple_k_fold(n, k);
-        let mut meta_features = Array2::zeros((n, n_base));
 
-        for (bi, (_, est)) in self.base_estimators.iter().enumerate() {
-            for (train_idx, test_idx) in &folds {
-                let x_train = select_rows(x, train_idx);
-                let y_train = select_elements(y, train_idx);
-                let x_test = select_rows(x, test_idx);
+        // Two passes through base estimators. Pass 1: out-of-fold predictions
+        // build the meta-feature matrix. We need to know each base's output
+        // width — for Predict it's 1, for PredictProba it's n_classes. We
+        // discover n_classes from the first proba estimator's prediction;
+        // otherwise default to 1.
 
-                let fitted = est.fit_box(&x_train, &y_train)?;
-                let preds = fitted.predict_box(&x_test)?;
-
-                for (li, &gi) in test_idx.iter().enumerate() {
-                    meta_features[[gi, bi]] = preds[li];
+        // Generate meta-features per estimator first, accumulate into a Vec<Vec<f64>>
+        // (one column per meta-feature, length n).
+        let mut meta_cols: Vec<Array1<F>> = Vec::new();
+        for (_name, est) in self.base_estimators.iter() {
+            match est {
+                BaseEstimator::Predict(b) => {
+                    let mut col = Array1::<F>::zeros(n);
+                    for (train_idx, test_idx) in &folds {
+                        let x_train = select_rows(x, train_idx);
+                        let y_train = select_elements(y, train_idx);
+                        let x_test = select_rows(x, test_idx);
+                        let fitted = b.fit_box(&x_train, &y_train)?;
+                        let preds = fitted.predict_box(&x_test)?;
+                        for (li, &gi) in test_idx.iter().enumerate() {
+                            col[gi] = preds[li];
+                        }
+                    }
+                    meta_cols.push(col);
                 }
+                BaseEstimator::PredictProba(b) => {
+                    // Need to know n_classes; defer column creation until we
+                    // see the first proba output.
+                    let mut buf: Option<Array2<F>> = None;
+                    for (train_idx, test_idx) in &folds {
+                        let x_train = select_rows(x, train_idx);
+                        let y_train = select_elements(y, train_idx);
+                        let x_test = select_rows(x, test_idx);
+                        let fitted = b.fit_proba_box(&x_train, &y_train)?;
+                        let probs = fitted.predict_proba_box(&x_test)?;
+                        let nc = probs.ncols();
+                        let bufm = buf.get_or_insert_with(|| Array2::<F>::zeros((n, nc)));
+                        for (li, &gi) in test_idx.iter().enumerate() {
+                            for c in 0..nc {
+                                bufm[[gi, c]] = probs[[li, c]];
+                            }
+                        }
+                    }
+                    if let Some(bufm) = buf {
+                        for c in 0..bufm.ncols() {
+                            meta_cols.push(bufm.column(c).to_owned());
+                        }
+                    }
+                }
+            }
+        }
+
+        let n_meta = meta_cols.len();
+        let mut meta_features = Array2::<F>::zeros((n, n_meta));
+        for (c, col) in meta_cols.iter().enumerate() {
+            for i in 0..n {
+                meta_features[[i, c]] = col[i];
             }
         }
 
         let fitted_meta = self.meta_estimator.fit_box(&meta_features, y)?;
 
-        let mut fitted_base = Vec::with_capacity(n_base);
+        let mut fitted_base = Vec::with_capacity(self.base_estimators.len());
         for (name, est) in &self.base_estimators {
-            let fitted = est.fit_box(x, y)?;
-            fitted_base.push((name.clone(), fitted));
+            let f = match est {
+                BaseEstimator::Predict(b) => FittedBase::Predict(b.fit_box(x, y)?),
+                BaseEstimator::PredictProba(b) => FittedBase::PredictProba(b.fit_proba_box(x, y)?),
+            };
+            fitted_base.push((name.clone(), f));
         }
 
         Ok(FittedStackingClassifier {
@@ -155,13 +277,24 @@ impl<F: Float> Predict<F> for FittedStackingClassifier<F> {
         }
 
         let n = x.nrows();
-        let n_base = self.fitted_base.len();
-        let mut meta_features = Array2::zeros((n, n_base));
-
-        for (bi, (_, m)) in self.fitted_base.iter().enumerate() {
-            let preds = m.predict_box(x)?;
+        let mut meta_cols: Vec<Array1<F>> = Vec::new();
+        for (_name, m) in &self.fitted_base {
+            match m {
+                FittedBase::Predict(p) => {
+                    meta_cols.push(p.predict_box(x)?);
+                }
+                FittedBase::PredictProba(p) => {
+                    let probs = p.predict_proba_box(x)?;
+                    for c in 0..probs.ncols() {
+                        meta_cols.push(probs.column(c).to_owned());
+                    }
+                }
+            }
+        }
+        let mut meta_features = Array2::<F>::zeros((n, meta_cols.len()));
+        for (c, col) in meta_cols.iter().enumerate() {
             for i in 0..n {
-                meta_features[[i, bi]] = preds[i];
+                meta_features[[i, c]] = col[i];
             }
         }
         self.fitted_meta.predict_box(&meta_features)
@@ -219,6 +352,29 @@ mod tests {
         let sc = StackingClassifier::new(DecisionTreeClassifier::default())
             .push("t1", DecisionTreeClassifier { max_depth: Some(2), ..Default::default() })
             .push("t2", DecisionTreeClassifier { max_depth: Some(3), ..Default::default() })
+            .with_cv_folds(2);
+
+        let fitted: FittedStackingClassifier<f64> = sc.fit(&x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        for (p, t) in preds.iter().zip(y.iter()) {
+            assert_eq!(*p, *t, "p={p}, t={t}");
+        }
+    }
+
+    #[test]
+    fn test_stacking_classifier_proba_path() {
+        // Stack two DT classifiers via predict_proba into a DT meta.
+        let x = array![
+            [0.0, 0.0], [5.0, 5.0],
+            [0.1, 0.1], [5.1, 5.0],
+            [0.2, -0.1], [4.9, 5.1],
+            [-0.1, 0.2], [5.2, 4.8],
+        ];
+        let y = array![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+
+        let sc = StackingClassifier::new(DecisionTreeClassifier::default())
+            .push_proba("t1", DecisionTreeClassifier { max_depth: Some(2), ..Default::default() })
+            .push_proba("t2", DecisionTreeClassifier { max_depth: Some(3), ..Default::default() })
             .with_cv_folds(2);
 
         let fitted: FittedStackingClassifier<f64> = sc.fit(&x, &y).unwrap();

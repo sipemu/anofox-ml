@@ -28,3 +28,10 @@ true labels and require `ARI ≥ sklearn_ARI − 0.05`.
 - No `distance_threshold` mode — `n_clusters` only.
 - No `connectivity` constraint graph.
 - No `compute_full_tree` / `children_` / `distances_` output.
+
+## Complexity
+
+- Time: **O(n³)** (naive Lance-Williams)
+- Memory: **O(n²)** (dense pairwise distances)
+- nn-chain algorithm would drop time to O(n²) for Ward — pending.
+- Hard ceiling: ~5,000 samples before OOM/wall-clock becomes painful.

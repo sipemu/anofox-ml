@@ -8,6 +8,7 @@ use ndarray::{Array1, Array2, Axis};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rayon::prelude::*;
 
 use crate::error::Result;
 use crate::traits::Predict;
@@ -37,8 +38,8 @@ pub fn permutation_importance<M, S>(
     score_fn: S,
 ) -> Result<PermutationImportance>
 where
-    M: Predict<f64>,
-    S: Fn(&Array1<f64>, &Array1<f64>) -> f64,
+    M: Predict<f64> + Sync,
+    S: Fn(&Array1<f64>, &Array1<f64>) -> f64 + Sync,
 {
     let n_features = x.ncols();
     let n_samples = x.nrows();
@@ -46,24 +47,32 @@ where
     let baseline_pred = model.predict(x)?;
     let baseline_score = score_fn(y, &baseline_pred);
 
-    let mut importances = Array2::<f64>::zeros((n_features, n_repeats));
-    let mut rng = StdRng::seed_from_u64(seed);
-
-    for j in 0..n_features {
-        for r in 0..n_repeats {
-            let mut x_perm = x.clone();
-            let mut idx: Vec<usize> = (0..n_samples).collect();
-            idx.shuffle(&mut rng);
-
-            // Save original column, write permuted column in-place.
+    // Each feature's repeats are independent — par_iter over features. Each
+    // gets a derived per-feature seed so the result is deterministic.
+    let per_feature: Vec<Vec<f64>> = (0..n_features)
+        .into_par_iter()
+        .map(|j| -> Result<Vec<f64>> {
+            let mut sub_rng = StdRng::seed_from_u64(seed.wrapping_add((j as u64).wrapping_mul(0x9E3779B97F4A7C15)));
             let original_col: Vec<f64> = x.column(j).iter().copied().collect();
-            for (i, &p) in idx.iter().enumerate() {
-                x_perm[[i, j]] = original_col[p];
+            let mut out = Vec::with_capacity(n_repeats);
+            for _ in 0..n_repeats {
+                let mut x_perm = x.clone();
+                let mut idx: Vec<usize> = (0..n_samples).collect();
+                idx.shuffle(&mut sub_rng);
+                for (i, &p) in idx.iter().enumerate() {
+                    x_perm[[i, j]] = original_col[p];
+                }
+                let perm_pred = model.predict(&x_perm)?;
+                out.push(baseline_score - score_fn(y, &perm_pred));
             }
+            Ok(out)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-            let perm_pred = model.predict(&x_perm)?;
-            let perm_score = score_fn(y, &perm_pred);
-            importances[[j, r]] = baseline_score - perm_score;
+    let mut importances = Array2::<f64>::zeros((n_features, n_repeats));
+    for (j, row) in per_feature.iter().enumerate() {
+        for r in 0..n_repeats {
+            importances[[j, r]] = row[r];
         }
     }
 

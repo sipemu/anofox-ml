@@ -2,7 +2,7 @@ use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use rustml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 
 /// Gradient boosting classifier parameters (unfitted state).
@@ -798,5 +798,11 @@ mod tests {
             correct_normal >= correct_tiny,
             "normal lr ({correct_normal} correct) should be >= tiny lr ({correct_tiny} correct)"
         );
+    }
+}
+
+impl<F: Float> PredictProba<F> for FittedGradientBoostingClassifier<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Self::predict_proba(self, x)
     }
 }

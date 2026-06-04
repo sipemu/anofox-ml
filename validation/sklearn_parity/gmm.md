@@ -26,3 +26,10 @@ Index against the true labels (`ARI ≥ sklearn_ARI − 0.05`).
 - Covariance types `tied` and `spherical` not implemented.
 - Single initialization (no `n_init`).
 - No `score_samples` / `predict_proba` public API.
+
+## Complexity
+
+- `fit`: O(max_iter · n · k · d²) for full covariance; O(max_iter · n · k · d) for diagonal.
+- E-step does a single pass per iteration (log-likelihood accumulates from the same log-sum-exp values used for responsibilities).
+- `predict_proba`: O(n_test · k · d²) (full) or O(n_test · k · d) (diag).
+- Memory: O(n · k) for responsibility matrix during fit; not retained.

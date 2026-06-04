@@ -30,3 +30,11 @@ sklearn to `1e-6`, posterior std to `1e-4`.
 - Kernel hyperparameter learning (log marginal likelihood + L-BFGS).
 - Composable kernels (Matern, RationalQuadratic, sums, products, WhiteKernel).
 - Multi-output GP.
+
+## Complexity
+
+- `fit`: O(n³) Cholesky on the n×n kernel matrix.
+- `predict` mean: O(n_train · n_test) for the kernel matrix + O(n_train · n_test) for the dot product.
+- `predict_std`: additional O(n_train² · n_test) for the per-query forward solve. Could be reduced to O(n_train · n_test) by precomputing `L⁻¹ K_train_test`.
+- Memory: O(n²) for the Cholesky factor.
+- Hard ceiling: ~5,000 samples before n³ wall-clock dominates.

@@ -34,3 +34,10 @@ agree on *which* features are relevant (|coef| < 0.1 for true-zero features,
 - No `return_std` on `predict`.
 - Inverse of `S = (αX'X + diag(λ))` is computed via column-by-column
   Cholesky solves rather than a single SVD-based inverse.
+
+## Complexity
+
+- `fit`: O(d³) one-time eigendecomposition + O(d²) per EM iteration (no per-iter inverse).
+- `predict`: O(d · n_test).
+- `predict_std`: O(d² · n_test) for the per-query projection through `V diag(1/(αs+λ)) Vᵀ`.
+- Memory: O(d²) for eigenvectors.

@@ -314,17 +314,6 @@ impl Fit<f64> for LassoLarsIC {
         let max_k = self.max_features.unwrap_or(d).min(d).min(x.nrows());
 
         let mut best: Option<FittedLassoLarsIC> = None;
-        // Pick noise variance from a max-features fit (used by sklearn for
-        // AIC/BIC normalisation under known-σ regime).
-        let full = Lars { n_nonzero_coefs: max_k, fit_intercept: self.fit_intercept, lasso: true }
-            .fit(x, y)?;
-        let preds_full = full.predict(x)?;
-        let mut sigma2 = 0.0_f64;
-        for (p, t) in preds_full.iter().zip(y.iter()) {
-            sigma2 += (t - p).powi(2);
-        }
-        sigma2 /= n.max(1.0);
-        let sigma2 = sigma2.max(1e-12);
 
         for k in 1..=max_k {
             let lars = Lars {
@@ -344,9 +333,16 @@ impl Fit<f64> for LassoLarsIC {
                 .iter()
                 .filter(|v| v.abs() > 1e-12)
                 .count() as f64;
+            // sklearn's formula (matching `linear_model.LassoLarsIC.criterion_`):
+            //   AIC = n * log(rss / n) + 2 * df
+            //   BIC = n * log(rss / n) + log(n) * df
+            // We follow that exactly. (Older sklearn used the rss/σ²
+            // formulation under a fixed-noise assumption; the modern path
+            // uses log-likelihood up to additive constants.)
+            let log_rss = (rss / n.max(1.0)).max(1e-300).ln();
             let crit = match self.criterion {
-                IcCriterion::Aic => rss / sigma2 + 2.0 * nnz,
-                IcCriterion::Bic => rss / sigma2 + n.ln() * nnz,
+                IcCriterion::Aic => n * log_rss + 2.0 * nnz,
+                IcCriterion::Bic => n * log_rss + n.ln() * nnz,
             };
             let nnz_int = nnz as usize;
             let candidate = FittedLassoLarsIC {

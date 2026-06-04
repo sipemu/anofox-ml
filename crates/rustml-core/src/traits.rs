@@ -44,3 +44,19 @@ pub trait InverseTransform<F: Float> {
 pub trait PredictProba<F: Float> {
     fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>>;
 }
+
+/// Supervised fit with optional per-sample weights.
+///
+/// Mirrors sklearn's `fit(X, y, sample_weight=...)`. Estimators that support
+/// importance-weighted training implement this in addition to (or instead of)
+/// the unweighted [`Fit`] trait. When `sample_weight` is `None`, the result
+/// should be identical to `Fit::fit(x, y)`.
+pub trait FitWeighted<F: Float> {
+    type Fitted;
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted>;
+}

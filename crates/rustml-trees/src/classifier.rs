@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2};
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 
 use crate::node::TreeNode;
 use crate::split::{
@@ -235,6 +235,13 @@ impl<F: Float> FittedDecisionTreeClassifier<F> {
     /// Number of features expected at prediction time.
     pub fn n_features(&self) -> usize {
         self.n_features
+    }
+}
+
+impl<F: Float> PredictProba<F> for FittedDecisionTreeClassifier<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        // Delegate to the inherent method.
+        Self::predict_proba(self, x)
     }
 }
 

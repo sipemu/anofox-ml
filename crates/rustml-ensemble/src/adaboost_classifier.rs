@@ -3,7 +3,7 @@ use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use rustml_trees::{DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion};
 
 /// AdaBoost classifier parameters (unfitted state).
@@ -673,5 +673,11 @@ mod tests {
         let ada = AdaBoostClassifier::default();
         let result: std::result::Result<FittedAdaBoostClassifier<f64>, _> = ada.fit(&x, &y);
         assert!(result.is_err());
+    }
+}
+
+impl<F: Float> PredictProba<F> for FittedAdaBoostClassifier<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Self::predict_proba(self, x)
     }
 }

@@ -9,7 +9,7 @@
 use faer::linalg::solvers::Svd;
 use faer::Mat;
 use ndarray::{Array1, Array2};
-use rustml_core::{FitUnsupervised, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
 
 #[derive(Debug, Clone)]
 pub struct TruncatedSvd {
@@ -101,6 +101,22 @@ impl Transform<f64> for FittedTruncatedSvd {
     }
 }
 
+impl InverseTransform<f64> for FittedTruncatedSvd {
+    /// Reconstruct the original-space representation from the projection
+    /// `transform(X) = X V_k`. The inverse mapping is `T @ V_kᵀ`, valid up to
+    /// the rank-`k` approximation error.
+    fn inverse_transform(&self, t: &Array2<f64>) -> Result<Array2<f64>> {
+        if t.ncols() != self.components.ncols() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} components, got {}",
+                self.components.ncols(),
+                t.ncols()
+            )));
+        }
+        Ok(t.dot(&self.components.t()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +130,20 @@ mod tests {
         assert_eq!(t.shape(), &[4, 2]);
         // First singular value should be much larger than second.
         assert!(svd.singular_values[0] > svd.singular_values[1]);
+    }
+
+    #[test]
+    fn test_inverse_transform_reconstructs_full_rank() {
+        let x = array![[1.0_f64, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [2.0, 3.0, 5.0]];
+        // Keep all components → inverse should reconstruct exactly.
+        let svd = TruncatedSvd::new(3).fit(&x).unwrap();
+        let t = svd.transform(&x).unwrap();
+        let back = svd.inverse_transform(&t).unwrap();
+        for ((i, j), &v) in x.indexed_iter() {
+            assert!(
+                (back[[i, j]] - v).abs() < 1e-9,
+                "[{},{}]: {} vs {}", i, j, back[[i, j]], v
+            );
+        }
     }
 }

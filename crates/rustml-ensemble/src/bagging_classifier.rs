@@ -2,7 +2,7 @@ use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use rustml_trees::{DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion};
 
 /// Bagging (Bootstrap Aggregating) classifier parameters (unfitted state).
@@ -558,5 +558,11 @@ mod tests {
         assert!(bc.max_depth.is_none());
         assert!(bc.max_samples.is_none());
         assert_eq!(bc.seed, 0);
+    }
+}
+
+impl<F: Float> PredictProba<F> for FittedBaggingClassifier<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Self::predict_proba(self, x)
     }
 }

@@ -35,3 +35,10 @@ sklearn's number.
   data isn't supported — sklearn's LOF only supports it in novelty mode).
 - LOF uses brute-force pairwise distances (O(n²)); a KD-tree path for
   Euclidean distance would be a future optimisation.
+
+## Complexity
+
+- **IsolationForest** fit: O(n_trees · subsample · log(subsample)). Trees are built in parallel via rayon.
+- **IsolationForest** predict: O(n_test · n_trees · log(subsample)). Per-row scoring is parallelised.
+- **LOF** fit: O(n² · d) (brute-force pairwise scan with a bounded heap). Memory O(n·k) for nearest-neighbour lists.
+- LOF KD-tree path would drop fit to O(n log n · d) — pending; the KNN crate already has the tree implementation.

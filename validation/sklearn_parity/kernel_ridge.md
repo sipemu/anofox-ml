@@ -38,3 +38,10 @@ closed-form solution agrees up to BLAS ordering).
 - Sigmoid, cosine, laplacian, chi-squared kernels not yet supported (the
   shared `SvmKernel` enum from `rustml-svm` only has linear / RBF / polynomial).
 - No sample-weight support.
+
+## Complexity
+
+- `fit`: O(n³) Cholesky + O(n² · d) Gram matrix.
+- `predict`: O(n_test · n_train · d) for the kernel matrix + O(n_test · n_train) for the dual product.
+- Memory: O(n²) Cholesky factor (kept in `FittedKernelRidge`).
+- Sample-weighted fit uses the `√W K √W` substitution; same asymptotic cost.

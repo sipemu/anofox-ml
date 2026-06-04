@@ -10,6 +10,7 @@ use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use rustml_core::{FitUnsupervised, Predict, Result, RustMlError};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -162,18 +163,18 @@ impl FittedIsolationForest {
     pub fn score_samples(&self, x: &Array2<f64>) -> Array1<f64> {
         let n = x.nrows();
         let c = c_factor(self.subsample_size);
-        let mut out = Array1::<f64>::zeros(n);
-        for i in 0..n {
-            let row = x.row(i).to_owned();
-            let mut total_depth = 0.0;
-            for t in &self.trees {
-                total_depth += path_length(t, &row);
-            }
-            let avg_h = total_depth / self.trees.len() as f64;
-            let anomaly = (-avg_h / c).exp2();  // 2^(-avg_h / c)
-            out[i] = -anomaly;  // higher = more normal
-        }
-        out
+        let n_trees = self.trees.len() as f64;
+        // Scoring is per-row independent; par_iter over rows.
+        let scores: Vec<f64> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let row = x.row(i).to_owned();
+                let total: f64 = self.trees.iter().map(|t| path_length(t, &row)).sum();
+                let avg_h = total / n_trees;
+                -(-avg_h / c).exp2()
+            })
+            .collect();
+        Array1::from_vec(scores)
     }
 }
 
@@ -187,17 +188,24 @@ impl FitUnsupervised<f64> for IsolationForest {
         let n = x.nrows();
         let subsample = self.max_samples.min(n);
         let max_depth = ((subsample as f64).log2().ceil() as usize).max(1);
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        let mut trees = Vec::with_capacity(self.n_estimators);
 
-        for _ in 0..self.n_estimators {
-            let mut idx: Vec<usize> = (0..n).collect();
-            idx.shuffle(&mut rng);
-            idx.truncate(subsample);
-            let mut nodes = Vec::new();
-            build_tree(x, &idx, 0, max_depth, &mut rng, &mut nodes);
-            trees.push(ITree { nodes, max_depth });
-        }
+        // Trees are independent; build in parallel. Each gets a deterministic
+        // per-tree seed derived from `self.seed` so results are reproducible.
+        let trees: Vec<ITree> = (0..self.n_estimators)
+            .into_par_iter()
+            .map(|t| {
+                let seed = self
+                    .seed
+                    .wrapping_add((t as u64).wrapping_mul(0x9E3779B97F4A7C15));
+                let mut rng = StdRng::seed_from_u64(seed);
+                let mut idx: Vec<usize> = (0..n).collect();
+                idx.shuffle(&mut rng);
+                idx.truncate(subsample);
+                let mut nodes = Vec::new();
+                build_tree(x, &idx, 0, max_depth, &mut rng, &mut nodes);
+                ITree { nodes, max_depth }
+            })
+            .collect();
 
         let mut fitted = FittedIsolationForest {
             trees,
