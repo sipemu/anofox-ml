@@ -47,11 +47,11 @@ pub use error::{Result, RustMlError};
 pub use float::Float;
 pub use feature_union::{FeatureUnion, FittedFeatureUnion};
 pub use function_transformer::FunctionTransformer;
-pub use halving::{halving_grid_search_cv, HalvingResult};
+pub use halving::{halving_grid_search_cv, halving_random_search_cv, HalvingResult};
 pub use inspection::{permutation_importance, PermutationImportance};
 pub use multi_output::{FittedMultiOutputRegressor, MultiOutputRegressor};
 pub use pipeline::{FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep};
-pub use traits::{Fit, FitUnsupervised, InverseTransform, Predict, Transform};
+pub use traits::{Fit, FitUnsupervised, InverseTransform, Predict, PredictProba, Transform};
 pub use utils::{
     cross_val_predict, cross_val_score, cross_val_score_stratified, cross_validate, grid_search_cv,
     group_k_fold, k_fold, learning_curve, leave_one_out, leave_p_out, randomized_search_cv,

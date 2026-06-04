@@ -40,7 +40,7 @@ impl Default for OrthogonalMatchingPursuit {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedOrthogonalMatchingPursuit {
     pub coef: Array1<f64>,
     pub intercept: f64,

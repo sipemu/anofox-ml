@@ -5,7 +5,7 @@
 //! all `λ_j = λ`; ARD has a per-feature `λ_j`. Hyperparameters are estimated
 //! by evidence (type-II) maximization.
 
-use faer::linalg::solvers::Solve;
+use faer::linalg::solvers::{SelfAdjointEigen, Solve};
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
 use rustml_core::{Fit, Predict, Result, RustMlError};
@@ -87,14 +87,59 @@ impl Default for BayesianRidge {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedBayesianRidge {
     pub coef: Array1<f64>,
     pub intercept: f64,
     pub alpha: f64,
     pub lambda: f64,
     pub n_iter: usize,
+    /// Eigenvectors of `XᵀX` (column-stored), needed for posterior variance.
+    eigvecs: Array2<f64>,
+    /// Eigenvalues of `XᵀX`.
+    eigvals: Array1<f64>,
+    /// Per-feature mean used for centering.
+    x_mean: Array1<f64>,
     n_features: usize,
+}
+
+impl FittedBayesianRidge {
+    /// Posterior predictive standard deviation per query point.
+    pub fn predict_std(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}", self.n_features, x.ncols()
+            )));
+        }
+        let n = x.nrows();
+        let d = self.n_features;
+        // Posterior covariance Σ = (α XᵀX + λ I)⁻¹ = V diag(1/(α s_i + λ)) Vᵀ.
+        // Variance at a centered query xq is xqᵀ Σ xq + 1/α (predictive variance).
+        let inv_var: Vec<f64> = (0..d)
+            .map(|i| 1.0 / (self.alpha * self.eigvals[i] + self.lambda).max(1e-12))
+            .collect();
+        let mut out = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let mut xq = vec![0.0; d];
+            for j in 0..d {
+                xq[j] = x[[i, j]] - self.x_mean[j];
+            }
+            let mut u = vec![0.0; d];
+            for c in 0..d {
+                let mut s = 0.0;
+                for j in 0..d {
+                    s += self.eigvecs[[j, c]] * xq[j];
+                }
+                u[c] = s;
+            }
+            let mut var = 1.0 / self.alpha.max(1e-12);
+            for c in 0..d {
+                var += u[c] * u[c] * inv_var[c];
+            }
+            out[i] = var.sqrt();
+        }
+        Ok(out)
+    }
 }
 
 impl Fit<f64> for BayesianRidge {
@@ -135,6 +180,25 @@ impl Fit<f64> for BayesianRidge {
             xty[j] = s;
         }
 
+        // Eigendecompose X'X once. With V Λ Vᵀ available, we get
+        // (αX'X + λI)⁻¹ = V diag(1/(α s_i + λ)) Vᵀ. That lets us compute μ
+        // and γ in O(d²) per iteration instead of O(d³).
+        let mat = Mat::<f64>::from_fn(d, d, |i, j| xtx[[i, j]]);
+        let eig = SelfAdjointEigen::new(mat.as_ref(), Side::Lower)
+            .map_err(|e| RustMlError::InvalidParameter(format!("eigen failed: {e:?}")))?;
+        let s_vec = eig.S();
+        let v_mat = eig.U();
+        let eigvals: Vec<f64> = (0..d).map(|i| s_vec.column_vector()[i]).collect();
+        // u = Vᵀ xty (length d).
+        let mut u = vec![0.0_f64; d];
+        for i in 0..d {
+            let mut s = 0.0;
+            for k in 0..d {
+                s += v_mat[(k, i)] * xty[k];
+            }
+            u[i] = s;
+        }
+
         // Initialize α, λ.
         let var_y = yc.iter().map(|v| v * v).sum::<f64>() / n.max(1.0);
         let mut alpha = 1.0 / var_y.max(1e-12);
@@ -146,26 +210,24 @@ impl Fit<f64> for BayesianRidge {
 
         for iter in 0..self.max_iter {
             n_iter = iter + 1;
-            // S^-1 = α X'X + λ I; μ = α S X'y
-            let mut s_inv = xtx.clone();
+            // μ in eigen basis: w_i = α u_i / (α s_i + λ); then β = V w.
+            let mut w = vec![0.0_f64; d];
             for i in 0..d {
-                for j in 0..d {
-                    s_inv[[i, j]] *= alpha;
+                w[i] = alpha * u[i] / (alpha * eigvals[i] + lambda).max(1e-12);
+            }
+            for j in 0..d {
+                let mut s = 0.0;
+                for i in 0..d {
+                    s += v_mat[(j, i)] * w[i];
                 }
-                s_inv[[i, i]] += lambda;
+                coef[j] = s;
             }
-            // Solve for μ from S^-1 μ = α X'y.
-            let rhs = xty.mapv(|v| alpha * v);
-            coef = solve_psd(&s_inv, &rhs)?;
 
-            // γ = sum λ_i / (λ_i + λ) where λ_i are eigenvalues of α X'X.
-            // We approximate γ via trace(S * α X'X) = d - λ tr(S).
-            let s = invert_psd(&s_inv)?;
-            let mut trace_s = 0.0;
+            // γ = Σ α s_i / (α s_i + λ) — exact, no inverse needed.
+            let mut gamma = 0.0_f64;
             for i in 0..d {
-                trace_s += s[[i, i]];
+                gamma += alpha * eigvals[i] / (alpha * eigvals[i] + lambda).max(1e-12);
             }
-            let gamma: f64 = (d as f64) - lambda * trace_s;
 
             // Update λ = (γ + 2λ₁) / (||μ||² + 2λ₂)
             let sq_coef: f64 = coef.iter().map(|v| v * v).sum();
@@ -196,12 +258,24 @@ impl Fit<f64> for BayesianRidge {
         }
 
         let intercept = y_mean - x_mean.dot(&coef);
+        // Capture eigendecomposition (currently in faer types) into ndarray.
+        let mut eigvecs = Array2::<f64>::zeros((d, d));
+        let mut eigvals_a = Array1::<f64>::zeros(d);
+        for i in 0..d {
+            eigvals_a[i] = eigvals[i];
+            for j in 0..d {
+                eigvecs[[j, i]] = v_mat[(j, i)];
+            }
+        }
         Ok(FittedBayesianRidge {
             coef,
             intercept,
             alpha,
             lambda,
             n_iter,
+            eigvecs,
+            eigvals: eigvals_a,
+            x_mean,
             n_features: d,
         })
     }
@@ -252,7 +326,7 @@ impl Default for ARDRegression {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedARDRegression {
     pub coef: Array1<f64>,
     pub intercept: f64,

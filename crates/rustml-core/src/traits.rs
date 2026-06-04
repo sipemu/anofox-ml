@@ -32,3 +32,15 @@ pub trait Transform<F: Float> {
 pub trait InverseTransform<F: Float> {
     fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>>;
 }
+
+/// Produce a probability distribution over classes (classifier) or a posterior
+/// uncertainty (regressor). Output shape is `(n_samples, n_outputs)` where
+/// `n_outputs` is the number of classes for classifiers or 1 for the
+/// regressor variants (which return std-dev). The columns sum to 1 for
+/// classifiers.
+///
+/// Mirrors sklearn's `predict_proba` (and partially `predict_std` for
+/// probabilistic regressors like Bayesian Ridge / Gaussian Process).
+pub trait PredictProba<F: Float> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>>;
+}

@@ -12,6 +12,7 @@ categories = ["science", "algorithms"]
 rust-version = "1.70"
 
 [dependencies]
+serde = { workspace = true }
 rustml-core = { path = "../rustml-core" }
 ndarray = { workspace = true }
 faer = "0.23"

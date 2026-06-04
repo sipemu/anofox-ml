@@ -22,7 +22,7 @@ impl TruncatedSvd {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedTruncatedSvd {
     /// Top-`k` right-singular vectors, shape (n_features, k).
     pub components: Array2<f64>,

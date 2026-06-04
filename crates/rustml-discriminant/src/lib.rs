@@ -7,10 +7,10 @@
 //!   function is linear in `x`.
 //! - **QDA** estimates a separate covariance Σ_k per class.
 
-use faer::linalg::solvers::Solve;
+use faer::linalg::solvers::{SelfAdjointEigen, Solve};
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
-use rustml_core::{Fit, Predict, Result, RustMlError};
+use rustml_core::{Fit, Predict, PredictProba, Result, RustMlError, Transform};
 
 /// Common helpers.
 fn class_indices(y: &Array1<f64>) -> (Vec<f64>, Vec<Vec<usize>>) {
@@ -109,13 +109,18 @@ impl Default for LinearDiscriminantAnalysis {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedLinearDiscriminantAnalysis {
     pub classes: Vec<f64>,
     pub means: Vec<Array1<f64>>,
     pub priors: Vec<f64>,
     pub coef: Vec<Array1<f64>>, // sigma_inv @ mu_k
     pub intercept: Vec<f64>,    // -0.5 * mu_k^T sigma_inv mu_k + log(pi_k)
+    /// Projection matrix for dimensionality reduction; columns are the
+    /// generalised eigenvectors of `Σ_b v = λ Σ_w v`. Shape (d, n_classes-1).
+    pub scalings: Array2<f64>,
+    /// Global feature mean (used to center before projecting).
+    pub xbar: Array1<f64>,
     pub n_features: usize,
 }
 
@@ -176,14 +181,106 @@ impl Fit<f64> for LinearDiscriminantAnalysis {
             intercept.push(-0.5 * q + pi.ln());
         }
 
+        // Build the LDA projection: solve the generalised eigenproblem
+        // Σ_b v = λ Σ_w v by Cholesky-whitening Σ_w.
+        let mut xbar = Array1::<f64>::zeros(d);
+        for (mu, g) in means.iter().zip(groups.iter()) {
+            let w = g.len() as f64 / n as f64;
+            for j in 0..d {
+                xbar[j] += w * mu[j];
+            }
+        }
+        let mut s_b = Array2::<f64>::zeros((d, d));
+        for (k_idx, mu) in means.iter().enumerate() {
+            let nk = groups[k_idx].len() as f64;
+            for a in 0..d {
+                for b in 0..d {
+                    s_b[[a, b]] += nk * (mu[a] - xbar[a]) * (mu[b] - xbar[b]);
+                }
+            }
+        }
+        // L Lᵀ = Σ_w; then symmetric matrix L⁻¹ Σ_b L⁻ᵀ.
+        let sw_mat = Mat::from_fn(d, d, |i, j| sigma[[i, j]]);
+        let llt = faer::linalg::solvers::Llt::new(sw_mat.as_ref(), Side::Lower)
+            .map_err(|e| RustMlError::InvalidParameter(format!("Σ_w Cholesky failed: {e:?}")))?;
+        // Solve L A = Σ_b for A (column-wise).
+        let sb_mat = Mat::from_fn(d, d, |i, j| s_b[[i, j]]);
+        let a_mat = llt.solve(&sb_mat);
+        // Then solve Lᵀ B = Aᵀ → B = (L⁻¹ Σ_b L⁻ᵀ) is symmetric.
+        // Equivalently: B = (L⁻¹ Σ_b)ᵀ first, then L⁻¹ on that.
+        let mut a_t = Mat::<f64>::zeros(d, d);
+        for i in 0..d {
+            for j in 0..d {
+                a_t[(i, j)] = a_mat[(j, i)];
+            }
+        }
+        let b_mat = llt.solve(&a_t);
+        // b_mat = L⁻¹ Σ_b L⁻ᵀ. Eigendecompose.
+        let eig = SelfAdjointEigen::new(b_mat.as_ref(), Side::Lower)
+            .map_err(|e| RustMlError::InvalidParameter(format!("eigen failed: {e:?}")))?;
+        let u = eig.U();
+        // Recover original-space eigenvectors V = L⁻ᵀ U; sklearn keeps the
+        // top n_classes-1 in descending eigenvalue order.
+        let n_proj = (classes.len() - 1).min(d);
+        let mut scalings = Array2::<f64>::zeros((d, n_proj));
+        for c in 0..n_proj {
+            let src = d - 1 - c;
+            let mut u_col = Mat::<f64>::zeros(d, 1);
+            for i in 0..d {
+                u_col[(i, 0)] = u[(i, src)];
+            }
+            // Solve Lᵀ v = u → v = L⁻ᵀ u; via two triangular solves on the
+            // same `llt`, we transpose-solve.
+            // faer's Llt::solve does L Lᵀ x = b, so we get the full inverse;
+            // for just Lᵀ x = u use an explicit back-sub on `lower.transpose()`.
+            let lower = llt.L();
+            // Lᵀ v = u; back-substitute from bottom.
+            let mut v = vec![0.0_f64; d];
+            for r in (0..d).rev() {
+                let mut s = u_col[(r, 0)];
+                for cc in (r + 1)..d {
+                    s -= lower[(cc, r)] * v[cc];
+                }
+                v[r] = s / lower[(r, r)].max(1e-12);
+            }
+            for r in 0..d {
+                scalings[[r, c]] = v[r];
+            }
+        }
+
         Ok(FittedLinearDiscriminantAnalysis {
             classes,
             means,
             priors,
             coef,
             intercept,
+            scalings,
+            xbar,
             n_features: d,
         })
+    }
+}
+
+impl Transform<f64> for FittedLinearDiscriminantAnalysis {
+    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}", self.n_features, x.ncols()
+            )));
+        }
+        let n = x.nrows();
+        let k = self.scalings.ncols();
+        let mut out = Array2::<f64>::zeros((n, k));
+        for i in 0..n {
+            for c in 0..k {
+                let mut s = 0.0;
+                for j in 0..self.n_features {
+                    s += (x[[i, j]] - self.xbar[j]) * self.scalings[[j, c]];
+                }
+                out[[i, c]] = s;
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -213,6 +310,39 @@ impl Predict<f64> for FittedLinearDiscriminantAnalysis {
     }
 }
 
+impl PredictProba<f64> for FittedLinearDiscriminantAnalysis {
+    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}", self.n_features, x.ncols()
+            )));
+        }
+        let n = x.nrows();
+        let k = self.classes.len();
+        let mut p = Array2::<f64>::zeros((n, k));
+        for i in 0..n {
+            let row = x.row(i);
+            let mut logits = vec![0.0_f64; k];
+            let mut max_l = f64::NEG_INFINITY;
+            for (c_i, (c, b)) in self.coef.iter().zip(self.intercept.iter()).enumerate() {
+                let s = row.dot(c) + b;
+                logits[c_i] = s;
+                if s > max_l { max_l = s; }
+            }
+            let mut z = 0.0;
+            for c_i in 0..k {
+                let e = (logits[c_i] - max_l).exp();
+                p[[i, c_i]] = e;
+                z += e;
+            }
+            for c_i in 0..k {
+                p[[i, c_i]] /= z;
+            }
+        }
+        Ok(p)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // QuadraticDiscriminantAnalysis (QDA)
 // ---------------------------------------------------------------------------
@@ -231,7 +361,7 @@ impl Default for QuadraticDiscriminantAnalysis {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedQuadraticDiscriminantAnalysis {
     pub classes: Vec<f64>,
     pub means: Vec<Array1<f64>>,
@@ -318,6 +448,45 @@ impl Predict<f64> for FittedQuadraticDiscriminantAnalysis {
     }
 }
 
+impl PredictProba<f64> for FittedQuadraticDiscriminantAnalysis {
+    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}", self.n_features, x.ncols()
+            )));
+        }
+        let n = x.nrows();
+        let k = self.classes.len();
+        let d = self.n_features;
+        let mut p = Array2::<f64>::zeros((n, k));
+        for i in 0..n {
+            let mut logits = vec![0.0_f64; k];
+            let mut max_l = f64::NEG_INFINITY;
+            for c_i in 0..k {
+                let mut diff = Array1::<f64>::zeros(d);
+                for j in 0..d {
+                    diff[j] = x[[i, j]] - self.means[c_i][j];
+                }
+                let s_inv_diff = solve_psd(&self.sigmas[c_i], &diff)?;
+                let m = diff.dot(&s_inv_diff);
+                let score = -0.5 * m - 0.5 * self.log_det[c_i] + self.priors[c_i].ln();
+                logits[c_i] = score;
+                if score > max_l { max_l = score; }
+            }
+            let mut z = 0.0;
+            for c_i in 0..k {
+                let e = (logits[c_i] - max_l).exp();
+                p[[i, c_i]] = e;
+                z += e;
+            }
+            for c_i in 0..k {
+                p[[i, c_i]] /= z;
+            }
+        }
+        Ok(p)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +504,33 @@ mod tests {
         for (p, t) in preds.iter().zip(y.iter()) {
             assert_eq!(*p, *t);
         }
+    }
+
+    #[test]
+    fn test_lda_transform_separates() {
+        // 3-class problem in 2D — projects to 2 dims (n_classes-1=2).
+        let x = array![
+            [0.0, 0.0], [0.5, 0.0], [0.0, 0.3],
+            [4.0, 0.0], [4.2, 0.1], [4.0, 0.3],
+            [0.0, 4.0], [0.1, 4.2], [-0.1, 4.0],
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let fitted = LinearDiscriminantAnalysis::new().fit(&x, &y).unwrap();
+        let t = fitted.transform(&x).unwrap();
+        assert_eq!(t.shape(), &[9, 2]);
+        // After projection, within-class points should be much closer than
+        // between-class.
+        let d_within: f64 = (0..3)
+            .map(|c| {
+                let base = 3 * c;
+                ((t[[base, 0]] - t[[base + 1, 0]]).powi(2)
+                    + (t[[base, 1]] - t[[base + 1, 1]]).powi(2)).sqrt()
+            })
+            .sum::<f64>() / 3.0;
+        let d_between: f64 = ((t[[0, 0]] - t[[3, 0]]).powi(2)
+            + (t[[0, 1]] - t[[3, 1]]).powi(2)).sqrt();
+        assert!(d_between > 5.0 * d_within,
+                "within={d_within}, between={d_between}");
     }
 
     #[test]

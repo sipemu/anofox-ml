@@ -31,7 +31,7 @@ impl Default for AffinityPropagation {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedAffinityPropagation {
     pub labels: Array1<f64>,
     pub cluster_centers_indices: Vec<usize>,
@@ -74,10 +74,13 @@ impl FitUnsupervised<f64> for AffinityPropagation {
         for i in 0..n {
             s[[i, i]] = pref;
         }
-        // Tie-breaking noise (sklearn does this).
+        // Tie-breaking noise. sklearn adds tiny deterministic positive noise
+        // to break degeneracy. We use a hash-style scrambler that's non-negative
+        // and stable across runs.
         for i in 0..n {
             for j in 0..n {
-                s[[i, j]] += 1e-12 * (i as f64 + 1.0) * (j as f64 + 1.0).cos();
+                let mix = ((i.wrapping_mul(2654435761) ^ j.wrapping_mul(40503)) & 0xFFFF) as f64;
+                s[[i, j]] += 1e-12 * (mix / 65536.0);
             }
         }
 

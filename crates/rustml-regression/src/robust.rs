@@ -106,7 +106,7 @@ impl Default for RansacRegressor {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedRansacRegressor {
     pub coef: Array1<f64>,
     pub intercept: f64,
@@ -255,7 +255,7 @@ impl Default for TheilSenRegressor {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedTheilSenRegressor {
     pub coef: Array1<f64>,
     pub intercept: f64,

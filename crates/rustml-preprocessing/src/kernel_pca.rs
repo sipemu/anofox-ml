@@ -9,7 +9,7 @@ use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
 use rustml_core::{FitUnsupervised, Result, RustMlError, Transform};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KpcaKernel {
     Linear,
     Rbf { gamma: f64 },
@@ -44,7 +44,7 @@ impl KernelPca {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedKernelPca {
     pub x_train: Array2<f64>,
     pub alphas: Array2<f64>,        // n_train × k

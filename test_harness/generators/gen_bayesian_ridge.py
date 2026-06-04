@@ -14,13 +14,15 @@ def generate():
     y = X @ np.array([1.5, -0.7, 0.0, 2.0]) + 0.1 * rng.standard_normal(n)
     m = BayesianRidge(max_iter=300, tol=1e-3, fit_intercept=True)
     m.fit(X, y)
+    pred, std = m.predict(X, return_std=True)
     cases.append({
         "name": "bayesian_ridge",
         "X": X.tolist(),
         "y": y.tolist(),
         "sklearn_coef": m.coef_.tolist(),
         "sklearn_intercept": float(m.intercept_),
-        "sklearn_predictions": m.predict(X).tolist(),
+        "sklearn_predictions": pred.tolist(),
+        "sklearn_std": std.tolist(),
     })
 
     # ARD: feature 1 and 2 are noise.

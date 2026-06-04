@@ -42,7 +42,7 @@ pub use glm::{BinomialRegressor, FittedBinomialRegressor, FittedPoissonRegressor
 pub use huber::{FittedHuberRegressor, HuberRegressor};
 pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor};
 pub use kernel_ridge::{FittedKernelRidge, KernelRidge};
-pub use lars::{FittedLars, Lars};
+pub use lars::{FittedLars, FittedLassoLarsIC, IcCriterion, Lars, LassoLarsIC};
 pub use lasso::{FittedLassoRegressor, LassoRegressor};
 pub use lasso_cv::{FittedLassoCrossValidated, LassoCrossValidated};
 pub use logistic::{FittedLogisticRegressor, LogisticRegressor};

@@ -28,7 +28,7 @@ impl AgglomerativeClustering {
     pub fn with_linkage(mut self, l: Linkage) -> Self { self.linkage = l; self }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedAgglomerativeClustering {
     pub labels: Array1<f64>,
     pub n_clusters: usize,

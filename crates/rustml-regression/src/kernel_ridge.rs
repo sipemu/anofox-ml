@@ -46,7 +46,7 @@ impl Default for KernelRidge {
 }
 
 /// Fitted kernel ridge regressor — stores the training set plus dual coefficients.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedKernelRidge {
     pub x_train: Array2<f64>,
     pub dual_coef: Array1<f64>,

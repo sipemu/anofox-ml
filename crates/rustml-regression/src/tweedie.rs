@@ -62,7 +62,8 @@ pub fn gamma_regressor() -> TweedieRegressor {
     TweedieRegressor::new(2.0)
 }
 
-/// Fitted Tweedie GLM regressor.
+/// Fitted Tweedie GLM regressor. Not yet serde-serialisable because the
+/// wrapped `anofox_regression::FittedTweedie` does not derive Serialize.
 #[derive(Debug, Clone)]
 pub struct FittedTweedieRegressor {
     inner: FittedTweedie,

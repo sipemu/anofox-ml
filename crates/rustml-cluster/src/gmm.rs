@@ -8,7 +8,7 @@ use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rustml_core::{FitUnsupervised, Predict, Result, RustMlError};
+use rustml_core::{FitUnsupervised, Predict, PredictProba, Result, RustMlError};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CovarianceType {
@@ -24,6 +24,8 @@ pub struct GaussianMixture {
     pub tol: f64,
     pub reg_covar: f64,
     pub seed: u64,
+    /// Number of independent random restarts (sklearn default 1).
+    pub n_init: usize,
 }
 
 impl GaussianMixture {
@@ -35,11 +37,13 @@ impl GaussianMixture {
             tol: 1e-3,
             reg_covar: 1e-6,
             seed: 0,
+            n_init: 1,
         }
     }
     pub fn with_covariance_type(mut self, c: CovarianceType) -> Self { self.covariance_type = c; self }
     pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
     pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_n_init(mut self, n: usize) -> Self { self.n_init = n.max(1); self }
 }
 
 #[derive(Debug, Clone)]
@@ -146,7 +150,7 @@ impl FitUnsupervised<f64> for GaussianMixture {
 
     fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
         let n = x.nrows();
-        let d = x.ncols();
+        let _d = x.ncols();
         let k = self.n_components;
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -155,12 +159,36 @@ impl FitUnsupervised<f64> for GaussianMixture {
             return Err(RustMlError::InvalidParameter("invalid n_components".into()));
         }
 
-        let mut rng = StdRng::seed_from_u64(self.seed);
+        // n_init restarts: pick the fit with highest log-likelihood.
+        let mut best: Option<FittedGaussianMixture> = None;
+        for restart in 0..self.n_init {
+            let fitted = single_fit(self, x, self.seed.wrapping_add(restart as u64))?;
+            match &best {
+                None => best = Some(fitted),
+                Some(b) if fitted.log_likelihood > b.log_likelihood => best = Some(fitted),
+                _ => {}
+            }
+        }
+        Ok(best.unwrap())
+    }
+}
+
+fn single_fit(
+    cfg: &GaussianMixture,
+    x: &Array2<f64>,
+    seed: u64,
+) -> Result<FittedGaussianMixture> {
+    let n = x.nrows();
+    let d = x.ncols();
+    let k = cfg.n_components;
+    {
+        // Original single-run body follows; minimally rewritten to take seed.
+        let mut rng = StdRng::seed_from_u64(seed);
         let mut means = kmeans_pp_init(x, k, &mut rng);
 
         // Init covariances: empirical full or diagonal.
         let mut covariances: Vec<Array2<f64>> = (0..k)
-            .map(|_| match self.covariance_type {
+            .map(|_| match cfg.covariance_type {
                 CovarianceType::Diag => Array2::<f64>::ones((1, d)),
                 CovarianceType::Full => Array2::<f64>::eye(d),
             })
@@ -172,9 +200,11 @@ impl FitUnsupervised<f64> for GaussianMixture {
         let mut log_resp = Array2::<f64>::zeros((n, k));
         let mut log_ll = f64::NEG_INFINITY;
 
-        for iter in 0..self.max_iter {
+        for iter in 0..cfg.max_iter {
             n_iter = iter + 1;
-            // E-step
+            // E-step: also accumulate log-likelihood from the same lse values
+            // we compute for responsibilities — no second pass.
+            let mut total_ll = 0.0_f64;
             for i in 0..n {
                 let xi = x.row(i).to_owned();
                 let mut logs = vec![0.0; k];
@@ -183,28 +213,14 @@ impl FitUnsupervised<f64> for GaussianMixture {
                     for j in 0..d {
                         diff[j] = xi[j] - means[[c, j]];
                     }
-                    logs[c] = weights[c].ln() + log_gauss(&diff, &covariances[c], self.covariance_type);
+                    logs[c] = weights[c].ln() + log_gauss(&diff, &covariances[c], cfg.covariance_type);
                 }
                 let lse = logsumexp(&logs);
+                total_ll += lse;
                 for c in 0..k {
                     log_resp[[i, c]] = logs[c] - lse;
                 }
             }
-            let total_ll: f64 = (0..n)
-                .map(|i| {
-                    let xi = x.row(i).to_owned();
-                    let logs: Vec<f64> = (0..k)
-                        .map(|c| {
-                            let mut diff = vec![0.0; d];
-                            for j in 0..d {
-                                diff[j] = xi[j] - means[[c, j]];
-                            }
-                            weights[c].ln() + log_gauss(&diff, &covariances[c], self.covariance_type)
-                        })
-                        .collect();
-                    logsumexp(&logs)
-                })
-                .sum();
             log_ll = total_ll / n as f64;
 
             // M-step
@@ -223,7 +239,7 @@ impl FitUnsupervised<f64> for GaussianMixture {
                     means[[c, j]] = s / nkc;
                 }
                 // Update covariance.
-                match self.covariance_type {
+                match cfg.covariance_type {
                     CovarianceType::Diag => {
                         let mut diag = Array2::<f64>::zeros((1, d));
                         for j in 0..d {
@@ -234,7 +250,7 @@ impl FitUnsupervised<f64> for GaussianMixture {
                                 let dv = x[[i, j]] - mu;
                                 s += r * dv * dv;
                             }
-                            diag[[0, j]] = s / nkc + self.reg_covar;
+                            diag[[0, j]] = s / nkc + cfg.reg_covar;
                         }
                         covariances[c] = diag;
                     }
@@ -251,14 +267,14 @@ impl FitUnsupervised<f64> for GaussianMixture {
                                 }
                                 sigma[[a, b]] = s / nkc;
                             }
-                            sigma[[a, a]] += self.reg_covar;
+                            sigma[[a, a]] += cfg.reg_covar;
                         }
                         covariances[c] = sigma;
                     }
                 }
             }
 
-            if (log_ll - prev_ll).abs() < self.tol {
+            if (log_ll - prev_ll).abs() < cfg.tol {
                 break;
             }
             prev_ll = log_ll;
@@ -270,7 +286,7 @@ impl FitUnsupervised<f64> for GaussianMixture {
             covariances,
             log_likelihood: log_ll,
             n_iter,
-            covariance_type: self.covariance_type,
+            covariance_type: cfg.covariance_type,
         })
     }
 }
@@ -305,6 +321,43 @@ impl Predict<f64> for FittedGaussianMixture {
             out[i] = best_c as f64;
         }
         Ok(out)
+    }
+}
+
+impl PredictProba<f64> for FittedGaussianMixture {
+    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        let k = self.weights.len();
+        let d = self.means.ncols();
+        if x.ncols() != d {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}", d, x.ncols()
+            )));
+        }
+        let n = x.nrows();
+        let mut p = Array2::<f64>::zeros((n, k));
+        for i in 0..n {
+            let xi = x.row(i).to_owned();
+            let mut logs = vec![0.0_f64; k];
+            for c in 0..k {
+                let mut diff = vec![0.0; d];
+                for j in 0..d {
+                    diff[j] = xi[j] - self.means[[c, j]];
+                }
+                logs[c] = self.weights[c].ln()
+                    + log_gauss(&diff, &self.covariances[c], self.covariance_type);
+            }
+            let max_l = logs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let mut z = 0.0;
+            for c in 0..k {
+                let e = (logs[c] - max_l).exp();
+                p[[i, c]] = e;
+                z += e;
+            }
+            for c in 0..k {
+                p[[i, c]] /= z;
+            }
+        }
+        Ok(p)
     }
 }
 

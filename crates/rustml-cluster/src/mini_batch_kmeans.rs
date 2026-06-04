@@ -143,13 +143,21 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
         let tol = F::from_f64(self.tol).unwrap();
         let mut n_iter = 0;
 
+        // Reused per iteration: partial Fisher-Yates shuffles the first
+        // `batch_size` slots of `idx`, no per-iter allocation.
+        let mut idx: Vec<usize> = (0..n).collect();
+
         for iter in 0..self.max_iter {
             n_iter = iter + 1;
 
-            // Sample a mini-batch (with replacement avoided by sampling indices).
-            let mut all_idx: Vec<usize> = (0..n).collect();
-            all_idx.shuffle(&mut rng);
-            let batch: &[usize] = &all_idx[..batch_size];
+            // Partial Fisher-Yates: pick batch_size distinct indices without
+            // shuffling the whole tail.
+            use rand::Rng;
+            for k in 0..batch_size {
+                let pick = k + rng.gen_range(0..(n - k));
+                idx.swap(k, pick);
+            }
+            let batch: &[usize] = &idx[..batch_size];
 
             // Save old centroids to measure shift.
             let prev = centroids.clone();

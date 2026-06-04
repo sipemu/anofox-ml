@@ -12,7 +12,7 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rustml_core::{FitUnsupervised, Predict, Result, RustMlError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct INode {
     feature: usize,
     threshold: f64,
@@ -21,7 +21,7 @@ struct INode {
     size: usize, // number of training samples at this leaf
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ITree {
     nodes: Vec<INode>, // nodes[0] is the root
     max_depth: usize,
@@ -146,7 +146,7 @@ impl Default for IsolationForest {
     fn default() -> Self { Self::new() }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedIsolationForest {
     trees: Vec<ITree>,
     subsample_size: usize,

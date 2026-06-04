@@ -20,7 +20,7 @@ impl PlsRegression {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedPlsRegression {
     pub x_mean: Array1<f64>,
     pub y_mean: f64,

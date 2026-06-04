@@ -24,7 +24,7 @@ impl Lars {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedLars {
     pub coef: Array1<f64>,
     pub intercept: f64,
@@ -71,22 +71,11 @@ impl Fit<f64> for Lars {
             y.clone()
         };
 
-        // Normalise feature columns to unit ℓ2 norm (sklearn `normalize=True`
-        // was deprecated, but Lars internally still scales by column norms).
-        // For numerical stability we scale and unscale at the end.
-        let mut col_norm = Array1::<f64>::ones(d);
-        let mut xs = xc.clone();
-        for j in 0..d {
-            let mut s = 0.0;
-            for i in 0..n {
-                s += xc[[i, j]] * xc[[i, j]];
-            }
-            let nrm = s.sqrt().max(1e-12);
-            col_norm[j] = nrm;
-            for i in 0..n {
-                xs[[i, j]] /= nrm;
-            }
-        }
+        // sklearn deprecated `normalize=True` in Lars; the modern path keeps
+        // centered (but un-normalised) features so coefficient magnitudes are
+        // returned in the original units. We follow that.
+        let xs = xc;
+        let col_norm = Array1::<f64>::ones(d);
 
         let mut beta = Array1::<f64>::zeros(d);
         let mut residual = yc.clone();
@@ -286,6 +275,101 @@ impl Predict<f64> for FittedLars {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LassoLarsIC — information-criterion-selected step on the LARS path.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IcCriterion {
+    Aic,
+    Bic,
+}
+
+#[derive(Debug, Clone)]
+pub struct LassoLarsIC {
+    pub criterion: IcCriterion,
+    pub max_features: Option<usize>,
+    pub fit_intercept: bool,
+}
+
+impl LassoLarsIC {
+    pub fn new(criterion: IcCriterion) -> Self {
+        Self { criterion, max_features: None, fit_intercept: true }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FittedLassoLarsIC {
+    pub fitted: FittedLars,
+    pub criterion_value: f64,
+    pub n_nonzero_coefs: usize,
+}
+
+impl Fit<f64> for LassoLarsIC {
+    type Fitted = FittedLassoLarsIC;
+
+    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+        let n = x.nrows() as f64;
+        let d = x.ncols();
+        let max_k = self.max_features.unwrap_or(d).min(d).min(x.nrows());
+
+        let mut best: Option<FittedLassoLarsIC> = None;
+        // Pick noise variance from a max-features fit (used by sklearn for
+        // AIC/BIC normalisation under known-σ regime).
+        let full = Lars { n_nonzero_coefs: max_k, fit_intercept: self.fit_intercept, lasso: true }
+            .fit(x, y)?;
+        let preds_full = full.predict(x)?;
+        let mut sigma2 = 0.0_f64;
+        for (p, t) in preds_full.iter().zip(y.iter()) {
+            sigma2 += (t - p).powi(2);
+        }
+        sigma2 /= n.max(1.0);
+        let sigma2 = sigma2.max(1e-12);
+
+        for k in 1..=max_k {
+            let lars = Lars {
+                n_nonzero_coefs: k,
+                fit_intercept: self.fit_intercept,
+                lasso: true,
+            };
+            let fitted = lars.fit(x, y)?;
+            let preds = fitted.predict(x)?;
+            let rss: f64 = preds
+                .iter()
+                .zip(y.iter())
+                .map(|(p, t)| (t - p).powi(2))
+                .sum();
+            let nnz = fitted
+                .coef
+                .iter()
+                .filter(|v| v.abs() > 1e-12)
+                .count() as f64;
+            let crit = match self.criterion {
+                IcCriterion::Aic => rss / sigma2 + 2.0 * nnz,
+                IcCriterion::Bic => rss / sigma2 + n.ln() * nnz,
+            };
+            let nnz_int = nnz as usize;
+            let candidate = FittedLassoLarsIC {
+                fitted,
+                criterion_value: crit,
+                n_nonzero_coefs: nnz_int,
+            };
+            match &best {
+                None => best = Some(candidate),
+                Some(b) if candidate.criterion_value < b.criterion_value => best = Some(candidate),
+                _ => {}
+            }
+        }
+        Ok(best.unwrap())
+    }
+}
+
+impl Predict<f64> for FittedLassoLarsIC {
+    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        self.fitted.predict(x)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +409,36 @@ mod tests {
         let y = x.column(0).mapv(|v| 2.0 * v);
         let fitted = Lars::lasso(2).fit(&x, &y).unwrap();
         assert!((fitted.coef[0] - 2.0).abs() < 0.2);
+    }
+
+    #[test]
+    fn test_lasso_lars_ic_bic_picks_sparse() {
+        // 3 informative features out of 6 — BIC should pick a sparse model.
+        let n = 100;
+        let mut data = Vec::new();
+        for i in 0..n {
+            for j in 0..6 {
+                data.push(((i * (j + 1) * 7) % 19) as f64 - 9.0);
+            }
+        }
+        let x = Array2::from_shape_vec((n, 6), data).unwrap();
+        let y = x.column(0).mapv(|v| 3.0 * v)
+            + x.column(2).mapv(|v| -2.0 * v)
+            + x.column(4).mapv(|v| 1.5 * v);
+        let fitted = LassoLarsIC::new(IcCriterion::Bic).fit(&x, &y).unwrap();
+        // Top-3 magnitudes should include the informative features.
+        let mut order: Vec<(usize, f64)> = fitted
+            .fitted
+            .coef
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, v.abs()))
+            .collect();
+        order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let top: std::collections::HashSet<usize> =
+            order.iter().take(3).map(|(i, _)| *i).collect();
+        for j in [0_usize, 2, 4] {
+            assert!(top.contains(&j), "feature {j} not in top-3: {:?}", top);
+        }
     }
 }

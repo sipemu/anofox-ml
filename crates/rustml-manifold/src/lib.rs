@@ -22,7 +22,7 @@ impl ClassicalMds {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedClassicalMds {
     pub embedding: Array2<f64>,
     pub eigenvalues: Array1<f64>,

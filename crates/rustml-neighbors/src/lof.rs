@@ -64,50 +64,67 @@ impl FitUnsupervised<f64> for LocalOutlierFactor {
             return Err(RustMlError::InvalidParameter("n_neighbors >= 1".into()));
         }
 
-        // 1. Pairwise distances.
-        let mut dist = vec![vec![0.0_f64; n]; n];
+        // 1. For each point find k-NN using a bounded max-heap; store
+        //    (neighbor_index, distance) per point. O(n*k) memory total.
+        use std::cmp::Ordering;
+        #[derive(Clone, Copy)]
+        struct DPair(usize, f64);
+        impl Ord for DPair {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.1.partial_cmp(&other.1).unwrap_or(Ordering::Equal)
+            }
+        }
+        impl PartialOrd for DPair {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+        }
+        impl Eq for DPair {}
+        impl PartialEq for DPair {
+            fn eq(&self, other: &Self) -> bool { self.1 == other.1 }
+        }
+
+        let mut neighbors: Vec<Vec<(usize, f64)>> = vec![Vec::with_capacity(k); n];
+        let mut k_dist = vec![0.0_f64; n];
         for i in 0..n {
             let row_i = x.row(i).to_owned();
             let ri = row_i.as_slice().unwrap();
-            for j in (i + 1)..n {
+            let mut heap: std::collections::BinaryHeap<DPair> = std::collections::BinaryHeap::with_capacity(k);
+            for j in 0..n {
+                if j == i { continue; }
                 let row_j = x.row(j).to_owned();
                 let rj = row_j.as_slice().unwrap();
                 let d = euclidean(ri, rj);
-                dist[i][j] = d;
-                dist[j][i] = d;
+                if heap.len() < k {
+                    heap.push(DPair(j, d));
+                } else if let Some(top) = heap.peek() {
+                    if d < top.1 {
+                        heap.pop();
+                        heap.push(DPair(j, d));
+                    }
+                }
             }
+            // Drain into sorted-ascending order.
+            let mut v: Vec<(usize, f64)> = heap.into_iter().map(|p| (p.0, p.1)).collect();
+            v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            k_dist[i] = v.last().map(|p| p.1).unwrap_or(0.0);
+            neighbors[i] = v;
         }
-        // 2. For each point: indices of k nearest neighbors (excluding self),
-        // and k-distance.
-        let mut neighbors = vec![Vec::<usize>::with_capacity(k); n];
-        let mut k_dist = vec![0.0_f64; n];
-        for i in 0..n {
-            let mut others: Vec<(usize, f64)> = (0..n)
-                .filter(|&j| j != i)
-                .map(|j| (j, dist[i][j]))
-                .collect();
-            others.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            for &(j, _) in others.iter().take(k) {
-                neighbors[i].push(j);
-            }
-            k_dist[i] = others[k - 1].1;
-        }
-        // 3. LRD per point.
+
+        // 2. LRD per point — reach_dist(i,j) = max(dist(i,j), k_dist(j)).
         let mut lrd = vec![0.0_f64; n];
         for i in 0..n {
             let mut s = 0.0;
-            for &j in &neighbors[i] {
-                let rd = dist[i][j].max(k_dist[j]);
+            for &(j, d_ij) in &neighbors[i] {
+                let rd = d_ij.max(k_dist[j]);
                 s += rd;
             }
             let mean_rd = s / k as f64;
             lrd[i] = if mean_rd > 0.0 { 1.0 / mean_rd } else { 1.0 };
         }
-        // 4. LOF per point = mean(lrd(neighbors) / lrd(i)).
+        // 3. LOF per point = mean(lrd(neighbors) / lrd(i)).
         let mut lof = vec![0.0_f64; n];
         for i in 0..n {
             let mut s = 0.0;
-            for &j in &neighbors[i] {
+            for &(j, _) in &neighbors[i] {
                 s += lrd[j];
             }
             lof[i] = (s / k as f64) / lrd[i];

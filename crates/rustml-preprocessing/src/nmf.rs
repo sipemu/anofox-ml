@@ -3,10 +3,20 @@
 //! Mirrors `sklearn.decomposition.NMF` with the multiplicative-update solver
 //! (Lee & Seung). `X ≈ W H` with `W ≥ 0`, `H ≥ 0`.
 
+use faer::linalg::solvers::Svd;
+use faer::Mat;
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rustml_core::{FitUnsupervised, Result, RustMlError};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NmfInit {
+    /// Sample W, H from uniform random.
+    Random,
+    /// NNDSVD: deterministic init from truncated SVD (sklearn default).
+    Nndsvd,
+}
 
 #[derive(Debug, Clone)]
 pub struct Nmf {
@@ -14,15 +24,140 @@ pub struct Nmf {
     pub max_iter: usize,
     pub tol: f64,
     pub seed: u64,
+    pub init: NmfInit,
 }
 
 impl Nmf {
     pub fn new(n_components: usize) -> Self {
-        Self { n_components, max_iter: 200, tol: 1e-4, seed: 0 }
+        Self {
+            n_components,
+            max_iter: 200,
+            tol: 1e-4,
+            seed: 0,
+            init: NmfInit::Nndsvd,
+        }
     }
+    pub fn with_init(mut self, init: NmfInit) -> Self { self.init = init; self }
 }
 
-#[derive(Debug, Clone)]
+/// NNDSVD initialisation (Boutsidis & Gallopoulos 2008).
+///
+/// 1. Compute the truncated SVD `X ≈ U Σ Vᵀ` keeping `k` triplets.
+/// 2. The first component is initialised from the leading singular triplet
+///    with positive sign (sign-fix).
+/// 3. Each subsequent component splits the next singular vectors into their
+///    positive and negative parts and picks whichever has higher norm.
+fn nndsvd_init(x: &Array2<f64>, k: usize) -> Result<(Array2<f64>, Array2<f64>)> {
+    let n = x.nrows();
+    let d = x.ncols();
+    let mat = Mat::<f64>::from_fn(n, d, |i, j| x[[i, j]]);
+    let svd = Svd::new(mat.as_ref())
+        .map_err(|e| RustMlError::InvalidParameter(format!("NNDSVD SVD failed: {e:?}")))?;
+    let u = svd.U();
+    let s = svd.S();
+    let v = svd.V();
+    let r = s.column_vector().nrows().min(k);
+
+    let mut w = Array2::<f64>::zeros((n, k));
+    let mut h = Array2::<f64>::zeros((k, d));
+
+    // First component: leading singular triplet (sign-fixed positive).
+    let s0 = s.column_vector()[0].max(1e-12);
+    let mut u0_pos_norm = 0.0_f64;
+    for i in 0..n {
+        u0_pos_norm += u[(i, 0)].max(0.0).powi(2);
+    }
+    u0_pos_norm = u0_pos_norm.sqrt();
+    let mut v0_pos_norm = 0.0_f64;
+    for j in 0..d {
+        v0_pos_norm += v[(j, 0)].max(0.0).powi(2);
+    }
+    v0_pos_norm = v0_pos_norm.sqrt();
+    // If positive part norm is larger, use it; else flip sign and use negative.
+    let (u_sign, v_sign) = if u0_pos_norm * v0_pos_norm
+        >= (u0_pos_norm * v0_pos_norm).max(1e-12) / 2.0
+    {
+        (1.0, 1.0)
+    } else {
+        (-1.0, -1.0)
+    };
+    let lead_scale = s0.sqrt();
+    for i in 0..n {
+        w[[i, 0]] = (u_sign * u[(i, 0)]).max(0.0) * lead_scale;
+    }
+    for j in 0..d {
+        h[[0, j]] = (v_sign * v[(j, 0)]).max(0.0) * lead_scale;
+    }
+
+    // Remaining components: split positive and negative parts.
+    for c in 1..r {
+        let sigma = s.column_vector()[c].max(1e-12);
+        // u positive / negative parts.
+        let mut up = vec![0.0_f64; n];
+        let mut un = vec![0.0_f64; n];
+        let mut up_norm = 0.0_f64;
+        let mut un_norm = 0.0_f64;
+        for i in 0..n {
+            let val = u[(i, c)];
+            if val > 0.0 {
+                up[i] = val;
+                up_norm += val * val;
+            } else {
+                un[i] = -val;
+                un_norm += val * val;
+            }
+        }
+        up_norm = up_norm.sqrt();
+        un_norm = un_norm.sqrt();
+        let mut vp = vec![0.0_f64; d];
+        let mut vn = vec![0.0_f64; d];
+        let mut vp_norm = 0.0_f64;
+        let mut vn_norm = 0.0_f64;
+        for j in 0..d {
+            let val = v[(j, c)];
+            if val > 0.0 {
+                vp[j] = val;
+                vp_norm += val * val;
+            } else {
+                vn[j] = -val;
+                vn_norm += val * val;
+            }
+        }
+        vp_norm = vp_norm.sqrt();
+        vn_norm = vn_norm.sqrt();
+        // Take whichever pair (positive/positive vs negative/negative) has
+        // higher Frobenius product norm.
+        let pos = up_norm * vp_norm;
+        let neg = un_norm * vn_norm;
+        let scale = sigma.sqrt() * (pos.max(neg)).sqrt();
+        if pos >= neg {
+            let nrm_u = up_norm.max(1e-12);
+            let nrm_v = vp_norm.max(1e-12);
+            for i in 0..n {
+                w[[i, c]] = up[i] / nrm_u * scale;
+            }
+            for j in 0..d {
+                h[[c, j]] = vp[j] / nrm_v * scale;
+            }
+        } else {
+            let nrm_u = un_norm.max(1e-12);
+            let nrm_v = vn_norm.max(1e-12);
+            for i in 0..n {
+                w[[i, c]] = un[i] / nrm_u * scale;
+            }
+            for j in 0..d {
+                h[[c, j]] = vn[j] / nrm_v * scale;
+            }
+        }
+    }
+    // Floor at a small epsilon (sklearn convention) to avoid zero-locks.
+    let eps = 1e-6;
+    for v in w.iter_mut() { if *v < eps { *v = eps; } }
+    for v in h.iter_mut() { if *v < eps { *v = eps; } }
+    Ok((w, h))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedNmf {
     /// Components, shape (n_components, n_features) — sklearn's H_.
     pub components: Array2<f64>,
@@ -55,10 +190,16 @@ impl FitUnsupervised<f64> for Nmf {
             }
         }
 
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        let scale = (x.mean().unwrap_or(0.0).max(0.0) / k as f64).sqrt().max(1e-6);
-        let mut w = Array2::<f64>::from_shape_fn((n, k), |_| rng.gen::<f64>() * scale + 1e-6);
-        let mut h = Array2::<f64>::from_shape_fn((k, d), |_| rng.gen::<f64>() * scale + 1e-6);
+        let (mut w, mut h) = match self.init {
+            NmfInit::Nndsvd => nndsvd_init(x, k)?,
+            NmfInit::Random => {
+                let mut rng = StdRng::seed_from_u64(self.seed);
+                let scale = (x.mean().unwrap_or(0.0).max(0.0) / k as f64).sqrt().max(1e-6);
+                let w = Array2::<f64>::from_shape_fn((n, k), |_| rng.gen::<f64>() * scale + 1e-6);
+                let h = Array2::<f64>::from_shape_fn((k, d), |_| rng.gen::<f64>() * scale + 1e-6);
+                (w, h)
+            }
+        };
 
         let mut prev_err = f64::INFINITY;
         let mut n_iter = 0;

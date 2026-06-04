@@ -26,7 +26,16 @@ fn test_bayesian_ridge_matches_sklearn() {
     let fitted = BayesianRidge::new().fit(&x, &y).unwrap();
     let preds = fitted.predict(&x).unwrap();
     for (i, (&a, &b)) in preds.iter().zip(expected.iter()).enumerate() {
-        assert!(rel(a, b) < 0.02, "[{}] rustml={}, sklearn={}", i, a, b);
+        assert!(rel(a, b) < 0.005, "[{}] rustml={}, sklearn={}", i, a, b);
+    }
+    // Posterior std should also match sklearn's return_std=True within a few %.
+    let sk_std = json_to_array1(&case["sklearn_std"]);
+    let std = fitted.predict_std(&x).unwrap();
+    for (i, (&a, &b)) in std.iter().zip(sk_std.iter()).enumerate() {
+        assert!(
+            rel(a, b) < 0.05,
+            "[std {}] rustml={}, sklearn={}", i, a, b
+        );
     }
 }
 
