@@ -31,10 +31,12 @@
 
 pub mod binarizer;
 pub mod kbins_discretizer;
+pub mod kernel_pca;
 pub mod label_encoder;
 pub mod max_abs_scaler;
 pub mod minmax_scaler;
 pub mod mutual_information;
+pub mod nmf;
 pub mod normalizer;
 pub mod one_hot_encoder;
 pub mod ordinal_encoder;
@@ -56,10 +58,12 @@ pub use binarizer::{Binarizer, FittedBinarizer};
 pub use kbins_discretizer::{
     BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
 };
+pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
 pub use label_encoder::{FittedLabelEncoder, LabelEncoder};
 pub use max_abs_scaler::{FittedMaxAbsScaler, MaxAbsScaler};
 pub use minmax_scaler::{FittedMinMaxScaler, MinMaxScaler};
 pub use mutual_information::{FittedMutualInformationSelector, MutualInformationSelector};
+pub use nmf::{FittedNmf, Nmf};
 pub use normalizer::{FittedNormalizer, NormType, Normalizer};
 pub use one_hot_encoder::{FittedOneHotEncoder, OneHotEncoder};
 pub use ordinal_encoder::{FittedOrdinalEncoder, OrdinalEncoder};

@@ -19,6 +19,7 @@ pub mod glm;
 pub mod huber;
 pub mod isotonic;
 pub mod kernel_ridge;
+pub mod lars;
 pub mod lasso;
 pub mod lasso_cv;
 pub mod logistic;
@@ -41,6 +42,7 @@ pub use glm::{BinomialRegressor, FittedBinomialRegressor, FittedPoissonRegressor
 pub use huber::{FittedHuberRegressor, HuberRegressor};
 pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor};
 pub use kernel_ridge::{FittedKernelRidge, KernelRidge};
+pub use lars::{FittedLars, Lars};
 pub use lasso::{FittedLassoRegressor, LassoRegressor};
 pub use lasso_cv::{FittedLassoCrossValidated, LassoCrossValidated};
 pub use logistic::{FittedLogisticRegressor, LogisticRegressor};

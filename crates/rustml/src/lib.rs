@@ -111,12 +111,12 @@ pub mod prelude {
     };
 
     pub use rustml_preprocessing::{
-        BinStrategy, Binarizer, EncodeStrategy, ImputeStrategy, KBinsDiscretizer, LabelEncoder,
-        MaxAbsScaler, MinMaxScaler, MutualInformationSelector, NormType, Normalizer,
-        OneHotEncoder, OrdinalEncoder, OutputDistribution, Pca, PolynomialFeatures,
-        PowerTransformer, QuantileTransformer, RobustScaler, SelectFromModel, SelectKBest,
-        Rfe, SequentialFeatureSelector, SimpleImputer, StandardScaler, TruncatedSvd,
-        VarianceThreshold,
+        BinStrategy, Binarizer, EncodeStrategy, ImputeStrategy, KBinsDiscretizer, KernelPca,
+        KpcaKernel, LabelEncoder, MaxAbsScaler, MinMaxScaler, MutualInformationSelector, Nmf,
+        NormType, Normalizer, OneHotEncoder, OrdinalEncoder, OutputDistribution, Pca,
+        PolynomialFeatures, PowerTransformer, QuantileTransformer, Rfe, RobustScaler,
+        SelectFromModel, SelectKBest, SequentialFeatureSelector, SimpleImputer, StandardScaler,
+        TruncatedSvd, VarianceThreshold,
     };
 
     pub use rustml_neighbors::{
