@@ -11,6 +11,8 @@ members = [
     "crates/rustml-naive-bayes",
     "crates/rustml-discriminant",
     "crates/rustml-text",
+    "crates/rustml-gaussian-process",
+    "crates/rustml-manifold",
     "crates/rustml-io",
     "crates/rustml-svm",
     "crates/rustml-neural-networks",

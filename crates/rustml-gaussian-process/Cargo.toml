@@ -1,0 +1,20 @@
+[package]
+name = "rustml-gaussian-process"
+version = "0.1.0"
+edition = "2021"
+description = "Gaussian Process regression for the RustML machine learning library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sipemu/rustml"
+documentation = "https://docs.rs/rustml-gaussian-process"
+readme = "../../README.md"
+keywords = ["machine-learning", "gaussian-process", "regression", "bayesian", "ndarray"]
+categories = ["science", "algorithms"]
+rust-version = "1.70"
+
+[dependencies]
+rustml-core = { path = "../rustml-core" }
+ndarray = { workspace = true }
+faer = "0.23"
+
+[dev-dependencies]
+approx = { workspace = true }

@@ -22,6 +22,7 @@ rustml-cluster = { path = "../rustml-cluster" }
 rustml-naive-bayes = { path = "../rustml-naive-bayes" }
 rustml-discriminant = { path = "../rustml-discriminant" }
 rustml-text = { path = "../rustml-text" }
+rustml-gaussian-process = { path = "../rustml-gaussian-process" }
 rustml-io = { path = "../rustml-io" }
 rustml-svm = { path = "../rustml-svm" }
 rustml-neural-networks = { path = "../rustml-neural-networks" }

@@ -35,12 +35,14 @@
 //! assert_ne!(labels[0] as usize, labels[3] as usize);
 //! ```
 
+pub mod affinity_propagation;
 pub mod agglomerative;
 pub mod dbscan;
 pub mod gmm;
 pub mod kmeans;
 pub mod mini_batch_kmeans;
 
+pub use affinity_propagation::{AffinityPropagation, FittedAffinityPropagation};
 pub use agglomerative::{AgglomerativeClustering, FittedAgglomerativeClustering, Linkage};
 pub use dbscan::{Dbscan, FittedDbscan};
 pub use gmm::{CovarianceType, FittedGaussianMixture, GaussianMixture};

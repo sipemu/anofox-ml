@@ -1,0 +1,20 @@
+[package]
+name = "rustml-manifold"
+version = "0.1.0"
+edition = "2021"
+description = "Manifold learning (MDS, Isomap) for the RustML library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sipemu/rustml"
+documentation = "https://docs.rs/rustml-manifold"
+readme = "../../README.md"
+keywords = ["machine-learning", "manifold", "mds", "isomap", "dimensionality-reduction"]
+categories = ["science", "algorithms"]
+rust-version = "1.70"
+
+[dependencies]
+rustml-core = { path = "../rustml-core" }
+ndarray = { workspace = true }
+faer = "0.23"
+
+[dev-dependencies]
+approx = { workspace = true }
