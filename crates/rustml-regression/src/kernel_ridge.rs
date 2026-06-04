@@ -279,3 +279,5 @@ mod tests {
         assert!((p[0] - 100.0).abs() < 1.0, "high-weight anchor pred={}", p[0]);
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedKernelRidge {}

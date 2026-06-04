@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 
 /// Multinomial Naive Bayes classifier parameters (unfitted state).
 ///
@@ -438,5 +438,11 @@ mod tests {
             Err(RustMlError::ShapeMismatch(_)) => {}
             other => panic!("expected ShapeMismatch error, got {:?}", other),
         }
+    }
+}
+
+impl<F: Float> PredictProba<F> for FittedMultinomialNB<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Self::predict_proba(self, x)
     }
 }

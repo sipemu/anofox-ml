@@ -60,3 +60,60 @@ pub trait FitWeighted<F: Float> {
         sample_weight: Option<&Array1<F>>,
     ) -> Result<Self::Fitted>;
 }
+
+/// Default scoring for regressors: R² (coefficient of determination).
+///
+/// Mirrors `sklearn.base.RegressorMixin.score`. Higher is better; 1.0 is
+/// perfect prediction, 0.0 means equivalent to predicting `y.mean()`.
+pub trait RegressorScore<F: Float>: Predict<F> {
+    fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<F> {
+        let pred = self.predict(x)?;
+        let n = y.len();
+        if n != pred.len() {
+            return Err(crate::error::RustMlError::ShapeMismatch(format!(
+                "y len {} != pred len {}",
+                n,
+                pred.len()
+            )));
+        }
+        let y_mean = y.iter().fold(F::zero(), |acc, &v| acc + v) / F::from_usize(n).unwrap();
+        let mut rss = F::zero();
+        let mut tss = F::zero();
+        for (a, b) in y.iter().zip(pred.iter()) {
+            let r = *a - *b;
+            rss = rss + r * r;
+            let t = *a - y_mean;
+            tss = tss + t * t;
+        }
+        let tss_safe = if tss == F::zero() {
+            F::from_f64(1e-12).unwrap()
+        } else {
+            tss
+        };
+        Ok(F::one() - rss / tss_safe)
+    }
+}
+
+/// Default scoring for classifiers: accuracy.
+///
+/// Mirrors `sklearn.base.ClassifierMixin.score`.
+pub trait ClassifierScore<F: Float>: Predict<F> {
+    fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<F> {
+        let pred = self.predict(x)?;
+        let n = y.len();
+        if n != pred.len() {
+            return Err(crate::error::RustMlError::ShapeMismatch(format!(
+                "y len {} != pred len {}",
+                n,
+                pred.len()
+            )));
+        }
+        let eps = F::from_f64(1e-9).unwrap();
+        let correct = y
+            .iter()
+            .zip(pred.iter())
+            .filter(|(a, b)| (**a - **b).abs() < eps)
+            .count();
+        Ok(F::from_usize(correct).unwrap() / F::from_usize(n).unwrap())
+    }
+}

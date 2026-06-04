@@ -438,3 +438,5 @@ mod tests {
         }
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedLars {}

@@ -501,3 +501,6 @@ mod tests {
         let _ = array![1.0]; // silence unused-import warning if any
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedBayesianRidge {}
+impl rustml_core::RegressorScore<f64> for FittedARDRegression {}

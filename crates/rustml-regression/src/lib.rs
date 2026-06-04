@@ -49,7 +49,7 @@ pub use logistic::{FittedLogisticRegressor, LogisticRegressor};
 pub use ols::{FittedOlsRegressor, OlsRegressor};
 pub use omp::{FittedOrthogonalMatchingPursuit, OrthogonalMatchingPursuit};
 pub use quantile::{FittedQuantileRegressor, QuantileRegressor};
-pub use ridge::{FittedRidgeRegressor, RidgeRegressor};
+pub use ridge::{FittedRidgeRegressor, FittedWeightedRidgeRegressor, RidgeRegressor};
 pub use robust::{
     FittedRansacRegressor, FittedTheilSenRegressor, RansacRegressor, TheilSenRegressor,
 };
