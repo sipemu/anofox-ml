@@ -388,3 +388,5 @@ mod tests {
 }
 
 impl rustml_core::ClassifierScore<f64> for FittedGaussianMixture {}
+
+impl rustml_core::PredictLogProba<f64> for FittedGaussianMixture {}

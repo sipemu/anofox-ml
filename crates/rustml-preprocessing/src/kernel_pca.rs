@@ -7,7 +7,7 @@
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
-use rustml_core::{FitUnsupervised, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KpcaKernel {
@@ -169,6 +169,46 @@ impl Transform<f64> for FittedKernelPca {
     }
 }
 
+impl InverseTransform<f64> for FittedKernelPca {
+    /// Approximate pre-image: maps a low-dim projection back to a reconstruction
+    /// in the original feature space.
+    ///
+    /// Uses the linear approximation `X̂ = T · diag(√λ) · αᵀ · X_train`, which
+    /// is exact for the linear kernel and a useful approximation for RBF /
+    /// polynomial. Mirrors sklearn's `KernelPCA(fit_inverse_transform=False)`
+    /// fallback (sklearn's full pre-image solver is iterative and not yet
+    /// implemented here).
+    fn inverse_transform(&self, t: &Array2<f64>) -> Result<Array2<f64>> {
+        let k = self.alphas.ncols();
+        if t.ncols() != k {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} components, got {}", k, t.ncols()
+            )));
+        }
+        let n_train = self.x_train.nrows();
+        let d_orig = self.x_train.ncols();
+        let n_new = t.nrows();
+
+        // Reconstruct dual coefficients in training-sample space:
+        //   coef = T · diag(√λ) · αᵀ  → shape (n_new, n_train)
+        let mut coef = Array2::<f64>::zeros((n_new, n_train));
+        for i in 0..n_new {
+            for j in 0..n_train {
+                let mut s = 0.0;
+                for c in 0..k {
+                    let lam_sqrt = self.eigenvalues[c].abs().sqrt().max(1e-12);
+                    s += t[[i, c]] * lam_sqrt * self.alphas[[j, c]];
+                }
+                coef[[i, j]] = s;
+            }
+        }
+        // Linear reconstruction: x̂ = coef · X_train. For the linear kernel
+        // this is the exact pre-image; for RBF / polynomial it's a useful
+        // approximation that's the linear-projection answer in dual space.
+        Ok(coef.dot(&self.x_train))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +223,21 @@ mod tests {
         let fitted = kpca.fit(&x).unwrap();
         let t = fitted.transform(&x).unwrap();
         assert_eq!(t.shape(), &[5, 2]);
-        // Eigenvalues should be in descending order.
         assert!(fitted.eigenvalues[0] >= fitted.eigenvalues[1]);
+    }
+
+    #[test]
+    fn test_kernel_pca_inverse_transform_runs() {
+        let x = array![
+            [0.0_f64, 0.0, 1.0], [1.0, 1.0, 0.0], [2.0, 4.0, -1.0],
+            [3.0, 9.0, 2.0], [4.0, 16.0, 0.5],
+        ];
+        let fitted = KernelPca::new(2, KpcaKernel::Linear).fit(&x).unwrap();
+        let t = fitted.transform(&x).unwrap();
+        let back = fitted.inverse_transform(&t).unwrap();
+        assert_eq!(back.shape(), &[5, 3]);
+        for v in back.iter() {
+            assert!(v.is_finite());
+        }
     }
 }

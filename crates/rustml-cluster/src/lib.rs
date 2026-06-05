@@ -40,6 +40,7 @@ pub mod agglomerative;
 pub mod dbscan;
 pub mod gmm;
 pub mod kmeans;
+pub mod mean_shift;
 pub mod mini_batch_kmeans;
 pub mod spectral;
 
@@ -48,5 +49,6 @@ pub use agglomerative::{AgglomerativeClustering, FittedAgglomerativeClustering, 
 pub use dbscan::{Dbscan, FittedDbscan};
 pub use gmm::{CovarianceType, FittedGaussianMixture, GaussianMixture};
 pub use kmeans::{FittedKMeans, KMeans};
+pub use mean_shift::{FittedMeanShift, MeanShift};
 pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchKMeans};
 pub use spectral::{Affinity, FittedSpectralClustering, SpectralClustering};

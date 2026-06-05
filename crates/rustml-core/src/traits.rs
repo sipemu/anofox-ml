@@ -61,6 +61,26 @@ pub trait FitWeighted<F: Float> {
     ) -> Result<Self::Fitted>;
 }
 
+/// Log-probability output. Default implementation takes `log(predict_proba)`
+/// with an epsilon clamp to avoid log(0).
+///
+/// Mirrors sklearn's `predict_log_proba`.
+pub trait PredictLogProba<F: Float>: PredictProba<F> {
+    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        let p = self.predict_proba(x)?;
+        let eps = F::from_f64(1e-300).unwrap();
+        Ok(p.mapv(|v| if v < eps { eps.ln() } else { v.ln() }))
+    }
+}
+
+/// Real-valued decision scores per class, before the softmax/argmax. Mirrors
+/// `sklearn.base.ClassifierMixin.decision_function`. Shape `(n_samples, n_classes)`
+/// for multi-class (sklearn returns 1-D for binary; we always return 2-D for
+/// consistency).
+pub trait DecisionFunction<F: Float> {
+    fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>>;
+}
+
 /// Default scoring for regressors: R² (coefficient of determination).
 ///
 /// Mirrors `sklearn.base.RegressorMixin.score`. Higher is better; 1.0 is

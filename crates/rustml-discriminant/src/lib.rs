@@ -551,3 +551,26 @@ mod tests {
 
 impl rustml_core::ClassifierScore<f64> for FittedLinearDiscriminantAnalysis {}
 impl rustml_core::ClassifierScore<f64> for FittedQuadraticDiscriminantAnalysis {}
+
+impl rustml_core::PredictLogProba<f64> for FittedLinearDiscriminantAnalysis {}
+impl rustml_core::PredictLogProba<f64> for FittedQuadraticDiscriminantAnalysis {}
+
+impl rustml_core::DecisionFunction<f64> for FittedLinearDiscriminantAnalysis {
+    fn decision_function(&self, x: &ndarray::Array2<f64>) -> rustml_core::Result<ndarray::Array2<f64>> {
+        if x.ncols() != self.n_features {
+            return Err(rustml_core::RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}", self.n_features, x.ncols()
+            )));
+        }
+        let n = x.nrows();
+        let k = self.classes.len();
+        let mut out = ndarray::Array2::<f64>::zeros((n, k));
+        for i in 0..n {
+            let row = x.row(i);
+            for (c_i, (c, b)) in self.coef.iter().zip(self.intercept.iter()).enumerate() {
+                out[[i, c_i]] = row.dot(c) + b;
+            }
+        }
+        Ok(out)
+    }
+}

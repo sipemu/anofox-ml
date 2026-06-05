@@ -56,8 +56,8 @@ pub use multi_output::{
 };
 pub use pipeline::{FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep};
 pub use traits::{
-    ClassifierScore, Fit, FitUnsupervised, FitWeighted, InverseTransform, Predict, PredictProba,
-    RegressorScore, Transform,
+    ClassifierScore, DecisionFunction, Fit, FitUnsupervised, FitWeighted, InverseTransform,
+    Predict, PredictLogProba, PredictProba, RegressorScore, Transform,
 };
 pub use utils::{
     cross_val_predict, cross_val_score, cross_val_score_stratified, cross_validate, grid_search_cv,

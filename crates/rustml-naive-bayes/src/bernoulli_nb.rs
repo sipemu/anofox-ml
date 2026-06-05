@@ -470,3 +470,5 @@ impl<F: Float> PredictProba<F> for FittedBernoulliNB<F> {
         Self::predict_proba(self, x)
     }
 }
+
+impl<F: Float> rustml_core::PredictLogProba<F> for FittedBernoulliNB<F> {}

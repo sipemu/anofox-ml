@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, Predict, PredictLogProba, PredictProba, Result, RustMlError};
 
 /// Gaussian Naive Bayes classifier parameters (unfitted state).
 ///
@@ -186,6 +186,49 @@ impl<F: Float> Predict<F> for FittedGaussianNB<F> {
         Ok(predictions)
     }
 }
+
+impl<F: Float> PredictProba<F> for FittedGaussianNB<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        if x.ncols() != self.theta.ncols() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}", self.theta.ncols(), x.ncols()
+            )));
+        }
+        let two = F::from_f64(2.0).unwrap();
+        let two_pi = two * F::from_f64(std::f64::consts::PI).unwrap();
+        let half = F::from_f64(0.5).unwrap();
+        let n_classes = self.class_labels.len();
+        let n = x.nrows();
+        let mut out = Array2::<F>::zeros((n, n_classes));
+        for (i, sample) in x.rows().into_iter().enumerate() {
+            let mut logs = vec![F::zero(); n_classes];
+            let mut max_l = F::neg_infinity();
+            for ci in 0..n_classes {
+                let mut log_post = self.class_prior[ci].ln();
+                for j in 0..x.ncols() {
+                    let mu = self.theta[[ci, j]];
+                    let var = self.sigma[[ci, j]];
+                    let diff = sample[j] - mu;
+                    log_post = log_post - half * (two_pi * var).ln() - half * diff * diff / var;
+                }
+                logs[ci] = log_post;
+                if log_post > max_l { max_l = log_post; }
+            }
+            let mut z = F::zero();
+            for ci in 0..n_classes {
+                let e = (logs[ci] - max_l).exp();
+                out[[i, ci]] = e;
+                z = z + e;
+            }
+            for ci in 0..n_classes {
+                out[[i, ci]] = out[[i, ci]] / z;
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl<F: Float> PredictLogProba<F> for FittedGaussianNB<F> {}
 
 #[cfg(test)]
 mod tests {
