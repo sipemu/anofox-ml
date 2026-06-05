@@ -30,6 +30,7 @@
 //! ```
 
 pub mod binarizer;
+pub mod fast_ica;
 pub mod kbins_discretizer;
 pub mod kernel_pca;
 pub mod label_encoder;
@@ -55,6 +56,7 @@ pub mod truncated_svd;
 pub mod variance_threshold;
 
 pub use binarizer::{Binarizer, FittedBinarizer};
+pub use fast_ica::{FastIca, FittedFastIca};
 pub use kbins_discretizer::{
     BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
 };
