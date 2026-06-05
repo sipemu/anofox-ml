@@ -37,9 +37,11 @@
 
 pub mod affinity_propagation;
 pub mod agglomerative;
+pub mod bgmm;
 pub mod birch;
 pub mod dbscan;
 pub mod gmm;
+pub mod hdbscan;
 pub mod kmeans;
 pub mod mean_shift;
 pub mod mini_batch_kmeans;
@@ -48,9 +50,11 @@ pub mod spectral;
 
 pub use affinity_propagation::{AffinityPropagation, FittedAffinityPropagation};
 pub use agglomerative::{AgglomerativeClustering, FittedAgglomerativeClustering, Linkage};
+pub use bgmm::{BayesianGaussianMixture, FittedBayesianGaussianMixture};
 pub use birch::{Birch, FittedBirch};
 pub use dbscan::{Dbscan, FittedDbscan};
 pub use gmm::{CovarianceType, FittedGaussianMixture, GaussianMixture};
+pub use hdbscan::{FittedHdbscan, Hdbscan};
 pub use kmeans::{FittedKMeans, KMeans};
 pub use mean_shift::{FittedMeanShift, MeanShift};
 pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchKMeans};
