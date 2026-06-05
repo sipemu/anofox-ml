@@ -75,9 +75,9 @@ impl FitUnsupervised<f64> for AgglomerativeClustering {
         }
 
         let mut current_clusters = n;
-        // nn-chain disabled: the chain-popping logic has a known correctness
-        // bug when intermediate merges invalidate the chain invariant; reverts
-        // to the naive O(n³) loop until a tested implementation lands.
+        // nn-chain disabled: the chain-extension logic doesn't yet correctly
+        // handle the case where NN(top) is a non-prev chain element under
+        // tied distances. The naive O(n³) path is correct and matches sklearn.
         let use_nn_chain = false;
 
         // Helper: Lance-Williams update for cluster k after merging bi and bj

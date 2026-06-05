@@ -10,17 +10,28 @@ A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 
 | Category | RustML | scikit-learn equivalent |
 |---|---|---|
-| **Preprocessing** | `StandardScaler`, `MinMaxScaler` | `sklearn.preprocessing` |
-| **Dimensionality Reduction** | `Pca` | `sklearn.decomposition.PCA` |
-| **Feature Selection** | `VarianceThreshold`, `MutualInformationSelector` | `sklearn.feature_selection` |
-| **Neighbors** | `KnnClassifier`, `KnnRegressor` (KD-tree) | `sklearn.neighbors` |
-| **Trees** | `DecisionTreeClassifier`, `DecisionTreeRegressor` | `sklearn.tree` |
-| **Ensemble** | `RandomForestClassifier/Regressor`, `GradientBoostingClassifier/Regressor` | `sklearn.ensemble` |
-| **Clustering** | `KMeans` (k-means++), `Dbscan` | `sklearn.cluster` |
-| **Naive Bayes** | `GaussianNB` | `sklearn.naive_bayes` |
-| **Metrics** | `accuracy_score`, `f1_score`, `mse`, `r2_score`, ... | `sklearn.metrics` |
-| **Utilities** | `train_test_split`, `cross_val_score`, `Pipeline` | `sklearn.model_selection`, `sklearn.pipeline` |
-| **I/O** | CSV reader with ndarray integration | `pandas.read_csv` |
+| **Preprocessing & scaling** | `StandardScaler`, `MinMaxScaler`, `MaxAbsScaler`, `RobustScaler`, `Normalizer`, `Binarizer`, `KBinsDiscretizer`, `PolynomialFeatures`, `PowerTransformer`, `QuantileTransformer`, `SimpleImputer`, `OneHotEncoder`, `OrdinalEncoder`, `LabelEncoder` | `sklearn.preprocessing`, `sklearn.impute` |
+| **Decomposition** | `Pca`, `TruncatedSvd`, `KernelPca`, `Nmf` (NNDSVD), `FastIca` | `sklearn.decomposition` |
+| **Cross-decomposition** | `PlsRegression` (PLS1), `Cca` | `sklearn.cross_decomposition` |
+| **Manifold learning** | `ClassicalMds`, `Isomap`, `LocallyLinearEmbedding`, `TSne` | `sklearn.manifold` |
+| **Feature selection** | `VarianceThreshold`, `MutualInformationSelector`, `SelectKBest`, `SelectFromModel`, `Rfe`, `Rfecv`, `SequentialFeatureSelector` | `sklearn.feature_selection` |
+| **Neighbors** | `KnnClassifier`, `KnnRegressor` (KD-tree), `LocalOutlierFactor` | `sklearn.neighbors` |
+| **Linear models** | `OlsRegressor`, `RidgeRegressor` (+CV, +sample_weight), `LassoRegressor` (+CV), `ElasticNetRegressor` (+CV), `HuberRegressor`, `QuantileRegressor`, `IsotonicRegressor`, `WlsRegressor`, `LogisticRegressor`, `BayesianRidge`, `ARDRegression`, `Lars`, `LassoLarsIC`, `OrthogonalMatchingPursuit`, `RansacRegressor`, `TheilSenRegressor`, `KernelRidge`, `TransformedTargetRegressor`, `SgdClassifier`, `SgdRegressor`, `PassiveAggressiveClassifier`, `PassiveAggressiveRegressor` | `sklearn.linear_model` |
+| **GLMs** | `PoissonRegressor`, `BinomialRegressor`, `TweedieRegressor`, `GammaRegressor` | `sklearn.linear_model` GLM family |
+| **Discriminant analysis** | `LinearDiscriminantAnalysis` (+`transform`), `QuadraticDiscriminantAnalysis` | `sklearn.discriminant_analysis` |
+| **Trees** | `DecisionTreeClassifier` (+`predict_proba`), `DecisionTreeRegressor` | `sklearn.tree` |
+| **Ensemble** | `RandomForest{Classifier,Regressor}`, `ExtraTrees{Classifier,Regressor}`, `GradientBoosting{Classifier,Regressor}`, `HistGradientBoosting{Classifier,Regressor}`, `LgbmClassifier`, `LgbmRegressor`, `Bagging{Classifier,Regressor}`, `AdaBoost{Classifier,Regressor}`, `Voting{Classifier,Regressor}`, `Stacking{Classifier,Regressor}` (+`push_proba`), `CalibratedClassifierCV`, `IsolationForest` (rayon-parallel) | `sklearn.ensemble`, `lightgbm` |
+| **Clustering** | `KMeans`, `MiniBatchKMeans`, `Dbscan`, `Hdbscan`, `Optics`, `Birch`, `AgglomerativeClustering` (Ward/single/complete/average), `SpectralClustering`, `MeanShift`, `AffinityPropagation`, `GaussianMixture`, `BayesianGaussianMixture` | `sklearn.cluster`, `sklearn.mixture` |
+| **Naive Bayes** | `GaussianNB`, `MultinomialNB`, `BernoulliNB` (all with `predict_proba`) | `sklearn.naive_bayes` |
+| **SVM** | `Svc`, `Svr`, `NuSvc`, `NuSvr`, `LinearSvc`, `LinearSvr`, `OneClassSvm` | `sklearn.svm` |
+| **Gaussian processes** | `GaussianProcessRegressor` (RBF, Matern, RationalQuadratic, White, Constant, sums/products), `GaussianProcessClassifier` (Laplace) | `sklearn.gaussian_process` |
+| **Neural networks** | `MlpClassifier`, `MlpRegressor` | `sklearn.neural_network` |
+| **Multi-output** | `MultiOutputRegressor`, `MultiOutputClassifier`, `RegressorChain`, `ClassifierChain` | `sklearn.multioutput` |
+| **Text** | `CountVectorizer`, `TfidfVectorizer`, `HashingVectorizer` | `sklearn.feature_extraction.text` |
+| **Inspection** | `permutation_importance` (rayon-parallel) | `sklearn.inspection` |
+| **Metrics** | `accuracy_score`, `precision`, `recall`, `f1_score`, `confusion_matrix`, `roc_auc_score`, `roc_curve`, `precision_recall_curve`, `log_loss`, `brier_score_loss`, `matthews_corrcoef`, `cohen_kappa_score`, `silhouette_score`, `adjusted_rand_score`, `mse`, `mae`, `r2_score`, `mean_absolute_percentage_error`, `median_absolute_error`, `mean_squared_log_error`, ... | `sklearn.metrics` |
+| **Utilities** | `train_test_split`, `cross_val_score`, `cross_validate`, `grid_search_cv`, `randomized_search_cv`, `halving_grid_search_cv`, `halving_random_search_cv`, `k_fold` (+ stratified / group / time-series / shuffle / leave-one-out), `learning_curve`, `validation_curve`, `Pipeline`, `ColumnTransformer`, `FunctionTransformer`, `FeatureUnion` | `sklearn.model_selection`, `sklearn.pipeline`, `sklearn.compose` |
+| **I/O & persistence** | CSV reader with ndarray integration, JSON / bincode serde round-tripping for fitted models | `pandas.read_csv`, `joblib.dump` |
 
 ## Quick Start
 
@@ -72,15 +83,30 @@ smaller dependency trees.
 
 ```
 rustml (facade)
-  +-- rustml-core          Core traits, error types, Pipeline, utilities
-  +-- rustml-metrics        Classification and regression metrics
-  +-- rustml-preprocessing  Scalers, PCA, feature selection
-  +-- rustml-neighbors      KNN with KD-tree acceleration
-  +-- rustml-trees          CART decision trees
-  +-- rustml-ensemble       Random Forest, Gradient Boosting (parallel via rayon)
-  +-- rustml-cluster        KMeans, DBSCAN
-  +-- rustml-naive-bayes    Gaussian Naive Bayes
-  +-- rustml-io             CSV loading
+  +-- rustml-core              Core traits, error types, Pipeline, utilities
+  +-- rustml-metrics           Classification, regression, clustering metrics
+  +-- rustml-preprocessing     Scalers, PCA, KernelPCA, NMF, FastICA, TruncatedSVD,
+                               PLS, CCA, feature selection, RFE/RFECV/SFS
+  +-- rustml-neighbors         KNN with KD-tree, LocalOutlierFactor
+  +-- rustml-trees             CART decision trees with predict_proba
+  +-- rustml-ensemble          Random Forest, ExtraTrees, Gradient Boosting,
+                               HistGradientBoosting, LightGBM-lite, AdaBoost,
+                               Bagging, Voting, Stacking, Calibrated, IsolationForest
+  +-- rustml-cluster           KMeans, MiniBatchKMeans, DBSCAN, HDBSCAN, OPTICS,
+                               Birch, Agglomerative, Spectral, MeanShift, AP,
+                               GaussianMixture, BayesianGaussianMixture
+  +-- rustml-naive-bayes       Gaussian/Multinomial/Bernoulli NB
+  +-- rustml-discriminant      LDA (with transform) and QDA
+  +-- rustml-svm               SVC, SVR, NuSVC, NuSVR, LinearSVC/SVR, OneClassSVM
+  +-- rustml-regression        OLS, Ridge (+weighted), Lasso, ElasticNet, GLMs,
+                               BayesianRidge, ARD, LARS, OMP, KernelRidge,
+                               RANSAC, TheilSen, Tweedie, TransformedTarget
+  +-- rustml-linear            SGD, PassiveAggressive
+  +-- rustml-gaussian-process  GP regressor (5 kernels + composites) & classifier
+  +-- rustml-manifold          ClassicalMDS, Isomap, LLE, t-SNE
+  +-- rustml-neural-networks   MLPClassifier, MLPRegressor
+  +-- rustml-text              Count/Tfidf/Hashing vectorizers
+  +-- rustml-io                CSV loading
 ```
 
 ### Type-state pattern
@@ -101,35 +127,52 @@ StandardScaler --fit()--> FittedStandardScaler --transform()--> Array2
 |---|---|
 | `Fit<F>` | Supervised fitting: `fit(&self, x, y) -> Fitted` |
 | `FitUnsupervised<F>` | Unsupervised fitting: `fit(&self, x) -> Fitted` |
+| `FitWeighted<F>` | Supervised fitting with per-sample `sample_weight` |
 | `Predict<F>` | Generate predictions from fitted model |
+| `PredictProba<F>` | Class probabilities; rows sum to 1 |
+| `PredictLogProba<F>` | Log of `predict_proba` (auto-derived) |
+| `DecisionFunction<F>` | Real-valued per-class decision scores |
+| `RegressorScore<F>` / `ClassifierScore<F>` | `score()` (R² / accuracy) |
 | `Transform<F>` | Transform feature matrix |
 | `InverseTransform<F>` | Reverse a transformation |
 
+## sklearn parity
+
+Every estimator in `rustml` is validated against scikit-learn 1.8.0 via golden
+fixtures (`test_harness/generators/gen_*.py`) and corresponding Rust tests in
+`crates/rustml/tests/golden_*.rs`. Per-estimator parity notes — including
+tolerances, sample-weight behaviour, missing options, and asymptotic
+complexity — live under `validation/sklearn_parity/`.
+
+The pinned sklearn version (1.8.0) is enforced by
+`test_harness/check_sklearn_version.py`. Bumping the pin requires
+`./test_harness/regenerate_all.sh` followed by a full `cargo test --workspace`
+to confirm tolerances still hold.
+
 ## Algorithms
 
-### Classification
-- K-Nearest Neighbors (`KnnClassifier`) with KD-tree and parallel query
-- Decision Tree (`DecisionTreeClassifier`) using CART
-- Random Forest (`RandomForestClassifier`) with parallel tree fitting
-- Gradient Boosting (`GradientBoostingClassifier`)
-- Gaussian Naive Bayes (`GaussianNB`)
+See the feature table above for the full list. New since the original release:
 
-### Regression
-- K-Nearest Neighbors (`KnnRegressor`)
-- Decision Tree (`DecisionTreeRegressor`)
-- Random Forest (`RandomForestRegressor`)
-- Gradient Boosting (`GradientBoostingRegressor`)
-
-### Clustering
-- K-Means with k-means++ initialization (`KMeans`)
-- DBSCAN density-based clustering (`Dbscan`)
-
-### Preprocessing
-- `StandardScaler` -- zero mean, unit variance
-- `MinMaxScaler` -- scale to [0, 1]
-- `Pca` -- principal component analysis
-- `VarianceThreshold` -- drop low-variance features
-- `MutualInformationSelector` -- select features by mutual information
+- **Linear models**: BayesianRidge / ARDRegression, LARS / LassoLars /
+  LassoLarsIC, OrthogonalMatchingPursuit, KernelRidge (with sample_weight),
+  Tweedie / Gamma GLMs, TransformedTargetRegressor, PassiveAggressive,
+  RANSAC, TheilSen, Ridge with `sample_weight`.
+- **Cluster**: MiniBatchKMeans, AgglomerativeClustering (4 linkages),
+  SpectralClustering, MeanShift, AffinityPropagation, Birch, OPTICS, HDBSCAN,
+  GaussianMixture, BayesianGaussianMixture.
+- **Decomposition / manifold**: TruncatedSVD, KernelPCA, NMF (NNDSVD),
+  FastICA, ClassicalMDS, Isomap, LocallyLinearEmbedding, t-SNE.
+- **Cross-decomposition**: PLSRegression, CCA.
+- **Discriminant**: LinearDiscriminantAnalysis (with `transform`), QDA.
+- **Gaussian processes**: regressor (5 kernels + composites) and Laplace
+  classifier.
+- **Outlier detection**: IsolationForest (rayon-parallel), LocalOutlierFactor.
+- **Meta-estimators**: MultiOutputRegressor/Classifier, RegressorChain,
+  ClassifierChain, StackingClassifier (with `predict_proba`), CalibratedClassifierCV.
+- **Feature selection**: RFE, RFECV, SequentialFeatureSelector (forward).
+- **Inspection**: `permutation_importance` (rayon-parallel).
+- **Search**: `halving_grid_search_cv`, `halving_random_search_cv`.
+- **Text**: CountVectorizer, TfidfVectorizer, HashingVectorizer.
 
 ### Metrics
 - Classification: `accuracy_score`, `precision`, `recall`, `f1_score`, `confusion_matrix`, macro/micro/weighted averaging
