@@ -16,6 +16,7 @@ serde = { workspace = true }
 rustml-core = { path = "../rustml-core" }
 ndarray = { workspace = true }
 faer = "0.23"
+rand = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }

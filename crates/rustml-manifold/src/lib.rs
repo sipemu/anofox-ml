@@ -8,13 +8,17 @@
 //! - **LocallyLinearEmbedding** — `sklearn.manifold.LocallyLinearEmbedding`:
 //!   local reconstruction weights + bottom-k eigenvectors of `(I − W)ᵀ(I − W)`.
 //!
-//! Future: t-SNE.
+//! - **t-SNE** — `sklearn.manifold.TSNE`: vanilla O(n²) gradient descent
+//!   with perplexity-calibrated Gaussian affinities and student-t low-dim
+//!   affinities. Suitable for n ≲ 1000.
 
 pub mod isomap;
 pub mod lle;
+pub mod tsne;
 
 pub use isomap::{FittedIsomap, Isomap};
 pub use lle::{FittedLocallyLinearEmbedding, LocallyLinearEmbedding};
+pub use tsne::{FittedTSne, TSne};
 
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};

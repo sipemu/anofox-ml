@@ -14,6 +14,9 @@
 //! - `Constant` — `σ²` everywhere
 //! - `Sum` / `Product` — composite kernels
 
+pub mod classifier;
+pub use classifier::{FittedGaussianProcessClassifier, GaussianProcessClassifier};
+
 use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
@@ -156,7 +159,7 @@ pub struct FittedGaussianProcessRegressor {
     pub y_std: f64,
 }
 
-fn build_gram(x_a: &Array2<f64>, x_b: &Array2<f64>, kernel: &GpKernel) -> Array2<f64> {
+pub(crate) fn build_gram(x_a: &Array2<f64>, x_b: &Array2<f64>, kernel: &GpKernel) -> Array2<f64> {
     let na = x_a.nrows();
     let nb = x_b.nrows();
     let mut out = Array2::<f64>::zeros((na, nb));
