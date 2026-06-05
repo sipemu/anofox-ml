@@ -1,10 +1,15 @@
 //! Manifold learning algorithms.
 //!
-//! Currently provides **Classical MDS** (multidimensional scaling). Mirrors
-//! `sklearn.manifold.MDS` with the closed-form eigendecomposition variant
-//! (`MDS(metric=True, n_init=1)` with a pre-computed distance matrix).
+//! Provides:
+//! - **Classical MDS** — eigendecomposition variant of `sklearn.manifold.MDS`.
+//! - **Isomap** — `sklearn.manifold.Isomap`: k-NN graph + geodesic shortest
+//!   paths (Floyd-Warshall) + classical MDS on the geodesic distances.
 //!
-//! Future: t-SNE, Isomap, LocallyLinearEmbedding.
+//! Future: t-SNE, LocallyLinearEmbedding.
+
+pub mod isomap;
+
+pub use isomap::{FittedIsomap, Isomap};
 
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
