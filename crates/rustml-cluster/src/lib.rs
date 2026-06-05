@@ -43,6 +43,7 @@ pub mod gmm;
 pub mod kmeans;
 pub mod mean_shift;
 pub mod mini_batch_kmeans;
+pub mod optics;
 pub mod spectral;
 
 pub use affinity_propagation::{AffinityPropagation, FittedAffinityPropagation};
@@ -53,4 +54,5 @@ pub use gmm::{CovarianceType, FittedGaussianMixture, GaussianMixture};
 pub use kmeans::{FittedKMeans, KMeans};
 pub use mean_shift::{FittedMeanShift, MeanShift};
 pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchKMeans};
+pub use optics::{FittedOptics, Optics};
 pub use spectral::{Affinity, FittedSpectralClustering, SpectralClustering};
