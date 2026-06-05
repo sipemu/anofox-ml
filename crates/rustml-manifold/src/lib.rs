@@ -5,11 +5,16 @@
 //! - **Isomap** — `sklearn.manifold.Isomap`: k-NN graph + geodesic shortest
 //!   paths (Floyd-Warshall) + classical MDS on the geodesic distances.
 //!
-//! Future: t-SNE, LocallyLinearEmbedding.
+//! - **LocallyLinearEmbedding** — `sklearn.manifold.LocallyLinearEmbedding`:
+//!   local reconstruction weights + bottom-k eigenvectors of `(I − W)ᵀ(I − W)`.
+//!
+//! Future: t-SNE.
 
 pub mod isomap;
+pub mod lle;
 
 pub use isomap::{FittedIsomap, Isomap};
+pub use lle::{FittedLocallyLinearEmbedding, LocallyLinearEmbedding};
 
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
