@@ -133,3 +133,5 @@ mod tests {
         assert!(WlsRegressor::new(w).fit(&x, &y).is_err());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedWlsRegressor {}

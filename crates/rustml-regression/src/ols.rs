@@ -223,3 +223,5 @@ mod tests {
         assert!(fitted.predict(&x_bad).is_err());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedOlsRegressor {}

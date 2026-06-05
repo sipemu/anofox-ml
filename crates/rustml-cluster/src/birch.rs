@@ -191,3 +191,5 @@ mod tests {
         assert_ne!(fitted.labels[0], fitted.labels[1]);
     }
 }
+
+impl rustml_core::ClassifierScore<f64> for FittedBirch {}

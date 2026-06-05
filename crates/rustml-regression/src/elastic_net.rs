@@ -168,3 +168,5 @@ mod tests {
             .is_err());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedElasticNetRegressor {}

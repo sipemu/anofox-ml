@@ -448,3 +448,5 @@ impl<F: Float> PredictProba<F> for FittedMultinomialNB<F> {
 }
 
 impl<F: Float> rustml_core::PredictLogProba<F> for FittedMultinomialNB<F> {}
+
+impl<F: Float> rustml_core::ClassifierScore<F> for FittedMultinomialNB<F> {}

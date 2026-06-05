@@ -472,3 +472,5 @@ impl<F: Float> PredictProba<F> for FittedBernoulliNB<F> {
 }
 
 impl<F: Float> rustml_core::PredictLogProba<F> for FittedBernoulliNB<F> {}
+
+impl<F: Float> rustml_core::ClassifierScore<F> for FittedBernoulliNB<F> {}

@@ -231,3 +231,5 @@ mod tests {
         let _ = array![1.0_f64];
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedOrthogonalMatchingPursuit {}

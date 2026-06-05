@@ -389,3 +389,5 @@ mod tests {
         }
     }
 }
+
+impl rustml_core::ClassifierScore<f64> for FittedBayesianGaussianMixture {}

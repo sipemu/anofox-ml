@@ -131,3 +131,5 @@ mod tests {
         assert!(QuantileRegressor::new(-0.1).fit(&x, &y).is_err());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedQuantileRegressor {}

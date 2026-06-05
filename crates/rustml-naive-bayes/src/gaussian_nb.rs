@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Fit, Float, Predict, PredictLogProba, PredictProba, Result, RustMlError};
+use rustml_core::{Fit, FitWeighted, Float, Predict, PredictLogProba, PredictProba, Result, RustMlError};
 
 /// Gaussian Naive Bayes classifier parameters (unfitted state).
 ///
@@ -69,6 +69,91 @@ impl<F: Float> FittedGaussianNB<F> {
     /// Returns the unique sorted class labels.
     pub fn class_labels(&self) -> &[F] {
         &self.class_labels
+    }
+}
+
+impl<F: Float> FitWeighted<F> for GaussianNB {
+    type Fitted = FittedGaussianNB<F>;
+
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        if let Some(w) = sample_weight {
+            if w.len() != y.len() {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "sample_weight len {} != y len {}", w.len(), y.len()
+                )));
+            }
+        }
+        if x.is_empty() || y.is_empty() {
+            return Err(RustMlError::EmptyInput("training data must not be empty".into()));
+        }
+        if x.nrows() != y.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "X has {} rows but y has {} elements", x.nrows(), y.len()
+            )));
+        }
+
+        let smoothing = F::from_f64(self.var_smoothing).unwrap();
+        let n_features = x.ncols();
+
+        let mut class_labels: Vec<F> = y.to_vec();
+        class_labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        class_labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
+        let n_classes = class_labels.len();
+
+        // Total weight across all samples.
+        let total_w: F = match sample_weight {
+            Some(w) => w.iter().copied().fold(F::zero(), |a, b| a + b),
+            None => F::from_usize(x.nrows()).unwrap(),
+        };
+
+        let mut theta = Array2::<F>::zeros((n_classes, n_features));
+        let mut sigma = Array2::<F>::zeros((n_classes, n_features));
+        let mut class_prior = Vec::with_capacity(n_classes);
+
+        for (ci, &label) in class_labels.iter().enumerate() {
+            // Weighted mean per class.
+            let mut wsum = F::zero();
+            let mut wmean = vec![F::zero(); n_features];
+            for i in 0..x.nrows() {
+                if (y[i] - label).abs() >= F::from_f64(1e-12).unwrap() {
+                    continue;
+                }
+                let wi = sample_weight.map(|w| w[i]).unwrap_or(F::one());
+                wsum = wsum + wi;
+                for j in 0..n_features {
+                    wmean[j] = wmean[j] + wi * x[[i, j]];
+                }
+            }
+            let wsum_safe = if wsum == F::zero() { F::from_f64(1e-12).unwrap() } else { wsum };
+            for j in 0..n_features {
+                wmean[j] = wmean[j] / wsum_safe;
+            }
+            // Weighted variance per class.
+            let mut wvar = vec![F::zero(); n_features];
+            for i in 0..x.nrows() {
+                if (y[i] - label).abs() >= F::from_f64(1e-12).unwrap() {
+                    continue;
+                }
+                let wi = sample_weight.map(|w| w[i]).unwrap_or(F::one());
+                for j in 0..n_features {
+                    let d = x[[i, j]] - wmean[j];
+                    wvar[j] = wvar[j] + wi * d * d;
+                }
+            }
+            for j in 0..n_features {
+                wvar[j] = wvar[j] / wsum_safe + smoothing;
+                theta[[ci, j]] = wmean[j];
+                sigma[[ci, j]] = wvar[j];
+            }
+            class_prior.push(wsum / total_w);
+        }
+
+        Ok(FittedGaussianNB { class_labels, class_prior, theta, sigma })
     }
 }
 
@@ -648,3 +733,5 @@ mod tests {
         }
     }
 }
+
+impl<F: Float> rustml_core::ClassifierScore<F> for FittedGaussianNB<F> {}

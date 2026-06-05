@@ -186,3 +186,5 @@ mod tests {
         assert!(has_low && has_high);
     }
 }
+
+impl rustml_core::ClassifierScore<f64> for FittedMeanShift {}

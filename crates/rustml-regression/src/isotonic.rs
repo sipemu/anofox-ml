@@ -129,3 +129,5 @@ mod tests {
         assert!(IsotonicRegressor::new().fit(&x, &y).is_err());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedIsotonicRegressor {}

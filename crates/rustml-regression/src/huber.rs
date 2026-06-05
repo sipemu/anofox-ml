@@ -260,3 +260,5 @@ mod tests {
         assert!(HuberRegressor::new().fit(&x, &y).is_err());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedHuberRegressor {}

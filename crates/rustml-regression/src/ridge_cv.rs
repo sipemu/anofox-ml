@@ -302,3 +302,5 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedRidgeCrossValidated {}

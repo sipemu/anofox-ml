@@ -413,3 +413,5 @@ mod tests {
         assert!(fitted.bias().is_finite());
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedSgdRegressor<f64> {}

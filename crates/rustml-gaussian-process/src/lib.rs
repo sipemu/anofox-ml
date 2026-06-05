@@ -15,7 +15,10 @@
 //! - `Sum` / `Product` — composite kernels
 
 pub mod classifier;
-pub use classifier::{FittedGaussianProcessClassifier, GaussianProcessClassifier};
+pub use classifier::{
+    FittedGaussianProcessClassifier, FittedMulticlassGaussianProcessClassifier,
+    GaussianProcessClassifier, MulticlassGaussianProcessClassifier,
+};
 
 use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
@@ -498,3 +501,5 @@ mod tests {
         }
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedGaussianProcessRegressor {}

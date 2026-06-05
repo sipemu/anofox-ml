@@ -304,3 +304,157 @@ mod tests {
         let _ = array![1.0_f64];
     }
 }
+
+impl rustml_core::ClassifierScore<f64> for FittedGaussianProcessClassifier {}
+
+// ---------------------------------------------------------------------------
+// Multi-class GPC via one-vs-rest.
+// ---------------------------------------------------------------------------
+
+/// Multi-class Gaussian Process Classifier built as a one-vs-rest stack of
+/// binary `GaussianProcessClassifier` instances. Mirrors sklearn's
+/// `GaussianProcessClassifier(multi_class='one_vs_rest')` for the case of
+/// arbitrary discrete class labels.
+pub struct MulticlassGaussianProcessClassifier {
+    pub kernel: GpKernel,
+    pub max_iter: usize,
+    pub tol: f64,
+}
+
+impl MulticlassGaussianProcessClassifier {
+    pub fn new(kernel: GpKernel) -> Self {
+        Self { kernel, max_iter: 100, tol: 1e-6 }
+    }
+    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
+    pub fn with_tol(mut self, t: f64) -> Self { self.tol = t; self }
+}
+
+pub struct FittedMulticlassGaussianProcessClassifier {
+    pub classes: Vec<f64>,
+    pub binary: Vec<FittedGaussianProcessClassifier>,
+}
+
+fn clone_kernel_local(k: &GpKernel) -> GpKernel {
+    match k {
+        GpKernel::Rbf { length_scale, signal_var } => GpKernel::Rbf {
+            length_scale: *length_scale, signal_var: *signal_var,
+        },
+        GpKernel::Matern { length_scale, signal_var, nu } => GpKernel::Matern {
+            length_scale: *length_scale, signal_var: *signal_var, nu: *nu,
+        },
+        GpKernel::RationalQuadratic { length_scale, signal_var, alpha } => GpKernel::RationalQuadratic {
+            length_scale: *length_scale, signal_var: *signal_var, alpha: *alpha,
+        },
+        GpKernel::White { noise_level } => GpKernel::White { noise_level: *noise_level },
+        GpKernel::Constant { value } => GpKernel::Constant { value: *value },
+        GpKernel::Sum(a, b) => GpKernel::Sum(Box::new(clone_kernel_local(a)), Box::new(clone_kernel_local(b))),
+        GpKernel::Product(a, b) => GpKernel::Product(Box::new(clone_kernel_local(a)), Box::new(clone_kernel_local(b))),
+    }
+}
+
+impl Fit<f64> for MulticlassGaussianProcessClassifier {
+    type Fitted = FittedMulticlassGaussianProcessClassifier;
+
+    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+        let mut classes: Vec<f64> = y.iter().copied().collect();
+        classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        classes.dedup();
+        if classes.len() < 2 {
+            return Err(RustMlError::InvalidParameter(format!(
+                "multi-class GPC needs ≥2 classes, found {}", classes.len()
+            )));
+        }
+        let mut binary = Vec::with_capacity(classes.len());
+        for &c in &classes {
+            let y_bin: Array1<f64> = y.mapv(|v| if v == c { 1.0 } else { 0.0 });
+            let inner = GaussianProcessClassifier {
+                kernel: clone_kernel_local(&self.kernel),
+                max_iter: self.max_iter,
+                tol: self.tol,
+            };
+            binary.push(inner.fit(x, &y_bin)?);
+        }
+        Ok(FittedMulticlassGaussianProcessClassifier { classes, binary })
+    }
+}
+
+impl Predict<f64> for FittedMulticlassGaussianProcessClassifier {
+    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        let proba = self.predict_proba(x)?;
+        let n = x.nrows();
+        let mut out = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let mut best = f64::NEG_INFINITY;
+            let mut best_c = 0;
+            for c in 0..self.classes.len() {
+                if proba[[i, c]] > best {
+                    best = proba[[i, c]];
+                    best_c = c;
+                }
+            }
+            out[i] = self.classes[best_c];
+        }
+        Ok(out)
+    }
+}
+
+impl PredictProba<f64> for FittedMulticlassGaussianProcessClassifier {
+    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        let n = x.nrows();
+        let k = self.classes.len();
+        let mut p = Array2::<f64>::zeros((n, k));
+        for c in 0..k {
+            let pc = self.binary[c].predict_proba(x)?;
+            // Take the "is-class-c" column (= column 1 since label 1.0 in fit).
+            for i in 0..n {
+                p[[i, c]] = pc[[i, 1]];
+            }
+        }
+        // Renormalise rows to sum to 1 (sklearn does the same for OvR).
+        for i in 0..n {
+            let s: f64 = (0..k).map(|c| p[[i, c]]).sum::<f64>().max(1e-12);
+            for c in 0..k {
+                p[[i, c]] /= s;
+            }
+        }
+        Ok(p)
+    }
+}
+
+impl rustml_core::ClassifierScore<f64> for FittedMulticlassGaussianProcessClassifier {}
+
+#[cfg(test)]
+mod multiclass_tests {
+    use super::*;
+    use crate::GpKernel;
+    use ndarray::Array2;
+
+    #[test]
+    fn test_multiclass_gpc_three_classes() {
+        // Three clusters at (0,0), (5,0), (0,5).
+        let n_per = 6;
+        let mut x_data = Vec::new();
+        let mut y_data = Vec::new();
+        for i in 0..n_per {
+            let f = i as f64 * 0.1;
+            x_data.extend([f, f]); y_data.push(0.0);
+            x_data.extend([5.0 + f, f]); y_data.push(1.0);
+            x_data.extend([f, 5.0 + f]); y_data.push(2.0);
+        }
+        let x = Array2::from_shape_vec((n_per * 3, 2), x_data).unwrap();
+        let y = Array1::from_vec(y_data);
+        let mc = MulticlassGaussianProcessClassifier::new(GpKernel::Rbf {
+            length_scale: 2.0, signal_var: 1.0,
+        }).with_max_iter(50);
+        let fitted = mc.fit(&x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        let correct = preds.iter().zip(y.iter())
+            .filter(|(p, t)| (*p - *t).abs() < 0.5).count();
+        assert!(correct >= (n_per * 3) * 9 / 10, "got {}/{} correct", correct, n_per * 3);
+        let p = fitted.predict_proba(&x).unwrap();
+        for i in 0..(n_per * 3) {
+            let s: f64 = (0..3).map(|c| p[[i, c]]).sum();
+            assert!((s - 1.0).abs() < 1e-9);
+        }
+    }
+}

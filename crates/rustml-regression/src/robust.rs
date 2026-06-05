@@ -451,3 +451,6 @@ mod tests {
         assert!((fitted.coef[0] - 2.0).abs() < 0.5);
     }
 }
+
+impl rustml_core::RegressorScore<f64> for FittedRansacRegressor {}
+impl rustml_core::RegressorScore<f64> for FittedTheilSenRegressor {}

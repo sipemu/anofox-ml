@@ -359,3 +359,6 @@ mod tests {
         assert!(mae < 1.0, "MAE too high: {mae}");
     }
 }
+
+impl rustml_core::ClassifierScore<f64> for FittedPassiveAggressiveClassifier {}
+impl rustml_core::RegressorScore<f64> for FittedPassiveAggressiveRegressor {}

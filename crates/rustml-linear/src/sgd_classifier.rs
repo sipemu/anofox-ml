@@ -522,3 +522,5 @@ mod tests {
         assert_eq!(preds.len(), 12);
     }
 }
+
+impl rustml_core::ClassifierScore<f64> for FittedSgdClassifier<f64> {}

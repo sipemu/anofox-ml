@@ -238,3 +238,5 @@ mod tests {
         }
     }
 }
+
+impl<F: rustml_core::Float> rustml_core::ClassifierScore<F> for FittedMiniBatchKMeans<F> {}
