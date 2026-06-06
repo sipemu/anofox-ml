@@ -528,11 +528,16 @@ fn bench_logistic_5000x20(c: &mut Criterion) {
 
     group.bench_function("fit", |b| {
         b.iter(|| {
-            let m = LogisticRegressor::new();
+            let m = LogisticRegressor::new().with_max_iter(500).with_tol(1e-3);
             Fit::fit(&m, black_box(&x_train), black_box(&y_train)).unwrap()
         });
     });
-    let fitted = Fit::fit(&LogisticRegressor::new(), &x_train, &y_train).unwrap();
+    let fitted = Fit::fit(
+        &LogisticRegressor::new().with_max_iter(500).with_tol(1e-3),
+        &x_train,
+        &y_train,
+    )
+    .unwrap();
     group.bench_function("predict", |b| {
         b.iter(|| fitted.predict(black_box(&x_test)).unwrap());
     });
@@ -888,6 +893,222 @@ fn bench_scaling_gradient_boosting(c: &mut Criterion) {
     group.finish();
 }
 
+// ===========================================================================
+// Phase D: head-to-head against linfa
+//
+// Compares anofox-ml against linfa on the algorithms both libraries
+// implement: KMeans (clustering), Ridge / Lasso via linfa-elasticnet
+// (linear regression), LogisticRegression, DecisionTreeClassifier, and
+// GaussianNB. The README's "Phase 3" table pairs the criterion outputs
+// 1-to-1 so the user can see how the Rust-vs-Rust comparison shakes out.
+// ===========================================================================
+
+mod linfa_bench {
+    use super::{
+        generate_random_classification_data, generate_random_data, generate_random_regression_data,
+    };
+    use criterion::{black_box, Criterion};
+    use linfa::dataset::DatasetBase;
+    use linfa::traits::{Fit, Predict};
+    use ndarray::Array1;
+
+    /// Convert ndarray (X, y) into a linfa Dataset for regression. linfa's
+    /// `Dataset::new` takes (records, targets) and infers the trait bounds.
+    fn to_regression_ds(
+        x: ndarray::Array2<f64>,
+        y: ndarray::Array1<f64>,
+    ) -> DatasetBase<ndarray::Array2<f64>, ndarray::Array1<f64>> {
+        DatasetBase::new(x, y)
+    }
+
+    /// Same idea for classification, but linfa wants usize/i32 targets.
+    fn to_classification_ds(
+        x: ndarray::Array2<f64>,
+        y: ndarray::Array1<f64>,
+    ) -> DatasetBase<ndarray::Array2<f64>, Array1<usize>> {
+        let y_usize = y.mapv(|v| v as usize);
+        DatasetBase::new(x, y_usize)
+    }
+
+    pub fn bench_linfa_kmeans_5000x20(c: &mut Criterion) {
+        use linfa_clustering::KMeans;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut group = c.benchmark_group("linfa_kmeans_5000x20");
+        group.sample_size(10);
+
+        let x = generate_random_data(5000, 20, 42);
+        // linfa wants targets even for unsupervised — empty Array1.
+        let ds = DatasetBase::from(x.clone());
+
+        group.bench_function("fit", |b| {
+            b.iter(|| {
+                let rng = StdRng::seed_from_u64(42);
+                let model = KMeans::params_with_rng(10, rng)
+                    .max_n_iterations(100)
+                    .fit(black_box(&ds))
+                    .unwrap();
+                black_box(model);
+            });
+        });
+
+        group.finish();
+    }
+
+    pub fn bench_linfa_ridge_5000x20(c: &mut Criterion) {
+        use linfa_elasticnet::ElasticNet;
+
+        let mut group = c.benchmark_group("linfa_ridge_5000x20");
+
+        let (x, y) = generate_random_regression_data(5000, 20, 42);
+        let (x_test, _) = generate_random_regression_data(500, 20, 43);
+        let ds = to_regression_ds(x, y);
+
+        group.bench_function("fit", |b| {
+            b.iter(|| {
+                let model = ElasticNet::params()
+                    .penalty(1.0)
+                    .l1_ratio(0.0) // pure L2 = Ridge
+                    .fit(black_box(&ds))
+                    .unwrap();
+                black_box(model);
+            });
+        });
+
+        let model = ElasticNet::params()
+            .penalty(1.0)
+            .l1_ratio(0.0)
+            .fit(&ds)
+            .unwrap();
+
+        group.bench_function("predict", |b| {
+            b.iter(|| model.predict(black_box(&x_test)));
+        });
+
+        group.finish();
+    }
+
+    pub fn bench_linfa_lasso_5000x20(c: &mut Criterion) {
+        use linfa_elasticnet::ElasticNet;
+
+        let mut group = c.benchmark_group("linfa_lasso_5000x20");
+
+        let (x, y) = generate_random_regression_data(5000, 20, 42);
+        let (x_test, _) = generate_random_regression_data(500, 20, 43);
+        let ds = to_regression_ds(x, y);
+
+        group.bench_function("fit", |b| {
+            b.iter(|| {
+                let model = ElasticNet::params()
+                    .penalty(0.1)
+                    .l1_ratio(1.0) // pure L1 = Lasso
+                    .fit(black_box(&ds))
+                    .unwrap();
+                black_box(model);
+            });
+        });
+
+        let model = ElasticNet::params()
+            .penalty(0.1)
+            .l1_ratio(1.0)
+            .fit(&ds)
+            .unwrap();
+
+        group.bench_function("predict", |b| {
+            b.iter(|| model.predict(black_box(&x_test)));
+        });
+
+        group.finish();
+    }
+
+    pub fn bench_linfa_logistic_5000x20(c: &mut Criterion) {
+        use linfa_logistic::LogisticRegression;
+
+        let mut group = c.benchmark_group("linfa_logistic_5000x20");
+        group.sample_size(10);
+
+        let (x, y) = generate_random_classification_data(5000, 20, 2, 42);
+        let (x_test, _) = generate_random_classification_data(500, 20, 2, 43);
+        let ds = to_classification_ds(x, y);
+
+        group.bench_function("fit", |b| {
+            b.iter(|| {
+                let model = LogisticRegression::default()
+                    .max_iterations(200)
+                    .fit(black_box(&ds))
+                    .unwrap();
+                black_box(model);
+            });
+        });
+
+        let model = LogisticRegression::default()
+            .max_iterations(200)
+            .fit(&ds)
+            .unwrap();
+
+        group.bench_function("predict", |b| {
+            b.iter(|| model.predict(black_box(&x_test)));
+        });
+
+        group.finish();
+    }
+
+    pub fn bench_linfa_decision_tree_5000x20(c: &mut Criterion) {
+        use linfa_trees::DecisionTree;
+
+        let mut group = c.benchmark_group("linfa_decision_tree_5000x20");
+        group.sample_size(20);
+
+        let (x, y) = generate_random_classification_data(5000, 20, 5, 42);
+        let (x_test, _) = generate_random_classification_data(500, 20, 5, 43);
+        let ds = to_classification_ds(x, y);
+
+        group.bench_function("fit", |b| {
+            b.iter(|| {
+                let model = DecisionTree::params()
+                    .max_depth(Some(10))
+                    .fit(black_box(&ds))
+                    .unwrap();
+                black_box(model);
+            });
+        });
+
+        let model = DecisionTree::params().max_depth(Some(10)).fit(&ds).unwrap();
+
+        group.bench_function("predict", |b| {
+            b.iter(|| model.predict(black_box(&x_test)));
+        });
+
+        group.finish();
+    }
+
+    pub fn bench_linfa_gaussian_nb_5000x20(c: &mut Criterion) {
+        use linfa_bayes::GaussianNb;
+
+        let mut group = c.benchmark_group("linfa_gnb_5000x20");
+
+        let (x, y) = generate_random_classification_data(5000, 20, 5, 42);
+        let (x_test, _) = generate_random_classification_data(500, 20, 5, 43);
+        let ds = to_classification_ds(x, y);
+
+        group.bench_function("fit", |b| {
+            b.iter(|| {
+                let model = GaussianNb::params().fit(black_box(&ds)).unwrap();
+                black_box(model);
+            });
+        });
+
+        let model = GaussianNb::params().fit(&ds).unwrap();
+
+        group.bench_function("predict", |b| {
+            b.iter(|| model.predict(black_box(&x_test)));
+        });
+
+        group.finish();
+    }
+}
+
 /// Random regression-data generator matching the seeded Python harness.
 fn generate_random_regression_data(
     n_samples: usize,
@@ -957,5 +1178,12 @@ criterion_group!(
     bench_scaling_random_forest_regressor,
     bench_scaling_random_forest,
     bench_scaling_gradient_boosting,
+    // Phase D: head-to-head against linfa
+    linfa_bench::bench_linfa_kmeans_5000x20,
+    linfa_bench::bench_linfa_ridge_5000x20,
+    linfa_bench::bench_linfa_lasso_5000x20,
+    linfa_bench::bench_linfa_logistic_5000x20,
+    linfa_bench::bench_linfa_decision_tree_5000x20,
+    linfa_bench::bench_linfa_gaussian_nb_5000x20,
 );
 criterion_main!(benches);

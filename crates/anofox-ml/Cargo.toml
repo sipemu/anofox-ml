@@ -38,6 +38,16 @@ num-traits = { workspace = true }
 serde_json = { workspace = true }
 approx = { workspace = true }
 rand = { workspace = true }
+# Phase D: linfa as a head-to-head Rust ML comparison in the benchmarks.
+# All linfa-* crates pin ndarray = "0.16", matching the workspace, so the
+# resolver doesn't fork. Bench-only — no runtime dep on linfa for users.
+linfa = "0.8"
+linfa-clustering = "0.8"
+linfa-linear = "0.8"
+linfa-elasticnet = "0.8"
+linfa-logistic = "0.8"
+linfa-bayes = "0.8"
+linfa-trees = "0.8"
 
 [[bench]]
 name = "benchmarks"

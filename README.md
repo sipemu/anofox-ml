@@ -240,6 +240,32 @@ cargo bench -p anofox-ml
 uv run benchmarks/compare.py
 ```
 
+### Phase 3: head-to-head against linfa (harness in place; numbers TBD)
+
+[linfa](https://github.com/rust-ml/linfa) is the established Rust ML
+toolkit. Where the algorithm exists in both libraries the benches run
+the same seeded data through both, so the comparison is honest. The 6
+overlap points are:
+
+| Algorithm | anofox-ml bench group | linfa bench group |
+|---|---|---|
+| KMeans | `kmeans_5000x20` | `linfa_kmeans_5000x20` |
+| Ridge | `ridge_5000x20` | `linfa_ridge_5000x20` |
+| Lasso | `lasso_5000x20` | `linfa_lasso_5000x20` |
+| LogisticRegression | `logistic_5000x20` | `linfa_logistic_5000x20` |
+| DecisionTree | `tree_5000x20` | `linfa_decision_tree_5000x20` |
+| GaussianNB | `gnb_5000x20` | `linfa_gnb_5000x20` |
+
+Run the harness to populate:
+
+```bash
+cargo bench -p anofox-ml -- "5000x20"
+```
+
+linfa is a dev-dependency only — no runtime dep on linfa from
+`anofox-ml`. Both libraries pin `ndarray = "0.16"` so the dependency
+resolver doesn't fork.
+
 ### Scaling profiles
 
 How wall-time grows as `n` grows, per category:
