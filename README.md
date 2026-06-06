@@ -266,24 +266,29 @@ linfa is a dev-dependency only — no runtime dep on linfa from
 `anofox-ml`. Both libraries pin `ndarray = "0.16"` so the dependency
 resolver doesn't fork.
 
-### Continuous performance tracking (bencher.dev)
+### Continuous performance tracking (codspeed)
 
-CI uploads criterion results to [bencher.dev](https://bencher.dev) on
-every push to `master` (sets the baseline) and on every PR (compares
-against `master`, comments perf delta on the PR, fails the workflow if a
-regression exceeds the project threshold).
+CI sends the criterion benchmarks to [codspeed.io](https://codspeed.io)
+on every push to `master` and every PR. codspeed uses **cachegrind to
+count CPU instructions** instead of wall-time, so the numbers are
+deterministic across noisy GH runners — a 1 % delta is a real
+algorithmic change, not a hot/cold cache or a busy hypervisor.
 
-The `bench-track` job is `continue-on-error: true` so a missing
-`BENCHER_API_TOKEN` secret doesn't block CI — that means forks and
-brand-new clones just skip the job silently. To enable it:
+Benches are unchanged: the `codspeed-criterion-compat` shim
+re-exports criterion's API verbatim, so `cargo bench` locally still
+works exactly as before. The shim only switches to cachegrind when
+codspeed's runner sets `CODSPEED_CARGO_WORKSPACE_ROOT`.
 
-1. Sign up at <https://bencher.dev/> and create a project named `anofox-ml`.
-2. Generate an API token under `Account → Tokens`.
-3. Add it to the GitHub repo secrets as `BENCHER_API_TOKEN`.
+The `codspeed` job is `continue-on-error: true`, so a missing
+`CODSPEED_TOKEN` doesn't block CI — forks and pre-setup clones just
+skip the job silently. To enable it:
 
-The workflow file (`.github/workflows/ci.yml`, job `bench-track`) does
-not need any further edits — it reads the token from env and adapts the
-`bencher run` invocation to push vs PR automatically.
+1. Sign in at <https://codspeed.io> with the GitHub account that owns the repo.
+2. Register the `anofox-ml` repository under your codspeed dashboard.
+3. Copy the generated upload token and add it as the
+   `CODSPEED_TOKEN` repo secret.
+
+That's it — the workflow file picks it up from env on the next push.
 
 ### Scaling profiles
 

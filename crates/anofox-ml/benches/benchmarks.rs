@@ -1,5 +1,7 @@
 use anofox_ml::prelude::*;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use codspeed_criterion_compat::{
+    black_box, criterion_group, criterion_main, BenchmarkId, Criterion,
+};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -907,7 +909,7 @@ mod linfa_bench {
     use super::{
         generate_random_classification_data, generate_random_data, generate_random_regression_data,
     };
-    use criterion::{black_box, Criterion};
+    use codspeed_criterion_compat::{black_box, Criterion};
     use linfa::dataset::DatasetBase;
     use linfa::traits::{Fit, Predict};
     use ndarray::Array1;
