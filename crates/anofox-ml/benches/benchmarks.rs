@@ -761,6 +761,133 @@ fn bench_adaboost_5000x20(c: &mut Criterion) {
     group.finish();
 }
 
+// ===========================================================================
+// Phase B: scaling profiles
+//
+// One representative estimator per category, swept across three sizes so the
+// asymptotic growth becomes visible. Sizes deliberately span ~25× so a
+// linear (O(n)) algorithm shows a flat ~25× slope and a quadratic (O(n²))
+// one shows ~625×. Each function emits three criterion samples that the
+// validation/scaling/*.md docs then summarise.
+// ===========================================================================
+
+// ─── Clustering ───────────────────────────────────────────────────────────
+
+fn bench_scaling_kmeans(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaling_kmeans");
+    group.sample_size(10);
+
+    for &n in &[1000_usize, 5000, 25000] {
+        let x = generate_random_data(n, 20, 42);
+        group.bench_with_input(BenchmarkId::new("fit", n), &n, |b, _| {
+            b.iter(|| {
+                let km = KMeans {
+                    n_clusters: 10,
+                    max_iter: 100,
+                    seed: 42,
+                    ..Default::default()
+                };
+                FitUnsupervised::<f64>::fit(&km, black_box(&x)).unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_scaling_agglo_ward(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaling_agglo_ward");
+    group.sample_size(10);
+
+    // Ward's nn-chain is O(n²); cap the sweep at 2500 so a single iteration
+    // finishes in a few seconds even on a laptop. Showcases the win from the
+    // O(n²) nn-chain over the naive O(n³) sweep.
+    for &n in &[200_usize, 800, 2500] {
+        let x = generate_random_data(n, 20, 42);
+        group.bench_with_input(BenchmarkId::new("fit", n), &n, |b, _| {
+            b.iter(|| {
+                let m = AgglomerativeClustering::new(5).with_linkage(Linkage::Ward);
+                FitUnsupervised::<f64>::fit(&m, black_box(&x)).unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
+// ─── Regression ───────────────────────────────────────────────────────────
+
+fn bench_scaling_ridge(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaling_ridge");
+    group.sample_size(10);
+
+    for &n in &[1000_usize, 10000, 100000] {
+        let (x, y) = generate_random_regression_data(n, 20, 42);
+        group.bench_with_input(BenchmarkId::new("fit", n), &n, |b, _| {
+            b.iter(|| {
+                let m = RidgeRegressor::new().with_lambda(1.0);
+                Fit::fit(&m, black_box(&x), black_box(&y)).unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_scaling_random_forest_regressor(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaling_rf_regressor");
+    group.sample_size(10);
+
+    for &n in &[1000_usize, 5000, 25000] {
+        let (x, y) = generate_random_regression_data(n, 20, 42);
+        group.bench_with_input(BenchmarkId::new("fit", n), &n, |b, _| {
+            b.iter(|| {
+                let m = RandomForestRegressor::new(100).with_max_depth(Some(10));
+                Fit::fit(&m, black_box(&x), black_box(&y)).unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
+// ─── Ensemble (boosting families) ─────────────────────────────────────────
+
+fn bench_scaling_random_forest(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaling_random_forest");
+    group.sample_size(10);
+
+    for &n in &[1000_usize, 5000, 25000] {
+        let (x, y) = generate_random_classification_data(n, 20, 2, 42);
+        group.bench_with_input(BenchmarkId::new("fit", n), &n, |b, _| {
+            b.iter(|| {
+                let m = RandomForestClassifier {
+                    n_estimators: 100,
+                    max_depth: Some(10),
+                    seed: 42,
+                    ..Default::default()
+                };
+                Fit::<f64>::fit(&m, black_box(&x), black_box(&y)).unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_scaling_gradient_boosting(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scaling_gradient_boosting");
+    group.sample_size(10);
+
+    for &n in &[1000_usize, 5000, 25000] {
+        let (x, y) = generate_random_classification_data(n, 20, 2, 42);
+        group.bench_with_input(BenchmarkId::new("fit", n), &n, |b, _| {
+            b.iter(|| {
+                let m = GradientBoostingClassifier::new()
+                    .with_n_estimators(100)
+                    .with_max_depth(Some(3));
+                Fit::fit(&m, black_box(&x), black_box(&y)).unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Random regression-data generator matching the seeded Python harness.
 fn generate_random_regression_data(
     n_samples: usize,
@@ -823,5 +950,12 @@ criterion_group!(
     bench_gbm_5000x20,
     bench_hist_gbm_5000x20,
     bench_adaboost_5000x20,
+    // Phase B: scaling profiles (one representative per category)
+    bench_scaling_kmeans,
+    bench_scaling_agglo_ward,
+    bench_scaling_ridge,
+    bench_scaling_random_forest_regressor,
+    bench_scaling_random_forest,
+    bench_scaling_gradient_boosting,
 );
 criterion_main!(benches);

@@ -240,6 +240,18 @@ cargo bench -p anofox-ml
 uv run benchmarks/compare.py
 ```
 
+### Scaling profiles
+
+How wall-time grows as `n` grows, per category:
+
+- [clustering](validation/scaling/clustering.md) — KMeans (linear), AgglomerativeClustering Ward (O(n²) nn-chain vs O(n³) naive)
+- [regression](validation/scaling/regression.md) — Ridge (linear), RandomForestRegressor (n log n)
+- [ensemble](validation/scaling/ensemble.md) — RandomForestClassifier (rayon-parallel) vs GradientBoostingClassifier (sequential)
+
+The single-point comparison above tells you how anofox-ml does on a 5k
+benchmark; the scaling profile docs tell you which algorithm to pick at
+your actual data size.
+
 ### Additional estimator families (not in the perf sweep)
 
 The benchmark table above covers the load-bearing fast paths. The following
