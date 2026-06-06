@@ -2,9 +2,12 @@
 
 A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 
+[![CI](https://github.com/sipemu/rustml/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/rustml/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/rustml.svg)](https://crates.io/crates/rustml)
+[![Documentation](https://docs.rs/rustml/badge.svg)](https://docs.rs/rustml)
+[![codecov](https://codecov.io/gh/sipemu/rustml/branch/master/graph/badge.svg)](https://codecov.io/gh/sipemu/rustml)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
-[![CI](https://github.com/sipemu/rustml/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/rustml/actions)
 
 ## Features
 

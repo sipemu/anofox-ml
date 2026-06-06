@@ -137,8 +137,15 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-      - run: cargo llvm-cov --workspace --exclude rustml-python --summary-only
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --exclude rustml-python --lcov --output-path lcov.info
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
 
   publish:
     name: Publish to crates.io
