@@ -5,6 +5,8 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  release:
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
@@ -137,3 +139,41 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
       - run: cargo llvm-cov --workspace --exclude rustml-python --summary-only
+
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    # Only runs when a GitHub release is published. Gated on the full test
+    # matrix so a release tag with a regression doesn't make it to the
+    # registry. `rustml-python` is excluded — it's a maturin-built PyO3
+    # cdylib that ships through PyPI, not crates.io.
+    if: github.event_name == 'release'
+    needs: [check, test, clippy, fmt, doc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify release tag matches workspace.package.version
+        # Releases must be tagged `v<workspace.package.version>` (e.g. v0.2.0)
+        # — otherwise rustml's umbrella crate would pull a different version
+        # of its sub-crates than they themselves report. Fails fast before
+        # any upload.
+        run: |
+          set -e
+          tag="${GITHUB_REF#refs/tags/}"
+          expected="${tag#v}"
+          actual=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::release tag '$tag' (-> version $expected) does not match workspace.package.version=$actual"
+            exit 1
+          fi
+          echo "Publishing v$actual"
+      - name: Publish (topological order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # The script walks rustml-core first, then leaf crates, then
+        # umbrella, sleeping between uploads to let the crates.io index
+        # catch up. Pre-existing versions short-circuit (cargo publish
+        # treats a re-upload of the same version as an error, which is the
+        # desired behaviour — bump workspace.package.version for a re-run).
+        run: scripts/publish.sh --execute

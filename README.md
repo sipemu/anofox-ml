@@ -247,25 +247,37 @@ The workspace is split into 17 publishable crates plus an umbrella `rustml`.
 Versions are kept in lockstep via `[workspace.package].version` in the root
 `Cargo.toml` — bumping there moves every crate at once.
 
-To publish a release:
+Releases publish through GitHub Actions, triggered by a published GitHub
+release. To cut a release:
 
 ```bash
 # 1. Bump workspace.package.version in Cargo.toml (e.g. 0.1.0 → 0.2.0)
-# 2. Bump workspace.dependencies.rustml-* versions to match
-# 3. Tag and push
-git tag v0.2.0 && git push --tags
+# 2. Bump workspace.dependencies.rustml-* `version = "..."` entries to match
+# 3. Commit, tag, push
+git commit -am "Release v0.2.0"
+git tag v0.2.0
+git push && git push --tags
 
-# 4. Dry-run (catches metadata issues without uploading)
-scripts/publish.sh
-
-# 5. Real publish (requires `cargo login` against crates.io)
-scripts/publish.sh --execute
+# 4. Create a GitHub release pointing at the tag.
+#    The `publish` job in .github/workflows/ci.yml fires on
+#    `release.types: [published]`, runs after the full test matrix, and
+#    invokes scripts/publish.sh --execute.
 ```
 
-The script walks crates in topological order (leaf-first) and sleeps
-between uploads to let the crates.io index catch up. `rustml-python` is
-marked `publish = false` — it's a PyO3 extension module distributed via
-maturin, not crates.io.
+Required secret: `CARGO_REGISTRY_TOKEN` (a crates.io API token with publish
+scope) configured in the GitHub repo settings. The workflow also asserts
+the release tag matches `workspace.package.version` before uploading
+anything, so a misnamed tag fails fast.
+
+`rustml-python` is marked `publish = false` — it's a PyO3 extension
+module distributed via maturin (PyPI), not crates.io.
+
+To dry-run locally before tagging:
+
+```bash
+scripts/publish.sh           # dry-run, no uploads
+scripts/publish.sh --execute # requires `cargo login` against crates.io
+```
 
 ## License
 
