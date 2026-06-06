@@ -6,7 +6,7 @@ A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 [![Crates.io](https://img.shields.io/crates/v/rustml.svg)](https://crates.io/crates/rustml)
 [![Documentation](https://docs.rs/rustml/badge.svg)](https://docs.rs/rustml)
 [![codecov](https://codecov.io/gh/sipemu/rustml/branch/master/graph/badge.svg)](https://codecov.io/gh/sipemu/rustml)
-[![Rust](https://img.shields.io/badge/rust-1.84%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
 ## Features

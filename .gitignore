@@ -1,6 +1,8 @@
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is checked in: the workspace ships a cdylib (rustml-python)
+# whose build needs to be deterministic, and CI needs the same resolution
+# as local development to avoid version-skew failures.
 
 # Python
 __pycache__/
