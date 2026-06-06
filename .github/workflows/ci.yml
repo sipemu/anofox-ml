@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --exclude rustml-python --all-targets
+      - run: cargo check --workspace --exclude anofox-ml-python --all-targets
 
   test:
     name: Test (${{ matrix.rust }})
@@ -34,7 +34,7 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude rustml-python
+      - run: cargo test --workspace --exclude anofox-ml-python
 
   clippy:
     name: Clippy
@@ -52,7 +52,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo clippy --workspace --exclude rustml-python --all-targets -- \
+          cargo clippy --workspace --exclude anofox-ml-python --all-targets -- \
             -A clippy::all \
             -W clippy::correctness \
             -W clippy::suspicious \
@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --exclude rustml-python --no-deps
+      - run: cargo doc --workspace --exclude anofox-ml-python --no-deps
         env:
           RUSTDOCFLAGS: -Dwarnings
 
@@ -108,7 +108,7 @@ jobs:
       - run: pip install -r test_harness/requirements.txt
       - run: python test_harness/generate_golden_data.py
       - name: Check fixtures unchanged (advisory)
-        run: git diff --exit-code crates/rustml/tests/golden_data/
+        run: git diff --exit-code crates/anofox-ml/tests/golden_data/
 
   python-bindings:
     name: Python Bindings Build
@@ -120,7 +120,7 @@ jobs:
         with:
           python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p rustml-python --release
+      - run: cargo build -p anofox-ml-python --release
 
   bench:
     name: Benchmarks (dry run)
@@ -129,7 +129,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --workspace --exclude rustml-python --no-run
+      - run: cargo bench --workspace --exclude anofox-ml-python --no-run
 
   coverage:
     name: Coverage
@@ -144,7 +144,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage (lcov)
-        run: cargo llvm-cov --workspace --exclude rustml-python --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude anofox-ml-python --lcov --output-path lcov.info
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
         with:
@@ -157,7 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     # Only runs when a GitHub release is published. Gated on the full test
     # matrix so a release tag with a regression doesn't make it to the
-    # registry. `rustml-python` is excluded — it's a maturin-built PyO3
+    # registry. `anofox-ml-python` is excluded — it's a maturin-built PyO3
     # cdylib that ships through PyPI, not crates.io.
     if: github.event_name == 'release'
     needs: [check, test, clippy, fmt, doc]
@@ -167,7 +167,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Verify release tag matches workspace.package.version
         # Releases must be tagged `v<workspace.package.version>` (e.g. v0.2.0)
-        # — otherwise rustml's umbrella crate would pull a different version
+        # — otherwise anofox-ml's umbrella crate would pull a different version
         # of its sub-crates than they themselves report. Fails fast before
         # any upload.
         run: |
@@ -183,7 +183,7 @@ jobs:
       - name: Publish (topological order)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        # The script walks rustml-core first, then leaf crates, then
+        # The script walks anofox-ml-core first, then leaf crates, then
         # umbrella, sleeping between uploads to let the crates.io index
         # catch up. Pre-existing versions short-circuit (cargo publish
         # treats a re-upload of the same version as an error, which is the

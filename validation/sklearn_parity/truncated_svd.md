@@ -1,6 +1,6 @@
 # TruncatedSVD — sklearn parity
 
-Issue: [#18](https://github.com/sipemu/rustml/issues/18) (partial)
+Issue: [#18](https://github.com/sipemu/anofox-ml/issues/18) (partial)
 
 ## What
 
@@ -17,8 +17,8 @@ Implemented with `faer`'s thin SVD.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_truncated_svd.py`
-- Fixture:   `crates/rustml/tests/golden_data/truncated_svd.json`
-- Rust test: `crates/rustml/tests/golden_truncated_svd.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/truncated_svd.json`
+- Rust test: `crates/anofox-ml/tests/golden_truncated_svd.rs`
 
 40×6 random matrix multiplied by a diagonal of decaying singular values. SVD
 is sign-ambiguous (any column of U/V can flip sign), so we compare:

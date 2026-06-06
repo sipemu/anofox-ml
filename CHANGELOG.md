@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to RustML are recorded here. The format is loosely based on
+All notable changes to anofox-ml are recorded here. The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -8,7 +8,7 @@ All notable changes to RustML are recorded here. The format is loosely based on
 
 ### Algorithms — new
 
-- **HDBSCAN** (`rustml-cluster`) with stability-based flat extraction that
+- **HDBSCAN** (`anofox-ml-cluster`) with stability-based flat extraction that
   correctly marks low-density outliers as noise.
 - **BayesianGaussianMixture** — full variational inference with
   Normal–Wishart conjugate priors (Bishop §10.2), Dirichlet weight prior,
@@ -41,7 +41,7 @@ All notable changes to RustML are recorded here. The format is loosely based on
 
 - New traits: `FitWeighted`, `FitUnsupervisedWeighted`, `PartialFit`,
   `PredictLogProba`, `DecisionFunction`, `RegressorScore`, `ClassifierScore`.
-- `CsrMatrix` (compressed sparse row) added to `rustml-core::sparse`. Text
+- `CsrMatrix` (compressed sparse row) added to `anofox-ml-core::sparse`. Text
   vectorizers now expose `fit_transform_sparse` returning CSR — typical
   10⁴–10⁵-vocab corpora are dense-infeasible.
 - PyO3 bindings extended to cover HDBSCAN, MeanShift, AffinityPropagation,

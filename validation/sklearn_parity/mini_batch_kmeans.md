@@ -1,6 +1,6 @@
 # MiniBatchKMeans — sklearn parity
 
-Issue: [#17](https://github.com/sipemu/rustml/issues/17)
+Issue: [#17](https://github.com/sipemu/anofox-ml/issues/17)
 
 ## What
 
@@ -15,8 +15,8 @@ ever assigned to cluster `k`. k-means++ initialization.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_mini_batch_kmeans.py`
-- Fixture:   `crates/rustml/tests/golden_data/mini_batch_kmeans.json`
-- Rust test: `crates/rustml/tests/golden_mini_batch_kmeans.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/mini_batch_kmeans.json`
+- Rust test: `crates/anofox-ml/tests/golden_mini_batch_kmeans.rs`
 
 300-sample 4-blob `make_blobs` dataset with `cluster_std=0.6`. Centroids are
 matched greedily against sklearn's; we require **max matched-pair distance

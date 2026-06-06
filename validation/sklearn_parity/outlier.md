@@ -1,13 +1,13 @@
 # IsolationForest / LocalOutlierFactor — sklearn parity
 
-Issue: [#20](https://github.com/sipemu/rustml/issues/20)
+Issue: [#20](https://github.com/sipemu/anofox-ml/issues/20)
 
 ## What
 
-- **IsolationForest** (`rustml-ensemble`): forest of randomized depth-limited
+- **IsolationForest** (`anofox-ml-ensemble`): forest of randomized depth-limited
   binary trees. Anomaly score = `2^(-E[h(x)] / c(n))` averaged across trees.
   Threshold calibrated from the training-set contamination rate.
-- **LocalOutlierFactor** (`rustml-neighbors`): density-based scoring. For each
+- **LocalOutlierFactor** (`anofox-ml-neighbors`): density-based scoring. For each
   point `a`, `LOF(a) = mean_{b ∈ N(a)} lrd(b) / lrd(a)`. Values much greater
   than 1 indicate an outlier. We use the sklearn sign convention
   (`-LOF` higher = more normal).
@@ -19,8 +19,8 @@ Issue: [#20](https://github.com/sipemu/rustml/issues/20)
 ## Golden test
 
 - Generator: `test_harness/generators/gen_outlier.py`
-- Fixture:   `crates/rustml/tests/golden_data/outlier.json`
-- Rust test: `crates/rustml/tests/golden_outlier.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/outlier.json`
+- Rust test: `crates/anofox-ml/tests/golden_outlier.rs`
 
 205-sample 2-D dataset: 200 normal Gaussians plus 5 fixed wild outliers.
 Both implementations must catch ≥ 60% of outliers and within ±0.4 recall of

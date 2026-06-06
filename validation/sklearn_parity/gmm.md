@@ -1,6 +1,6 @@
 # GaussianMixture — sklearn parity
 
-Issue: [#13](https://github.com/sipemu/rustml/issues/13) (partial — Bayesian GMM pending)
+Issue: [#13](https://github.com/sipemu/anofox-ml/issues/13) (partial — Bayesian GMM pending)
 
 ## What
 
@@ -14,8 +14,8 @@ and `diag` covariance types.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_gmm.py`
-- Fixture:   `crates/rustml/tests/golden_data/gmm.json`
-- Rust test: `crates/rustml/tests/golden_gmm.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/gmm.json`
+- Rust test: `crates/anofox-ml/tests/golden_gmm.rs`
 
 150-sample 3-blob dataset, both covariance types. Compared via Adjusted Rand
 Index against the true labels (`ARI ≥ sklearn_ARI − 0.05`).

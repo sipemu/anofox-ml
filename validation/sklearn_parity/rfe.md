@@ -1,6 +1,6 @@
 # RFE / SequentialFeatureSelector — sklearn parity
 
-Issue: [#21](https://github.com/sipemu/rustml/issues/21) (partial — RFECV not yet)
+Issue: [#21](https://github.com/sipemu/anofox-ml/issues/21) (partial — RFECV not yet)
 
 ## What
 
@@ -18,8 +18,8 @@ Issue: [#21](https://github.com/sipemu/rustml/issues/21) (partial — RFECV not 
 ## Golden test
 
 - Generator: `test_harness/generators/gen_rfe.py`
-- Fixture:   `crates/rustml/tests/golden_data/rfe.json`
-- Rust test: `crates/rustml/tests/golden_rfe.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/rfe.json`
+- Rust test: `crates/anofox-ml/tests/golden_rfe.rs`
 
 100×8 problem with 3 informative features at indices `{0, 2, 5}`. RFE asserts
 exact match with sklearn's `support_`; SFS asserts ≥ 2 of 3 informative

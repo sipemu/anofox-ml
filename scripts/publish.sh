@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Publishes every rustml-* crate to crates.io in topological order.
+# Publishes every anofox-ml-* crate to crates.io in topological order.
 #
 # Why an explicit order: cargo refuses to upload a crate whose internal
 # dependencies aren't yet on crates.io, so leaf-first is mandatory. Between
@@ -32,27 +32,27 @@ if [[ "${1:-}" == "--execute" ]]; then
     SLEEP_SECS=20
 fi
 
-# Topological order: rustml-core has no internal deps, then everything else
+# Topological order: anofox-ml-core has no internal deps, then everything else
 # layered upward to the umbrella.
 CRATES=(
-    rustml-core
-    rustml-text
-    rustml-io
-    rustml-svm
-    rustml-linear
-    rustml-neural-networks
-    rustml-naive-bayes
-    rustml-neighbors
-    rustml-trees
-    rustml-discriminant
-    rustml-metrics
-    rustml-cluster
-    rustml-gaussian-process
-    rustml-manifold
-    rustml-preprocessing
-    rustml-ensemble
-    rustml-regression
-    rustml
+    anofox-ml-core
+    anofox-ml-text
+    anofox-ml-io
+    anofox-ml-svm
+    anofox-ml-linear
+    anofox-ml-neural-networks
+    anofox-ml-naive-bayes
+    anofox-ml-neighbors
+    anofox-ml-trees
+    anofox-ml-discriminant
+    anofox-ml-metrics
+    anofox-ml-cluster
+    anofox-ml-gaussian-process
+    anofox-ml-manifold
+    anofox-ml-preprocessing
+    anofox-ml-ensemble
+    anofox-ml-regression
+    anofox-ml
 )
 
 for crate in "${CRATES[@]}"; do

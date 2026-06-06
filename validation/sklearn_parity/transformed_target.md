@@ -1,6 +1,6 @@
 # TransformedTargetRegressor — sklearn parity
 
-Issue: [#8](https://github.com/sipemu/rustml/issues/8)
+Issue: [#8](https://github.com/sipemu/anofox-ml/issues/8)
 
 ## What
 
@@ -16,8 +16,8 @@ Mirrors `sklearn.compose.TransformedTargetRegressor` in its function-based form
 ## Golden test
 
 - Generator: `test_harness/generators/gen_transformed_target.py`
-- Fixture:   `crates/rustml/tests/golden_data/transformed_target.json`
-- Rust test: `crates/rustml/tests/golden_transformed_target.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/transformed_target.json`
+- Rust test: `crates/anofox-ml/tests/golden_transformed_target.rs`
 
 The fixture trains a sklearn `Ridge(alpha=0.01)` wrapped with
 `TransformedTargetRegressor(func=np.log, inverse_func=np.exp)` on a 50×4

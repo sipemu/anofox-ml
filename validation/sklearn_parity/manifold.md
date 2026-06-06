@@ -1,10 +1,10 @@
 # Manifold learning (Classical MDS) — sklearn parity
 
-Issue: [#19](https://github.com/sipemu/rustml/issues/19) (partial — t-SNE / Isomap / LLE pending)
+Issue: [#19](https://github.com/sipemu/anofox-ml/issues/19) (partial — t-SNE / Isomap / LLE pending)
 
 ## What
 
-New crate `rustml-manifold`. Implements **Classical MDS** (Torgerson scaling)
+New crate `anofox-ml-manifold`. Implements **Classical MDS** (Torgerson scaling)
 via double-centring the squared pairwise-distance matrix and
 eigendecomposing the resulting Gram matrix.
 

@@ -1,0 +1,21 @@
+[package]
+name = "anofox-ml-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+rust-version.workspace = true
+authors.workspace = true
+description = "Text feature extraction (CountVectorizer, TfidfVectorizer, HashingVectorizer) for anofox-ml"
+documentation = "https://docs.rs/anofox-ml-text"
+keywords = ["machine-learning", "text", "tfidf", "nlp", "ndarray"]
+categories = ["science", "text-processing"]
+
+[dependencies]
+anofox-ml-core = { workspace = true }
+ndarray = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

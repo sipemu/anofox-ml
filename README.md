@@ -1,17 +1,17 @@
-# RustML
+# anofox-ml
 
 A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 
-[![CI](https://github.com/sipemu/rustml/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/rustml/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/rustml.svg)](https://crates.io/crates/rustml)
-[![Documentation](https://docs.rs/rustml/badge.svg)](https://docs.rs/rustml)
-[![codecov](https://codecov.io/gh/sipemu/rustml/branch/master/graph/badge.svg)](https://codecov.io/gh/sipemu/rustml)
+[![CI](https://github.com/sipemu/anofox-ml/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/anofox-ml/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/anofox-ml.svg)](https://crates.io/crates/anofox-ml)
+[![Documentation](https://docs.rs/anofox-ml/badge.svg)](https://docs.rs/anofox-ml)
+[![codecov](https://codecov.io/gh/sipemu/anofox-ml/branch/master/graph/badge.svg)](https://codecov.io/gh/sipemu/anofox-ml)
 [![Rust](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 
 ## Features
 
-| Category | RustML | scikit-learn equivalent |
+| Category | anofox-ml | scikit-learn equivalent |
 |---|---|---|
 | **Preprocessing & scaling** | `StandardScaler`, `MinMaxScaler`, `MaxAbsScaler`, `RobustScaler`, `Normalizer`, `Binarizer`, `KBinsDiscretizer`, `PolynomialFeatures`, `PowerTransformer`, `QuantileTransformer`, `SimpleImputer`, `OneHotEncoder`, `OrdinalEncoder`, `LabelEncoder` | `sklearn.preprocessing`, `sklearn.impute` |
 | **Decomposition** | `Pca`, `TruncatedSvd`, `KernelPca`, `Nmf` (NNDSVD), `FastIca` | `sklearn.decomposition` |
@@ -38,21 +38,21 @@ A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 
 ## Quick Start
 
-Add RustML to your project:
+Add anofox-ml to your project:
 
 ```toml
 [dependencies]
-rustml = "0.1"
+anofox-ml = "0.1"
 ndarray = "0.16"
 ```
 
 Train a KNN classifier with standardized features:
 
 ```rust
-use rustml::prelude::*;
+use anofox_ml::prelude::*;
 use ndarray::array;
 
-fn main() -> rustml::core::Result<()> {
+fn main() -> anofox_ml::core::Result<()> {
     // Sample data
     let x_train = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0],
                           [8.0, 9.0], [9.0, 10.0], [10.0, 11.0]];
@@ -80,36 +80,36 @@ fn main() -> rustml::core::Result<()> {
 
 ## Architecture
 
-RustML is organized as a Cargo workspace with focused crates. You can depend on
-the umbrella `rustml` crate for everything, or pick individual crates for
+anofox-ml is organized as a Cargo workspace with focused crates. You can depend on
+the umbrella `anofox-ml` crate for everything, or pick individual crates for
 smaller dependency trees.
 
 ```
-rustml (facade)
-  +-- rustml-core              Core traits, error types, Pipeline, utilities
-  +-- rustml-metrics           Classification, regression, clustering metrics
-  +-- rustml-preprocessing     Scalers, PCA, KernelPCA, NMF, FastICA, TruncatedSVD,
+anofox-ml (facade)
+  +-- anofox-ml-core              Core traits, error types, Pipeline, utilities
+  +-- anofox-ml-metrics           Classification, regression, clustering metrics
+  +-- anofox-ml-preprocessing     Scalers, PCA, KernelPCA, NMF, FastICA, TruncatedSVD,
                                PLS, CCA, feature selection, RFE/RFECV/SFS
-  +-- rustml-neighbors         KNN with KD-tree, LocalOutlierFactor
-  +-- rustml-trees             CART decision trees with predict_proba
-  +-- rustml-ensemble          Random Forest, ExtraTrees, Gradient Boosting,
+  +-- anofox-ml-neighbors         KNN with KD-tree, LocalOutlierFactor
+  +-- anofox-ml-trees             CART decision trees with predict_proba
+  +-- anofox-ml-ensemble          Random Forest, ExtraTrees, Gradient Boosting,
                                HistGradientBoosting, LightGBM-lite, AdaBoost,
                                Bagging, Voting, Stacking, Calibrated, IsolationForest
-  +-- rustml-cluster           KMeans, MiniBatchKMeans, DBSCAN, HDBSCAN, OPTICS,
+  +-- anofox-ml-cluster           KMeans, MiniBatchKMeans, DBSCAN, HDBSCAN, OPTICS,
                                Birch, Agglomerative, Spectral, MeanShift, AP,
                                GaussianMixture, BayesianGaussianMixture
-  +-- rustml-naive-bayes       Gaussian/Multinomial/Bernoulli NB
-  +-- rustml-discriminant      LDA (with transform) and QDA
-  +-- rustml-svm               SVC, SVR, NuSVC, NuSVR, LinearSVC/SVR, OneClassSVM
-  +-- rustml-regression        OLS, Ridge (+weighted), Lasso, ElasticNet, GLMs,
+  +-- anofox-ml-naive-bayes       Gaussian/Multinomial/Bernoulli NB
+  +-- anofox-ml-discriminant      LDA (with transform) and QDA
+  +-- anofox-ml-svm               SVC, SVR, NuSVC, NuSVR, LinearSVC/SVR, OneClassSVM
+  +-- anofox-ml-regression        OLS, Ridge (+weighted), Lasso, ElasticNet, GLMs,
                                BayesianRidge, ARD, LARS, OMP, KernelRidge,
                                RANSAC, TheilSen, Tweedie, TransformedTarget
-  +-- rustml-linear            SGD, PassiveAggressive
-  +-- rustml-gaussian-process  GP regressor (5 kernels + composites) & classifier
-  +-- rustml-manifold          ClassicalMDS, Isomap, LLE, t-SNE
-  +-- rustml-neural-networks   MLPClassifier, MLPRegressor
-  +-- rustml-text              Count/Tfidf/Hashing vectorizers
-  +-- rustml-io                CSV loading
+  +-- anofox-ml-linear            SGD, PassiveAggressive
+  +-- anofox-ml-gaussian-process  GP regressor (5 kernels + composites) & classifier
+  +-- anofox-ml-manifold          ClassicalMDS, Isomap, LLE, t-SNE
+  +-- anofox-ml-neural-networks   MLPClassifier, MLPRegressor
+  +-- anofox-ml-text              Count/Tfidf/Hashing vectorizers
+  +-- anofox-ml-io                CSV loading
 ```
 
 ### Type-state pattern
@@ -141,9 +141,9 @@ StandardScaler --fit()--> FittedStandardScaler --transform()--> Array2
 
 ## sklearn parity
 
-Every estimator in `rustml` is validated against scikit-learn 1.8.0 via golden
+Every estimator in `anofox-ml` is validated against scikit-learn 1.8.0 via golden
 fixtures (`test_harness/generators/gen_*.py`) and corresponding Rust tests in
-`crates/rustml/tests/golden_*.rs`. Per-estimator parity notes — including
+`crates/anofox-ml/tests/golden_*.rs`. Per-estimator parity notes — including
 tolerances, sample-weight behaviour, missing options, and asymptotic
 complexity — live under `validation/sklearn_parity/`.
 
@@ -186,11 +186,11 @@ See the feature table above for the full list. New since the original release:
 
 ## Benchmarks
 
-RustML outperforms scikit-learn across all benchmarks, with up to 22x speedups
+anofox-ml outperforms scikit-learn across all benchmarks, with up to 22x speedups
 on critical operations. Measurements taken on the same machine with identical
 datasets and parameters.
 
-| Algorithm | Operation | sklearn (ms) | rustml (ms) | Speedup |
+| Algorithm | Operation | sklearn (ms) | anofox-ml (ms) | Speedup |
 |---|---|--:|--:|--:|
 | **GaussianNB** | fit 5000×20 | 6.34 | 0.29 | **21.8x** |
 | **DecisionTree** | predict 5000×20 | 0.10 | 0.007 | **14.6x** |
@@ -210,7 +210,7 @@ rayon parallelism for KMeans, and batch prediction for Random Forest.
 
 Reproduce with:
 ```bash
-cargo bench -p rustml
+cargo bench -p anofox-ml
 uv run benchmarks/compare.py
 ```
 
@@ -236,7 +236,7 @@ Algorithmic complexity tables for each estimator live in
 
 ## Documentation
 
-API documentation is published at [docs.rs/rustml](https://docs.rs/rustml).
+API documentation is published at [docs.rs/anofox-ml](https://docs.rs/anofox-ml).
 
 ## Contributing
 
@@ -246,7 +246,7 @@ before submitting a pull request. All code should include tests and pass
 
 ## Releasing
 
-The workspace is split into 17 publishable crates plus an umbrella `rustml`.
+The workspace is split into 17 publishable crates plus an umbrella `anofox-ml`.
 Versions are kept in lockstep via `[workspace.package].version` in the root
 `Cargo.toml` — bumping there moves every crate at once.
 
@@ -255,7 +255,7 @@ release. To cut a release:
 
 ```bash
 # 1. Bump workspace.package.version in Cargo.toml (e.g. 0.1.0 → 0.2.0)
-# 2. Bump workspace.dependencies.rustml-* `version = "..."` entries to match
+# 2. Bump workspace.dependencies.anofox-ml-* `version = "..."` entries to match
 # 3. Commit, tag, push
 git commit -am "Release v0.2.0"
 git tag v0.2.0
@@ -272,7 +272,7 @@ scope) configured in the GitHub repo settings. The workflow also asserts
 the release tag matches `workspace.package.version` before uploading
 anything, so a misnamed tag fails fast.
 
-`rustml-python` is marked `publish = false` — it's a PyO3 extension
+`anofox-ml-python` is marked `publish = false` — it's a PyO3 extension
 module distributed via maturin (PyPI), not crates.io.
 
 To dry-run locally before tagging:

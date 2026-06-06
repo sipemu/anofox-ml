@@ -1,13 +1,13 @@
 # SpectralClustering + MeanShift — sklearn parity
 
-Issue: [#15](https://github.com/sipemu/rustml/issues/15) (now fully closed in terms of clustering set; HDBSCAN/OPTICS/Birch are #16).
+Issue: [#15](https://github.com/sipemu/anofox-ml/issues/15) (now fully closed in terms of clustering set; HDBSCAN/OPTICS/Birch are #16).
 
 ## What
 
-- **SpectralClustering** (`rustml-cluster::spectral`): RBF or k-NN affinity →
+- **SpectralClustering** (`anofox-ml-cluster::spectral`): RBF or k-NN affinity →
   normalised Laplacian `L = I - D^{-1/2} A D^{-1/2}` → bottom-k eigenvectors
   → row-normalise → KMeans on the embedding.
-- **MeanShift** (`rustml-cluster::mean_shift`): flat-kernel mean-shift
+- **MeanShift** (`anofox-ml-cluster::mean_shift`): flat-kernel mean-shift
   iteration from each point with mode-merging at bandwidth/2.
 
 ## Reference

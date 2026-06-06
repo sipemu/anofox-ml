@@ -1,6 +1,6 @@
 # AgglomerativeClustering — sklearn parity
 
-Issue: [#15](https://github.com/sipemu/rustml/issues/15) (partial — Spectral & MeanShift pending)
+Issue: [#15](https://github.com/sipemu/anofox-ml/issues/15) (partial — Spectral & MeanShift pending)
 
 ## What
 
@@ -15,8 +15,8 @@ Single/Complete/Average use the naive `O(n³)` sweep (also `O(n²)` memory).
 ## Golden test
 
 - Generator: `test_harness/generators/gen_agglomerative.py`
-- Fixture:   `crates/rustml/tests/golden_data/agglomerative.json`
-- Rust test: `crates/rustml/tests/golden_agglomerative.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/agglomerative.json`
+- Rust test: `crates/anofox-ml/tests/golden_agglomerative.rs`
 
 120-sample 4-blob dataset, all four linkages. Labels are arbitrary permutations
 between implementations, so we compare via Adjusted Rand Index against the

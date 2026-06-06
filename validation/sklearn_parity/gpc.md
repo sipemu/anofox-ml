@@ -1,6 +1,6 @@
 # GaussianProcessClassifier — sklearn parity
 
-Issue: [#12](https://github.com/sipemu/rustml/issues/12) (now closed)
+Issue: [#12](https://github.com/sipemu/anofox-ml/issues/12) (now closed)
 
 ## What
 
@@ -14,7 +14,7 @@ Binary Gaussian Process classification via Laplace approximation
 3. Predict via probit approximation:
    `p(y=1|x_*) ≈ σ(f̄_* / √(1 + π/8 · V[f_*]))`.
 
-Implemented in `rustml_gaussian_process::classifier::GaussianProcessClassifier`.
+Implemented in `anofox_ml_gaussian_process::classifier::GaussianProcessClassifier`.
 
 ## Reference
 

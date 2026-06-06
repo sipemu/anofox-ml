@@ -1,6 +1,6 @@
 # RansacRegressor / TheilSenRegressor — sklearn parity
 
-Issue: [#4](https://github.com/sipemu/rustml/issues/4)
+Issue: [#4](https://github.com/sipemu/anofox-ml/issues/4)
 
 ## What
 
@@ -20,8 +20,8 @@ Robust linear regression for outlier-heavy data.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_robust.py`
-- Fixture:   `crates/rustml/tests/golden_data/robust.json`
-- Rust test: `crates/rustml/tests/golden_robust.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/robust.json`
+- Rust test: `crates/anofox-ml/tests/golden_robust.rs`
 
 120-sample 1-D contaminated regression problem: 100 inliers on `y = 2x + 1`
 plus 20 wild outliers at `y ∈ [15, 30]`. Both implementations must recover

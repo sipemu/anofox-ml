@@ -15,8 +15,8 @@ Out-of-fold predictions are generated via sequential k-fold during fitting.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_stacking_classifier.py`
-- Fixture:   `crates/rustml/tests/golden_data/stacking_classifier.json`
-- Rust test: `crates/rustml/tests/golden_stacking_classifier.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/stacking_classifier.json`
+- Rust test: `crates/anofox-ml/tests/golden_stacking_classifier.rs`
 
 Behavioral parity, not exact prediction match — we use hard predictions and
 sequential k-fold; sklearn defaults to `predict_proba` and StratifiedKFold.

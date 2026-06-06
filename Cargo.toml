@@ -1,25 +1,25 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/rustml-core",
-    "crates/rustml-metrics",
-    "crates/rustml-preprocessing",
-    "crates/rustml-neighbors",
-    "crates/rustml-trees",
-    "crates/rustml-ensemble",
-    "crates/rustml-cluster",
-    "crates/rustml-naive-bayes",
-    "crates/rustml-discriminant",
-    "crates/rustml-text",
-    "crates/rustml-gaussian-process",
-    "crates/rustml-manifold",
-    "crates/rustml-io",
-    "crates/rustml-svm",
-    "crates/rustml-neural-networks",
-    "crates/rustml-regression",
-    "crates/rustml-linear",
-    "crates/rustml-python",
-    "crates/rustml",
+    "crates/anofox-ml-core",
+    "crates/anofox-ml-metrics",
+    "crates/anofox-ml-preprocessing",
+    "crates/anofox-ml-neighbors",
+    "crates/anofox-ml-trees",
+    "crates/anofox-ml-ensemble",
+    "crates/anofox-ml-cluster",
+    "crates/anofox-ml-naive-bayes",
+    "crates/anofox-ml-discriminant",
+    "crates/anofox-ml-text",
+    "crates/anofox-ml-gaussian-process",
+    "crates/anofox-ml-manifold",
+    "crates/anofox-ml-io",
+    "crates/anofox-ml-svm",
+    "crates/anofox-ml-neural-networks",
+    "crates/anofox-ml-regression",
+    "crates/anofox-ml-linear",
+    "crates/anofox-ml-python",
+    "crates/anofox-ml",
 ]
 
 # Shared package metadata. Every publishable crate inherits version, license,
@@ -29,8 +29,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/sipemu/rustml"
-homepage = "https://github.com/sipemu/rustml"
+repository = "https://github.com/sipemu/anofox-ml"
+homepage = "https://github.com/sipemu/anofox-ml"
 readme = "README.md"
 keywords = ["machine-learning", "ml", "scikit-learn", "classification", "regression"]
 categories = ["science", "algorithms"]
@@ -53,20 +53,20 @@ faer = "0.23"
 # Internal workspace crates. Each carries both `path` (for local builds)
 # and `version` (for crates.io); without `version` cargo refuses to
 # publish. Bump these in lock-step with `workspace.package.version`.
-rustml-core = { version = "0.1.0", path = "crates/rustml-core" }
-rustml-metrics = { version = "0.1.0", path = "crates/rustml-metrics" }
-rustml-preprocessing = { version = "0.1.0", path = "crates/rustml-preprocessing" }
-rustml-neighbors = { version = "0.1.0", path = "crates/rustml-neighbors" }
-rustml-trees = { version = "0.1.0", path = "crates/rustml-trees" }
-rustml-ensemble = { version = "0.1.0", path = "crates/rustml-ensemble" }
-rustml-cluster = { version = "0.1.0", path = "crates/rustml-cluster" }
-rustml-naive-bayes = { version = "0.1.0", path = "crates/rustml-naive-bayes" }
-rustml-discriminant = { version = "0.1.0", path = "crates/rustml-discriminant" }
-rustml-text = { version = "0.1.0", path = "crates/rustml-text" }
-rustml-gaussian-process = { version = "0.1.0", path = "crates/rustml-gaussian-process" }
-rustml-manifold = { version = "0.1.0", path = "crates/rustml-manifold" }
-rustml-io = { version = "0.1.0", path = "crates/rustml-io" }
-rustml-svm = { version = "0.1.0", path = "crates/rustml-svm" }
-rustml-neural-networks = { version = "0.1.0", path = "crates/rustml-neural-networks" }
-rustml-regression = { version = "0.1.0", path = "crates/rustml-regression" }
-rustml-linear = { version = "0.1.0", path = "crates/rustml-linear" }
+anofox-ml-core = { version = "0.1.0", path = "crates/anofox-ml-core" }
+anofox-ml-metrics = { version = "0.1.0", path = "crates/anofox-ml-metrics" }
+anofox-ml-preprocessing = { version = "0.1.0", path = "crates/anofox-ml-preprocessing" }
+anofox-ml-neighbors = { version = "0.1.0", path = "crates/anofox-ml-neighbors" }
+anofox-ml-trees = { version = "0.1.0", path = "crates/anofox-ml-trees" }
+anofox-ml-ensemble = { version = "0.1.0", path = "crates/anofox-ml-ensemble" }
+anofox-ml-cluster = { version = "0.1.0", path = "crates/anofox-ml-cluster" }
+anofox-ml-naive-bayes = { version = "0.1.0", path = "crates/anofox-ml-naive-bayes" }
+anofox-ml-discriminant = { version = "0.1.0", path = "crates/anofox-ml-discriminant" }
+anofox-ml-text = { version = "0.1.0", path = "crates/anofox-ml-text" }
+anofox-ml-gaussian-process = { version = "0.1.0", path = "crates/anofox-ml-gaussian-process" }
+anofox-ml-manifold = { version = "0.1.0", path = "crates/anofox-ml-manifold" }
+anofox-ml-io = { version = "0.1.0", path = "crates/anofox-ml-io" }
+anofox-ml-svm = { version = "0.1.0", path = "crates/anofox-ml-svm" }
+anofox-ml-neural-networks = { version = "0.1.0", path = "crates/anofox-ml-neural-networks" }
+anofox-ml-regression = { version = "0.1.0", path = "crates/anofox-ml-regression" }
+anofox-ml-linear = { version = "0.1.0", path = "crates/anofox-ml-linear" }

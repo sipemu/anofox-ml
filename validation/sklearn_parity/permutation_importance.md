@@ -1,6 +1,6 @@
 # permutation_importance — sklearn parity
 
-Issue: [#22](https://github.com/sipemu/rustml/issues/22)
+Issue: [#22](https://github.com/sipemu/anofox-ml/issues/22)
 
 ## What
 
@@ -15,8 +15,8 @@ shuffled `n_repeats` times and the drop in score is recorded.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_permutation_importance.py`
-- Fixture:   `crates/rustml/tests/golden_data/permutation_importance.json`
-- Rust test: `crates/rustml/tests/golden_permutation_importance.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/permutation_importance.json`
+- Rust test: `crates/anofox-ml/tests/golden_permutation_importance.rs`
 
 Fixture: 200×5 synthetic dataset, true coefficients `[5, 0, 2, 0, 0.3]`,
 Ridge(alpha=1e-3) baseline scored by R², 50 permutation repeats.

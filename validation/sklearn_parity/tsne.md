@@ -1,6 +1,6 @@
 # t-SNE — sklearn parity
 
-Issue: [#19](https://github.com/sipemu/rustml/issues/19) (now closed)
+Issue: [#19](https://github.com/sipemu/anofox-ml/issues/19) (now closed)
 
 ## What
 
@@ -8,7 +8,7 @@ Vanilla O(n²) t-SNE (van der Maaten & Hinton 2008): perplexity-calibrated
 Gaussian conditional probabilities in input space, student-t affinities in
 embedding space, gradient descent with momentum and early exaggeration.
 
-Implemented in `rustml_manifold::tsne::TSne`. Suitable for n ≲ 1000; beyond
+Implemented in `anofox_ml_manifold::tsne::TSne`. Suitable for n ≲ 1000; beyond
 that the O(n²) cost per iteration dominates.
 
 ## Reference

@@ -1,12 +1,12 @@
 # Isomap + LocallyLinearEmbedding — sklearn parity
 
-Issue: [#19](https://github.com/sipemu/rustml/issues/19) (now closed)
+Issue: [#19](https://github.com/sipemu/anofox-ml/issues/19) (now closed)
 
 ## What
 
-- **Isomap** (`rustml_manifold::isomap`): k-NN graph + Floyd-Warshall geodesic
+- **Isomap** (`anofox_ml_manifold::isomap`): k-NN graph + Floyd-Warshall geodesic
   distances + classical MDS on the geodesic distance matrix.
-- **LocallyLinearEmbedding** (`rustml_manifold::lle`): per-point local
+- **LocallyLinearEmbedding** (`anofox_ml_manifold::lle`): per-point local
   reconstruction weights via Cholesky on the local Gram, then bottom-k
   eigenvectors of `(I − W)ᵀ(I − W)` (dropping the smallest, which
   corresponds to the constant direction).

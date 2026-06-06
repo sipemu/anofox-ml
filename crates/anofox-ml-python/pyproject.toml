@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "anofox-ml-python"
+version = "0.1.0"
+description = "Python bindings for the anofox-ml machine learning library — scikit-learn-compatible ML in Rust"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+keywords = ["machine-learning", "scikit-learn", "rust", "classification", "regression"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Repository = "https://github.com/sipemu/anofox-ml"
+Documentation = "https://docs.rs/anofox-ml"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]

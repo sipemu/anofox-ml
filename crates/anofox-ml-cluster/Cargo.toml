@@ -1,0 +1,27 @@
+[package]
+name = "anofox-ml-cluster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+rust-version.workspace = true
+authors.workspace = true
+description = "Clustering algorithms (KMeans, DBSCAN, HDBSCAN, GMM, BGMM, MeanShift, OPTICS, Birch, Spectral, AffinityPropagation, Agglomerative) for anofox-ml"
+documentation = "https://docs.rs/anofox-ml-cluster"
+keywords = ["machine-learning", "clustering", "kmeans", "dbscan", "hdbscan"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+anofox-ml-core = { workspace = true }
+faer = { workspace = true }
+ndarray = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+proptest = { workspace = true }

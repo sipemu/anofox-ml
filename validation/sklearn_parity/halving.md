@@ -1,6 +1,6 @@
 # HalvingGridSearchCV — sklearn parity
 
-Issue: [#23](https://github.com/sipemu/rustml/issues/23) (partial — no randomized variant)
+Issue: [#23](https://github.com/sipemu/anofox-ml/issues/23) (partial — no randomized variant)
 
 ## What
 
@@ -8,7 +8,7 @@ Successive halving for hyperparameter search. Start with `min_resources`
 samples, evaluate all candidates, keep top `1 / factor`, multiply resources
 by `factor`, repeat until 1 candidate remains.
 
-API: `halving_grid_search_cv` in `rustml-core::halving`.
+API: `halving_grid_search_cv` in `anofox-ml-core::halving`.
 
 ## Reference
 

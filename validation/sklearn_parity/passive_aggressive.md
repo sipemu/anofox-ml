@@ -1,6 +1,6 @@
 # PassiveAggressive — sklearn parity
 
-Issue: [#5](https://github.com/sipemu/rustml/issues/5)
+Issue: [#5](https://github.com/sipemu/anofox-ml/issues/5)
 
 ## What
 
@@ -19,15 +19,15 @@ Per-sample update:
 ## Golden test
 
 - Generator: `test_harness/generators/gen_passive_aggressive.py`
-- Fixture:   `crates/rustml/tests/golden_data/passive_aggressive.json`
-- Rust test: `crates/rustml/tests/golden_passive_aggressive.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/passive_aggressive.json`
+- Rust test: `crates/anofox-ml/tests/golden_passive_aggressive.rs`
 
 Behavioral parity tests:
 - Classifier on a 200-sample, 10-feature `make_classification` problem
-  (class_sep=2.0). Both implementations land at ≥ 85% accuracy; rustml within
+  (class_sep=2.0). Both implementations land at ≥ 85% accuracy; anofox-ml within
   0.15 of sklearn's accuracy.
 - Regressor on a 200-sample `make_regression` problem with standardized `y`.
-  Both achieve R² > 0.6; rustml within 0.15 of sklearn's R².
+  Both achieve R² > 0.6; anofox-ml within 0.15 of sklearn's R².
 
 We don't pursue exact agreement: sklearn averages updates (`averaging`),
 applies an early-stopping validation split, and uses a different RNG order.

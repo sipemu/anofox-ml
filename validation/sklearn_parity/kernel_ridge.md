@@ -1,6 +1,6 @@
 # KernelRidge — sklearn parity
 
-Issue: [#6](https://github.com/sipemu/rustml/issues/6)
+Issue: [#6](https://github.com/sipemu/anofox-ml/issues/6)
 
 ## What
 
@@ -16,8 +16,8 @@ default).
 ## Golden test
 
 - Generator: `test_harness/generators/gen_kernel_ridge.py`
-- Fixture:   `crates/rustml/tests/golden_data/kernel_ridge.json`
-- Rust test: `crates/rustml/tests/golden_kernel_ridge.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/kernel_ridge.json`
+- Rust test: `crates/anofox-ml/tests/golden_kernel_ridge.rs`
 
 Three cases, all 30×3 synthetic with a noisy non-linear target:
 
@@ -36,7 +36,7 @@ closed-form solution agrees up to BLAS ordering).
   uses the `(x·y + coef0)^degree` form, equivalent to sklearn with `gamma=1`.
   Test fixture pins `gamma=1` accordingly.
 - Sigmoid, cosine, laplacian, chi-squared kernels not yet supported (the
-  shared `SvmKernel` enum from `rustml-svm` only has linear / RBF / polynomial).
+  shared `SvmKernel` enum from `anofox-ml-svm` only has linear / RBF / polynomial).
 - No sample-weight support.
 
 ## Complexity

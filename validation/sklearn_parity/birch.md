@@ -1,6 +1,6 @@
 # Birch-lite — sklearn parity
 
-Issue: [#16](https://github.com/sipemu/rustml/issues/16) (now closed)
+Issue: [#16](https://github.com/sipemu/anofox-ml/issues/16) (now closed)
 
 ## What
 

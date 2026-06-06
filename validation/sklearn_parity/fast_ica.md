@@ -1,6 +1,6 @@
 # FastICA — sklearn parity
 
-Issue: [#18](https://github.com/sipemu/rustml/issues/18) (now closed)
+Issue: [#18](https://github.com/sipemu/anofox-ml/issues/18) (now closed)
 
 ## What
 
@@ -13,7 +13,7 @@ non-linearity. Implementation steps:
 3. Orthogonalise against previously extracted components.
 4. Normalise to unit length, repeat until convergence.
 
-Implemented in `rustml_preprocessing::fast_ica::FastIca`.
+Implemented in `anofox_ml_preprocessing::fast_ica::FastIca`.
 
 ## Reference
 

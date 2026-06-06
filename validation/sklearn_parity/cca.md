@@ -1,6 +1,6 @@
 # CCA — sklearn parity
 
-Issue: [#11](https://github.com/sipemu/rustml/issues/11) (now closed)
+Issue: [#11](https://github.com/sipemu/anofox-ml/issues/11) (now closed)
 
 ## What
 
@@ -11,7 +11,7 @@ Canonical Correlation Analysis via closed-form SVD on whitened (X, Y):
 3. SVD `C = U Σ Vᵀ`. The first `k` columns of `K_x U` and `K_y V` are the
    canonical loadings; `Σ_ii` are the canonical correlations.
 
-Implemented in `rustml_preprocessing::cca::Cca`.
+Implemented in `anofox_ml_preprocessing::cca::Cca`.
 
 ## Reference
 

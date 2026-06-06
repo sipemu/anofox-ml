@@ -1,10 +1,10 @@
 # AffinityPropagation — sklearn parity
 
-Issue: [#16](https://github.com/sipemu/rustml/issues/16) (partial — HDBSCAN / OPTICS / Birch pending)
+Issue: [#16](https://github.com/sipemu/anofox-ml/issues/16) (partial — HDBSCAN / OPTICS / Birch pending)
 
 ## What
 
-Affinity Propagation in `rustml-cluster::affinity_propagation`. Uses
+Affinity Propagation in `anofox-ml-cluster::affinity_propagation`. Uses
 similarity `s_{i,k} = -||x_i - x_k||²`, message-passes responsibilities and
 availabilities until exemplars stabilise.
 

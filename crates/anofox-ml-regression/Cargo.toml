@@ -1,0 +1,28 @@
+[package]
+name = "anofox-ml-regression"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+rust-version.workspace = true
+authors.workspace = true
+description = "Classical regression models (OLS, Ridge, Lasso, Elastic Net, GLM, GP) for anofox-ml"
+documentation = "https://docs.rs/anofox-ml-regression"
+keywords = ["machine-learning", "regression", "ols", "ridge", "glm"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+serde = { workspace = true }
+anofox-ml-core = { workspace = true }
+anofox-ml-metrics = { workspace = true }
+anofox-ml-svm = { workspace = true }
+anofox-regression = "0.5"
+faer = { workspace = true }
+rand = { workspace = true }
+ndarray = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+proptest = { workspace = true }

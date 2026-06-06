@@ -1,6 +1,6 @@
 # OrthogonalMatchingPursuit — sklearn parity
 
-Issue: [#3](https://github.com/sipemu/rustml/issues/3)
+Issue: [#3](https://github.com/sipemu/anofox-ml/issues/3)
 
 ## What
 
@@ -15,8 +15,8 @@ Stop after `n_nonzero_coefs` features or when residual norm < `tol`.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_omp.py`
-- Fixture:   `crates/rustml/tests/golden_data/omp.json`
-- Rust test: `crates/rustml/tests/golden_omp.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/omp.json`
+- Rust test: `crates/anofox-ml/tests/golden_omp.rs`
 
 80×8 problem with 3 non-zero true coefficients at indices `{1, 3, 6}`. Test
 asserts both the recovered active set and predictions match sklearn (`1e-6`

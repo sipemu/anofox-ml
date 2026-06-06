@@ -1,6 +1,6 @@
 # BayesianGaussianMixture — sklearn parity
 
-Issue: [#13](https://github.com/sipemu/rustml/issues/13) (now closed)
+Issue: [#13](https://github.com/sipemu/anofox-ml/issues/13) (now closed)
 
 ## What
 

@@ -1,0 +1,27 @@
+[package]
+name = "anofox-ml-ensemble"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+rust-version.workspace = true
+authors.workspace = true
+description = "Random forest and gradient boosting ensemble methods for the anofox-ml library"
+documentation = "https://docs.rs/anofox-ml-ensemble"
+keywords = ["machine-learning", "random-forest", "gradient-boosting", "ensemble", "ndarray"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+anofox-ml-core = { workspace = true }
+anofox-ml-trees = { workspace = true }
+ndarray = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+proptest = { workspace = true }

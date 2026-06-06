@@ -1,6 +1,6 @@
 # PLSRegression — sklearn parity
 
-Issue: [#11](https://github.com/sipemu/rustml/issues/11) (partial — PLSCanonical / CCA pending)
+Issue: [#11](https://github.com/sipemu/anofox-ml/issues/11) (partial — PLSCanonical / CCA pending)
 
 ## What
 
@@ -8,7 +8,7 @@ PLS1 (1-D `y`) regression via NIPALS. Standardizes X and y to unit variance,
 fits `n_components` latent variables, returns coefficients in the original
 scale.
 
-API: `PlsRegression` in `rustml-preprocessing::pls`.
+API: `PlsRegression` in `anofox-ml-preprocessing::pls`.
 
 ## Reference
 
@@ -17,8 +17,8 @@ API: `PlsRegression` in `rustml-preprocessing::pls`.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_pls.py`
-- Fixture:   `crates/rustml/tests/golden_data/pls.json`
-- Rust test: `crates/rustml/tests/golden_pls.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/pls.json`
+- Rust test: `crates/anofox-ml/tests/golden_pls.rs`
 
 80×6 problem with multiple non-zero coefficients, 3 PLS components. NIPALS is
 deterministic — predictions match sklearn element-wise to `1e-6`.

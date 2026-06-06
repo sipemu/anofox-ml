@@ -1,10 +1,10 @@
 # Text vectorizers — sklearn parity
 
-Issue: [#24](https://github.com/sipemu/rustml/issues/24)
+Issue: [#24](https://github.com/sipemu/anofox-ml/issues/24)
 
 ## What
 
-New crate `rustml-text`:
+New crate `anofox-ml-text`:
 
 - **CountVectorizer**: tokenises with `[A-Za-z]{2,}` (lowercased), builds an
   alphabetically-sorted vocabulary, returns a dense count matrix.
@@ -20,8 +20,8 @@ New crate `rustml-text`:
 ## Golden test
 
 - Generator: `test_harness/generators/gen_text.py`
-- Fixture:   `crates/rustml/tests/golden_data/text.json`
-- Rust test: `crates/rustml/tests/golden_text.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/text.json`
+- Rust test: `crates/anofox-ml/tests/golden_text.rs`
 
 4-document corpus. CountVectorizer's vocabulary and count matrix match
 sklearn **exactly**; TfidfVectorizer matches to `1e-6` element-wise. sklearn

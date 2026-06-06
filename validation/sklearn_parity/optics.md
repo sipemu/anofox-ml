@@ -1,6 +1,6 @@
 # OPTICS — sklearn parity
 
-Issue: [#16](https://github.com/sipemu/rustml/issues/16) (now closed)
+Issue: [#16](https://github.com/sipemu/anofox-ml/issues/16) (now closed)
 
 ## What
 
@@ -8,7 +8,7 @@ Ordering Points To Identify the Clustering Structure (Ankerst et al. 1999).
 Produces a reachability ordering of samples, then extracts clusters by
 walking the ordering with a single-eps DBSCAN-like threshold.
 
-Implemented in `rustml_cluster::optics::Optics` with brute-force pairwise
+Implemented in `anofox_ml_cluster::optics::Optics` with brute-force pairwise
 distance and a priority-queue chain extension.
 
 ## Reference

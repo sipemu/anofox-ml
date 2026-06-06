@@ -1,6 +1,6 @@
 # TweedieRegressor / GammaRegressor — sklearn parity
 
-Issue: [#7](https://github.com/sipemu/rustml/issues/7)
+Issue: [#7](https://github.com/sipemu/anofox-ml/issues/7)
 
 ## What
 
@@ -18,8 +18,8 @@ Mirrors `sklearn.linear_model.TweedieRegressor` and `GammaRegressor`.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_tweedie.py`
-- Fixture:   `crates/rustml/tests/golden_data/tweedie.json`
-- Rust test: `crates/rustml/tests/golden_tweedie.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/tweedie.json`
+- Rust test: `crates/anofox-ml/tests/golden_tweedie.rs`
 
 Two cases: Tweedie(power=1.5, sklearn α=0.5) and Gamma(power=2, sklearn α=0.1).
 Predictions match sklearn within **1% relative tolerance** element-wise.

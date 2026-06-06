@@ -1,6 +1,6 @@
-# Benchmarks: rustml vs scikit-learn
+# Benchmarks: anofox-ml vs scikit-learn
 
-Benchmark comparison between rustml (Rust) and scikit-learn (Python) on
+Benchmark comparison between anofox-ml (Rust) and scikit-learn (Python) on
 standardised datasets with identical shapes and parameters.
 
 ## Prerequisites
@@ -24,7 +24,7 @@ python benchmarks/sklearn_benchmark.py > benchmarks/sklearn_results.json
 ### 2. Run Rust benchmarks
 
 ```bash
-cargo bench -p rustml
+cargo bench -p anofox-ml
 ```
 
 ### 3. Compare results

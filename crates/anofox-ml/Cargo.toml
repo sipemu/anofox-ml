@@ -1,0 +1,48 @@
+[package]
+name = "anofox-ml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+rust-version.workspace = true
+authors.workspace = true
+description = "scikit-learn-style machine learning umbrella crate — re-exports every anofox-ml-* subcrate under a single API"
+documentation = "https://docs.rs/anofox-ml"
+keywords = ["machine-learning", "ml", "scikit-learn", "classification", "regression"]
+categories = ["science", "algorithms"]
+
+[dependencies]
+anofox-ml-core = { workspace = true }
+anofox-ml-metrics = { workspace = true }
+anofox-ml-preprocessing = { workspace = true }
+anofox-ml-neighbors = { workspace = true }
+anofox-ml-trees = { workspace = true }
+anofox-ml-ensemble = { workspace = true }
+anofox-ml-cluster = { workspace = true }
+anofox-ml-naive-bayes = { workspace = true }
+anofox-ml-discriminant = { workspace = true }
+anofox-ml-text = { workspace = true }
+anofox-ml-gaussian-process = { workspace = true }
+anofox-ml-manifold = { workspace = true }
+anofox-ml-io = { workspace = true }
+anofox-ml-svm = { workspace = true }
+anofox-ml-neural-networks = { workspace = true }
+anofox-ml-regression = { workspace = true }
+anofox-ml-linear = { workspace = true }
+ndarray = { workspace = true }
+num-traits = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+approx = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[dev-dependencies.criterion]
+version = "0.5"
+features = ["html_reports"]

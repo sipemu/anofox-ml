@@ -1,6 +1,6 @@
 # BayesianRidge / ARDRegression — sklearn parity
 
-Issue: [#1](https://github.com/sipemu/rustml/issues/1)
+Issue: [#1](https://github.com/sipemu/anofox-ml/issues/1)
 
 ## What
 
@@ -18,8 +18,8 @@ Bayesian linear regression with evidence (type-II ML) hyperparameter updates.
 ## Golden test
 
 - Generator: `test_harness/generators/gen_bayesian_ridge.py`
-- Fixture:   `crates/rustml/tests/golden_data/bayesian_ridge.json`
-- Rust test: `crates/rustml/tests/golden_bayesian_ridge.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/bayesian_ridge.json`
+- Rust test: `crates/anofox-ml/tests/golden_bayesian_ridge.rs`
 
 BayesianRidge: predictions match sklearn within 2% relative tolerance on a
 80×4 synthetic problem.

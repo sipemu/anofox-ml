@@ -1,13 +1,13 @@
 # KernelPCA / NMF — sklearn parity
 
-Issue: [#18](https://github.com/sipemu/rustml/issues/18) (continued from TruncatedSVD)
+Issue: [#18](https://github.com/sipemu/anofox-ml/issues/18) (continued from TruncatedSVD)
 
 ## What
 
-- **KernelPCA** (`rustml-preprocessing::kernel_pca`): eigendecomposition of the
+- **KernelPCA** (`anofox-ml-preprocessing::kernel_pca`): eigendecomposition of the
   centered kernel matrix. Linear / RBF / Polynomial kernels. Coordinates
   returned as `α / √λ * K_new α` (sklearn convention).
-- **NMF** (`rustml-preprocessing::nmf`): multiplicative-update solver (Lee &
+- **NMF** (`anofox-ml-preprocessing::nmf`): multiplicative-update solver (Lee &
   Seung). `X ≈ W H` with `W, H ≥ 0`.
 
 ## Reference
@@ -17,8 +17,8 @@ Issue: [#18](https://github.com/sipemu/rustml/issues/18) (continued from Truncat
 ## Golden test
 
 - Generator: `test_harness/generators/gen_decomposition.py`
-- Fixture:   `crates/rustml/tests/golden_data/decomposition.json`
-- Rust test: `crates/rustml/tests/golden_decomposition.rs`
+- Fixture:   `crates/anofox-ml/tests/golden_data/decomposition.json`
+- Rust test: `crates/anofox-ml/tests/golden_decomposition.rs`
 
 KernelPCA: eigenvalues match sklearn to `1e-6` (the centered kernel matrix
 spectrum is deterministic; only the eigenvectors are sign-flippable).

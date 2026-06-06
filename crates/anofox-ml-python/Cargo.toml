@@ -1,0 +1,33 @@
+[package]
+name = "anofox-ml-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Not published on crates.io — this is a PyO3 cdylib extension module built
+# with maturin, not a normal Rust crate.
+publish = false
+
+[lib]
+name = "anofox_ml_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+numpy = "0.28"
+ndarray = { workspace = true }
+anofox-ml-core = { workspace = true }
+anofox-ml-preprocessing = { workspace = true }
+anofox-ml-neighbors = { workspace = true }
+anofox-ml-trees = { workspace = true }
+anofox-ml-ensemble = { workspace = true }
+anofox-ml-cluster = { workspace = true }
+anofox-ml-naive-bayes = { workspace = true }
+anofox-ml-metrics = { workspace = true }
+anofox-ml-svm = { workspace = true }
+anofox-ml-neural-networks = { workspace = true }
+anofox-ml-manifold = { workspace = true }
+anofox-ml-gaussian-process = { workspace = true }
+anofox-ml-discriminant = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
