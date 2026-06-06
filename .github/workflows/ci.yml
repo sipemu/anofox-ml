@@ -161,6 +161,10 @@ jobs:
     # cdylib that ships through PyPI, not crates.io.
     if: github.event_name == 'release'
     needs: [check, test, clippy, fmt, doc]
+    # Slow-drip publish at 11 min per new crate (crates.io 1-per-10-min
+    # rate limit). Worst-case 18 × 11 ≈ 200 min — give wide headroom so
+    # transient registry flakes don't trip a job-timeout cancel.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

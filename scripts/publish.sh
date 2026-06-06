@@ -29,7 +29,12 @@ DRY_RUN_FLAG="--dry-run"
 SLEEP_SECS=0
 if [[ "${1:-}" == "--execute" ]]; then
     DRY_RUN_FLAG=""
-    SLEEP_SECS=20
+    # crates.io rate-limits new-crate uploads to a burst of 5, then 1 per
+    # 10 minutes. With 18 crates in this workspace we exhaust the burst
+    # immediately; everything past that has to wait. 11 min is the safe
+    # cadence (10 min plus a 60 s safety margin to ride out any clock-
+    # skew between the runner and crates.io).
+    SLEEP_SECS=660
 fi
 
 # Topological order: anofox-ml-core has no internal deps, then everything else
