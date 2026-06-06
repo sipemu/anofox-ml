@@ -190,6 +190,8 @@ anofox-ml outperforms scikit-learn across all benchmarks, with up to 22x speedup
 on critical operations. Measurements taken on the same machine with identical
 datasets and parameters.
 
+### Phase 1: original sweep (verified)
+
 | Algorithm | Operation | sklearn (ms) | anofox-ml (ms) | Speedup |
 |---|---|--:|--:|--:|
 | **GaussianNB** | fit 5000×20 | 6.34 | 0.29 | **21.8x** |
@@ -203,6 +205,30 @@ datasets and parameters.
 | **DecisionTree** | fit 5000×20 | 78.45 | 59.95 | **1.3x** |
 | **GaussianNB** | predict 5000×20 | 0.31 | 0.23 | **1.3x** |
 | **KNN** | fit 1000×50 | 0.31 | 0.29 | **1.1x** |
+
+### Phase 2: extended supervised sweep (harness in place; numbers TBD)
+
+Implemented in `crates/anofox-ml/benches/benchmarks.rs` + the matching
+estimators in `benchmarks/sklearn_benchmark.py`. Run the harness on your
+own hardware to populate; the entries below list what gets measured.
+
+| Algorithm | Operation | size |
+|---|---|---|
+| Ridge | fit + predict | 5000×20 |
+| Lasso | fit + predict | 5000×20 |
+| ElasticNet | fit + predict | 5000×20 |
+| OLS | fit + predict | 5000×20 |
+| BayesianRidge | fit + predict | 5000×20 |
+| LogisticRegression | fit + predict | 5000×20 |
+| SVC (RBF) | fit + predict | 1000×20 |
+| LinearSVC | fit + predict | 5000×20 |
+| LDA | fit + predict | 5000×20 |
+| QDA | fit + predict | 5000×20 |
+| MLP (1×32, 50 epochs) | fit + predict | 5000×20 |
+| ExtraTrees (100 trees) | fit + predict | 5000×20 |
+| GradientBoosting (100×depth-3) | fit + predict | 5000×20 |
+| HistGradientBoosting | fit + predict | 5000×20 |
+| AdaBoost (50 stumps) | fit + predict | 5000×20 |
 
 Key optimizations: incremental sorted-index split finding for decision trees,
 BinaryHeap-based KD-tree pruning for KNN, vectorized distance computation with
