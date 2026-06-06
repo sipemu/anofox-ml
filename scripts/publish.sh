@@ -55,8 +55,27 @@ CRATES=(
     anofox-ml
 )
 
+# Detect the workspace version once; we use it to skip crates that have
+# already been published at this exact version (idempotent re-runs).
+WS_VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+echo "Workspace version: ${WS_VERSION}"
+
+is_already_published() {
+    local name="$1"
+    local code
+    code=$(curl -fsS -o /dev/null -w "%{http_code}" \
+        -H "User-Agent: anofox-ml-publish (sm@data-zoo.de)" \
+        "https://crates.io/api/v1/crates/${name}/${WS_VERSION}" 2>/dev/null || echo "0")
+    [[ "${code}" == "200" ]]
+}
+
 for crate in "${CRATES[@]}"; do
     echo "=========================================================="
+    if [[ -z "${DRY_RUN_FLAG}" ]] && is_already_published "${crate}"; then
+        echo "Skipping ${crate} v${WS_VERSION} — already on crates.io"
+        echo "=========================================================="
+        continue
+    fi
     echo "Publishing ${crate}${DRY_RUN_FLAG:+ (dry-run)}"
     echo "=========================================================="
     cargo publish -p "${crate}" ${DRY_RUN_FLAG}

@@ -10,7 +10,7 @@ rust-version.workspace = true
 authors.workspace = true
 description = "Manifold learning (MDS, Isomap, LLE, t-SNE) for the anofox-ml library"
 documentation = "https://docs.rs/anofox-ml-manifold"
-keywords = ["machine-learning", "manifold", "tsne", "isomap", "dimensionality-reduction"]
+keywords = ["machine-learning", "manifold", "tsne", "isomap", "embedding"]
 categories = ["science", "algorithms"]
 
 [dependencies]

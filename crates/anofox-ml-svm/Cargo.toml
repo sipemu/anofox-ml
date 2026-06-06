@@ -10,7 +10,7 @@ rust-version.workspace = true
 authors.workspace = true
 description = "Support Vector Machines (SVC, SVR, NuSVC, NuSVR, LinearSVC, LinearSVR, OneClassSVM) for anofox-ml"
 documentation = "https://docs.rs/anofox-ml-svm"
-keywords = ["machine-learning", "svm", "classification", "support-vector-machine", "ndarray"]
+keywords = ["machine-learning", "svm", "classification", "kernel-methods", "ndarray"]
 categories = ["science", "algorithms"]
 
 [dependencies]
