@@ -131,6 +131,53 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench --workspace --exclude anofox-ml-python --no-run
 
+  bench-track:
+    name: Bench tracking (bencher.dev)
+    runs-on: ubuntu-latest
+    # Tracks criterion numbers over time + alerts on per-PR regressions via
+    # bencher.dev. Advisory (continue-on-error) so a missing BENCHER_API_TOKEN
+    # secret doesn't block CI; populate at https://bencher.dev/console/projects
+    # under the `anofox-ml` project. Skips when the secret is empty so forks
+    # don't fail.
+    continue-on-error: true
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/master')
+      || (github.event_name == 'pull_request')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: bencherdev/bencher@main
+      - name: Run benches (push → master baseline)
+        if: github.event_name == 'push' && env.BENCHER_API_TOKEN != ''
+        env:
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+        run: |
+          bencher run \
+            --project anofox-ml \
+            --token "$BENCHER_API_TOKEN" \
+            --branch master \
+            --testbed ubuntu-latest \
+            --adapter rust_criterion \
+            --err \
+            "cargo bench -p anofox-ml --bench benchmarks -- --output-format bencher"
+      - name: Run benches (PR → compare vs master)
+        if: github.event_name == 'pull_request' && env.BENCHER_API_TOKEN != ''
+        env:
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+        run: |
+          bencher run \
+            --project anofox-ml \
+            --token "$BENCHER_API_TOKEN" \
+            --branch "${{ github.head_ref }}" \
+            --start-point master \
+            --start-point-reset \
+            --testbed ubuntu-latest \
+            --adapter rust_criterion \
+            --err \
+            --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+            "cargo bench -p anofox-ml --bench benchmarks -- --output-format bencher"
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

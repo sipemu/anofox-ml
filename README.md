@@ -266,6 +266,25 @@ linfa is a dev-dependency only — no runtime dep on linfa from
 `anofox-ml`. Both libraries pin `ndarray = "0.16"` so the dependency
 resolver doesn't fork.
 
+### Continuous performance tracking (bencher.dev)
+
+CI uploads criterion results to [bencher.dev](https://bencher.dev) on
+every push to `master` (sets the baseline) and on every PR (compares
+against `master`, comments perf delta on the PR, fails the workflow if a
+regression exceeds the project threshold).
+
+The `bench-track` job is `continue-on-error: true` so a missing
+`BENCHER_API_TOKEN` secret doesn't block CI — that means forks and
+brand-new clones just skip the job silently. To enable it:
+
+1. Sign up at <https://bencher.dev/> and create a project named `anofox-ml`.
+2. Generate an API token under `Account → Tokens`.
+3. Add it to the GitHub repo secrets as `BENCHER_API_TOKEN`.
+
+The workflow file (`.github/workflows/ci.yml`, job `bench-track`) does
+not need any further edits — it reads the token from env and adapts the
+`bencher run` invocation to push vs PR automatically.
+
 ### Scaling profiles
 
 How wall-time grows as `n` grows, per category:
