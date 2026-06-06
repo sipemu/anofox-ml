@@ -21,7 +21,9 @@ pub struct Cca {
 }
 
 impl Cca {
-    pub fn new(n_components: usize) -> Self { Self { n_components } }
+    pub fn new(n_components: usize) -> Self {
+        Self { n_components }
+    }
 
     pub fn fit(&self, x: &Array2<f64>, y: &Array2<f64>) -> Result<FittedCca> {
         let n = x.nrows();
@@ -29,7 +31,9 @@ impl Cca {
         let dy = y.ncols();
         if y.nrows() != n {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but Y has {}", n, y.nrows()
+                "X has {} rows but Y has {}",
+                n,
+                y.nrows()
             )));
         }
         let k = self.n_components.min(dx).min(dy);
@@ -38,14 +42,26 @@ impl Cca {
         }
         let n_f = n as f64;
         let mut x_mean = Array1::<f64>::zeros(dx);
-        for j in 0..dx { x_mean[j] = x.column(j).sum() / n_f; }
+        for j in 0..dx {
+            x_mean[j] = x.column(j).sum() / n_f;
+        }
         let mut y_mean = Array1::<f64>::zeros(dy);
-        for j in 0..dy { y_mean[j] = y.column(j).sum() / n_f; }
+        for j in 0..dy {
+            y_mean[j] = y.column(j).sum() / n_f;
+        }
 
         let mut xc = x.clone();
         let mut yc = y.clone();
-        for j in 0..dx { for i in 0..n { xc[[i, j]] -= x_mean[j]; } }
-        for j in 0..dy { for i in 0..n { yc[[i, j]] -= y_mean[j]; } }
+        for j in 0..dx {
+            for i in 0..n {
+                xc[[i, j]] -= x_mean[j];
+            }
+        }
+        for j in 0..dy {
+            for i in 0..n {
+                yc[[i, j]] -= y_mean[j];
+            }
+        }
 
         // Whitening for X via SVD: X_centred = U_x Σ_x V_xᵀ.
         // K_x = V_x Σ_x⁻¹ √(n-1).
@@ -71,8 +87,12 @@ impl Cca {
         let mut corrs = Array1::<f64>::zeros(k_real);
         for c_i in 0..k_real {
             corrs[c_i] = s.column_vector()[c_i];
-            for i in 0..nx { u_top[[i, c_i]] = u[(i, c_i)]; }
-            for i in 0..ny { v_top[[i, c_i]] = v[(i, c_i)]; }
+            for i in 0..nx {
+                u_top[[i, c_i]] = u[(i, c_i)];
+            }
+            for i in 0..ny {
+                v_top[[i, c_i]] = v[(i, c_i)];
+            }
         }
         let x_weights = kx.dot(&u_top);
         let y_weights = ky.dot(&v_top);
@@ -123,7 +143,9 @@ impl FittedCca {
     pub fn transform_x(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.x_mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} X-features, got {}", self.x_mean.len(), x.ncols()
+                "expected {} X-features, got {}",
+                self.x_mean.len(),
+                x.ncols()
             )));
         }
         let mut xc = x.clone();
@@ -139,7 +161,9 @@ impl FittedCca {
     pub fn transform_y(&self, y: &Array2<f64>) -> Result<Array2<f64>> {
         if y.ncols() != self.y_mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} Y-features, got {}", self.y_mean.len(), y.ncols()
+                "expected {} Y-features, got {}",
+                self.y_mean.len(),
+                y.ncols()
             )));
         }
         let mut yc = y.clone();
@@ -175,7 +199,8 @@ mod tests {
         let fitted = Cca::new(1).fit(&x, &y).unwrap();
         assert!(
             fitted.canonical_correlations[0] > 0.9,
-            "first canonical correlation = {}", fitted.canonical_correlations[0]
+            "first canonical correlation = {}",
+            fitted.canonical_correlations[0]
         );
         let _ = array![1.0_f64];
     }

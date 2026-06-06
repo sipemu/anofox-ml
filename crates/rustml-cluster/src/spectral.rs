@@ -158,13 +158,17 @@ impl FitUnsupervised<f64> for SpectralClustering {
         }
         // Row-normalise the embedding (sklearn does this for `assign_labels='kmeans'`).
         for i in 0..n {
-            let nrm: f64 = (0..k).map(|c| embedding[[i, c]].powi(2)).sum::<f64>().sqrt().max(1e-12);
+            let nrm: f64 = (0..k)
+                .map(|c| embedding[[i, c]].powi(2))
+                .sum::<f64>()
+                .sqrt()
+                .max(1e-12);
             for c in 0..k {
                 embedding[[i, c]] /= nrm;
             }
         }
         let _ = s; // unused
-        // KMeans on the embedding.
+                   // KMeans on the embedding.
         let km = KMeans::new(k).with_seed(self.seed);
         let fitted: crate::kmeans::FittedKMeans<f64> = FitUnsupervised::fit(&km, &embedding)?;
         let labels = fitted.predict(&embedding)?;
@@ -180,8 +184,14 @@ mod tests {
     #[test]
     fn test_spectral_two_well_separated_blobs() {
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.2], [0.1, -0.2],
-            [10.0, 10.0], [10.1, 9.9], [9.8, 10.2], [10.2, 9.8],
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.2],
+            [0.1, -0.2],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.8, 10.2],
+            [10.2, 9.8],
         ];
         let sc = SpectralClustering::new(2)
             .with_affinity(Affinity::Rbf(0.1))
@@ -199,8 +209,14 @@ mod tests {
     #[test]
     fn test_spectral_knn_graph() {
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.2], [0.1, -0.2],
-            [10.0, 10.0], [10.1, 9.9], [9.8, 10.2], [10.2, 9.8],
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.2],
+            [0.1, -0.2],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.8, 10.2],
+            [10.2, 9.8],
         ];
         let sc = SpectralClustering::new(2)
             .with_affinity(Affinity::KNearest(3))

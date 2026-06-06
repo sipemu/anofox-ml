@@ -10,10 +10,7 @@ use ndarray::Array1;
 use rustml::core::FitUnsupervised;
 use rustml_cluster::MiniBatchKMeans;
 
-fn matched_centroid_distance(
-    ours: &ndarray::Array2<f64>,
-    theirs: &ndarray::Array2<f64>,
-) -> f64 {
+fn matched_centroid_distance(ours: &ndarray::Array2<f64>, theirs: &ndarray::Array2<f64>) -> f64 {
     // Greedy matching: for each rustml centroid, find closest sklearn centroid
     // (without reuse). Return the maximum match distance.
     let n = ours.nrows();

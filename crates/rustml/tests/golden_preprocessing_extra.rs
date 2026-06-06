@@ -8,7 +8,10 @@ const TOL: f64 = 1e-10;
 #[test]
 fn test_golden_max_abs_scaler() {
     let cases = load_golden_data("preprocessing_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "max_abs_scaler").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "max_abs_scaler")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let expected = json_to_array2(&case["X_transformed"]);

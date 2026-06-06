@@ -125,7 +125,11 @@ pub fn cross_val_score<F: Float>(
 
     for fold in 0..k {
         let test_start = fold * fold_size;
-        let test_end = if fold == k - 1 { n } else { test_start + fold_size };
+        let test_end = if fold == k - 1 {
+            n
+        } else {
+            test_start + fold_size
+        };
 
         let test_indices: Vec<usize> = (test_start..test_end).collect();
         let train_indices: Vec<usize> = (0..test_start).chain(test_end..n).collect();
@@ -304,8 +308,7 @@ pub fn grid_search_cv<F: Float>(
     for fit_predict in param_configs {
         let mut fold_scores = Vec::with_capacity(k);
         for (train_indices, test_indices) in &folds {
-            let score =
-                evaluate_fold(x, y, train_indices, test_indices, fit_predict, &scorer)?;
+            let score = evaluate_fold(x, y, train_indices, test_indices, fit_predict, &scorer)?;
             fold_scores.push(score);
         }
         cv_scores.push(fold_scores);
@@ -404,7 +407,9 @@ pub fn shuffle_split(
         ));
     }
 
-    let n_test = ((n_samples as f64 * test_size).round() as usize).max(1).min(n_samples - 1);
+    let n_test = ((n_samples as f64 * test_size).round() as usize)
+        .max(1)
+        .min(n_samples - 1);
     let mut result = Vec::with_capacity(n_splits);
 
     for split in 0..n_splits {
@@ -571,9 +576,7 @@ where
     P: Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
 {
     if n_iter == 0 {
-        return Err(RustMlError::InvalidParameter(
-            "n_iter must be > 0".into(),
-        ));
+        return Err(RustMlError::InvalidParameter("n_iter must be > 0".into()));
     }
 
     let folds = stratified_k_fold(x, y, k, seed)?;
@@ -582,13 +585,14 @@ where
     let mut mean_scores: Vec<F> = Vec::with_capacity(n_iter);
 
     for i in 0..n_iter {
-        let config_seed = seed.wrapping_add(i as u64).wrapping_mul(6364136223846793005);
+        let config_seed = seed
+            .wrapping_add(i as u64)
+            .wrapping_mul(6364136223846793005);
         let fit_predict = param_sampler(config_seed);
 
         let mut fold_scores = Vec::with_capacity(k);
         for (train_indices, test_indices) in &folds {
-            let score =
-                evaluate_fold(x, y, train_indices, test_indices, &fit_predict, &scorer)?;
+            let score = evaluate_fold(x, y, train_indices, test_indices, &fit_predict, &scorer)?;
             fold_scores.push(score);
         }
 
@@ -665,7 +669,9 @@ pub fn repeated_stratified_k_fold<F: Float>(
 
     let mut all_folds = Vec::with_capacity(k * n_repeats);
     for r in 0..n_repeats {
-        let repeat_seed = seed.wrapping_add(r as u64).wrapping_mul(6364136223846793005);
+        let repeat_seed = seed
+            .wrapping_add(r as u64)
+            .wrapping_mul(6364136223846793005);
         let folds = stratified_k_fold(x, y, k, repeat_seed)?;
         all_folds.extend(folds);
     }
@@ -691,9 +697,7 @@ pub fn stratified_shuffle_split<F: Float>(
         ));
     }
     if n_splits == 0 {
-        return Err(RustMlError::InvalidParameter(
-            "n_splits must be > 0".into(),
-        ));
+        return Err(RustMlError::InvalidParameter("n_splits must be > 0".into()));
     }
     let n = x.nrows();
     if n < 2 {
@@ -785,14 +789,9 @@ pub fn leave_p_out(n_samples: usize, p: usize) -> Result<Vec<(Vec<usize>, Vec<us
 /// correlated (e.g., multiple measurements from the same subject).
 ///
 /// `groups` is an array of group labels (integers) with one entry per sample.
-pub fn group_k_fold(
-    groups: &Array1<usize>,
-    k: usize,
-) -> Result<Vec<(Vec<usize>, Vec<usize>)>> {
+pub fn group_k_fold(groups: &Array1<usize>, k: usize) -> Result<Vec<(Vec<usize>, Vec<usize>)>> {
     if k < 2 {
-        return Err(RustMlError::InvalidParameter(
-            "k must be >= 2".into(),
-        ));
+        return Err(RustMlError::InvalidParameter("k must be >= 2".into()));
     }
 
     // Collect unique groups
@@ -1062,8 +1061,7 @@ mod tests {
         y_train: &Array1<f64>,
         x_test: &Array2<f64>,
     ) -> Result<Array1<f64>> {
-        let mut counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for &v in y_train.iter() {
             *counts.entry(format!("{v}")).or_default() += 1;
         }
@@ -1083,11 +1081,21 @@ mod tests {
 
     #[test]
     fn test_train_test_split_sizes() {
-        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]];
+        let x = array![
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
+        ];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
 
-        let (x_train, x_test, y_train, y_test) =
-            train_test_split(&x, &y, 0.3, 42).unwrap();
+        let (x_train, x_test, y_train, y_test) = train_test_split(&x, &y, 0.3, 42).unwrap();
 
         assert_eq!(x_train.nrows(), 7);
         assert_eq!(x_test.nrows(), 3);
@@ -1161,9 +1169,7 @@ mod tests {
 
     #[test]
     fn test_stratified_k_fold_no_overlap_between_train_and_test() {
-        let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let folds = stratified_k_fold(&x, &y, 2, 99).unwrap();
@@ -1184,7 +1190,15 @@ mod tests {
     fn test_stratified_k_fold_preserves_class_proportions() {
         // 6 samples of class 0, 3 samples of class 1 => ratio 2:1
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
@@ -1255,8 +1269,7 @@ mod tests {
         let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-        let scores =
-            cross_val_score_stratified(&x, &y, 3, 42, predict_zero, accuracy).unwrap();
+        let scores = cross_val_score_stratified(&x, &y, 3, 42, predict_zero, accuracy).unwrap();
 
         assert_eq!(scores.len(), 3);
     }
@@ -1269,8 +1282,7 @@ mod tests {
         let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; // all same class
 
-        let scores =
-            cross_val_score_stratified(&x, &y, 3, 42, predict_zero, accuracy).unwrap();
+        let scores = cross_val_score_stratified(&x, &y, 3, 42, predict_zero, accuracy).unwrap();
 
         // All predictions are 0.0, all true values are 0.0 => perfect accuracy
         for &s in &scores {
@@ -1302,12 +1314,20 @@ mod tests {
     fn test_cross_val_score_stratified_majority_class_baseline() {
         // With balanced 50/50 classes a majority predictor should get ~50% accuracy.
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
-        let scores =
-            cross_val_score_stratified(&x, &y, 5, 42, predict_majority, accuracy).unwrap();
+        let scores = cross_val_score_stratified(&x, &y, 5, 42, predict_majority, accuracy).unwrap();
 
         let mean: f64 = scores.iter().sum::<f64>() / scores.len() as f64;
         // Majority predictor on a 50/50 split should hover around 0.5
@@ -1329,7 +1349,9 @@ mod tests {
         // Config 0: always predict 0 (50% accuracy on balanced data)
         // Config 1: always predict 1 (50% accuracy on balanced data)
         // Config 2: always predict the majority class from training set
-        let configs: Vec<Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>> = vec![
+        let configs: Vec<
+            Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>,
+        > = vec![
             Box::new(|_xt, _yt, x_te| Ok(Array1::from_elem(x_te.nrows(), 0.0))),
             Box::new(|_xt, _yt, x_te| Ok(Array1::from_elem(x_te.nrows(), 1.0))),
             Box::new(predict_majority),
@@ -1374,12 +1396,12 @@ mod tests {
 
     #[test]
     fn test_grid_search_cv_best_score_matches_mean() {
-        let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
-        let configs: Vec<Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>> = vec![
+        let configs: Vec<
+            Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>,
+        > = vec![
             Box::new(|_xt, _yt, x_te| Ok(Array1::from_elem(x_te.nrows(), 0.0))),
             Box::new(|_xt, _yt, x_te| Ok(Array1::from_elem(x_te.nrows(), 1.0))),
         ];
@@ -1411,7 +1433,16 @@ mod tests {
     #[test]
     fn test_grid_search_cv_correct_fold_count() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
@@ -1779,9 +1810,7 @@ mod tests {
 
         // Sampler that always returns the same trivial model
         let sampler = |_seed: u64| {
-            move |_x_train: &Array2<f64>,
-                  y_train: &Array1<f64>,
-                  x_test: &Array2<f64>| {
+            move |_x_train: &Array2<f64>, y_train: &Array1<f64>, x_test: &Array2<f64>| {
                 // Predict majority class
                 let ones: usize = y_train.iter().filter(|&&v| v == 1.0).count();
                 let majority = if ones > y_train.len() / 2 { 1.0 } else { 0.0 };
@@ -1789,22 +1818,14 @@ mod tests {
             }
         };
 
-        let result = randomized_search_cv(
-            &x,
-            &y,
-            2,
-            42,
-            5,
-            sampler,
-            |y_true, y_pred| {
-                let correct: usize = y_true
-                    .iter()
-                    .zip(y_pred.iter())
-                    .filter(|(&a, &b)| a == b)
-                    .count();
-                Ok(correct as f64 / y_true.len() as f64)
-            },
-        )
+        let result = randomized_search_cv(&x, &y, 2, 42, 5, sampler, |y_true, y_pred| {
+            let correct: usize = y_true
+                .iter()
+                .zip(y_pred.iter())
+                .filter(|(&a, &b)| a == b)
+                .count();
+            Ok(correct as f64 / y_true.len() as f64)
+        })
         .unwrap();
 
         assert_eq!(result.cv_scores.len(), 5);
@@ -1836,23 +1857,12 @@ mod tests {
 
     #[test]
     fn test_randomized_search_cv_selects_best() {
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         // Even seeds predict all 0s, odd seeds predict based on threshold
         let sampler = |seed: u64| {
-            move |_x_train: &Array2<f64>,
-                  _y_train: &Array1<f64>,
-                  x_test: &Array2<f64>| {
+            move |_x_train: &Array2<f64>, _y_train: &Array1<f64>, x_test: &Array2<f64>| {
                 if seed % 2 == 0 {
                     Ok(Array1::from_elem(x_test.nrows(), 0.0))
                 } else {
@@ -1861,22 +1871,14 @@ mod tests {
             }
         };
 
-        let result = randomized_search_cv(
-            &x,
-            &y,
-            2,
-            42,
-            4,
-            sampler,
-            |y_true, y_pred| {
-                let correct: usize = y_true
-                    .iter()
-                    .zip(y_pred.iter())
-                    .filter(|(&a, &b)| a == b)
-                    .count();
-                Ok(correct as f64 / y_true.len() as f64)
-            },
-        )
+        let result = randomized_search_cv(&x, &y, 2, 42, 4, sampler, |y_true, y_pred| {
+            let correct: usize = y_true
+                .iter()
+                .zip(y_pred.iter())
+                .filter(|(&a, &b)| a == b)
+                .count();
+            Ok(correct as f64 / y_true.len() as f64)
+        })
         .unwrap();
 
         // The best score should be achievable
@@ -2027,7 +2029,11 @@ mod tests {
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
         let accuracy = |y_true: &Array1<f64>, y_pred: &Array1<f64>| -> Result<f64> {
-            let c: usize = y_true.iter().zip(y_pred.iter()).filter(|(&a, &b)| a == b).count();
+            let c: usize = y_true
+                .iter()
+                .zip(y_pred.iter())
+                .filter(|(&a, &b)| a == b)
+                .count();
             Ok(c as f64 / y_true.len() as f64)
         };
         let always_half = |_: &Array1<f64>, _: &Array1<f64>| -> Result<f64> { Ok(0.5) };
@@ -2065,7 +2071,11 @@ mod tests {
             &[0.5, 1.0],
             |_xt, _yt, x_te| Ok(Array1::zeros(x_te.nrows())),
             |y_true, y_pred| {
-                let c: usize = y_true.iter().zip(y_pred.iter()).filter(|(&a, &b)| a == b).count();
+                let c: usize = y_true
+                    .iter()
+                    .zip(y_pred.iter())
+                    .filter(|(&a, &b)| a == b)
+                    .count();
                 Ok(c as f64 / y_true.len() as f64)
             },
         )
@@ -2083,23 +2093,23 @@ mod tests {
         let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-        let configs: Vec<Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>> = vec![
+        let configs: Vec<
+            Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>,
+        > = vec![
             Box::new(|_xt, _yt, x_te| Ok(Array1::zeros(x_te.nrows()))),
             Box::new(|_xt, _yt, x_te| Ok(Array1::from_elem(x_te.nrows(), 1.0))),
         ];
 
-        let (train_scores, test_scores) = validation_curve(
-            &x,
-            &y,
-            2,
-            42,
-            &configs,
-            |y_true, y_pred| {
-                let c: usize = y_true.iter().zip(y_pred.iter()).filter(|(&a, &b)| a == b).count();
+        let (train_scores, test_scores) =
+            validation_curve(&x, &y, 2, 42, &configs, |y_true, y_pred| {
+                let c: usize = y_true
+                    .iter()
+                    .zip(y_pred.iter())
+                    .filter(|(&a, &b)| a == b)
+                    .count();
                 Ok(c as f64 / y_true.len() as f64)
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         assert_eq!(train_scores.len(), 2);
         assert_eq!(test_scores.len(), 2);

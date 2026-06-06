@@ -8,14 +8,25 @@ const TOL: f64 = 1e-4;
 #[test]
 fn test_golden_multinomial_nb() {
     let cases = load_golden_data("naive_bayes_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "multinomial_nb").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "multinomial_nb")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
     let expected_preds = json_to_array1(&case["predictions"]);
     let expected_proba: Vec<Vec<f64>> = case["predict_proba"]
-        .as_array().unwrap().iter()
-        .map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap())
+                .collect()
+        })
         .collect();
 
     let fitted = MultinomialNB::new().fit(&x, &y).unwrap();
@@ -31,7 +42,9 @@ fn test_golden_multinomial_nb() {
     for i in 0..x.nrows() {
         for c in 0..proba.ncols() {
             assert_close(
-                proba[[i, c]], expected_proba[i][c], TOL,
+                proba[[i, c]],
+                expected_proba[i][c],
+                TOL,
                 &format!("multinomial_nb proba[{},{}]", i, c),
             );
         }
@@ -47,8 +60,16 @@ fn test_golden_bernoulli_nb() {
     let y = json_to_array1(&case["y"]);
     let expected_preds = json_to_array1(&case["predictions"]);
     let expected_proba: Vec<Vec<f64>> = case["predict_proba"]
-        .as_array().unwrap().iter()
-        .map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect())
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap())
+                .collect()
+        })
         .collect();
 
     let fitted = BernoulliNB::new().fit(&x, &y).unwrap();
@@ -62,7 +83,9 @@ fn test_golden_bernoulli_nb() {
     for i in 0..x.nrows() {
         for c in 0..proba.ncols() {
             assert_close(
-                proba[[i, c]], expected_proba[i][c], TOL,
+                proba[[i, c]],
+                expected_proba[i][c],
+                TOL,
                 &format!("bernoulli_nb proba[{},{}]", i, c),
             );
         }

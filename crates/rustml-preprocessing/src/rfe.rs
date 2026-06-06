@@ -6,11 +6,10 @@
 //! for trees). RFE repeatedly drops the `step` least-important features
 //! until `n_features_to_select` remain.
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2};
 use rustml_core::{Result, RustMlError};
 
-pub type ImportanceFn =
-    dyn Fn(&Array2<f64>, &Array1<f64>) -> Result<Array1<f64>> + Send + Sync;
+pub type ImportanceFn = dyn Fn(&Array2<f64>, &Array1<f64>) -> Result<Array1<f64>> + Send + Sync;
 
 pub struct Rfe {
     pub n_features_to_select: usize,
@@ -76,13 +75,16 @@ impl Rfe {
     pub fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedRfe> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         let d = x.ncols();
         if self.n_features_to_select == 0 || self.n_features_to_select > d {
             return Err(RustMlError::InvalidParameter(format!(
-                "n_features_to_select must be in 1..={}", d
+                "n_features_to_select must be in 1..={}",
+                d
             )));
         }
         let mut active: Vec<usize> = (0..d).collect();
@@ -98,9 +100,7 @@ impl Rfe {
             }
             // Sort active features by ascending importance; drop step
             // least-important without going below the target.
-            let n_drop = self
-                .step
-                .min(active.len() - self.n_features_to_select);
+            let n_drop = self.step.min(active.len() - self.n_features_to_select);
             let mut order: Vec<usize> = (0..active.len()).collect();
             order.sort_by(|&a, &b| imp[a].abs().partial_cmp(&imp[b].abs()).unwrap());
             let to_drop: Vec<usize> = order[..n_drop].iter().map(|&i| active[i]).collect();
@@ -306,8 +306,7 @@ fn select_elements(y: &Array1<f64>, idx: &[usize]) -> Array1<f64> {
 // SequentialFeatureSelector (forward direction only, with CV scoring)
 // ---------------------------------------------------------------------------
 
-pub type ScoringFn =
-    dyn Fn(&Array2<f64>, &Array1<f64>) -> Result<f64> + Send + Sync;
+pub type ScoringFn = dyn Fn(&Array2<f64>, &Array1<f64>) -> Result<f64> + Send + Sync;
 
 pub struct SequentialFeatureSelector {
     pub n_features_to_select: usize,
@@ -350,11 +349,7 @@ impl FittedSequentialFeatureSelector {
 }
 
 impl SequentialFeatureSelector {
-    pub fn fit(
-        &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-    ) -> Result<FittedSequentialFeatureSelector> {
+    pub fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedSequentialFeatureSelector> {
         let d = x.ncols();
         if self.n_features_to_select == 0 || self.n_features_to_select > d {
             return Err(RustMlError::InvalidParameter("invalid k".into()));
@@ -491,27 +486,41 @@ mod tests {
             let mut b = xty.clone();
             for col in 0..m {
                 let pv = a[[col, col]];
-                if pv.abs() < 1e-14 { continue; }
+                if pv.abs() < 1e-14 {
+                    continue;
+                }
                 for r in (col + 1)..m {
                     let f = a[[r, col]] / pv;
-                    for c in col..m { a[[r, c]] -= f * a[[col, c]]; }
+                    for c in col..m {
+                        a[[r, c]] -= f * a[[col, c]];
+                    }
                     b[r] -= f * b[col];
                 }
             }
             let mut beta = Array1::<f64>::zeros(m);
             for r in (0..m).rev() {
                 let mut s = b[r];
-                for c in (r+1)..m { s -= a[[r, c]] * beta[c]; }
+                for c in (r + 1)..m {
+                    s -= a[[r, c]] * beta[c];
+                }
                 let pv = a[[r, r]];
-                if pv.abs() > 1e-14 { beta[r] = s / pv; }
+                if pv.abs() > 1e-14 {
+                    beta[r] = s / pv;
+                }
             }
             let mut pred = Array1::<f64>::zeros(xs.nrows());
             for i in 0..xs.nrows() {
                 let mut p = y_mean;
-                for j in 0..m { p += xs[[i, j]] * beta[j]; }
+                for j in 0..m {
+                    p += xs[[i, j]] * beta[j];
+                }
                 pred[i] = p;
             }
-            let rss: f64 = pred.iter().zip(ys.iter()).map(|(p, t)| (p-t).powi(2)).sum();
+            let rss: f64 = pred
+                .iter()
+                .zip(ys.iter())
+                .map(|(p, t)| (p - t).powi(2))
+                .sum();
             let tss: f64 = ys.iter().map(|t| (t - y_mean).powi(2)).sum();
             Ok(1.0 - rss / tss.max(1e-12))
         };

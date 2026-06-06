@@ -5,7 +5,7 @@
 
 use faer::linalg::solvers::Svd;
 use faer::Mat;
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rustml_core::{FitUnsupervised, Result, RustMlError};
@@ -37,7 +37,10 @@ impl Nmf {
             init: NmfInit::Nndsvd,
         }
     }
-    pub fn with_init(mut self, init: NmfInit) -> Self { self.init = init; self }
+    pub fn with_init(mut self, init: NmfInit) -> Self {
+        self.init = init;
+        self
+    }
 }
 
 /// NNDSVD initialisation (Boutsidis & Gallopoulos 2008).
@@ -74,13 +77,12 @@ fn nndsvd_init(x: &Array2<f64>, k: usize) -> Result<(Array2<f64>, Array2<f64>)> 
     }
     v0_pos_norm = v0_pos_norm.sqrt();
     // If positive part norm is larger, use it; else flip sign and use negative.
-    let (u_sign, v_sign) = if u0_pos_norm * v0_pos_norm
-        >= (u0_pos_norm * v0_pos_norm).max(1e-12) / 2.0
-    {
-        (1.0, 1.0)
-    } else {
-        (-1.0, -1.0)
-    };
+    let (u_sign, v_sign) =
+        if u0_pos_norm * v0_pos_norm >= (u0_pos_norm * v0_pos_norm).max(1e-12) / 2.0 {
+            (1.0, 1.0)
+        } else {
+            (-1.0, -1.0)
+        };
     let lead_scale = s0.sqrt();
     for i in 0..n {
         w[[i, 0]] = (u_sign * u[(i, 0)]).max(0.0) * lead_scale;
@@ -152,8 +154,16 @@ fn nndsvd_init(x: &Array2<f64>, k: usize) -> Result<(Array2<f64>, Array2<f64>)> 
     }
     // Floor at a small epsilon (sklearn convention) to avoid zero-locks.
     let eps = 1e-6;
-    for v in w.iter_mut() { if *v < eps { *v = eps; } }
-    for v in h.iter_mut() { if *v < eps { *v = eps; } }
+    for v in w.iter_mut() {
+        if *v < eps {
+            *v = eps;
+        }
+    }
+    for v in h.iter_mut() {
+        if *v < eps {
+            *v = eps;
+        }
+    }
     Ok((w, h))
 }
 
@@ -178,15 +188,14 @@ impl FitUnsupervised<f64> for Nmf {
         }
         if k == 0 || k > d.min(n) {
             return Err(RustMlError::InvalidParameter(format!(
-                "n_components must be in 1..={}", d.min(n)
+                "n_components must be in 1..={}",
+                d.min(n)
             )));
         }
         // Require X ≥ 0.
         for v in x.iter() {
             if *v < 0.0 {
-                return Err(RustMlError::InvalidParameter(
-                    "NMF requires X >= 0".into(),
-                ));
+                return Err(RustMlError::InvalidParameter("NMF requires X >= 0".into()));
             }
         }
 
@@ -194,7 +203,9 @@ impl FitUnsupervised<f64> for Nmf {
             NmfInit::Nndsvd => nndsvd_init(x, k)?,
             NmfInit::Random => {
                 let mut rng = StdRng::seed_from_u64(self.seed);
-                let scale = (x.mean().unwrap_or(0.0).max(0.0) / k as f64).sqrt().max(1e-6);
+                let scale = (x.mean().unwrap_or(0.0).max(0.0) / k as f64)
+                    .sqrt()
+                    .max(1e-6);
                 let w = Array2::<f64>::from_shape_fn((n, k), |_| rng.gen::<f64>() * scale + 1e-6);
                 let h = Array2::<f64>::from_shape_fn((k, d), |_| rng.gen::<f64>() * scale + 1e-6);
                 (w, h)
@@ -257,7 +268,9 @@ impl FittedNmf {
         let n = x.nrows();
         let k = h.nrows();
         let mut rng = StdRng::seed_from_u64(7);
-        let scale = (x.mean().unwrap_or(0.0).max(0.0) / k as f64).sqrt().max(1e-6);
+        let scale = (x.mean().unwrap_or(0.0).max(0.0) / k as f64)
+            .sqrt()
+            .max(1e-6);
         let mut w = Array2::<f64>::from_shape_fn((n, k), |_| rng.gen::<f64>() * scale + 1e-6);
         let h_ht = h.dot(&h.t());
         let x_ht = x.dot(&h.t());
@@ -272,9 +285,15 @@ impl FittedNmf {
         Ok(w)
     }
 
-    pub fn reconstruction_err(&self) -> f64 { self.reconstruction_err }
-    pub fn n_iter(&self) -> usize { self.n_iter }
-    pub fn components(&self) -> &Array2<f64> { &self.components }
+    pub fn reconstruction_err(&self) -> f64 {
+        self.reconstruction_err
+    }
+    pub fn n_iter(&self) -> usize {
+        self.n_iter
+    }
+    pub fn components(&self) -> &Array2<f64> {
+        &self.components
+    }
 }
 
 #[cfg(test)]
@@ -290,9 +309,7 @@ mod tests {
         let x = w_true.dot(&h_true);
         let nmf = Nmf::new(2);
         let fitted = nmf.fit(&x).unwrap();
-        let recon = nmf
-            .max_iter
-            .min(0); // suppress unused field warning
+        let recon = nmf.max_iter.min(0); // suppress unused field warning
         let _ = recon;
         let recon = fitted.components.clone();
         // The transform should give us back something whose product is close.

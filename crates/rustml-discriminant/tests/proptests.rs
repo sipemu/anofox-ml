@@ -13,9 +13,13 @@ fn two_class(n_per_class: usize, offset: f64, jitter: u64) -> (Array2<f64>, Arra
     let mut y = Array1::<f64>::zeros(n);
     let mut s = jitter | 1;
     for i in 0..n {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let jx = ((s >> 16) as f64 / u64::MAX as f64 - 0.5) * 0.4;
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let jy = ((s >> 16) as f64 / u64::MAX as f64 - 0.5) * 0.4;
         if i < n_per_class {
             x[[i, 0]] = jx;

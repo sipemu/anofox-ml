@@ -128,8 +128,8 @@ mod tests {
 
     mod prop_tests {
         use super::*;
-        use proptest::prelude::*;
         use proptest::collection::vec;
+        use proptest::prelude::*;
 
         proptest! {
             #[test]

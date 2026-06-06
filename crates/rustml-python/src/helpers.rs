@@ -18,7 +18,12 @@ pub(crate) fn not_fitted() -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted")
 }
 
-pub(crate) fn parse_kernel(kernel: &str, gamma: f64, degree: usize, coef0: f64) -> pyo3::PyResult<rustml_svm::SvmKernel> {
+pub(crate) fn parse_kernel(
+    kernel: &str,
+    gamma: f64,
+    degree: usize,
+    coef0: f64,
+) -> pyo3::PyResult<rustml_svm::SvmKernel> {
     match kernel {
         "linear" => Ok(rustml_svm::SvmKernel::Linear),
         "rbf" => Ok(rustml_svm::SvmKernel::Rbf { gamma }),

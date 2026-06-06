@@ -1,8 +1,8 @@
 //! Isotonic (monotonic) regression wrapper.
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
-use anofox_regression::{FittedRegressor as _, Regressor as _};
 use anofox_regression::{FittedIsotonic, IsotonicRegressor as InnerIsotonic};
+use anofox_regression::{FittedRegressor as _, Regressor as _};
 use ndarray::{Array1, Array2};
 use rustml_core::{Fit, Predict, Result, RustMlError};
 
@@ -67,9 +67,7 @@ impl Fit<f64> for IsotonicRegressor {
         let x_mat = ndarray_to_mat(x);
         let y_col = ndarray_to_col(y);
 
-        let inner_model = InnerIsotonic::builder()
-            .increasing(self.increasing)
-            .build();
+        let inner_model = InnerIsotonic::builder().increasing(self.increasing).build();
 
         let fitted = inner_model
             .fit(&x_mat, &y_col)

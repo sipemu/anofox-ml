@@ -33,3 +33,10 @@ entry points; the inner estimator continues to use the 1-D contract.
 - `MultiOutputClassifier`, `RegressorChain`, `ClassifierChain` — same issue
   (#9) still tracks these. Filing a follow-up issue would be reasonable; for
   now they're called out as gaps in the issue thread.
+
+## Complexity
+
+- MultiOutputRegressor/Classifier: independently fits one base estimator per output → **O(n_outputs · cost(base on n_samples))**.
+- Embarrassingly parallel across outputs.
+- RegressorChain: sequential — output i is conditional on outputs 0..i−1 already predicted, so each step's feature dimensionality grows by 1 → **O(Σ_i cost(base on n_samples, p+i))**.
+- Memory: each fitted base estimator is independently stored; chain also requires intermediate predictions.

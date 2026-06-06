@@ -66,7 +66,10 @@ impl LinearSvc {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_svm::LinearSvc::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_svm::LinearSvc::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -77,7 +80,10 @@ impl LinearSvc {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_svm::LinearSvc::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_svm::LinearSvc::new(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -153,7 +159,10 @@ impl Svc {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_svm::Svc::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_svm::Svc::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -164,6 +173,9 @@ impl Svc {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_svm::Svc::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_svm::Svc::new(),
+            fitted: Some(fitted),
+        })
     }
 }

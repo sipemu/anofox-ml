@@ -29,7 +29,11 @@ fn test_lars_recovers_correct_active_set() {
     // step k, not at the OLS solution on the active set).
     let preds = fitted.predict(&x).unwrap();
     let mean = y.iter().sum::<f64>() / y.len() as f64;
-    let rss: f64 = preds.iter().zip(y.iter()).map(|(p, t)| (t - p).powi(2)).sum();
+    let rss: f64 = preds
+        .iter()
+        .zip(y.iter())
+        .map(|(p, t)| (t - p).powi(2))
+        .sum();
     let tss: f64 = y.iter().map(|t| (t - mean).powi(2)).sum();
     let r2 = 1.0 - rss / tss;
     let sk_r2 = case["sklearn_r2"].as_f64().unwrap();

@@ -176,10 +176,7 @@ impl<F: Float> Fit<F> for ExtraTreesRegressor {
             })
             .collect();
 
-        Ok(FittedExtraTreesRegressor {
-            trees,
-            n_features,
-        })
+        Ok(FittedExtraTreesRegressor { trees, n_features })
     }
 }
 
@@ -237,10 +234,9 @@ impl<F: Float> FittedExtraTreesRegressor<F> {
 
         for forest_tree in &self.trees {
             let total_samples = tree_n_samples(&forest_tree.tree);
-            let tree_raw =
-                forest_tree
-                    .tree
-                    .feature_importances(forest_tree.n_features_tree, total_samples);
+            let tree_raw = forest_tree
+                .tree
+                .feature_importances(forest_tree.n_features_tree, total_samples);
             // Normalize individual tree importances
             let sum: F = tree_raw.iter().copied().fold(F::zero(), |a, b| a + b);
             for (local_idx, &original_idx) in forest_tree.feature_indices.iter().enumerate() {
@@ -295,7 +291,9 @@ fn build_extra_tree<F: Float>(
     }
 
     // Use a depth-dependent seed so left/right children get different randomness
-    let split_seed = seed.wrapping_add(depth as u64).wrapping_mul(0x517CC1B727220A95);
+    let split_seed = seed
+        .wrapping_add(depth as u64)
+        .wrapping_mul(0x517CC1B727220A95);
 
     match find_random_split(x, y, indices, criterion, min_samples_leaf, split_seed) {
         Some(split) => {

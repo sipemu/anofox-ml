@@ -82,9 +82,7 @@ impl NuSvc {
     /// Validate parameters before fitting.
     fn validate(&self) -> Result<()> {
         if self.nu <= 0.0 || self.nu > 1.0 {
-            return Err(RustMlError::InvalidParameter(
-                "nu must be in (0, 1]".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("nu must be in (0, 1]".into()));
         }
         if self.max_iter == 0 {
             return Err(RustMlError::InvalidParameter(
@@ -92,9 +90,7 @@ impl NuSvc {
             ));
         }
         if self.tol <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "tol must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
         match &self.kernel {
             SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {

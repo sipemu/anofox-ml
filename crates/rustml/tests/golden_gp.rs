@@ -19,8 +19,11 @@ fn test_gp_mean_matches_sklearn() {
     let sk_pred = json_to_array1(&case["sklearn_pred"]);
     let sk_std = json_to_array1(&case["sklearn_std"]);
 
-    let gp = GaussianProcessRegressor::new(GpKernel::Rbf { length_scale, signal_var })
-        .with_alpha(alpha);
+    let gp = GaussianProcessRegressor::new(GpKernel::Rbf {
+        length_scale,
+        signal_var,
+    })
+    .with_alpha(alpha);
     let fitted = gp.fit(&x, &y).unwrap();
     let mean = fitted.predict(&xq).unwrap();
     let std = fitted.predict_std(&xq).unwrap();
@@ -31,7 +34,9 @@ fn test_gp_mean_matches_sklearn() {
     for i in 0..std.len() {
         assert!(
             (std[i] - sk_std[i]).abs() < 1e-4,
-            "std[{i}]: {} vs {}", std[i], sk_std[i]
+            "std[{i}]: {} vs {}",
+            std[i],
+            sk_std[i]
         );
     }
 }

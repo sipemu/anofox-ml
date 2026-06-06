@@ -6,10 +6,7 @@ use rustml_core::{Fit, Predict};
 use rustml_regression::{BayesianRidge, KernelRidge};
 use rustml_svm::SvmKernel;
 
-fn matrix_strategy(
-    rows: usize,
-    cols: usize,
-) -> impl Strategy<Value = Array2<f64>> {
+fn matrix_strategy(rows: usize, cols: usize) -> impl Strategy<Value = Array2<f64>> {
     prop::collection::vec(-5.0_f64..=5.0, rows * cols)
         .prop_map(move |v| Array2::from_shape_vec((rows, cols), v).unwrap())
 }

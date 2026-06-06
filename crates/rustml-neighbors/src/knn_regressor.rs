@@ -159,7 +159,10 @@ impl<F: Float> FittedKnnRegressor<F> {
 fn weighted_mean<F: Float>(neighbors: &[(F, F)], weights: WeightFunction) -> F {
     match weights {
         WeightFunction::Uniform => {
-            let sum: F = neighbors.iter().map(|&(_, y)| y).fold(F::zero(), |a, b| a + b);
+            let sum: F = neighbors
+                .iter()
+                .map(|&(_, y)| y)
+                .fold(F::zero(), |a, b| a + b);
             sum / F::from_usize(neighbors.len()).unwrap()
         }
         WeightFunction::Distance => {
@@ -261,8 +264,7 @@ mod tests {
             weights: WeightFunction::Distance,
             ..Default::default()
         };
-        let fitted_dist: FittedKnnRegressor<f64> =
-            Fit::fit(&knn_dist, &x_train, &y_train).unwrap();
+        let fitted_dist: FittedKnnRegressor<f64> = Fit::fit(&knn_dist, &x_train, &y_train).unwrap();
 
         // Query at 0.9 — nearest is [1.0] (y=100), then [0.0] (y=0), then [10.0] (y=200).
         let x_test = array![[0.9]];

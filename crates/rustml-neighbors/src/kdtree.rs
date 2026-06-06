@@ -130,11 +130,7 @@ impl<F: Float> KdTree<F> {
             .into_iter()
             .map(|e| (e.dist_sq.sqrt(), e.index))
             .collect();
-        result.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap()
-                .then(a.1.cmp(&b.1))
-        });
+        result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
         result.truncate(k);
         result
     }
@@ -160,9 +156,7 @@ impl<F: Float> KdTree<F> {
         } else if let Some(worst) = heap.peek() {
             // Replace if this point is better than the worst in our k-best,
             // or if it's the same distance but has a lower index (tie-breaking).
-            if dist_sq < worst.dist_sq
-                || (dist_sq == worst.dist_sq && node.index < worst.index)
-            {
+            if dist_sq < worst.dist_sq || (dist_sq == worst.dist_sq && node.index < worst.index) {
                 heap.pop();
                 heap.push(HeapEntry {
                     dist_sq,
@@ -267,11 +261,7 @@ mod tests {
 
     #[test]
     fn test_kdtree_all_points() {
-        let points: Vec<(Vec<f64>, usize)> = vec![
-            (vec![0.0], 0),
-            (vec![1.0], 1),
-            (vec![2.0], 2),
-        ];
+        let points: Vec<(Vec<f64>, usize)> = vec![(vec![0.0], 0), (vec![1.0], 1), (vec![2.0], 2)];
         let tree = KdTree::build(&points, 1);
         let result = tree.query_k_nearest(&[0.5], 3);
         assert_eq!(result.len(), 3);
@@ -280,10 +270,7 @@ mod tests {
     #[test]
     fn test_kdtree_tie_breaking() {
         // Two points equidistant from query: lower index should come first
-        let points: Vec<(Vec<f64>, usize)> = vec![
-            (vec![1.0, 0.0], 0),
-            (vec![-1.0, 0.0], 1),
-        ];
+        let points: Vec<(Vec<f64>, usize)> = vec![(vec![1.0, 0.0], 0), (vec![-1.0, 0.0], 1)];
         let tree = KdTree::build(&points, 2);
         let result = tree.query_k_nearest(&[0.0, 0.0], 1);
         assert_eq!(result.len(), 1);
@@ -308,14 +295,23 @@ mod tests {
         let mut dists: Vec<(f64, usize)> = points
             .iter()
             .map(|(p, idx)| {
-                let d: f64 = p.iter().zip(query.iter()).map(|(&a, &b)| (a - b) * (a - b)).sum::<f64>().sqrt();
+                let d: f64 = p
+                    .iter()
+                    .zip(query.iter())
+                    .map(|(&a, &b)| (a - b) * (a - b))
+                    .sum::<f64>()
+                    .sqrt();
                 (d, *idx)
             })
             .collect();
         dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
         let brute: Vec<usize> = dists.iter().take(k).map(|&(_, idx)| idx).collect();
 
-        let kd_result: Vec<usize> = tree.query_k_nearest(&query, k).iter().map(|&(_, idx)| idx).collect();
+        let kd_result: Vec<usize> = tree
+            .query_k_nearest(&query, k)
+            .iter()
+            .map(|&(_, idx)| idx)
+            .collect();
         assert_eq!(kd_result, brute);
     }
 }

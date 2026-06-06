@@ -5,7 +5,8 @@ Issue: [#15](https://github.com/sipemu/rustml/issues/15) (partial — Spectral &
 ## What
 
 Bottom-up hierarchical clustering with Lance-Williams updates. Linkages:
-Single, Complete, Average, Ward. Naive `O(n²)` memory / `O(n³)` time.
+Single, Complete, Average, Ward. Ward uses Müllner's `O(n²)` nn-chain;
+Single/Complete/Average use the naive `O(n³)` sweep (also `O(n²)` memory).
 
 ## Reference
 
@@ -31,7 +32,9 @@ true labels and require `ARI ≥ sklearn_ARI − 0.05`.
 
 ## Complexity
 
-- Time: **O(n³)** (naive Lance-Williams)
-- Memory: **O(n²)** (dense pairwise distances)
-- nn-chain algorithm would drop time to O(n²) for Ward — pending.
-- Hard ceiling: ~5,000 samples before OOM/wall-clock becomes painful.
+- Time: **O(n²)** for Ward (Müllner's nn-chain, default).
+- Time: **O(n³)** for Single/Complete/Average (naive Lance-Williams).
+- Memory: **O(n²)** (dense pairwise distance matrix).
+- Set `RUSTML_AGGLO_NAIVE=1` to force the O(n³) sweep on Ward — cross-checks
+  against nn-chain via a partition-equality regression test.
+- Hard ceiling: ~5,000 samples before the O(n²) memory bound bites.

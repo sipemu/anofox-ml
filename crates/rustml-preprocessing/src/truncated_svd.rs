@@ -70,7 +70,11 @@ impl FitUnsupervised<f64> for TruncatedSvd {
             for i in 0..d {
                 components[[i, j]] = v[(i, j)];
             }
-            sv[j] = if j < sv_len { s.column_vector()[j] } else { 0.0 };
+            sv[j] = if j < sv_len {
+                s.column_vector()[j]
+            } else {
+                0.0
+            };
         }
         // Explained variance ≈ Var(X V_j) = (s_j^2) / (n - 1)
         let mut ev = Array1::<f64>::zeros(k);
@@ -124,7 +128,12 @@ mod tests {
 
     #[test]
     fn test_truncated_svd_reduces_dim() {
-        let x = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [2.0, 3.0, 5.0]];
+        let x = array![
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [2.0, 3.0, 5.0]
+        ];
         let svd = TruncatedSvd::new(2).fit(&x).unwrap();
         let t = svd.transform(&x).unwrap();
         assert_eq!(t.shape(), &[4, 2]);
@@ -134,7 +143,12 @@ mod tests {
 
     #[test]
     fn test_inverse_transform_reconstructs_full_rank() {
-        let x = array![[1.0_f64, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0], [2.0, 3.0, 5.0]];
+        let x = array![
+            [1.0_f64, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [2.0, 3.0, 5.0]
+        ];
         // Keep all components → inverse should reconstruct exactly.
         let svd = TruncatedSvd::new(3).fit(&x).unwrap();
         let t = svd.transform(&x).unwrap();
@@ -142,7 +156,11 @@ mod tests {
         for ((i, j), &v) in x.indexed_iter() {
             assert!(
                 (back[[i, j]] - v).abs() < 1e-9,
-                "[{},{}]: {} vs {}", i, j, back[[i, j]], v
+                "[{},{}]: {} vs {}",
+                i,
+                j,
+                back[[i, j]],
+                v
             );
         }
     }

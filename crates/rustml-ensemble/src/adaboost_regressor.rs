@@ -176,9 +176,7 @@ impl<F: Float> Fit<F> for AdaBoostRegressor {
             let preds = fitted_tree.predict(x)?;
 
             // Compute absolute errors.
-            let abs_errors: Vec<F> = (0..n_samples)
-                .map(|i| (y[i] - preds[i]).abs())
-                .collect();
+            let abs_errors: Vec<F> = (0..n_samples).map(|i| (y[i] - preds[i]).abs()).collect();
 
             // Maximum error D.
             let d_max = abs_errors
@@ -412,19 +410,14 @@ mod tests {
 
     #[test]
     fn test_loss_functions() {
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
-        for loss in [AdaBoostLoss::Linear, AdaBoostLoss::Square, AdaBoostLoss::Exponential] {
+        for loss in [
+            AdaBoostLoss::Linear,
+            AdaBoostLoss::Square,
+            AdaBoostLoss::Exponential,
+        ] {
             let ada = AdaBoostRegressor {
                 n_estimators: 50,
                 learning_rate: 1.0,
@@ -437,7 +430,11 @@ mod tests {
 
             // All predictions should be finite.
             for &p in preds.iter() {
-                assert!(p.is_finite(), "prediction must be finite, got {p} with loss {:?}", loss);
+                assert!(
+                    p.is_finite(),
+                    "prediction must be finite, got {p} with loss {:?}",
+                    loss
+                );
             }
         }
     }
@@ -538,16 +535,7 @@ mod tests {
 
     #[test]
     fn test_with_builder_pattern() {
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
         let ada = AdaBoostRegressor::new()
@@ -574,16 +562,7 @@ mod tests {
 
     #[test]
     fn test_estimator_weights_positive() {
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
         let ada = AdaBoostRegressor {
@@ -596,10 +575,7 @@ mod tests {
         let fitted: FittedAdaBoostRegressor<f64> = ada.fit(&x, &y).unwrap();
 
         for &w in fitted.estimator_weights() {
-            assert!(
-                w >= 0.0,
-                "estimator weight must be non-negative, got {w}"
-            );
+            assert!(w >= 0.0, "estimator weight must be non-negative, got {w}");
         }
     }
 }

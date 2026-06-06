@@ -39,7 +39,8 @@ fn test_golden_linear_svc() {
             assert!(
                 classes.iter().any(|&c| (c - p).abs() < 1e-10),
                 "{}: prediction {} is not a valid class label",
-                name, p
+                name,
+                p
             );
         }
 
@@ -54,7 +55,8 @@ fn test_golden_linear_svc() {
         assert!(
             accuracy >= 0.7,
             "{}: accuracy {} is too low (expected >= 0.7)",
-            name, accuracy
+            name,
+            accuracy
         );
     }
 }
@@ -101,7 +103,8 @@ fn test_golden_svc() {
             assert!(
                 classes.iter().any(|&c| (c - p).abs() < 1e-10),
                 "{}: prediction {} is not a valid class label",
-                name, p
+                name,
+                p
             );
         }
 
@@ -116,7 +119,8 @@ fn test_golden_svc() {
         assert!(
             accuracy >= 0.7,
             "{}: accuracy {} is too low (expected >= 0.7)",
-            name, accuracy
+            name,
+            accuracy
         );
     }
 }

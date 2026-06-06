@@ -12,11 +12,24 @@ use common::{json_to_array1, json_to_array2, load_golden_data};
 use rustml::prelude::*;
 use rustml_regression::TweedieRegressor;
 
-fn assert_rel_close(actual: &ndarray::Array1<f64>, expected: &ndarray::Array1<f64>, rel_tol: f64, context: &str) {
+fn assert_rel_close(
+    actual: &ndarray::Array1<f64>,
+    expected: &ndarray::Array1<f64>,
+    rel_tol: f64,
+    context: &str,
+) {
     assert_eq!(actual.len(), expected.len(), "{} length mismatch", context);
     for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
         let rel = (a - e).abs() / e.abs().max(1e-9);
-        assert!(rel < rel_tol, "{}[{}]: rustml={}, sklearn={}, rel={}", context, i, a, e, rel);
+        assert!(
+            rel < rel_tol,
+            "{}[{}]: rustml={}, sklearn={}, rel={}",
+            context,
+            i,
+            a,
+            e,
+            rel
+        );
     }
 }
 

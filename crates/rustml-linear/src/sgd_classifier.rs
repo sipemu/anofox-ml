@@ -9,7 +9,7 @@ use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
-use rustml_core::{Fit, Float, Predict, Result, RustMlError};
+use rustml_core::{Fit, Float, PartialFit, Predict, Result, RustMlError};
 
 /// Loss function for SGD classifier.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -189,10 +189,46 @@ fn train_binary_sgd(
     shuffle: bool,
     seed: u64,
 ) -> (Array1<f64>, f64) {
+    train_binary_sgd_resume(
+        x,
+        y_binary,
+        None,
+        loss,
+        penalty,
+        alpha,
+        l1_ratio,
+        max_iter,
+        tol,
+        eta0,
+        power_t,
+        learning_rate,
+        shuffle,
+        seed,
+    )
+}
+
+/// Same as `train_binary_sgd` but starts from the given (weights, bias) if
+/// provided. Powers `partial_fit`: each call resumes from the previous
+/// state instead of zero-initialising.
+fn train_binary_sgd_resume(
+    x: &Array2<f64>,
+    y_binary: &[f64],
+    initial: Option<(Array1<f64>, f64)>,
+    loss: ClassifierLoss,
+    penalty: Penalty,
+    alpha: f64,
+    l1_ratio: f64,
+    max_iter: usize,
+    tol: f64,
+    eta0: f64,
+    power_t: f64,
+    learning_rate: LearningRate,
+    shuffle: bool,
+    seed: u64,
+) -> (Array1<f64>, f64) {
     let n = x.nrows();
     let p = x.ncols();
-    let mut w = Array1::zeros(p);
-    let mut b = 0.0;
+    let (mut w, mut b) = initial.unwrap_or_else(|| (Array1::zeros(p), 0.0));
     let mut rng = StdRng::seed_from_u64(seed);
     let mut indices: Vec<usize> = (0..n).collect();
     let mut t: usize = 1;
@@ -256,7 +292,8 @@ fn train_binary_sgd(
             // Update weights: w -= eta * (dloss * x_i + penalty_grad)
             if dloss != 0.0 {
                 for j in 0..p {
-                    w[j] -= eta * (dloss * x[[i, j]] + penalty_gradient(w[j], alpha, penalty, l1_ratio));
+                    w[j] -= eta
+                        * (dloss * x[[i, j]] + penalty_gradient(w[j], alpha, penalty, l1_ratio));
                 }
                 b -= eta * dloss;
             } else {
@@ -315,7 +352,10 @@ impl Fit<f64> for SgdClassifier {
         let mut biases = Vec::with_capacity(classes.len());
 
         for (c_idx, &cls) in classes.iter().enumerate() {
-            let y_binary: Vec<f64> = y.iter().map(|&v| if v == cls { 1.0 } else { -1.0 }).collect();
+            let y_binary: Vec<f64> = y
+                .iter()
+                .map(|&v| if v == cls { 1.0 } else { -1.0 })
+                .collect();
 
             let (w, b) = train_binary_sgd(
                 x,
@@ -340,6 +380,101 @@ impl Fit<f64> for SgdClassifier {
             weights,
             biases,
             classes,
+            n_features,
+        })
+    }
+}
+
+impl PartialFit<f64> for SgdClassifier {
+    type Fitted = FittedSgdClassifier<f64>;
+
+    fn partial_fit(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        classes: Option<&[f64]>,
+    ) -> Result<Self::Fitted> {
+        if x.nrows() != y.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
+            )));
+        }
+        if x.is_empty() {
+            return Err(RustMlError::EmptyInput("training data is empty".into()));
+        }
+
+        // Establish the class set: from state, or from `classes` on first call,
+        // or by deriving from the batch (must have ≥ 2 unique labels then).
+        let class_list: Vec<f64> = if let Some(s) = &state {
+            s.classes.clone()
+        } else if let Some(c) = classes {
+            c.to_vec()
+        } else {
+            let mut v: Vec<f64> = y.iter().copied().collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v.dedup();
+            if v.len() < 2 {
+                return Err(RustMlError::InvalidParameter(
+                    "first partial_fit needs classes= or batch with ≥ 2 unique labels".into(),
+                ));
+            }
+            v
+        };
+
+        let n_features = x.ncols();
+
+        // Initial weights/biases per class — from existing state or zeros.
+        let (existing_weights, existing_biases): (Vec<Array1<f64>>, Vec<f64>) =
+            if let Some(s) = state {
+                if s.n_features != n_features {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "previous fit had {} features, batch has {}",
+                        s.n_features, n_features
+                    )));
+                }
+                (s.weights, s.biases)
+            } else {
+                (
+                    vec![Array1::<f64>::zeros(n_features); class_list.len()],
+                    vec![0.0; class_list.len()],
+                )
+            };
+
+        // Run one resume-pass per class.
+        let mut weights = Vec::with_capacity(class_list.len());
+        let mut biases = Vec::with_capacity(class_list.len());
+        for (c_idx, &cls) in class_list.iter().enumerate() {
+            let y_binary: Vec<f64> = y
+                .iter()
+                .map(|&v| if v == cls { 1.0 } else { -1.0 })
+                .collect();
+            let (w, b) = train_binary_sgd_resume(
+                x,
+                &y_binary,
+                Some((existing_weights[c_idx].clone(), existing_biases[c_idx])),
+                self.loss,
+                self.penalty,
+                self.alpha,
+                self.l1_ratio,
+                self.max_iter,
+                self.tol,
+                self.eta0,
+                self.power_t,
+                self.learning_rate,
+                self.shuffle,
+                self.seed.wrapping_add(c_idx as u64),
+            );
+            weights.push(w);
+            biases.push(b);
+        }
+
+        Ok(FittedSgdClassifier {
+            weights,
+            biases,
+            classes: class_list,
             n_features,
         })
     }
@@ -375,15 +510,41 @@ mod tests {
         let x = Array2::from_shape_vec(
             (12, 2),
             vec![
-                0.0, 0.0, 0.5, 0.5, 1.0, 0.0, 0.0, 1.0,
-                3.0, 3.0, 3.5, 3.5, 4.0, 3.0, 3.0, 4.0,
-                0.5, 0.0, 0.0, 0.5,
-                3.5, 3.0, 3.0, 3.5,
+                0.0, 0.0, 0.5, 0.5, 1.0, 0.0, 0.0, 1.0, 3.0, 3.0, 3.5, 3.5, 4.0, 3.0, 3.0, 4.0,
+                0.5, 0.0, 0.0, 0.5, 3.5, 3.0, 3.0, 3.5,
             ],
         )
         .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0];
         (x, y)
+    }
+
+    #[test]
+    fn test_sgd_partial_fit_resumes_from_state() {
+        // partial_fit on two halves should fit a classifier that achieves
+        // training accuracy ≥ that of one-shot fit on a single half.
+        let (x, y) = make_binary_data();
+        let n = x.nrows();
+        let half = n / 2;
+        let x1 = x.slice(ndarray::s![..half, ..]).to_owned();
+        let y1 = y.slice(ndarray::s![..half]).to_owned();
+        let x2 = x.slice(ndarray::s![half.., ..]).to_owned();
+        let y2 = y.slice(ndarray::s![half..]).to_owned();
+
+        let clf = SgdClassifier::new()
+            .with_loss(ClassifierLoss::Log)
+            .with_max_iter(200)
+            .with_alpha(0.001);
+        let classes = [0.0_f64, 1.0];
+
+        let s1 = PartialFit::partial_fit(&clf, None, &x1, &y1, Some(&classes)).unwrap();
+        let s2 = PartialFit::partial_fit(&clf, Some(s1), &x2, &y2, None).unwrap();
+
+        let preds = s2.predict(&x).unwrap();
+        let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
+        // Should classify the majority correctly after seeing both halves.
+        assert!(correct >= 10, "partial_fit too inaccurate: {correct}/12");
+        assert_eq!(s2.classes(), &[0.0_f64, 1.0]);
     }
 
     #[test]
@@ -397,7 +558,11 @@ mod tests {
 
         let preds = fitted.predict(&x).unwrap();
         let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
-        assert!(correct >= 8, "should classify most points correctly, got {}/12", correct);
+        assert!(
+            correct >= 8,
+            "should classify most points correctly, got {}/12",
+            correct
+        );
     }
 
     #[test]
@@ -411,7 +576,11 @@ mod tests {
 
         let preds = fitted.predict(&x).unwrap();
         let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
-        assert!(correct >= 8, "should classify most points correctly, got {}/12", correct);
+        assert!(
+            correct >= 8,
+            "should classify most points correctly, got {}/12",
+            correct
+        );
     }
 
     #[test]
@@ -445,9 +614,8 @@ mod tests {
         let x = Array2::from_shape_vec(
             (9, 2),
             vec![
-                0.0, 0.0, 0.5, 0.5, 0.0, 0.5,
-                3.0, 0.0, 3.5, 0.5, 3.0, 0.5,
-                1.5, 3.0, 1.0, 3.5, 2.0, 3.0,
+                0.0, 0.0, 0.5, 0.5, 0.0, 0.5, 3.0, 0.0, 3.5, 0.5, 3.0, 0.5, 1.5, 3.0, 1.0, 3.5,
+                2.0, 3.0,
             ],
         )
         .unwrap();

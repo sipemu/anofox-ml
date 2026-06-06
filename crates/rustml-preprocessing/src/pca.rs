@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Float, FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 
 /// Parameters for PCA (unfitted state).
 ///
@@ -151,7 +151,11 @@ impl<F: Float> FitUnsupervised<F> for Pca {
             // (c) Eigenvalue = v^T C v. Clamp to zero if negative (numerical noise).
             let cv = cov.dot(&v);
             let eigenvalue = v.dot(&cv);
-            let eigenvalue = if eigenvalue < F::zero() { F::zero() } else { eigenvalue };
+            let eigenvalue = if eigenvalue < F::zero() {
+                F::zero()
+            } else {
+                eigenvalue
+            };
 
             // (d) Deflate: C = C - eigenvalue * v v^T (outer product).
             let v_col = v.view().insert_axis(Axis(1));
@@ -430,22 +434,25 @@ mod tests {
     #[test]
     fn test_large_values() {
         // Large feature values should not produce NaN/Inf
-        let x = array![
-            [1e10, 2e10],
-            [3e10, 4e10],
-            [5e10, 6e10],
-            [7e10, 8e10],
-        ];
+        let x = array![[1e10, 2e10], [3e10, 4e10], [5e10, 6e10], [7e10, 8e10],];
 
         let pca = Pca { n_components: 2 };
         let fitted = FitUnsupervised::<f64>::fit(&pca, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
         for &v in transformed.iter() {
-            assert!(v.is_finite(), "PCA on large values produced non-finite: {}", v);
+            assert!(
+                v.is_finite(),
+                "PCA on large values produced non-finite: {}",
+                v
+            );
         }
         for &v in fitted.explained_variance().iter() {
-            assert!(v.is_finite() && v >= 0.0, "variance should be finite and non-negative: {}", v);
+            assert!(
+                v.is_finite() && v >= 0.0,
+                "variance should be finite and non-negative: {}",
+                v
+            );
         }
     }
 
@@ -464,7 +471,11 @@ mod tests {
         let transformed = fitted.transform(&x).unwrap();
 
         for &v in transformed.iter() {
-            assert!(v.is_finite(), "near-zero variance column produced non-finite: {}", v);
+            assert!(
+                v.is_finite(),
+                "near-zero variance column produced non-finite: {}",
+                v
+            );
         }
         // First component should capture nearly all variance
         let var = fitted.explained_variance();
@@ -489,10 +500,18 @@ mod tests {
 
         // All values should be finite and non-negative
         for &v in var.iter() {
-            assert!(v.is_finite() && v >= -1e-10, "variance should be finite and non-negative: {}", v);
+            assert!(
+                v.is_finite() && v >= -1e-10,
+                "variance should be finite and non-negative: {}",
+                v
+            );
         }
         // With perfect collinearity, effective rank is 1, so at most 1 non-zero eigenvalue
         let nonzero_count = var.iter().filter(|&&v| v > 1e-8).count();
-        assert!(nonzero_count <= 2, "collinear data should have rank <= 2, got {} non-zero eigenvalues", nonzero_count);
+        assert!(
+            nonzero_count <= 2,
+            "collinear data should have rank <= 2, got {} non-zero eigenvalues",
+            nonzero_count
+        );
     }
 }

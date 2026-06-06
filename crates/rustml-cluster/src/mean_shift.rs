@@ -17,10 +17,20 @@ pub struct MeanShift {
 
 impl MeanShift {
     pub fn new(bandwidth: f64) -> Self {
-        Self { bandwidth, max_iter: 300, tol: 1e-3 }
+        Self {
+            bandwidth,
+            max_iter: 300,
+            tol: 1e-3,
+        }
     }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_tol(mut self, t: f64) -> Self { self.tol = t; self }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_tol(mut self, t: f64) -> Self {
+        self.tol = t;
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -64,7 +74,9 @@ impl FitUnsupervised<f64> for MeanShift {
             return Err(RustMlError::EmptyInput("empty input".into()));
         }
         if self.bandwidth <= 0.0 {
-            return Err(RustMlError::InvalidParameter("bandwidth must be > 0".into()));
+            return Err(RustMlError::InvalidParameter(
+                "bandwidth must be > 0".into(),
+            ));
         }
         let d = x.ncols();
         let bw_sq = self.bandwidth * self.bandwidth;
@@ -122,7 +134,9 @@ impl Predict<f64> for FittedMeanShift {
         let d = self.cluster_centers.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", d, x.ncols()
+                "expected {} features, got {}",
+                d,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -153,8 +167,14 @@ mod tests {
     #[test]
     fn test_mean_shift_two_blobs() {
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.2], [0.1, -0.1],
-            [10.0, 10.0], [10.1, 9.9], [9.9, 10.2], [10.0, 10.1],
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.2],
+            [0.1, -0.1],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.9, 10.2],
+            [10.0, 10.1],
         ];
         let ms = MeanShift::new(2.0);
         let fitted = ms.fit(&x).unwrap();
@@ -171,8 +191,14 @@ mod tests {
     #[test]
     fn test_mean_shift_centers_near_blob_means() {
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.2], [0.1, -0.1],
-            [10.0, 10.0], [10.1, 9.9], [9.9, 10.2], [10.0, 10.1],
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.2],
+            [0.1, -0.1],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.9, 10.2],
+            [10.0, 10.1],
         ];
         let fitted = MeanShift::new(2.0).fit(&x).unwrap();
         // Centroids should be near (0.025, 0.05) and (10.0, 10.05).
@@ -180,8 +206,12 @@ mod tests {
         let mut has_high = false;
         for k in 0..fitted.cluster_centers.nrows() {
             let cx = fitted.cluster_centers[[k, 0]];
-            if cx.abs() < 1.0 { has_low = true; }
-            if (cx - 10.0).abs() < 1.0 { has_high = true; }
+            if cx.abs() < 1.0 {
+                has_low = true;
+            }
+            if (cx - 10.0).abs() < 1.0 {
+                has_high = true;
+            }
         }
         assert!(has_low && has_high);
     }

@@ -172,13 +172,17 @@ fn bench_preprocessing(c: &mut Criterion) {
     for &n in &[100, 1000, 5000] {
         let (x, _) = generate_regression_data(n, 10);
 
-        group.bench_with_input(BenchmarkId::new("standard_scaler_fit_transform", n), &n, |b, _| {
-            b.iter(|| {
-                let scaler = StandardScaler::default();
-                let fitted = FitUnsupervised::<f64>::fit(&scaler, black_box(&x)).unwrap();
-                fitted.transform(black_box(&x)).unwrap()
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("standard_scaler_fit_transform", n),
+            &n,
+            |b, _| {
+                b.iter(|| {
+                    let scaler = StandardScaler::default();
+                    let fitted = FitUnsupervised::<f64>::fit(&scaler, black_box(&x)).unwrap();
+                    fitted.transform(black_box(&x)).unwrap()
+                });
+            },
+        );
     }
 
     group.finish();

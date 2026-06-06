@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2};
-use rustml_core::{Float, FitUnsupervised, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 use std::collections::HashMap;
 
 /// Strategy used to compute the fill value for missing (NaN) entries.
@@ -195,11 +195,7 @@ mod tests {
 
     #[test]
     fn test_mean_strategy_basic() {
-        let x = array![
-            [1.0, f64::NAN],
-            [2.0, 4.0],
-            [3.0, 6.0],
-        ];
+        let x = array![[1.0, f64::NAN], [2.0, 4.0], [3.0, 6.0],];
         let imputer = SimpleImputer::<f64>::new();
         let fitted = FitUnsupervised::<f64>::fit(&imputer, &x).unwrap();
         let result = fitted.transform(&x).unwrap();
@@ -216,12 +212,7 @@ mod tests {
 
     #[test]
     fn test_median_strategy() {
-        let x = array![
-            [f64::NAN, 1.0],
-            [2.0, 3.0],
-            [4.0, 5.0],
-            [6.0, 7.0],
-        ];
+        let x = array![[f64::NAN, 1.0], [2.0, 3.0], [4.0, 5.0], [6.0, 7.0],];
         let imputer = SimpleImputer::<f64>::new().with_strategy(ImputeStrategy::Median);
         let fitted = FitUnsupervised::<f64>::fit(&imputer, &x).unwrap();
         let result = fitted.transform(&x).unwrap();
@@ -234,12 +225,7 @@ mod tests {
 
     #[test]
     fn test_most_frequent_strategy() {
-        let x = array![
-            [1.0, f64::NAN],
-            [2.0, 3.0],
-            [2.0, 3.0],
-            [3.0, 5.0],
-        ];
+        let x = array![[1.0, f64::NAN], [2.0, 3.0], [2.0, 3.0], [3.0, 5.0],];
         let imputer = SimpleImputer::<f64>::new().with_strategy(ImputeStrategy::MostFrequent);
         let fitted = FitUnsupervised::<f64>::fit(&imputer, &x).unwrap();
         let result = fitted.transform(&x).unwrap();
@@ -252,10 +238,7 @@ mod tests {
 
     #[test]
     fn test_constant_strategy() {
-        let x = array![
-            [f64::NAN, 1.0],
-            [2.0, f64::NAN],
-        ];
+        let x = array![[f64::NAN, 1.0], [2.0, f64::NAN],];
         let imputer = SimpleImputer::<f64>::new()
             .with_strategy(ImputeStrategy::Constant)
             .with_fill_value(-999.0);
@@ -295,27 +278,23 @@ mod tests {
 
     #[test]
     fn test_all_nan_column_error() {
-        let x = array![
-            [1.0, f64::NAN],
-            [2.0, f64::NAN],
-            [3.0, f64::NAN],
-        ];
+        let x = array![[1.0, f64::NAN], [2.0, f64::NAN], [3.0, f64::NAN],];
         let imputer = SimpleImputer::<f64>::new();
         let result = FitUnsupervised::<f64>::fit(&imputer, &x);
         assert!(result.is_err());
         let err = result.unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("column 1"), "error should mention column index: {}", msg);
+        assert!(
+            msg.contains("column 1"),
+            "error should mention column index: {}",
+            msg
+        );
         assert!(msg.contains("NaN"), "error should mention NaN: {}", msg);
     }
 
     #[test]
     fn test_no_nan_passthrough() {
-        let x = array![
-            [1.0, 2.0],
-            [3.0, 4.0],
-            [5.0, 6.0],
-        ];
+        let x = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0],];
         let imputer = SimpleImputer::<f64>::new();
         let fitted = FitUnsupervised::<f64>::fit(&imputer, &x).unwrap();
         let result = fitted.transform(&x).unwrap();
@@ -328,29 +307,23 @@ mod tests {
 
     #[test]
     fn test_shape_mismatch_on_transform() {
-        let x_fit = array![
-            [1.0, 2.0, 3.0],
-            [4.0, 5.0, 6.0],
-        ];
-        let x_transform = array![
-            [1.0, 2.0],
-            [3.0, 4.0],
-        ];
+        let x_fit = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0],];
+        let x_transform = array![[1.0, 2.0], [3.0, 4.0],];
         let imputer = SimpleImputer::<f64>::new();
         let fitted = FitUnsupervised::<f64>::fit(&imputer, &x_fit).unwrap();
         let result = fitted.transform(&x_transform);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("3") && msg.contains("2"), "error should mention expected and actual: {}", msg);
+        assert!(
+            msg.contains("3") && msg.contains("2"),
+            "error should mention expected and actual: {}",
+            msg
+        );
     }
 
     #[test]
     fn test_f32_support() {
-        let x = array![
-            [1.0f32, f32::NAN],
-            [3.0f32, 4.0f32],
-            [5.0f32, 6.0f32],
-        ];
+        let x = array![[1.0f32, f32::NAN], [3.0f32, 4.0f32], [5.0f32, 6.0f32],];
         let imputer = SimpleImputer::<f32>::new();
         let fitted = FitUnsupervised::<f32>::fit(&imputer, &x).unwrap();
         let result = fitted.transform(&x).unwrap();
@@ -364,10 +337,7 @@ mod tests {
     #[test]
     fn test_constant_strategy_default_fill_value() {
         // When Constant strategy is used without specifying fill_value, default to 0.
-        let x = array![
-            [f64::NAN, 1.0],
-            [2.0, f64::NAN],
-        ];
+        let x = array![[f64::NAN, 1.0], [2.0, f64::NAN],];
         let imputer = SimpleImputer::<f64>::new().with_strategy(ImputeStrategy::Constant);
         let fitted = FitUnsupervised::<f64>::fit(&imputer, &x).unwrap();
         let result = fitted.transform(&x).unwrap();
@@ -379,12 +349,7 @@ mod tests {
     #[test]
     fn test_median_even_count() {
         // Even number of non-NaN values: median is average of two middle values.
-        let x = array![
-            [1.0],
-            [3.0],
-            [5.0],
-            [7.0],
-        ];
+        let x = array![[1.0], [3.0], [5.0], [7.0],];
         let imputer = SimpleImputer::<f64>::new().with_strategy(ImputeStrategy::Median);
         let fitted = FitUnsupervised::<f64>::fit(&imputer, &x).unwrap();
         // Median of [1,3,5,7] = (3+5)/2 = 4.0

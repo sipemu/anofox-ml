@@ -4,9 +4,7 @@ use rand::SeedableRng;
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 
 use crate::activation::Activation;
-use crate::network::{
-    adam_update, backward_pass, forward_pass, sgd_update, DenseLayer,
-};
+use crate::network::{adam_update, backward_pass, forward_pass, sgd_update, DenseLayer};
 use crate::solver::{AdamState, Solver};
 use crate::utils::{mse_loss, select_rows, shuffle_indices};
 
@@ -209,8 +207,16 @@ mod tests {
     fn simple_linear_regression() {
         // y = 2*x + 1
         let x = array![
-            [0.0], [0.25], [0.5], [0.75], [1.0],
-            [1.25], [1.5], [1.75], [2.0], [2.25],
+            [0.0],
+            [0.25],
+            [0.5],
+            [0.75],
+            [1.0],
+            [1.25],
+            [1.5],
+            [1.75],
+            [2.0],
+            [2.25],
         ];
         let y = array![1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5];
 
@@ -238,8 +244,16 @@ mod tests {
     fn quadratic_regression() {
         // y = x^2
         let x = array![
-            [0.0], [0.5], [1.0], [1.5], [2.0],
-            [2.5], [3.0], [3.5], [4.0], [4.5],
+            [0.0],
+            [0.5],
+            [1.0],
+            [1.5],
+            [2.0],
+            [2.5],
+            [3.0],
+            [3.5],
+            [4.0],
+            [4.5],
         ];
         let y = array![0.0, 0.25, 1.0, 2.25, 4.0, 6.25, 9.0, 12.25, 16.0, 20.25];
 

@@ -103,11 +103,11 @@ pub mod prelude {
 
     pub use rustml_metrics::{
         accuracy_score, adjusted_rand_score, average_precision_score, balanced_accuracy_score,
-        brier_score_loss, cohen_kappa_score, confusion_matrix, explained_variance_score,
-        f1_score, f1_score_avg, log_loss, mae, matthews_corrcoef, max_error,
-        mean_absolute_percentage_error, mean_squared_log_error, median_absolute_error, mse,
-        normalized_mutual_info_score, precision, precision_recall_curve, precision_score,
-        r2_score, recall, recall_score, roc_auc_score, roc_curve, silhouette_score, Average,
+        brier_score_loss, cohen_kappa_score, confusion_matrix, explained_variance_score, f1_score,
+        f1_score_avg, log_loss, mae, matthews_corrcoef, max_error, mean_absolute_percentage_error,
+        mean_squared_log_error, median_absolute_error, mse, normalized_mutual_info_score,
+        precision, precision_recall_curve, precision_score, r2_score, recall, recall_score,
+        roc_auc_score, roc_curve, silhouette_score, Average,
     };
 
     pub use rustml_preprocessing::{
@@ -128,13 +128,13 @@ pub mod prelude {
     };
 
     pub use rustml_ensemble::{
-        AdaBoostClassifier, AdaBoostRegressor, BaggingClassifier, BaggingRegressor,
-        BoostingType, CalibratedClassifierCV, CalibrationMethod, ExtraTreesClassifier,
-        ExtraTreesRegressor, GradientBoostingClassifier, GradientBoostingRegressor,
-        HistGradientBoostingClassifier, HistGradientBoostingRegressor, IsolationForest,
-        LgbmClassWeight, LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor,
-        RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor,
-        VotingClassifier, VotingRegressor,
+        AdaBoostClassifier, AdaBoostRegressor, BaggingClassifier, BaggingRegressor, BoostingType,
+        CalibratedClassifierCV, CalibrationMethod, ExtraTreesClassifier, ExtraTreesRegressor,
+        GradientBoostingClassifier, GradientBoostingRegressor, HistGradientBoostingClassifier,
+        HistGradientBoostingRegressor, IsolationForest, LgbmClassWeight, LgbmClassifier,
+        LgbmFitOptions, LgbmObjective, LgbmRegressor, RandomForestClassifier,
+        RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier,
+        VotingRegressor,
     };
 
     pub use rustml_cluster::{
@@ -149,7 +149,7 @@ pub mod prelude {
         LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis,
     };
 
-    pub use rustml_svm::{LinearSvc, LinearSvr, NuSvc, NuSvr, OneClassSvm, Svc, Svr, SvmKernel};
+    pub use rustml_svm::{LinearSvc, LinearSvr, NuSvc, NuSvr, OneClassSvm, Svc, SvmKernel, Svr};
 
     pub use rustml_neural_networks::{MlpClassifier, MlpRegressor};
 
@@ -166,7 +166,7 @@ pub mod prelude {
         PassiveAggressiveClassifier, PassiveAggressiveRegressor, SgdClassifier, SgdRegressor,
     };
 
-    pub use rustml_core::persistence::{
-        load_bincode, load_json, save_bincode, save_json,
-    };
+    pub use rustml_text::{CountVectorizer, HashingVectorizer, TfidfVectorizer};
+
+    pub use rustml_core::persistence::{load_bincode, load_json, save_bincode, save_json};
 }

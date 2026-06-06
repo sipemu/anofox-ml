@@ -20,7 +20,13 @@ fn adjusted_rand(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
         *row.entry(ai).or_default() += 1;
         *col.entry(bi).or_default() += 1;
     }
-    let c2 = |n: usize| -> f64 { if n < 2 { 0.0 } else { (n * (n - 1)) as f64 / 2.0 } };
+    let c2 = |n: usize| -> f64 {
+        if n < 2 {
+            0.0
+        } else {
+            (n * (n - 1)) as f64 / 2.0
+        }
+    };
     let sum_nij: f64 = contingency.values().map(|&c| c2(c)).sum();
     let sum_ai: f64 = row.values().map(|&c| c2(c)).sum();
     let sum_bj: f64 = col.values().map(|&c| c2(c)).sum();
@@ -53,7 +59,9 @@ fn test_gmm_full_and_diag_match_sklearn() {
         assert!(
             ari >= sklearn_ari - 0.05,
             "{}: rustml ARI {} vs sklearn {}",
-            case["name"].as_str().unwrap(), ari, sklearn_ari
+            case["name"].as_str().unwrap(),
+            ari,
+            sklearn_ari
         );
     }
 }

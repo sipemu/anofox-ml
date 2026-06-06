@@ -37,7 +37,9 @@ impl OrthogonalMatchingPursuit {
 }
 
 impl Default for OrthogonalMatchingPursuit {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -64,7 +66,9 @@ impl Fit<f64> for OrthogonalMatchingPursuit {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
@@ -99,7 +103,11 @@ impl Fit<f64> for OrthogonalMatchingPursuit {
         };
 
         // Default n_nonzero = max(1, 0.1 * n_features) (sklearn rule).
-        let target_k = self.n_nonzero_coefs.unwrap_or(((d as f64) * 0.1).ceil() as usize).max(1).min(d);
+        let target_k = self
+            .n_nonzero_coefs
+            .unwrap_or(((d as f64) * 0.1).ceil() as usize)
+            .max(1)
+            .min(d);
 
         let mut active: Vec<usize> = Vec::with_capacity(target_k);
         let mut residual = yc.clone();
@@ -192,7 +200,9 @@ impl Predict<f64> for FittedOrthogonalMatchingPursuit {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
@@ -219,7 +229,8 @@ mod tests {
 
         let fitted = OrthogonalMatchingPursuit::new()
             .with_n_nonzero_coefs(2)
-            .fit(&x, &y).unwrap();
+            .fit(&x, &y)
+            .unwrap();
         // The two selected features must be 0 and 2 (in either order).
         let mut sel = fitted.active_set.clone();
         sel.sort();

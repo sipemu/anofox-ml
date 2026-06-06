@@ -1,6 +1,6 @@
 //! Lasso (L1-regularized) regression wrapper.
 //!
-//! This is a convenience wrapper around [`ElasticNetRegressor`] with `alpha = 1.0`
+//! This is a convenience wrapper around `ElasticNetRegressor` with `alpha = 1.0`
 //! (pure L1 regularization).
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
@@ -134,10 +134,7 @@ mod tests {
         let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..10).map(|i| 2.0 + 3.0 * i as f64).collect());
 
-        let fitted = LassoRegressor::new()
-            .with_lambda(0.01)
-            .fit(&x, &y)
-            .unwrap();
+        let fitted = LassoRegressor::new().with_lambda(0.01).fit(&x, &y).unwrap();
 
         // Lasso with small lambda should be close to OLS
         assert!(fitted.r_squared() > 0.99);
@@ -149,10 +146,7 @@ mod tests {
         let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..10).map(|i| 2.0 + 3.0 * i as f64).collect());
 
-        let fitted_small = LassoRegressor::new()
-            .with_lambda(0.01)
-            .fit(&x, &y)
-            .unwrap();
+        let fitted_small = LassoRegressor::new().with_lambda(0.01).fit(&x, &y).unwrap();
         let fitted_large = LassoRegressor::new()
             .with_lambda(100.0)
             .fit(&x, &y)
@@ -170,17 +164,10 @@ mod tests {
     #[test]
     fn test_lasso_sparsity() {
         // Lasso with large lambda should push some coefficients toward zero
-        let x = Array2::from_shape_vec(
-            (20, 3),
-            (0..60).map(|i| i as f64 * 0.1).collect(),
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((20, 3), (0..60).map(|i| i as f64 * 0.1).collect()).unwrap();
         let y = Array1::from_vec((0..20).map(|i| 1.0 + 2.0 * i as f64 * 0.1).collect());
 
-        let fitted = LassoRegressor::new()
-            .with_lambda(10.0)
-            .fit(&x, &y)
-            .unwrap();
+        let fitted = LassoRegressor::new().with_lambda(10.0).fit(&x, &y).unwrap();
 
         // At least some coefficients should be very small (near zero)
         let coeffs = fitted.coefficients();
@@ -224,10 +211,7 @@ mod tests {
         let x = Array2::from_shape_vec((5, 2), vec![0.0; 10]).unwrap();
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let fitted = LassoRegressor::new()
-            .with_lambda(0.01)
-            .fit(&x, &y)
-            .unwrap();
+        let fitted = LassoRegressor::new().with_lambda(0.01).fit(&x, &y).unwrap();
 
         let x_wrong = Array2::from_shape_vec((3, 3), vec![0.0; 9]).unwrap();
         assert!(fitted.predict(&x_wrong).is_err());

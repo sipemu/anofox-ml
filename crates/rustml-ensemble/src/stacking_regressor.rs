@@ -66,7 +66,8 @@ impl<F: Float> StackingRegressor<F> {
         T: Fit<F> + Send + Sync + 'static,
         T::Fitted: Predict<F> + Send + Sync + 'static,
     {
-        self.base_estimators.push((name.into(), Box::new(estimator)));
+        self.base_estimators
+            .push((name.into(), Box::new(estimator)));
         self
     }
 
@@ -211,7 +212,6 @@ fn select_elements<F: Float>(y: &Array1<F>, indices: &[usize]) -> Array1<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use approx::assert_abs_diff_eq;
     use ndarray::array;
     use rustml_trees::DecisionTreeRegressor;
 
@@ -221,8 +221,20 @@ mod tests {
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
 
         let sr = StackingRegressor::new(DecisionTreeRegressor::default())
-            .push("t1", DecisionTreeRegressor { max_depth: Some(2), ..Default::default() })
-            .push("t2", DecisionTreeRegressor { max_depth: Some(3), ..Default::default() })
+            .push(
+                "t1",
+                DecisionTreeRegressor {
+                    max_depth: Some(2),
+                    ..Default::default()
+                },
+            )
+            .push(
+                "t2",
+                DecisionTreeRegressor {
+                    max_depth: Some(3),
+                    ..Default::default()
+                },
+            )
             .with_cv_folds(2);
 
         let fitted: FittedStackingRegressor<f64> = sr.fit(&x, &y).unwrap();

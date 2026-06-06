@@ -23,7 +23,13 @@ pub fn cross_entropy_loss<F: Float>(probs: &Array2<F>, y_onehot: &Array2<F>) -> 
     let n = F::from_usize(probs.nrows()).unwrap();
 
     let log_probs = probs.mapv(|p| {
-        let clamped = if p < eps { eps } else if p > one - eps { one - eps } else { p };
+        let clamped = if p < eps {
+            eps
+        } else if p > one - eps {
+            one - eps
+        } else {
+            p
+        };
         clamped.ln()
     });
 

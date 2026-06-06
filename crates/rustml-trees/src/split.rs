@@ -122,16 +122,25 @@ pub fn find_best_split_with_features<F: Float>(
     let parent_impurity = compute_impurity(y, indices, criterion);
 
     match criterion {
-        SplitCriterion::Gini | SplitCriterion::Entropy => {
-            find_best_split_classification(
-                x, y, indices, criterion, min_samples_leaf, feature_indices, n, parent_impurity,
-            )
-        }
-        SplitCriterion::Mse => {
-            find_best_split_regression(
-                x, y, indices, min_samples_leaf, feature_indices, n, parent_impurity,
-            )
-        }
+        SplitCriterion::Gini | SplitCriterion::Entropy => find_best_split_classification(
+            x,
+            y,
+            indices,
+            criterion,
+            min_samples_leaf,
+            feature_indices,
+            n,
+            parent_impurity,
+        ),
+        SplitCriterion::Mse => find_best_split_regression(
+            x,
+            y,
+            indices,
+            min_samples_leaf,
+            feature_indices,
+            n,
+            parent_impurity,
+        ),
     }
 }
 
@@ -415,9 +424,14 @@ where
             acc.move_to_left(y, cur_idx);
 
             let next_val = sorted_pairs[pos + 1].0;
-            if let Some((threshold, improvement)) =
-                evaluate_candidate_split(&acc, n, min_samples_leaf, cur_val, next_val, parent_impurity)
-            {
+            if let Some((threshold, improvement)) = evaluate_candidate_split(
+                &acc,
+                n,
+                min_samples_leaf,
+                cur_val,
+                next_val,
+                parent_impurity,
+            ) {
                 try_update_best_split(
                     improvement,
                     &mut best_improvement,
@@ -545,7 +559,11 @@ fn impurity_from_counts<F: Float>(counts: &[usize], total: usize, criterion: Spl
 
 /// Compute impurity for a subset of samples.
 #[inline]
-pub fn compute_impurity<F: Float>(y: &Array1<F>, indices: &[usize], criterion: SplitCriterion) -> F {
+pub fn compute_impurity<F: Float>(
+    y: &Array1<F>,
+    indices: &[usize],
+    criterion: SplitCriterion,
+) -> F {
     match criterion {
         SplitCriterion::Gini => gini(y, indices),
         SplitCriterion::Entropy => entropy(y, indices),
@@ -607,9 +625,7 @@ pub fn count_classes<F: Float>(y: &Array1<F>, indices: &[usize]) -> Vec<(F, usiz
     for &i in indices {
         let val = y[i];
         let bits = float_key(val);
-        map.entry(bits)
-            .and_modify(|e| e.1 += 1)
-            .or_insert((val, 1));
+        map.entry(bits).and_modify(|e| e.1 += 1).or_insert((val, 1));
     }
     let mut counts: Vec<(F, usize)> = map.into_values().collect();
     counts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -722,7 +738,13 @@ pub fn find_random_split<F: Float>(
         let weighted = (nl_f / n_f) * left_imp + (nr_f / n_f) * right_imp;
         let improvement = parent_impurity - weighted;
 
-        try_update_best_split(improvement, &mut best_improvement, &mut best, feature, threshold);
+        try_update_best_split(
+            improvement,
+            &mut best_improvement,
+            &mut best,
+            feature,
+            threshold,
+        );
     }
 
     // Reconstruct index vectors for winning split
@@ -801,7 +823,10 @@ pub fn compute_weighted_impurity<F: Float>(
     weights: &Array1<F>,
     criterion: SplitCriterion,
 ) -> F {
-    let total_weight: F = indices.iter().map(|&i| weights[i]).fold(F::zero(), |a, b| a + b);
+    let total_weight: F = indices
+        .iter()
+        .map(|&i| weights[i])
+        .fold(F::zero(), |a, b| a + b);
     if total_weight <= F::zero() {
         return F::zero();
     }
@@ -864,7 +889,10 @@ pub fn weighted_leaf_value<F: Float>(
 ) -> F {
     match criterion {
         SplitCriterion::Mse => {
-            let total_weight: F = indices.iter().map(|&i| weights[i]).fold(F::zero(), |a, b| a + b);
+            let total_weight: F = indices
+                .iter()
+                .map(|&i| weights[i])
+                .fold(F::zero(), |a, b| a + b);
             if total_weight <= F::zero() {
                 return F::zero();
             }
@@ -935,7 +963,10 @@ pub fn find_best_split_weighted<F: Float>(
     let mut best_improvement = F::neg_infinity();
     let mut sorted_pairs: Vec<(F, usize)> = Vec::with_capacity(n);
 
-    let total_weight: F = indices.iter().map(|&i| weights[i]).fold(F::zero(), |a, b| a + b);
+    let total_weight: F = indices
+        .iter()
+        .map(|&i| weights[i])
+        .fold(F::zero(), |a, b| a + b);
 
     for &feature in feature_indices {
         sort_feature_pairs(x, indices, feature, &mut sorted_pairs);
@@ -1042,7 +1073,13 @@ pub fn find_best_split_weighted<F: Float>(
             let improvement = parent_impurity - weighted_imp;
             let threshold = (cur_val + next_val) / (F::one() + F::one());
 
-            try_update_best_split(improvement, &mut best_improvement, &mut best, feature, threshold);
+            try_update_best_split(
+                improvement,
+                &mut best_improvement,
+                &mut best,
+                feature,
+                threshold,
+            );
         }
     }
 

@@ -124,7 +124,10 @@ fn test_golden_elastic_net_close_to_sklearn() {
 #[test]
 fn test_golden_logistic_regression_matches_sklearn() {
     let cases = load_golden_data("regression_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "logistic_regression").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "logistic_regression")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -171,7 +174,10 @@ fn test_golden_logistic_regression_matches_sklearn() {
 #[test]
 fn test_golden_huber_regressor_close_to_sklearn() {
     let cases = load_golden_data("regression_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "huber_regressor").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "huber_regressor")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);

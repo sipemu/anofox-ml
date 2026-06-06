@@ -52,7 +52,11 @@ pub struct FittedOptics {
 }
 
 fn euclid(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f64>()
+        .sqrt()
 }
 
 impl FitUnsupervised<f64> for Optics {
@@ -81,8 +85,7 @@ impl FitUnsupervised<f64> for Optics {
         // Core distance per point.
         let mut core_dist = vec![f64::INFINITY; n];
         for i in 0..n {
-            let mut neigh: Vec<f64> =
-                (0..n).filter(|&j| j != i).map(|j| dist[i][j]).collect();
+            let mut neigh: Vec<f64> = (0..n).filter(|&j| j != i).map(|j| dist[i][j]).collect();
             neigh.sort_by(|a, b| a.partial_cmp(b).unwrap());
             if neigh.len() >= self.min_samples - 1 + 1 {
                 let kth = neigh[self.min_samples - 1];
@@ -103,7 +106,8 @@ impl FitUnsupervised<f64> for Optics {
             // Seed start: own reachability stays INF.
             // Process the connected reachability ordering rooted at seed.
             let mut stack: Vec<usize> = vec![seed];
-            while let Some(p) = stack.iter()
+            while let Some(p) = stack
+                .iter()
                 .filter(|&&q| !processed[q])
                 .min_by(|&&a, &&b| reach[a].partial_cmp(&reach[b]).unwrap())
                 .copied()
@@ -170,9 +174,15 @@ mod tests {
     #[test]
     fn test_optics_two_blobs() {
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.2], [0.1, -0.1],
-            [10.0, 10.0], [10.1, 9.9], [9.8, 10.2], [10.2, 9.8],
-            [50.0, 50.0],  // far outlier → noise (-1)
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.2],
+            [0.1, -0.1],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.8, 10.2],
+            [10.2, 9.8],
+            [50.0, 50.0], // far outlier → noise (-1)
         ];
         let fitted = Optics::new(2, 1.0).fit(&x).unwrap();
         let labels = &fitted.labels;
@@ -188,7 +198,10 @@ mod tests {
         }
         assert_ne!(l0, l4);
         // Outlier:
-        assert!(labels[8] == -1.0 || labels[8] != l0 && labels[8] != l4,
-                "outlier label = {}", labels[8]);
+        assert!(
+            labels[8] == -1.0 || labels[8] != l0 && labels[8] != l4,
+            "outlier label = {}",
+            labels[8]
+        );
     }
 }

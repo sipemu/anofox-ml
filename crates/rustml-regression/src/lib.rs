@@ -1,7 +1,7 @@
 //! Classical regression models wrapping the `anofox-regression` crate.
 //!
 //! Provides OLS, Ridge, Lasso, Elastic Net, WLS, Quantile, Isotonic, and GLM
-//! (Poisson, Binomial) regressors that implement the rustml [`Fit`] / [`Predict`]
+//! (Poisson, Binomial) regressors that implement the rustml `Fit` / `Predict`
 //! type-state pattern.
 //!
 //! Cross-validated variants (`RidgeCrossValidated`, `LassoCrossValidated`,
@@ -27,18 +27,18 @@ pub mod ols;
 pub mod omp;
 pub mod quantile;
 pub mod ridge;
-pub mod robust;
 pub mod ridge_cv;
+pub mod robust;
 pub mod transformed_target;
 pub mod tweedie;
 pub mod wls;
 
-pub use bayesian_ridge::{
-    ARDRegression, BayesianRidge, FittedARDRegression, FittedBayesianRidge,
-};
+pub use bayesian_ridge::{ARDRegression, BayesianRidge, FittedARDRegression, FittedBayesianRidge};
 pub use elastic_net::{ElasticNetRegressor, FittedElasticNetRegressor};
 pub use elastic_net_cv::{ElasticNetCrossValidated, FittedElasticNetCrossValidated};
-pub use glm::{BinomialRegressor, FittedBinomialRegressor, FittedPoissonRegressor, PoissonRegressor};
+pub use glm::{
+    BinomialRegressor, FittedBinomialRegressor, FittedPoissonRegressor, PoissonRegressor,
+};
 pub use huber::{FittedHuberRegressor, HuberRegressor};
 pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor};
 pub use kernel_ridge::{FittedKernelRidge, KernelRidge};
@@ -50,10 +50,10 @@ pub use ols::{FittedOlsRegressor, OlsRegressor};
 pub use omp::{FittedOrthogonalMatchingPursuit, OrthogonalMatchingPursuit};
 pub use quantile::{FittedQuantileRegressor, QuantileRegressor};
 pub use ridge::{FittedRidgeRegressor, FittedWeightedRidgeRegressor, RidgeRegressor};
+pub use ridge_cv::{FittedRidgeCrossValidated, RidgeCrossValidated};
 pub use robust::{
     FittedRansacRegressor, FittedTheilSenRegressor, RansacRegressor, TheilSenRegressor,
 };
-pub use ridge_cv::{FittedRidgeCrossValidated, RidgeCrossValidated};
 pub use transformed_target::{FittedTransformedTargetRegressor, TransformedTargetRegressor};
 pub use tweedie::{
     gamma_regressor, FittedGammaRegressor, FittedTweedieRegressor, GammaRegressor, TweedieRegressor,

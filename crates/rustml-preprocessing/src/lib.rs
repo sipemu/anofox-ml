@@ -75,7 +75,9 @@ pub use pca::{FittedPca, Pca};
 pub use pls::{FittedPlsRegression, PlsRegression};
 pub use polynomial_features::{FittedPolynomialFeatures, PolynomialFeatures};
 pub use power_transformer::{FittedPowerTransformer, PowerTransformer};
-pub use quantile_transformer::{FittedQuantileTransformer, OutputDistribution, QuantileTransformer};
+pub use quantile_transformer::{
+    FittedQuantileTransformer, OutputDistribution, QuantileTransformer,
+};
 pub use rfe::{FittedRfe, FittedSequentialFeatureSelector, Rfe, SequentialFeatureSelector};
 pub use robust_scaler::{FittedRobustScaler, RobustScaler};
 pub use select_from_model::{FittedSelectFromModel, SelectFromModel};

@@ -1,7 +1,7 @@
 use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
-use rustml_core::{Fit, Predict};
+use rustml_core::{Fit, FitUnsupervised, Predict};
 
 use crate::helpers::{not_fitted, py_err, to_array1, to_array2};
 
@@ -52,7 +52,10 @@ impl KnnClassifier {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neighbors::KnnClassifier::new(5), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neighbors::KnnClassifier::new(5),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -63,7 +66,10 @@ impl KnnClassifier {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neighbors::KnnClassifier::new(5), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neighbors::KnnClassifier::new(5),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -114,7 +120,10 @@ impl KnnRegressor {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neighbors::KnnRegressor::new(5), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neighbors::KnnRegressor::new(5),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -125,6 +134,65 @@ impl KnnRegressor {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neighbors::KnnRegressor::new(5), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neighbors::KnnRegressor::new(5),
+            fitted: Some(fitted),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LocalOutlierFactor
+// ---------------------------------------------------------------------------
+#[pyclass]
+pub struct LocalOutlierFactor {
+    inner: rustml_neighbors::LocalOutlierFactor,
+    fitted: Option<rustml_neighbors::FittedLocalOutlierFactor>,
+}
+
+#[pymethods]
+impl LocalOutlierFactor {
+    #[new]
+    #[pyo3(signature = (n_neighbors=20, contamination=0.1, algorithm="auto"))]
+    fn new(n_neighbors: usize, contamination: f64, algorithm: &str) -> PyResult<Self> {
+        let alg = match algorithm {
+            "auto" => rustml_neighbors::LofAlgorithm::Auto,
+            "kdtree" | "kd_tree" => rustml_neighbors::LofAlgorithm::KdTree,
+            "brute" => rustml_neighbors::LofAlgorithm::BruteForce,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown algorithm '{other}'; expected 'auto', 'kdtree', or 'brute'"
+                )));
+            }
+        };
+        Ok(Self {
+            inner: rustml_neighbors::LocalOutlierFactor::new(n_neighbors)
+                .with_contamination(contamination)
+                .with_algorithm(alg),
+            fitted: None,
+        })
+    }
+    fn fit_predict<'py>(
+        &mut self,
+        py: Python<'py>,
+        x: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let fitted = FitUnsupervised::fit(&self.inner, &to_array2(x)).map_err(py_err)?;
+        let preds = fitted.predictions.clone();
+        self.fitted = Some(fitted);
+        Ok(PyArray1::from_owned_array(py, preds))
+    }
+    #[getter]
+    fn negative_outlier_factor<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let f = self.fitted.as_ref().ok_or_else(not_fitted)?;
+        Ok(PyArray1::from_owned_array(
+            py,
+            f.negative_outlier_factor.clone(),
+        ))
+    }
+    #[getter]
+    fn threshold(&self) -> PyResult<f64> {
+        let f = self.fitted.as_ref().ok_or_else(not_fitted)?;
+        Ok(f.threshold)
     }
 }

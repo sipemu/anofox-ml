@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2};
-use rustml_core::{Float, FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 
 /// Parameters for PowerTransformer (unfitted state).
 ///
@@ -105,13 +105,20 @@ fn yeo_johnson_inverse<F: Float>(y: F, lam: F) -> F {
 fn neg_log_likelihood<F: Float>(col: &[F], lam: F) -> f64 {
     let n = col.len() as f64;
     // Transform all values
-    let transformed: Vec<f64> = col.iter().map(|&x| yeo_johnson(x, lam).to_f64().unwrap()).collect();
+    let transformed: Vec<f64> = col
+        .iter()
+        .map(|&x| yeo_johnson(x, lam).to_f64().unwrap())
+        .collect();
 
     // Mean
     let mean: f64 = transformed.iter().sum::<f64>() / n;
 
     // Variance
-    let var: f64 = transformed.iter().map(|&t| (t - mean) * (t - mean)).sum::<f64>() / n;
+    let var: f64 = transformed
+        .iter()
+        .map(|&t| (t - mean) * (t - mean))
+        .sum::<f64>()
+        / n;
     let var = var.max(1e-30); // avoid log(0)
 
     // Log-likelihood = -n/2 * ln(2*pi*var) + (lam - 1) * sum(sign(x) * ln(|x| + 1))
@@ -307,13 +314,7 @@ mod tests {
 
     #[test]
     fn test_inverse_transform_roundtrip() {
-        let x = array![
-            [0.5, 1.0],
-            [1.5, 2.0],
-            [2.5, 3.0],
-            [3.5, 4.0],
-            [4.5, 5.0],
-        ];
+        let x = array![[0.5, 1.0], [1.5, 2.0], [2.5, 3.0], [3.5, 4.0], [4.5, 5.0],];
         let pt = PowerTransformer::default();
         let fitted = FitUnsupervised::<f64>::fit(&pt, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();

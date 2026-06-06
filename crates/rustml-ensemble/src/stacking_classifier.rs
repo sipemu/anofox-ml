@@ -342,16 +342,32 @@ mod tests {
         // Two well-separated clusters, interleaved so simple k-fold sees both
         // classes in each fold.
         let x = array![
-            [0.0, 0.0], [5.0, 5.0],
-            [0.1, 0.1], [5.1, 5.0],
-            [0.2, -0.1], [4.9, 5.1],
-            [-0.1, 0.2], [5.2, 4.8],
+            [0.0, 0.0],
+            [5.0, 5.0],
+            [0.1, 0.1],
+            [5.1, 5.0],
+            [0.2, -0.1],
+            [4.9, 5.1],
+            [-0.1, 0.2],
+            [5.2, 4.8],
         ];
         let y = array![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
 
         let sc = StackingClassifier::new(DecisionTreeClassifier::default())
-            .push("t1", DecisionTreeClassifier { max_depth: Some(2), ..Default::default() })
-            .push("t2", DecisionTreeClassifier { max_depth: Some(3), ..Default::default() })
+            .push(
+                "t1",
+                DecisionTreeClassifier {
+                    max_depth: Some(2),
+                    ..Default::default()
+                },
+            )
+            .push(
+                "t2",
+                DecisionTreeClassifier {
+                    max_depth: Some(3),
+                    ..Default::default()
+                },
+            )
             .with_cv_folds(2);
 
         let fitted: FittedStackingClassifier<f64> = sc.fit(&x, &y).unwrap();
@@ -365,16 +381,32 @@ mod tests {
     fn test_stacking_classifier_proba_path() {
         // Stack two DT classifiers via predict_proba into a DT meta.
         let x = array![
-            [0.0, 0.0], [5.0, 5.0],
-            [0.1, 0.1], [5.1, 5.0],
-            [0.2, -0.1], [4.9, 5.1],
-            [-0.1, 0.2], [5.2, 4.8],
+            [0.0, 0.0],
+            [5.0, 5.0],
+            [0.1, 0.1],
+            [5.1, 5.0],
+            [0.2, -0.1],
+            [4.9, 5.1],
+            [-0.1, 0.2],
+            [5.2, 4.8],
         ];
         let y = array![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
 
         let sc = StackingClassifier::new(DecisionTreeClassifier::default())
-            .push_proba("t1", DecisionTreeClassifier { max_depth: Some(2), ..Default::default() })
-            .push_proba("t2", DecisionTreeClassifier { max_depth: Some(3), ..Default::default() })
+            .push_proba(
+                "t1",
+                DecisionTreeClassifier {
+                    max_depth: Some(2),
+                    ..Default::default()
+                },
+            )
+            .push_proba(
+                "t2",
+                DecisionTreeClassifier {
+                    max_depth: Some(3),
+                    ..Default::default()
+                },
+            )
             .with_cv_folds(2);
 
         let fitted: FittedStackingClassifier<f64> = sc.fit(&x, &y).unwrap();

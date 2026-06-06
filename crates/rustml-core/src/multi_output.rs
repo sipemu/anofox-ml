@@ -112,7 +112,9 @@ impl<F: Float> FittedMultiOutputRegressor<F> {
         Ok(out)
     }
 
-    pub fn n_features(&self) -> usize { self.n_features }
+    pub fn n_features(&self) -> usize {
+        self.n_features
+    }
 
     pub fn n_outputs(&self) -> usize {
         self.models.len()
@@ -166,7 +168,9 @@ impl<F: Float> RegressorChain<F> {
     pub fn fit_2d(&self, x: &Array2<F>, y: &Array2<F>) -> Result<FittedRegressorChain<F>> {
         if x.nrows() != y.nrows() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.nrows()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.nrows()
             )));
         }
         if y.is_empty() {
@@ -178,7 +182,9 @@ impl<F: Float> RegressorChain<F> {
         let order = self.order.clone().unwrap_or_else(|| (0..n_out).collect());
         if order.len() != n_out {
             return Err(RustMlError::InvalidParameter(format!(
-                "order length {} != n_outputs {}", order.len(), n_out
+                "order length {} != n_outputs {}",
+                order.len(),
+                n_out
             )));
         }
         let mut models: Vec<Box<dyn PredBox<F>>> = Vec::with_capacity(n_out);
@@ -224,7 +230,9 @@ impl<F: Float> FittedRegressorChain<F> {
     pub fn predict_2d(&self, x: &Array2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();

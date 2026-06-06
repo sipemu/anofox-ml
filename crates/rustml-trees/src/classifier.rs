@@ -4,9 +4,9 @@ use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use crate::node::TreeNode;
 use crate::split::{
     compute_impurity, compute_sample_weights_from_class_weight, compute_weighted_impurity,
-    count_classes, find_best_split_weighted, find_best_split_with_features,
-    leaf_value, select_feature_subset, weighted_count_classes, weighted_leaf_value, ClassWeight,
-    MaxFeatures, SplitCriterion,
+    count_classes, find_best_split_weighted, find_best_split_with_features, leaf_value,
+    select_feature_subset, weighted_count_classes, weighted_leaf_value, ClassWeight, MaxFeatures,
+    SplitCriterion,
 };
 
 /// Decision tree classifier parameters (unfitted state).
@@ -117,12 +117,14 @@ impl<F: Float> Fit<F> for DecisionTreeClassifier {
 
         // Compute effective sample weights (merge class_weight and sample_weight)
         let effective_weights: Option<Array1<F>> = {
-            let class_w = self.class_weight.as_ref().map(|cw| {
-                compute_sample_weights_from_class_weight(y, cw)
-            });
-            let sample_w = self.sample_weight.as_ref().map(|sw| {
-                sw.mapv(|v| F::from_f64(v).unwrap())
-            });
+            let class_w = self
+                .class_weight
+                .as_ref()
+                .map(|cw| compute_sample_weights_from_class_weight(y, cw));
+            let sample_w = self
+                .sample_weight
+                .as_ref()
+                .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
             match (class_w, sample_w) {
                 (Some(cw), Some(sw)) => Some(cw * sw),
                 (Some(cw), None) => Some(cw),
@@ -207,18 +209,28 @@ impl<F: Float> FittedDecisionTreeClassifier<F> {
 
         for (i, row) in x.rows().into_iter().enumerate() {
             let leaf = find_leaf(&self.tree, row.as_slice().unwrap());
-            if let TreeNode::Leaf { class_counts: Some(counts), .. } = leaf {
+            if let TreeNode::Leaf {
+                class_counts: Some(counts),
+                ..
+            } = leaf
+            {
                 let total: usize = counts.iter().map(|&(_, c)| c).sum();
                 let total_f = F::from_usize(total).unwrap();
                 for &(class_val, count) in counts {
-                    if let Some(ci) = classes.iter().position(|&c| (c - class_val).abs() < F::from_f64(1e-9).unwrap()) {
+                    if let Some(ci) = classes
+                        .iter()
+                        .position(|&c| (c - class_val).abs() < F::from_f64(1e-9).unwrap())
+                    {
                         proba[[i, ci]] = F::from_usize(count).unwrap() / total_f;
                     }
                 }
             } else {
                 // Regression leaf or no counts — put all weight on predicted class
                 let pred = self.tree.predict_one(row.as_slice().unwrap());
-                if let Some(ci) = classes.iter().position(|&c| (c - pred).abs() < F::from_f64(1e-9).unwrap()) {
+                if let Some(ci) = classes
+                    .iter()
+                    .position(|&c| (c - pred).abs() < F::from_f64(1e-9).unwrap())
+                {
                     proba[[i, ci]] = F::one();
                 }
             }
@@ -413,7 +425,10 @@ fn collect_classes<F: Float>(node: &TreeNode<F>) -> Vec<F> {
 
 fn collect_classes_recursive<F: Float>(node: &TreeNode<F>, classes: &mut Vec<F>) {
     match node {
-        TreeNode::Leaf { class_counts: Some(counts), .. } => {
+        TreeNode::Leaf {
+            class_counts: Some(counts),
+            ..
+        } => {
             for &(class_val, _) in counts {
                 classes.push(class_val);
             }
@@ -525,9 +540,15 @@ mod tests {
     fn test_multiclass_three_classes() {
         // 9 data points, 3 classes separated by feature value
         let x = array![
-            [1.0], [2.0], [3.0],  // class 0
-            [5.0], [6.0], [7.0],  // class 1
-            [9.0], [10.0], [11.0] // class 2
+            [1.0],
+            [2.0],
+            [3.0], // class 0
+            [5.0],
+            [6.0],
+            [7.0], // class 1
+            [9.0],
+            [10.0],
+            [11.0] // class 2
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
 
@@ -655,12 +676,7 @@ mod tests {
     #[test]
     fn test_small_feature_values() {
         // Very small feature values should still produce valid splits
-        let x = array![
-            [1e-10],
-            [2e-10],
-            [3e-10],
-            [4e-10],
-        ];
+        let x = array![[1e-10], [2e-10], [3e-10], [4e-10],];
         let y = array![0.0, 0.0, 1.0, 1.0];
 
         let tree = DecisionTreeClassifier::default();
@@ -674,12 +690,7 @@ mod tests {
     #[test]
     fn test_near_identical_feature_values() {
         // Features that differ by tiny amounts (near machine epsilon)
-        let x = array![
-            [1.0 + 1e-14],
-            [1.0 + 2e-14],
-            [1.0 + 3e-14],
-            [1.0 + 4e-14],
-        ];
+        let x = array![[1.0 + 1e-14], [1.0 + 2e-14], [1.0 + 3e-14], [1.0 + 4e-14],];
         let y = array![0.0, 0.0, 1.0, 1.0];
 
         let tree = DecisionTreeClassifier::default();
@@ -687,7 +698,11 @@ mod tests {
         let preds = fitted.predict(&x).unwrap();
         // Should not panic; predictions should be valid labels
         for &p in preds.iter() {
-            assert!(p == 0.0 || p == 1.0, "prediction should be 0 or 1, got {}", p);
+            assert!(
+                p == 0.0 || p == 1.0,
+                "prediction should be 0 or 1, got {}",
+                p
+            );
         }
     }
 

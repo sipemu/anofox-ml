@@ -60,9 +60,8 @@ fn test_golden_permutation_importance_ridge_5feat() {
     }
     let wrap = Wrap(fitted);
 
-    let r2_fn = |y_true: &Array1<f64>, y_pred: &Array1<f64>| {
-        r2_score(y_true, y_pred).unwrap_or(0.0)
-    };
+    let r2_fn =
+        |y_true: &Array1<f64>, y_pred: &Array1<f64>| r2_score(y_true, y_pred).unwrap_or(0.0);
 
     let imp = permutation_importance(&wrap, &x, &y, 50, 0, r2_fn).unwrap();
 

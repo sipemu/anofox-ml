@@ -30,7 +30,11 @@ fn test_golden_pca() {
         );
 
         // Variance should be in the right ballpark
-        for (i, (&a, &e)) in actual_variance.iter().zip(expected_variance.iter()).enumerate() {
+        for (i, (&a, &e)) in actual_variance
+            .iter()
+            .zip(expected_variance.iter())
+            .enumerate()
+        {
             let rel_err = if e.abs() > 1e-10 {
                 (a - e).abs() / e.abs()
             } else {

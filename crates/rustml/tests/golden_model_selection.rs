@@ -15,15 +15,29 @@ fn test_golden_k_fold() {
         .unwrap()
         .iter()
         .map(|fold| {
-            let train: Vec<usize> = fold[0].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
-            let test: Vec<usize> = fold[1].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+            let train: Vec<usize> = fold[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
+            let test: Vec<usize> = fold[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
             (train, test)
         })
         .collect();
 
     let actual_folds = k_fold(n, k).unwrap();
 
-    assert_eq!(actual_folds.len(), expected_folds.len(), "wrong number of folds");
+    assert_eq!(
+        actual_folds.len(),
+        expected_folds.len(),
+        "wrong number of folds"
+    );
     for (i, ((actual_train, actual_test), (expected_train, expected_test))) in
         actual_folds.iter().zip(expected_folds.iter()).enumerate()
     {
@@ -43,8 +57,18 @@ fn test_golden_leave_one_out() {
         .unwrap()
         .iter()
         .map(|fold| {
-            let train: Vec<usize> = fold[0].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
-            let test: Vec<usize> = fold[1].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+            let train: Vec<usize> = fold[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
+            let test: Vec<usize> = fold[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
             (train, test)
         })
         .collect();
@@ -63,7 +87,10 @@ fn test_golden_leave_one_out() {
 #[test]
 fn test_golden_time_series_split() {
     let cases = load_golden_data("model_selection_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "time_series_split").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "time_series_split")
+        .unwrap();
 
     let n = case["n_samples"].as_u64().unwrap() as usize;
     let n_splits = case["n_splits"].as_u64().unwrap() as usize;
@@ -72,15 +99,29 @@ fn test_golden_time_series_split() {
         .unwrap()
         .iter()
         .map(|fold| {
-            let train: Vec<usize> = fold[0].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
-            let test: Vec<usize> = fold[1].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+            let train: Vec<usize> = fold[0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
+            let test: Vec<usize> = fold[1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
             (train, test)
         })
         .collect();
 
     let actual_folds = time_series_split(n, n_splits).unwrap();
 
-    assert_eq!(actual_folds.len(), expected_folds.len(), "wrong number of splits");
+    assert_eq!(
+        actual_folds.len(),
+        expected_folds.len(),
+        "wrong number of splits"
+    );
     for (i, ((actual_train, actual_test), (expected_train, expected_test))) in
         actual_folds.iter().zip(expected_folds.iter()).enumerate()
     {

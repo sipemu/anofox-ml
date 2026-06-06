@@ -106,7 +106,11 @@ impl<F: Float> FittedBernoulliNB<F> {
             for ci in 0..n_classes {
                 let mut log_post = self.log_class_prior[ci];
                 for j in 0..x.ncols() {
-                    let xj = if sample[j] > threshold { one } else { F::zero() };
+                    let xj = if sample[j] > threshold {
+                        one
+                    } else {
+                        F::zero()
+                    };
                     // log P(x_j | c) = x_j * log(p) + (1 - x_j) * log(1 - p)
                     log_post = log_post
                         + xj * self.log_feature_prob[[ci, j]]
@@ -231,7 +235,11 @@ impl<F: Float> Predict<F> for FittedBernoulliNB<F> {
             for (ci, &label) in self.class_labels.iter().enumerate() {
                 let mut log_posterior = self.log_class_prior[ci];
                 for j in 0..x.ncols() {
-                    let xj = if sample[j] > threshold { one } else { F::zero() };
+                    let xj = if sample[j] > threshold {
+                        one
+                    } else {
+                        F::zero()
+                    };
                     log_posterior = log_posterior
                         + xj * self.log_feature_prob[[ci, j]]
                         + (one - xj) * self.log_feature_neg_prob[[ci, j]];
@@ -281,12 +289,7 @@ mod tests {
 
     #[test]
     fn test_predict_proba_sums_to_one() {
-        let x_train = array![
-            [1.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 1.0]
-        ];
+        let x_train = array![[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
         let y_train = array![0.0, 0.0, 1.0, 1.0];
 
         let nb = BernoulliNB::new();
@@ -309,12 +312,7 @@ mod tests {
     fn test_binarize_threshold() {
         // Use a non-default threshold of 0.5.
         // Values > 0.5 become 1, else 0.
-        let x_train = array![
-            [0.8, 0.2],
-            [0.9, 0.1],
-            [0.2, 0.8],
-            [0.1, 0.9]
-        ];
+        let x_train = array![[0.8, 0.2], [0.9, 0.1], [0.2, 0.8], [0.1, 0.9]];
         let y_train = array![0.0, 0.0, 1.0, 1.0];
 
         let nb = BernoulliNB::new().with_binarize_threshold(0.5);
@@ -330,21 +328,14 @@ mod tests {
 
     #[test]
     fn test_alpha_smoothing_effect() {
-        let x_train = array![
-            [1.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 1.0]
-        ];
+        let x_train = array![[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
         let y_train = array![0.0, 0.0, 1.0, 1.0];
 
         let nb_small = BernoulliNB::new().with_alpha(1e-10);
-        let fitted_small: FittedBernoulliNB<f64> =
-            Fit::fit(&nb_small, &x_train, &y_train).unwrap();
+        let fitted_small: FittedBernoulliNB<f64> = Fit::fit(&nb_small, &x_train, &y_train).unwrap();
 
         let nb_large = BernoulliNB::new().with_alpha(100.0);
-        let fitted_large: FittedBernoulliNB<f64> =
-            Fit::fit(&nb_large, &x_train, &y_train).unwrap();
+        let fitted_large: FittedBernoulliNB<f64> = Fit::fit(&nb_large, &x_train, &y_train).unwrap();
 
         let x_test = array![[1.0, 0.0]];
         let proba_small = fitted_small.predict_proba(&x_test).unwrap();
@@ -429,12 +420,7 @@ mod tests {
 
     #[test]
     fn test_f32_support() {
-        let x_train: Array2<f32> = array![
-            [1.0f32, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 1.0]
-        ];
+        let x_train: Array2<f32> = array![[1.0f32, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
         let y_train: Array1<f32> = array![0.0f32, 0.0, 1.0, 1.0];
 
         let nb = BernoulliNB::new();

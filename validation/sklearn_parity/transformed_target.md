@@ -37,3 +37,11 @@ order).
   use case appears.
 - `check_inverse` defaults to `true` (matches sklearn) and verifies the
   round-trip on up to 10 elements of `y`.
+
+## Complexity
+
+- TransformedTargetRegressor wraps any regressor `R` with target transform `f`.
+- Fit: one `f.fit(y)` then `R.fit(X, f.transform(y))`.
+- Predict: one `R.predict(X)` then `f.inverse_transform(y_pred)`.
+- Per-operation cost is `cost(R.fit) + O(n)` for the transform; memory adds **O(p_f)** for the fitted transform parameters.
+- No quadratic overhead — TransformedTargetRegressor is a pure pipeline-style wrapper.

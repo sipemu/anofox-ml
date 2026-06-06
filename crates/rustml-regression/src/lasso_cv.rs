@@ -142,10 +142,7 @@ impl Fit<f64> for LassoCrossValidated {
             .with_intercept(with_intercept);
         let inner = final_model.fit(x, y)?;
 
-        Ok(FittedLassoCrossValidated {
-            inner,
-            best_alpha,
-        })
+        Ok(FittedLassoCrossValidated { inner, best_alpha })
     }
 }
 
@@ -162,11 +159,7 @@ mod tests {
     use ndarray::array;
 
     fn make_linear_data(n: usize) -> (Array2<f64>, Array1<f64>) {
-        let x = Array2::from_shape_vec(
-            (n, 1),
-            (0..n).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((n, 1), (0..n).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..n).map(|i| 2.0 + 3.0 * i as f64).collect());
         (x, y)
     }
@@ -175,9 +168,7 @@ mod tests {
     fn test_lasso_cv_basic() {
         let (x, y) = make_linear_data(50);
 
-        let fitted = LassoCrossValidated::new()
-            .fit(&x, &y)
-            .unwrap();
+        let fitted = LassoCrossValidated::new().fit(&x, &y).unwrap();
 
         assert!(fitted.r_squared() > 0.99);
         assert!(fitted.best_alpha() > 0.0);
@@ -250,9 +241,7 @@ mod tests {
     fn test_lasso_cv_empty_alphas() {
         let (x, y) = make_linear_data(20);
 
-        let result = LassoCrossValidated::new()
-            .with_alphas(vec![])
-            .fit(&x, &y);
+        let result = LassoCrossValidated::new().with_alphas(vec![]).fit(&x, &y);
         assert!(result.is_err());
     }
 
@@ -270,19 +259,13 @@ mod tests {
     fn test_lasso_cv_invalid_folds() {
         let (x, y) = make_linear_data(20);
 
-        let result = LassoCrossValidated::new()
-            .with_cv_folds(1)
-            .fit(&x, &y);
+        let result = LassoCrossValidated::new().with_cv_folds(1).fit(&x, &y);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_lasso_cv_no_intercept() {
-        let x = Array2::from_shape_vec(
-            (50, 1),
-            (0..50).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((50, 1), (0..50).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..50).map(|i| 3.0 * i as f64).collect());
 
         let fitted = LassoCrossValidated::new()

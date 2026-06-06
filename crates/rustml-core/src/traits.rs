@@ -61,6 +61,40 @@ pub trait FitWeighted<F: Float> {
     ) -> Result<Self::Fitted>;
 }
 
+/// Incremental / online fit.
+///
+/// Mirrors sklearn's `partial_fit(X, y, classes=...)`. Calling `partial_fit`
+/// with `state = None` initialises a fresh fitted model on the batch; later
+/// calls with `state = Some(prev)` update the model in place from `prev`.
+///
+/// The `classes` argument is required on the first call for classifiers
+/// where the label space is not derivable from a single mini-batch.
+pub trait PartialFit<F: Float> {
+    type Fitted;
+    fn partial_fit(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        classes: Option<&[F]>,
+    ) -> Result<Self::Fitted>;
+}
+
+/// Unsupervised fit with optional per-sample weights.
+///
+/// Mirrors sklearn's `fit(X, sample_weight=...)` for unsupervised estimators
+/// such as `KMeans`, `GaussianMixture`, and density-style scalers. When
+/// `sample_weight` is `None`, the result must be identical to
+/// `FitUnsupervised::fit(x)`.
+pub trait FitUnsupervisedWeighted<F: Float> {
+    type Fitted;
+    fn fit_unsupervised_weighted(
+        &self,
+        x: &Array2<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted>;
+}
+
 /// Log-probability output. Default implementation takes `log(predict_proba)`
 /// with an epsilon clamp to avoid log(0).
 ///

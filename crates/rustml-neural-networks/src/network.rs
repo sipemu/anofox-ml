@@ -109,7 +109,10 @@ pub(crate) fn backward_pass<F: Float>(
 
         // Weight gradient: (1/batch) * input^T @ delta + alpha * W
         let dw = cache.input.t().dot(&delta) / batch_f + &layers[i].weights * alpha;
-        let db = delta.sum_axis(ndarray::Axis(0)).insert_axis(ndarray::Axis(0)) / batch_f;
+        let db = delta
+            .sum_axis(ndarray::Axis(0))
+            .insert_axis(ndarray::Axis(0))
+            / batch_f;
 
         grads.push(LayerGradients { dw, db });
 

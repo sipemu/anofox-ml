@@ -13,7 +13,7 @@ use crate::traits::{FitUnsupervised, Transform};
 
 /// A transformer that applies an arbitrary function to the data.
 ///
-/// Implements [`FitTransform`] so it can be used directly in a [`Pipeline`].
+/// Implements `FitTransform` so it can be used directly in a `Pipeline`.
 /// The fit step is a no-op — only the transform function is called.
 ///
 /// # Example

@@ -211,6 +211,26 @@ cargo bench -p rustml
 uv run benchmarks/compare.py
 ```
 
+### Additional estimator families (not in the perf sweep)
+
+The benchmark table above covers the load-bearing fast paths. The following
+families ship with correctness-only validation against sklearn and are not
+part of the head-to-head perf sweep — they target API parity, not throughput
+records:
+
+- **Clustering**: HDBSCAN, AffinityPropagation, MeanShift, Birch, OPTICS,
+  SpectralClustering, BayesianGaussianMixture
+- **Manifold**: Isomap, LocallyLinearEmbedding, t-SNE (exact and Barnes-Hut),
+  ClassicalMDS
+- **Decomposition / FE**: FastICA, CCA, KernelPCA + inverse_transform,
+  TruncatedSVD, NMF, PLS, RFECV
+- **Neighbors**: LocalOutlierFactor (KD-tree path)
+- **GP**: GaussianProcessClassifier (Laplace), kernel zoo (Matern, RQ, White,
+  Constant, sums/products), L-BFGS multi-parameter optimisation
+
+Algorithmic complexity tables for each estimator live in
+`validation/sklearn_parity/*.md`.
+
 ## Documentation
 
 API documentation is published at [docs.rs/rustml](https://docs.rs/rustml).

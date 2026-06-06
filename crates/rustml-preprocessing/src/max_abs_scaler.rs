@@ -1,11 +1,11 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Float, FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 
 /// Parameters for MaxAbsScaler (unfitted state).
 ///
 /// Scales each feature by its maximum absolute value so that the resulting
-/// values lie in the range [-1, 1]. Unlike [`StandardScaler`] or
-/// [`RobustScaler`], this scaler does **not** center the data, which makes
+/// values lie in the range [-1, 1]. Unlike `StandardScaler` or
+/// `RobustScaler`, this scaler does **not** center the data, which makes
 /// it suitable for sparse data.
 ///
 /// `x_scaled[i, j] = x[i, j] / max_abs[j]`
@@ -40,7 +40,9 @@ impl<F: Float> FitUnsupervised<F> for MaxAbsScaler {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
 
-        let max_abs = x.mapv(|v| v.abs()).fold_axis(Axis(0), F::zero(), |&a, &b| a.max(b));
+        let max_abs = x
+            .mapv(|v| v.abs())
+            .fold_axis(Axis(0), F::zero(), |&a, &b| a.max(b));
 
         Ok(FittedMaxAbsScaler { max_abs })
     }

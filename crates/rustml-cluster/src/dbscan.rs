@@ -128,9 +128,7 @@ impl<F: Float> FitUnsupervised<F> for Dbscan {
         }
 
         if self.eps <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "eps must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("eps must be positive".into()));
         }
 
         if self.min_samples == 0 {
@@ -201,8 +199,12 @@ impl<F: Float> FitUnsupervised<F> for Dbscan {
             0
         };
 
-        let core_sample_indices: Vec<usize> =
-            is_core.iter().enumerate().filter(|(_, &c)| c).map(|(i, _)| i).collect();
+        let core_sample_indices: Vec<usize> = is_core
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c)
+            .map(|(i, _)| i)
+            .collect();
 
         let float_labels: Array1<F> = Array1::from_vec(
             labels

@@ -74,9 +74,7 @@ impl OneClassSvm {
     /// Validate parameters before fitting.
     fn validate(&self) -> Result<()> {
         if self.nu <= 0.0 || self.nu > 1.0 {
-            return Err(RustMlError::InvalidParameter(
-                "nu must be in (0, 1]".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("nu must be in (0, 1]".into()));
         }
         if self.max_iter == 0 {
             return Err(RustMlError::InvalidParameter(
@@ -84,9 +82,7 @@ impl OneClassSvm {
             ));
         }
         if self.tol <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "tol must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
         match &self.kernel {
             SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
@@ -487,8 +483,7 @@ mod tests {
             .with_kernel(SvmKernel::Rbf { gamma: 10.0 })
             .with_nu(0.1)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
         // Most training points should be classified as inliers (+1).
@@ -518,8 +513,7 @@ mod tests {
             .with_kernel(SvmKernel::Rbf { gamma: 10.0 })
             .with_nu(0.1)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
 
         let x_outliers = array![[10.0, 10.0], [-10.0, -10.0], [5.0, -5.0]];
         let preds = fitted.predict(&x_outliers).unwrap();
@@ -550,15 +544,13 @@ mod tests {
             .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
             .with_nu(0.1)
             .with_max_iter(5000);
-        let fitted_low: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm_low, &x).unwrap();
+        let fitted_low: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm_low, &x).unwrap();
 
         let ocsvm_high = OneClassSvm::new()
             .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
             .with_nu(0.9)
             .with_max_iter(5000);
-        let fitted_high: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm_high, &x).unwrap();
+        let fitted_high: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm_high, &x).unwrap();
 
         let preds_low = fitted_low.predict(&x).unwrap();
         let preds_high = fitted_high.predict(&x).unwrap();
@@ -591,8 +583,7 @@ mod tests {
             .with_kernel(SvmKernel::Linear)
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
         let preds = fitted.predict(&x).unwrap();
         assert_eq!(preds.len(), x.nrows());
 
@@ -604,8 +595,7 @@ mod tests {
             })
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
         let preds = fitted.predict(&x).unwrap();
         assert_eq!(preds.len(), x.nrows());
 
@@ -614,33 +604,22 @@ mod tests {
             .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
         let preds = fitted.predict(&x).unwrap();
         assert_eq!(preds.len(), x.nrows());
     }
 
     #[test]
     fn test_predict_shape() {
-        let x_train = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 1.0],
-        ];
+        let x_train = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0],];
 
         let ocsvm = OneClassSvm::new()
             .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
 
-        let x_test = array![
-            [0.5, 0.5],
-            [2.0, 2.0],
-            [-1.0, -1.0],
-        ];
+        let x_test = array![[0.5, 0.5], [2.0, 2.0], [-1.0, -1.0],];
         let preds = fitted.predict(&x_test).unwrap();
         assert_eq!(preds.len(), 3);
 
@@ -660,14 +639,12 @@ mod tests {
 
         // Empty training data.
         let x_empty = Array2::<f64>::zeros((0, 2));
-        let result: Result<FittedOneClassSvm<f64>> =
-            FitUnsupervised::fit(&ocsvm, &x_empty);
+        let result: Result<FittedOneClassSvm<f64>> = FitUnsupervised::fit(&ocsvm, &x_empty);
         assert!(result.is_err());
 
         // Train on valid data, then predict on empty.
         let x_train = array![[0.0, 0.0], [1.0, 1.0], [0.5, 0.5], [0.2, 0.8]];
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
 
         let x_pred_empty = Array2::<f64>::zeros((0, 2));
         assert!(fitted.predict(&x_pred_empty).is_err());
@@ -692,8 +669,7 @@ mod tests {
             .with_kernel(SvmKernel::Rbf { gamma: 10.0 })
             .with_nu(0.1)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
 
         // Decision function for far-away outliers should be negative.
         let x_outliers = array![[10.0, 10.0], [-10.0, -10.0]];
@@ -728,8 +704,7 @@ mod tests {
             .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f32> =
-            FitUnsupervised::fit(&ocsvm, &x).unwrap();
+        let fitted: FittedOneClassSvm<f32> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
         assert_eq!(preds.len(), x.nrows());
@@ -766,8 +741,7 @@ mod tests {
             .with_kernel(SvmKernel::Linear)
             .with_nu(0.5)
             .with_max_iter(5000);
-        let fitted: FittedOneClassSvm<f64> =
-            FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
+        let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
 
         // Wrong number of features.
         let x_bad = array![[1.0, 2.0, 3.0]];

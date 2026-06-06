@@ -322,10 +322,10 @@ mod tests {
         // Cosine distance cares about angle, not magnitude.
         // Two directions: roughly (1,0) and (0,1).
         let x_train = array![
-            [10.0, 0.1],  // class 0 — points along x-axis
-            [20.0, 0.2],  // class 0
-            [0.1, 10.0],  // class 1 — points along y-axis
-            [0.2, 20.0]   // class 1
+            [10.0, 0.1], // class 0 — points along x-axis
+            [20.0, 0.2], // class 0
+            [0.1, 10.0], // class 1 — points along y-axis
+            [0.2, 20.0]  // class 1
         ];
         let y_train = array![0.0, 0.0, 1.0, 1.0];
 
@@ -366,12 +366,7 @@ mod tests {
 
     #[test]
     fn test_f32_support() {
-        let x_train: Array2<f32> = array![
-            [0.0f32, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1]
-        ];
+        let x_train: Array2<f32> = array![[0.0f32, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1]];
         let y_train: Array1<f32> = array![0.0f32, 0.0, 1.0, 1.0];
 
         let knn = KnnClassifier::new(2);

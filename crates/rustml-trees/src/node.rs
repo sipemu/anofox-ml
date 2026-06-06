@@ -72,12 +72,11 @@ impl<F: Float> TreeNode<F> {
             let n = num_traits::FromPrimitive::from_usize(*n_samples).unwrap_or(F::one());
             let nl = num_traits::FromPrimitive::from_usize(left_samples).unwrap_or(F::zero());
             let nr = num_traits::FromPrimitive::from_usize(right_samples).unwrap_or(F::zero());
-            let total =
-                num_traits::FromPrimitive::from_usize(total_samples).unwrap_or(F::one());
+            let total = num_traits::FromPrimitive::from_usize(total_samples).unwrap_or(F::one());
 
             // Weighted impurity decrease
-            let decrease = (n / total)
-                * (*impurity - (nl / n) * left_impurity - (nr / n) * right_impurity);
+            let decrease =
+                (n / total) * (*impurity - (nl / n) * left_impurity - (nr / n) * right_impurity);
 
             importances[*feature_index] += decrease;
 

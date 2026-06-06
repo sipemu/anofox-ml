@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Float, FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 
 /// Parameters for StandardScaler (unfitted state).
 ///
@@ -194,18 +194,17 @@ mod tests {
     #[test]
     fn test_large_values() {
         // Very large feature values should not produce NaN/Inf
-        let x = array![
-            [1e10, -1e10],
-            [2e10, -2e10],
-            [3e10, -3e10],
-            [4e10, -4e10],
-        ];
+        let x = array![[1e10, -1e10], [2e10, -2e10], [3e10, -3e10], [4e10, -4e10],];
         let scaler = StandardScaler::default();
         let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
         for &v in transformed.iter() {
-            assert!(v.is_finite(), "transformed value should be finite, got {}", v);
+            assert!(
+                v.is_finite(),
+                "transformed value should be finite, got {}",
+                v
+            );
         }
         // Mean should be ~0
         let col_means = transformed.sum_axis(Axis(0)) / 4.0;
@@ -226,7 +225,11 @@ mod tests {
         let transformed = fitted.transform(&x).unwrap();
 
         for &v in transformed.iter() {
-            assert!(v.is_finite(), "transformed value should be finite, got {}", v);
+            assert!(
+                v.is_finite(),
+                "transformed value should be finite, got {}",
+                v
+            );
         }
         // Roundtrip should preserve values
         let recovered = fitted.inverse_transform(&transformed).unwrap();
@@ -249,7 +252,11 @@ mod tests {
         let transformed = fitted.transform(&x).unwrap();
 
         for &v in transformed.iter() {
-            assert!(v.is_finite(), "near-zero variance column produced non-finite: {}", v);
+            assert!(
+                v.is_finite(),
+                "near-zero variance column produced non-finite: {}",
+                v
+            );
         }
     }
 

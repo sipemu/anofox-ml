@@ -184,9 +184,8 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
             }
 
             // Compute estimator weight (SAMME formula).
-            let alpha = lr
-                * (((F::one() - err) / (err + eps)).ln()
-                    + (n_classes_f - F::one()).ln());
+            let alpha =
+                lr * (((F::one() - err) / (err + eps)).ln() + (n_classes_f - F::one()).ln());
 
             // Update sample weights.
             for i in 0..n_samples {
@@ -493,11 +492,17 @@ mod tests {
         let proba = fitted.predict_proba(&x).unwrap();
         // Class 0 samples should have high probability for class 0.
         for i in 0..3 {
-            assert!(proba[[i, 0]] > 0.5, "expected high prob for class 0 at sample {i}");
+            assert!(
+                proba[[i, 0]] > 0.5,
+                "expected high prob for class 0 at sample {i}"
+            );
         }
         // Class 1 samples should have high probability for class 1.
         for i in 3..6 {
-            assert!(proba[[i, 1]] > 0.5, "expected high prob for class 1 at sample {i}");
+            assert!(
+                proba[[i, 1]] > 0.5,
+                "expected high prob for class 1 at sample {i}"
+            );
         }
     }
 
@@ -604,8 +609,7 @@ mod tests {
         let fitted: FittedAdaBoostClassifier<f64> = ada.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
-        let valid_labels: std::collections::HashSet<u64> =
-            y.iter().map(|v| v.to_bits()).collect();
+        let valid_labels: std::collections::HashSet<u64> = y.iter().map(|v| v.to_bits()).collect();
         for &p in preds.iter() {
             assert!(
                 valid_labels.contains(&p.to_bits()),
@@ -658,10 +662,7 @@ mod tests {
         let fitted: FittedAdaBoostClassifier<f64> = ada.fit(&x, &y).unwrap();
 
         for &w in fitted.estimator_weights() {
-            assert!(
-                w >= 0.0,
-                "estimator weight must be non-negative, got {w}"
-            );
+            assert!(w >= 0.0, "estimator weight must be non-negative, got {w}");
         }
     }
 

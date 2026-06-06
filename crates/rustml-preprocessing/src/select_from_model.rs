@@ -4,7 +4,7 @@ use rustml_core::{Float, Result, RustMlError, Transform};
 /// Parameters for `SelectFromModel` feature selector (unfitted state).
 ///
 /// Selects features based on a pre-computed importance vector (e.g., from a
-/// fitted [`RandomForestClassifier`](rustml_ensemble::RandomForestClassifier)'s
+/// fitted `RandomForestClassifier`'s
 /// `feature_importances()`).
 ///
 /// Features can be selected in two ways:
@@ -133,8 +133,7 @@ impl SelectFromModel {
         }
 
         // Sort by index for stable column ordering.
-        let mut selected_indices: Vec<usize> =
-            candidates.iter().map(|&(idx, _)| idx).collect();
+        let mut selected_indices: Vec<usize> = candidates.iter().map(|&(idx, _)| idx).collect();
         selected_indices.sort_unstable();
 
         Ok(FittedSelectFromModel {
@@ -254,10 +253,7 @@ mod tests {
         // Should select indices 1 (0.9) and 2 (0.5), sorted -> [1, 2]
         assert_eq!(fitted.selected_indices(), &[1, 2]);
 
-        let x = array![
-            [10.0, 20.0, 30.0],
-            [40.0, 50.0, 60.0],
-        ];
+        let x = array![[10.0, 20.0, 30.0], [40.0, 50.0, 60.0],];
         let result = fitted.transform(&x).unwrap();
 
         assert_eq!(result.dim(), (2, 2));
@@ -295,11 +291,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             RustMlError::InvalidParameter(msg) => {
-                assert!(
-                    msg.contains("no features"),
-                    "unexpected message: {}",
-                    msg
-                );
+                assert!(msg.contains("no features"), "unexpected message: {}", msg);
             }
             other => panic!("expected InvalidParameter, got {:?}", other),
         }

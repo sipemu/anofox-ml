@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2};
-use rustml_core::{Float, FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 
 /// Parameters for RobustScaler (unfitted state).
 ///
@@ -177,7 +177,13 @@ mod tests {
 
     #[test]
     fn test_fit_transform() {
-        let x = array![[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0], [5.0, 50.0]];
+        let x = array![
+            [1.0, 10.0],
+            [2.0, 20.0],
+            [3.0, 30.0],
+            [4.0, 40.0],
+            [5.0, 50.0]
+        ];
         let scaler = RobustScaler::default();
         let fitted = FitUnsupervised::<f64>::fit(&scaler, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();

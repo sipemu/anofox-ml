@@ -80,7 +80,12 @@ pub fn assert_array1_close(actual: &Array1<f64>, expected: &Array1<f64>, tol: f6
 /// Assert two Array2<f64> are element-wise within tolerance.
 #[allow(dead_code)]
 pub fn assert_array2_close(actual: &Array2<f64>, expected: &Array2<f64>, tol: f64, context: &str) {
-    assert_eq!(actual.shape(), expected.shape(), "{}: shape mismatch", context);
+    assert_eq!(
+        actual.shape(),
+        expected.shape(),
+        "{}: shape mismatch",
+        context
+    );
     for ((r, c), &a) in actual.indexed_iter() {
         let e = expected[[r, c]];
         assert_close(a, e, tol, &format!("{}[{},{}]", context, r, c));

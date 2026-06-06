@@ -47,10 +47,7 @@ impl DecisionTreeClassifier {
         Ok(PyArray1::from_owned_array(py, result))
     }
 
-    fn feature_importances<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    fn feature_importances<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
         Ok(PyArray1::from_owned_array(py, fitted.feature_importances()))
     }
@@ -63,7 +60,10 @@ impl DecisionTreeClassifier {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_trees::DecisionTreeClassifier::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_trees::DecisionTreeClassifier::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -74,7 +74,10 @@ impl DecisionTreeClassifier {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_trees::DecisionTreeClassifier::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_trees::DecisionTreeClassifier::new(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -128,7 +131,10 @@ impl DecisionTreeRegressor {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_trees::DecisionTreeRegressor::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_trees::DecisionTreeRegressor::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -139,6 +145,9 @@ impl DecisionTreeRegressor {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_trees::DecisionTreeRegressor::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_trees::DecisionTreeRegressor::new(),
+            fitted: Some(fitted),
+        })
     }
 }

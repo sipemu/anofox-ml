@@ -63,7 +63,10 @@ fn test_golden_nu_svr_r2() {
     let y = json_to_array1(&case["y"]);
     let sklearn_r2 = case["r2"].as_f64().unwrap();
 
-    let model = NuSvr::new().with_nu(0.5).with_c(10.0).with_kernel(SvmKernel::Linear);
+    let model = NuSvr::new()
+        .with_nu(0.5)
+        .with_c(10.0)
+        .with_kernel(SvmKernel::Linear);
     let fitted: rustml::svm::FittedNuSvr<f64> = Fit::fit(&model, &x, &y).unwrap();
     let preds = fitted.predict(&x).unwrap();
     let our_r2 = r2(&preds, &y);

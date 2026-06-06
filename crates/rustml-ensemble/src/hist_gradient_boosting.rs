@@ -264,12 +264,24 @@ fn build_hist_tree(
                 .partition(|&&i| binned_x[[i, s.feature]] <= s.bin_threshold);
 
             let left = build_hist_tree(
-                binned_x, gradients, hessians, &left_idx,
-                max_depth, min_samples_leaf, l2_regularization, depth + 1,
+                binned_x,
+                gradients,
+                hessians,
+                &left_idx,
+                max_depth,
+                min_samples_leaf,
+                l2_regularization,
+                depth + 1,
             );
             let right = build_hist_tree(
-                binned_x, gradients, hessians, &right_idx,
-                max_depth, min_samples_leaf, l2_regularization, depth + 1,
+                binned_x,
+                gradients,
+                hessians,
+                &right_idx,
+                max_depth,
+                min_samples_leaf,
+                l2_regularization,
+                depth + 1,
             );
 
             HistNode::Internal {
@@ -288,7 +300,7 @@ fn build_hist_tree(
 
 /// Histogram-based gradient boosting regressor.
 ///
-/// Much faster than [`GradientBoostingRegressor`] for datasets with >1000 samples.
+/// Much faster than `GradientBoostingRegressor` for datasets with >1000 samples.
 /// Features are discretized into 256 bins for O(n) split finding.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HistGradientBoostingRegressor {
@@ -312,16 +324,36 @@ impl HistGradientBoostingRegressor {
         }
     }
 
-    pub fn with_n_estimators(mut self, n: usize) -> Self { self.n_estimators = n; self }
-    pub fn with_learning_rate(mut self, lr: f64) -> Self { self.learning_rate = lr; self }
-    pub fn with_max_depth(mut self, d: usize) -> Self { self.max_depth = d; self }
-    pub fn with_min_samples_leaf(mut self, m: usize) -> Self { self.min_samples_leaf = m; self }
-    pub fn with_l2_regularization(mut self, l2: f64) -> Self { self.l2_regularization = l2; self }
-    pub fn with_max_bins(mut self, b: usize) -> Self { self.max_bins = b; self }
+    pub fn with_n_estimators(mut self, n: usize) -> Self {
+        self.n_estimators = n;
+        self
+    }
+    pub fn with_learning_rate(mut self, lr: f64) -> Self {
+        self.learning_rate = lr;
+        self
+    }
+    pub fn with_max_depth(mut self, d: usize) -> Self {
+        self.max_depth = d;
+        self
+    }
+    pub fn with_min_samples_leaf(mut self, m: usize) -> Self {
+        self.min_samples_leaf = m;
+        self
+    }
+    pub fn with_l2_regularization(mut self, l2: f64) -> Self {
+        self.l2_regularization = l2;
+        self
+    }
+    pub fn with_max_bins(mut self, b: usize) -> Self {
+        self.max_bins = b;
+        self
+    }
 }
 
 impl Default for HistGradientBoostingRegressor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted histogram-based gradient boosting regressor.
@@ -335,7 +367,9 @@ pub struct FittedHistGradientBoostingRegressor {
 }
 
 impl FittedHistGradientBoostingRegressor {
-    pub fn n_estimators(&self) -> usize { self.trees.len() }
+    pub fn n_estimators(&self) -> usize {
+        self.trees.len()
+    }
 }
 
 impl Fit<f64> for HistGradientBoostingRegressor {
@@ -344,7 +378,9 @@ impl Fit<f64> for HistGradientBoostingRegressor {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
@@ -379,9 +415,7 @@ impl Fit<f64> for HistGradientBoostingRegressor {
 
             // Update predictions
             for i in 0..n {
-                let row_bins: Vec<u8> = (0..x.ncols())
-                    .map(|j| binned_x[[i, j]])
-                    .collect();
+                let row_bins: Vec<u8> = (0..x.ncols()).map(|j| binned_x[[i, j]]).collect();
                 predictions[i] += self.learning_rate * tree.predict_binned(&row_bins);
             }
 
@@ -402,7 +436,9 @@ impl Predict<f64> for FittedHistGradientBoostingRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
 
@@ -450,16 +486,36 @@ impl HistGradientBoostingClassifier {
         }
     }
 
-    pub fn with_n_estimators(mut self, n: usize) -> Self { self.n_estimators = n; self }
-    pub fn with_learning_rate(mut self, lr: f64) -> Self { self.learning_rate = lr; self }
-    pub fn with_max_depth(mut self, d: usize) -> Self { self.max_depth = d; self }
-    pub fn with_min_samples_leaf(mut self, m: usize) -> Self { self.min_samples_leaf = m; self }
-    pub fn with_l2_regularization(mut self, l2: f64) -> Self { self.l2_regularization = l2; self }
-    pub fn with_max_bins(mut self, b: usize) -> Self { self.max_bins = b; self }
+    pub fn with_n_estimators(mut self, n: usize) -> Self {
+        self.n_estimators = n;
+        self
+    }
+    pub fn with_learning_rate(mut self, lr: f64) -> Self {
+        self.learning_rate = lr;
+        self
+    }
+    pub fn with_max_depth(mut self, d: usize) -> Self {
+        self.max_depth = d;
+        self
+    }
+    pub fn with_min_samples_leaf(mut self, m: usize) -> Self {
+        self.min_samples_leaf = m;
+        self
+    }
+    pub fn with_l2_regularization(mut self, l2: f64) -> Self {
+        self.l2_regularization = l2;
+        self
+    }
+    pub fn with_max_bins(mut self, b: usize) -> Self {
+        self.max_bins = b;
+        self
+    }
 }
 
 impl Default for HistGradientBoostingClassifier {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted histogram-based gradient boosting classifier.
@@ -475,7 +531,9 @@ pub struct FittedHistGradientBoostingClassifier {
 }
 
 impl FittedHistGradientBoostingClassifier {
-    pub fn classes(&self) -> &[f64] { &self.classes }
+    pub fn classes(&self) -> &[f64] {
+        &self.classes
+    }
     pub fn n_estimators(&self) -> usize {
         self.tree_sets.first().map_or(0, |t| t.len())
     }
@@ -484,7 +542,9 @@ impl FittedHistGradientBoostingClassifier {
     pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
 
@@ -537,7 +597,9 @@ impl Fit<f64> for HistGradientBoostingClassifier {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
@@ -554,7 +616,9 @@ impl Fit<f64> for HistGradientBoostingClassifier {
         let n_classes = classes.len();
 
         if n_classes < 2 {
-            return Err(RustMlError::InvalidParameter("need at least 2 classes".into()));
+            return Err(RustMlError::InvalidParameter(
+                "need at least 2 classes".into(),
+            ));
         }
 
         let indices: Vec<usize> = (0..n).collect();
@@ -562,7 +626,10 @@ impl Fit<f64> for HistGradientBoostingClassifier {
         if n_classes == 2 {
             // Binary: log-loss with single set of trees
             let pos_class = classes[1];
-            let labels: Vec<f64> = y.iter().map(|&v| if v == pos_class { 1.0 } else { 0.0 }).collect();
+            let labels: Vec<f64> = y
+                .iter()
+                .map(|&v| if v == pos_class { 1.0 } else { 0.0 })
+                .collect();
             let pos_frac: f64 = labels.iter().sum::<f64>() / n as f64;
             let baseline = (pos_frac / (1.0 - pos_frac + 1e-15)).ln();
 
@@ -571,18 +638,28 @@ impl Fit<f64> for HistGradientBoostingClassifier {
 
             for _ in 0..self.n_estimators {
                 // Log-loss gradients: p - y, hessians: p * (1 - p)
-                let gradients: Vec<f64> = (0..n).map(|i| {
-                    let p = 1.0 / (1.0 + (-raw_scores[i]).exp());
-                    p - labels[i]
-                }).collect();
-                let hessians: Vec<f64> = (0..n).map(|i| {
-                    let p = 1.0 / (1.0 + (-raw_scores[i]).exp());
-                    (p * (1.0 - p)).max(1e-12)
-                }).collect();
+                let gradients: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let p = 1.0 / (1.0 + (-raw_scores[i]).exp());
+                        p - labels[i]
+                    })
+                    .collect();
+                let hessians: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let p = 1.0 / (1.0 + (-raw_scores[i]).exp());
+                        (p * (1.0 - p)).max(1e-12)
+                    })
+                    .collect();
 
                 let tree = build_hist_tree(
-                    &binned_x, &gradients, &hessians, &indices,
-                    self.max_depth, self.min_samples_leaf, self.l2_regularization, 0,
+                    &binned_x,
+                    &gradients,
+                    &hessians,
+                    &indices,
+                    self.max_depth,
+                    self.min_samples_leaf,
+                    self.l2_regularization,
+                    0,
                 );
 
                 for i in 0..n {
@@ -620,7 +697,10 @@ impl Fit<f64> for HistGradientBoostingClassifier {
                 // Compute softmax probabilities
                 let mut probas = vec![vec![0.0; n_classes]; n];
                 for i in 0..n {
-                    let max_s = all_raw_scores.iter().map(|s| s[i]).fold(f64::NEG_INFINITY, f64::max);
+                    let max_s = all_raw_scores
+                        .iter()
+                        .map(|s| s[i])
+                        .fold(f64::NEG_INFINITY, f64::max);
                     let exp_sum: f64 = all_raw_scores.iter().map(|s| (s[i] - max_s).exp()).sum();
                     for c in 0..n_classes {
                         probas[i][c] = (all_raw_scores[c][i] - max_s).exp() / exp_sum;
@@ -629,17 +709,25 @@ impl Fit<f64> for HistGradientBoostingClassifier {
 
                 let mut round_trees = Vec::with_capacity(n_classes);
                 for (c, &cls) in classes.iter().enumerate() {
-                    let gradients: Vec<f64> = (0..n).map(|i| {
-                        let label = if y[i] == cls { 1.0 } else { 0.0 };
-                        probas[i][c] - label
-                    }).collect();
-                    let hessians: Vec<f64> = (0..n).map(|i| {
-                        (probas[i][c] * (1.0 - probas[i][c])).max(1e-12)
-                    }).collect();
+                    let gradients: Vec<f64> = (0..n)
+                        .map(|i| {
+                            let label = if y[i] == cls { 1.0 } else { 0.0 };
+                            probas[i][c] - label
+                        })
+                        .collect();
+                    let hessians: Vec<f64> = (0..n)
+                        .map(|i| (probas[i][c] * (1.0 - probas[i][c])).max(1e-12))
+                        .collect();
 
                     let tree = build_hist_tree(
-                        &binned_x, &gradients, &hessians, &indices,
-                        self.max_depth, self.min_samples_leaf, self.l2_regularization, 0,
+                        &binned_x,
+                        &gradients,
+                        &hessians,
+                        &indices,
+                        self.max_depth,
+                        self.min_samples_leaf,
+                        self.l2_regularization,
+                        0,
                     );
 
                     for i in 0..n {
@@ -704,8 +792,16 @@ mod tests {
     #[test]
     fn test_hist_gb_regressor_basic() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -739,8 +835,16 @@ mod tests {
     #[test]
     fn test_hist_gb_classifier_binary() {
         let x = array![
-            [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0], [5.0, 0.0],
-            [10.0, 1.0], [11.0, 1.0], [12.0, 1.0], [13.0, 1.0], [14.0, 1.0]
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [5.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0],
+            [13.0, 1.0],
+            [14.0, 1.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
@@ -753,14 +857,26 @@ mod tests {
         let preds = fitted.predict(&x).unwrap();
 
         let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
-        assert!(correct >= 8, "should classify most correctly, got {}/10", correct);
+        assert!(
+            correct >= 8,
+            "should classify most correctly, got {}/10",
+            correct
+        );
     }
 
     #[test]
     fn test_hist_gb_classifier_predict_proba() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [10.0], [11.0], [12.0], [13.0], [14.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [10.0],
+            [11.0],
+            [12.0],
+            [13.0],
+            [14.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
@@ -782,9 +898,15 @@ mod tests {
     #[test]
     fn test_hist_gb_classifier_multiclass() {
         let x = array![
-            [0.0, 0.0], [1.0, 0.0], [2.0, 0.0],
-            [5.0, 5.0], [6.0, 5.0], [7.0, 5.0],
-            [0.0, 10.0], [1.0, 10.0], [2.0, 10.0]
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [5.0, 5.0],
+            [6.0, 5.0],
+            [7.0, 5.0],
+            [0.0, 10.0],
+            [1.0, 10.0],
+            [2.0, 10.0]
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
 

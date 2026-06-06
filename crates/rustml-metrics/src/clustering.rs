@@ -161,13 +161,8 @@ mod tests {
     #[test]
     fn test_silhouette_overlapping() {
         // Two overlapping clusters: all points at similar locations.
-        let x = Array2::from_shape_vec(
-            (4, 2),
-            vec![
-                0.0, 0.0, 0.1, 0.1, 0.0, 0.1, 0.1, 0.0,
-            ],
-        )
-        .unwrap();
+        let x =
+            Array2::from_shape_vec((4, 2), vec![0.0, 0.0, 0.1, 0.1, 0.0, 0.1, 0.1, 0.0]).unwrap();
         let labels = array![0.0, 0.0, 1.0, 1.0];
 
         let score: f64 = silhouette_score(&x, &labels).unwrap();
@@ -233,35 +228,23 @@ mod tests {
 
     #[test]
     fn test_silhouette_shape_mismatch_error() {
-        let x = Array2::from_shape_vec(
-            (3, 2),
-            vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((3, 2), vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0]).unwrap();
         let labels = array![0.0, 1.0]; // wrong length
         assert!(silhouette_score(&x, &labels).is_err());
     }
 
     #[test]
     fn test_silhouette_single_cluster_error() {
-        let x = Array2::from_shape_vec(
-            (3, 2),
-            vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((3, 2), vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0]).unwrap();
         let labels = array![0.0, 0.0, 0.0]; // only one cluster
         assert!(silhouette_score(&x, &labels).is_err());
     }
 
     #[test]
     fn test_silhouette_f32() {
-        let x: Array2<f32> = Array2::from_shape_vec(
-            (4, 2),
-            vec![
-                0.0f32, 0.0, 0.1, 0.0, 10.0, 10.0, 10.1, 10.0,
-            ],
-        )
-        .unwrap();
+        let x: Array2<f32> =
+            Array2::from_shape_vec((4, 2), vec![0.0f32, 0.0, 0.1, 0.0, 10.0, 10.0, 10.1, 10.0])
+                .unwrap();
         let labels: Array1<f32> = array![0.0f32, 0.0, 1.0, 1.0];
         let score = silhouette_score(&x, &labels).unwrap();
         assert!(score.is_finite());

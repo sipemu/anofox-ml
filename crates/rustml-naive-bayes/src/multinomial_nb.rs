@@ -174,8 +174,8 @@ impl<F: Float> Fit<F> for MultinomialNB {
             let feature_counts = class_x.sum_axis(Axis(0));
 
             // Total count across all features for this class (with smoothing).
-            let total_count: F = feature_counts.iter().copied().fold(F::zero(), |a, b| a + b)
-                + alpha * n_features_f;
+            let total_count: F =
+                feature_counts.iter().copied().fold(F::zero(), |a, b| a + b) + alpha * n_features_f;
 
             // Log probability with Laplace smoothing:
             // log P(x_j | c) = log((count_j + alpha) / (total + alpha * n_features))
@@ -211,8 +211,7 @@ impl<F: Float> Predict<F> for FittedMultinomialNB<F> {
             for (ci, &label) in self.class_labels.iter().enumerate() {
                 let mut log_posterior = self.log_class_prior[ci];
                 for j in 0..x.ncols() {
-                    log_posterior =
-                        log_posterior + self.log_feature_prob[[ci, j]] * sample[j];
+                    log_posterior = log_posterior + self.log_feature_prob[[ci, j]] * sample[j];
                 }
 
                 if log_posterior > best_log_posterior {
@@ -260,12 +259,7 @@ mod tests {
 
     #[test]
     fn test_predict_proba_sums_to_one() {
-        let x_train = array![
-            [3.0, 1.0],
-            [4.0, 0.0],
-            [1.0, 3.0],
-            [0.0, 4.0]
-        ];
+        let x_train = array![[3.0, 1.0], [4.0, 0.0], [1.0, 3.0], [0.0, 4.0]];
         let y_train = array![0.0, 0.0, 1.0, 1.0];
 
         let nb = MultinomialNB::new();
@@ -289,10 +283,7 @@ mod tests {
     #[test]
     fn test_alpha_smoothing_effect() {
         // With very small alpha, probabilities should be more extreme.
-        let x_train = array![
-            [10.0, 0.0],
-            [0.0, 10.0]
-        ];
+        let x_train = array![[10.0, 0.0], [0.0, 10.0]];
         let y_train = array![0.0, 1.0];
 
         let nb_small = MultinomialNB::new().with_alpha(1e-10);
@@ -405,12 +396,7 @@ mod tests {
 
     #[test]
     fn test_f32_support() {
-        let x_train: Array2<f32> = array![
-            [5.0f32, 0.0],
-            [4.0, 1.0],
-            [0.0, 5.0],
-            [1.0, 4.0]
-        ];
+        let x_train: Array2<f32> = array![[5.0f32, 0.0], [4.0, 1.0], [0.0, 5.0], [1.0, 4.0]];
         let y_train: Array1<f32> = array![0.0f32, 0.0, 1.0, 1.0];
 
         let nb = MultinomialNB::new();

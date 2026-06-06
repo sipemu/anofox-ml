@@ -52,7 +52,10 @@ impl GaussianNB {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_naive_bayes::GaussianNB::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_naive_bayes::GaussianNB::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -63,6 +66,9 @@ impl GaussianNB {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_naive_bayes::GaussianNB::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_naive_bayes::GaussianNB::new(),
+            fitted: Some(fitted),
+        })
     }
 }

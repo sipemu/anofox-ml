@@ -27,11 +27,25 @@ pub struct FastIca {
 
 impl FastIca {
     pub fn new(n_components: usize) -> Self {
-        Self { n_components, max_iter: 200, tol: 1e-4, seed: 0 }
+        Self {
+            n_components,
+            max_iter: 200,
+            tol: 1e-4,
+            seed: 0,
+        }
     }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_tol(mut self, t: f64) -> Self { self.tol = t; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_tol(mut self, t: f64) -> Self {
+        self.tol = t;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -100,8 +114,7 @@ impl FitUnsupervised<f64> for FastIca {
         let mut w = Array2::<f64>::zeros((k, k));
         for comp in 0..k {
             // Random init.
-            let mut wi: Array1<f64> =
-                Array1::from_shape_fn(k, |_| rng.gen::<f64>() * 2.0 - 1.0);
+            let mut wi: Array1<f64> = Array1::from_shape_fn(k, |_| rng.gen::<f64>() * 2.0 - 1.0);
             // Normalize.
             let nrm = wi.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
             wi.mapv_inplace(|v| v / nrm);
@@ -178,7 +191,9 @@ impl Transform<f64> for FittedFastIca {
     fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let mut xc = x.clone();
@@ -204,7 +219,7 @@ mod tests {
         let mut s = Array2::<f64>::zeros((n, 2));
         for i in 0..n {
             let t = i as f64 * 0.1;
-            s[[i, 0]] = t.sin();           // sine
+            s[[i, 0]] = t.sin(); // sine
             s[[i, 1]] = (t * 0.3).sin().signum(); // square
         }
         // Mixing matrix.

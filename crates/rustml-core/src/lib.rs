@@ -39,25 +39,30 @@ pub mod inspection;
 pub mod multi_output;
 pub mod persistence;
 pub mod pipeline;
+pub mod sparse;
 pub mod traits;
 pub mod utils;
 
 pub use column_transformer::{ColumnSelector, ColumnTransformer, Remainder};
 pub use error::{Result, RustMlError};
-pub use float::Float;
 pub use feature_union::{FeatureUnion, FittedFeatureUnion};
+pub use float::Float;
 pub use function_transformer::FunctionTransformer;
 pub use halving::{halving_grid_search_cv, halving_random_search_cv, HalvingResult};
 pub use inspection::{permutation_importance, PermutationImportance};
 pub use multi_output::{
     ClassifierChain, FittedClassifierChain, FittedMultiOutputClassifier,
-    FittedMultiOutputRegressor, FittedRegressorChain, MultiOutputClassifier,
-    MultiOutputRegressor, RegressorChain,
+    FittedMultiOutputRegressor, FittedRegressorChain, MultiOutputClassifier, MultiOutputRegressor,
+    RegressorChain,
 };
-pub use pipeline::{FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep};
+pub use pipeline::{
+    FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep,
+};
+pub use sparse::CsrMatrix;
 pub use traits::{
-    ClassifierScore, DecisionFunction, Fit, FitUnsupervised, FitWeighted, InverseTransform,
-    Predict, PredictLogProba, PredictProba, RegressorScore, Transform,
+    ClassifierScore, DecisionFunction, Fit, FitUnsupervised, FitUnsupervisedWeighted, FitWeighted,
+    InverseTransform, PartialFit, Predict, PredictLogProba, PredictProba, RegressorScore,
+    Transform,
 };
 pub use utils::{
     cross_val_predict, cross_val_score, cross_val_score_stratified, cross_validate, grid_search_cv,

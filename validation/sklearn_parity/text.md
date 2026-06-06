@@ -37,3 +37,11 @@ to match our tokeniser.
   corpora this is the main scaling limitation.
 - HashingVectorizer's hash is FNV-1a, not sklearn's MurmurHash3 — bucket
   assignments differ.
+
+## Complexity
+
+- CountVectorizer / TfidfVectorizer fit: **O(total_tokens)** for the count pass + **O(vocab · log vocab)** for vocabulary sort.
+- Dense transform: **O(n_docs · vocab)** time and memory — quickly becomes prohibitive when `vocab > 10⁴`.
+- Sparse transform (CSR): **O(total_tokens)** time and **O(total_tokens)** memory — the only practical option for full-corpus vectorisation.
+- HashingVectorizer: **O(total_tokens)** time, **O(n_docs · n_features)** memory (n_features set by user, no vocab pass).
+- L2 normalisation: **O(nnz)** per row in the sparse path.

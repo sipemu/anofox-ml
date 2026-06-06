@@ -42,7 +42,11 @@ fn test_stacking_classifier_matches_sklearn_accuracy_band() {
     let fitted: rustml_ensemble::FittedStackingClassifier<f64> = sc.fit(&x, &y).unwrap();
     let preds = fitted.predict(&x).unwrap();
 
-    let correct = preds.iter().zip(y.iter()).filter(|(p, t)| (*p - *t).abs() < 0.5).count();
+    let correct = preds
+        .iter()
+        .zip(y.iter())
+        .filter(|(p, t)| (*p - *t).abs() < 0.5)
+        .count();
     let acc = correct as f64 / y.len() as f64;
 
     // Sklearn typically scores 0.95+. Require ours within 0.10 of that.

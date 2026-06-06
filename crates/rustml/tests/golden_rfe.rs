@@ -72,5 +72,10 @@ fn test_sfs_picks_informative_features() {
             hits += 1;
         }
     }
-    assert!(hits >= 2, "SFS selected {:?}; expected to overlap with {:?}", selected, expected);
+    assert!(
+        hits >= 2,
+        "SFS selected {:?}; expected to overlap with {:?}",
+        selected,
+        expected
+    );
 }

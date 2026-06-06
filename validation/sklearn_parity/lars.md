@@ -31,3 +31,10 @@ hits an interpolation R²).
 - `LassoLarsIC` (AIC/BIC criterion selection).
 - `LarsCV` / `LassoLarsCV`.
 - Stopping by `alpha` instead of `n_nonzero_coefs` for LassoLars.
+
+## Complexity
+
+- LARS / LassoLars: each LARS iteration adds (or removes) one variable. Cost per step is **O(n·p + p²)** for Gram updates + Cholesky downdate.
+- Total: **O(k · (np + p²))** for k iterations, where k ≤ min(n, p) (the active-set size).
+- LassoLarsIC: same cost as LassoLars plus an O(k) model-selection sweep over the path.
+- Memory: **O(p²)** for the Gram matrix scratch, **O(n·p)** for the data.

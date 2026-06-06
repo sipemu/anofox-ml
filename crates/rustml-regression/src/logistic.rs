@@ -4,9 +4,7 @@
 //! binary classifier with the rustml [`Fit`] / [`Predict`] type-state pattern.
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
-use anofox_regression::solvers::{
-    FittedLogistic, LogisticRegression as InnerLogistic, Penalty,
-};
+use anofox_regression::solvers::{FittedLogistic, LogisticRegression as InnerLogistic, Penalty};
 use ndarray::{Array1, Array2};
 use rustml_core::{Fit, Predict, Result, RustMlError};
 
@@ -134,11 +132,7 @@ impl FittedLogisticRegressor {
     pub fn score(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<f64> {
         let preds = self.predict(x)?;
         let n = y.len();
-        let correct = preds
-            .iter()
-            .zip(y.iter())
-            .filter(|(&p, &a)| p == a)
-            .count();
+        let correct = preds.iter().zip(y.iter()).filter(|(&p, &a)| p == a).count();
         Ok(correct as f64 / n as f64)
     }
 
@@ -213,11 +207,8 @@ mod tests {
 
     #[test]
     fn test_logistic_basic() {
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((8, 1), vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+            .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let fitted = LogisticRegressor::new().fit(&x, &y).unwrap();
@@ -229,11 +220,8 @@ mod tests {
 
     #[test]
     fn test_predict_labels() {
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((8, 1), vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+            .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let fitted = LogisticRegressor::new().fit(&x, &y).unwrap();
@@ -246,11 +234,8 @@ mod tests {
 
     #[test]
     fn test_predict_proba_range() {
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((8, 1), vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+            .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let fitted = LogisticRegressor::new().fit(&x, &y).unwrap();
@@ -267,30 +252,31 @@ mod tests {
 
     #[test]
     fn test_score() {
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((8, 1), vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+            .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let fitted = LogisticRegressor::new().fit(&x, &y).unwrap();
         let acc = fitted.score(&x, &y).unwrap();
 
-        assert!(acc > 0.7, "accuracy should be > 0.7 on separable data, got {}", acc);
+        assert!(
+            acc > 0.7,
+            "accuracy should be > 0.7 on separable data, got {}",
+            acc
+        );
     }
 
     #[test]
     fn test_l2_regularization() {
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((8, 1), vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+            .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let no_reg = LogisticRegressor::new().fit(&x, &y).unwrap();
-        let l2 = LogisticRegressor::new().with_lambda(10.0).fit(&x, &y).unwrap();
+        let l2 = LogisticRegressor::new()
+            .with_lambda(10.0)
+            .fit(&x, &y)
+            .unwrap();
 
         assert!(
             l2.coefficients()[0].abs() < no_reg.coefficients()[0].abs(),
@@ -300,11 +286,8 @@ mod tests {
 
     #[test]
     fn test_c_convention() {
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((8, 1), vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+            .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         // Small C = strong regularization

@@ -75,9 +75,7 @@ impl LinearSvr {
             ));
         }
         if self.tol <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "tol must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
         Ok(())
     }

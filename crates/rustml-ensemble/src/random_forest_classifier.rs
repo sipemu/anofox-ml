@@ -3,7 +3,9 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 use rustml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
-use rustml_trees::{ClassWeight, DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion};
+use rustml_trees::{
+    ClassWeight, DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion,
+};
 
 /// Random forest classifier parameters (unfitted state).
 ///
@@ -205,9 +207,7 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
             .into_par_iter()
             .map(|(row_indices, feature_indices)| {
                 let x_sub = build_sub_matrix(x, &row_indices, &feature_indices);
-                let y_sub = Array1::from_vec(
-                    row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
-                );
+                let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
                 let fitted_tree: FittedDecisionTreeClassifier<F> =
                     tree_params.fit(&x_sub, &y_sub)?;
                 Ok(ForestTree {
@@ -247,7 +247,8 @@ impl<F: Float> Predict<F> for FittedRandomForestClassifier<F> {
         let n_trees = self.trees.len();
 
         // Collect all tree predictions in parallel
-        let all_preds: Result<Vec<Array1<F>>> = self.trees
+        let all_preds: Result<Vec<Array1<F>>> = self
+            .trees
             .par_iter()
             .map(|forest_tree| {
                 let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
@@ -331,10 +332,7 @@ impl<F: Float> FittedRandomForestClassifier<F> {
         let eps = F::from_f64(1e-9).unwrap();
         for forest_tree in &self.trees {
             for c in forest_tree.tree.classes() {
-                if !global_classes
-                    .iter()
-                    .any(|&gc| (gc - c).abs() < eps)
-                {
+                if !global_classes.iter().any(|&gc| (gc - c).abs() < eps) {
                     global_classes.push(c);
                 }
             }
@@ -352,9 +350,7 @@ impl<F: Float> FittedRandomForestClassifier<F> {
             let tree_proba = &all_proba[tree_idx];
 
             for (local_ci, &tc) in tree_classes.iter().enumerate() {
-                if let Some(global_ci) = global_classes
-                    .iter()
-                    .position(|&gc| (gc - tc).abs() < eps)
+                if let Some(global_ci) = global_classes.iter().position(|&gc| (gc - tc).abs() < eps)
                 {
                     for i in 0..n_samples {
                         avg_proba[[i, global_ci]] += tree_proba[[i, local_ci]] / n_trees_f;
@@ -439,10 +435,7 @@ fn build_sub_matrix<F: Float>(
 /// Build a sub-matrix selecting all rows but only specific columns from `x`.
 /// Produces a guaranteed C-contiguous (standard layout) array so that
 /// `row.as_slice()` works in downstream predict calls.
-fn build_sub_matrix_cols<F: Float>(
-    x: &Array2<F>,
-    col_indices: &[usize],
-) -> Array2<F> {
+fn build_sub_matrix_cols<F: Float>(x: &Array2<F>, col_indices: &[usize]) -> Array2<F> {
     let n_rows = x.nrows();
     let n_cols = col_indices.len();
     let mut data = Vec::with_capacity(n_rows * n_cols);
@@ -517,10 +510,7 @@ fn majority_vote<F: Float>(votes: &[F]) -> F {
     let mut counts: HashMap<u64, (F, usize)> = HashMap::new();
     for &v in votes {
         let key = v.to_f64().unwrap().to_bits();
-        counts
-            .entry(key)
-            .and_modify(|e| e.1 += 1)
-            .or_insert((v, 1));
+        counts.entry(key).and_modify(|e| e.1 += 1).or_insert((v, 1));
     }
     counts
         .into_values()
@@ -768,8 +758,7 @@ mod tests {
         let fitted: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
-        let valid_labels: std::collections::HashSet<u64> =
-            y.iter().map(|v| v.to_bits()).collect();
+        let valid_labels: std::collections::HashSet<u64> = y.iter().map(|v| v.to_bits()).collect();
         for &p in preds.iter() {
             assert!(
                 valid_labels.contains(&p.to_bits()),

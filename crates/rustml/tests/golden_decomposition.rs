@@ -22,7 +22,9 @@ fn test_kernel_pca_eigenvalues_match_sklearn() {
     for i in 0..k {
         assert!(
             (fitted.eigenvalues[i] - sk_evals[i]).abs() < 1e-6,
-            "eig[{i}]: {} vs {}", fitted.eigenvalues[i], sk_evals[i]
+            "eig[{i}]: {} vs {}",
+            fitted.eigenvalues[i],
+            sk_evals[i]
         );
     }
     let t = fitted.transform(&x).unwrap();

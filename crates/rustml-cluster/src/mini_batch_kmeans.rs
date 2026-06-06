@@ -11,7 +11,6 @@
 
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rustml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
 use serde::{Deserialize, Serialize};
@@ -35,14 +34,28 @@ impl MiniBatchKMeans {
             seed: 42,
         }
     }
-    pub fn with_batch_size(mut self, b: usize) -> Self { self.batch_size = b; self }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_tol(mut self, t: f64) -> Self { self.tol = t; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_batch_size(mut self, b: usize) -> Self {
+        self.batch_size = b;
+        self
+    }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_tol(mut self, t: f64) -> Self {
+        self.tol = t;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 }
 
 impl Default for MiniBatchKMeans {
-    fn default() -> Self { Self::new(3) }
+    fn default() -> Self {
+        Self::new(3)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,8 +66,12 @@ pub struct FittedMiniBatchKMeans<F: Float> {
 }
 
 impl<F: Float> FittedMiniBatchKMeans<F> {
-    pub fn centroids(&self) -> &Array2<F> { &self.centroids }
-    pub fn n_iter(&self) -> usize { self.n_iter }
+    pub fn centroids(&self) -> &Array2<F> {
+        &self.centroids
+    }
+    pub fn n_iter(&self) -> usize {
+        self.n_iter
+    }
 }
 
 fn sq_dist<F: Float>(a: &[F], b: &[F]) -> F {
@@ -220,8 +237,14 @@ mod tests {
     #[test]
     fn test_mini_batch_kmeans_two_clusters() {
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.05], [0.05, -0.1],
-            [10.0, 10.0], [10.1, 10.05], [9.95, 10.1], [10.05, 9.95],
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.05],
+            [0.05, -0.1],
+            [10.0, 10.0],
+            [10.1, 10.05],
+            [9.95, 10.1],
+            [10.05, 9.95],
         ];
         let model = MiniBatchKMeans::new(2)
             .with_batch_size(4)

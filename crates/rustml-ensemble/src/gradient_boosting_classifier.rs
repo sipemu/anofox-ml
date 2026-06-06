@@ -152,8 +152,7 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
 
         if n_classes == 2 {
             // Binary classification: single set of trees on log-odds.
-            let (initial, trees) =
-                self.fit_binary(x, y, &classes[1], lr)?;
+            let (initial, trees) = self.fit_binary(x, y, &classes[1], lr)?;
             Ok(FittedGradientBoostingClassifier {
                 classes,
                 tree_sets: vec![trees],
@@ -167,8 +166,7 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
             let mut initial_values = Vec::with_capacity(n_classes);
 
             for class in &classes {
-                let (initial, trees) =
-                    self.fit_binary(x, y, class, lr)?;
+                let (initial, trees) = self.fit_binary(x, y, class, lr)?;
                 tree_sets.push(trees);
                 initial_values.push(initial);
             }
@@ -695,8 +693,7 @@ mod tests {
         let fitted: FittedGradientBoostingClassifier<f64> = gb.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
-        let valid_labels: std::collections::HashSet<u64> =
-            y.iter().map(|v| v.to_bits()).collect();
+        let valid_labels: std::collections::HashSet<u64> = y.iter().map(|v| v.to_bits()).collect();
         for &p in preds.iter() {
             assert!(
                 valid_labels.contains(&p.to_bits()),
@@ -767,8 +764,7 @@ mod tests {
             seed: 42,
             ..Default::default()
         };
-        let fitted_normal: FittedGradientBoostingClassifier<f64> =
-            gb_normal.fit(&x, &y).unwrap();
+        let fitted_normal: FittedGradientBoostingClassifier<f64> = gb_normal.fit(&x, &y).unwrap();
         let preds_normal = fitted_normal.predict(&x).unwrap();
         let correct_normal: usize = preds_normal
             .iter()
@@ -784,8 +780,7 @@ mod tests {
             seed: 42,
             ..Default::default()
         };
-        let fitted_tiny: FittedGradientBoostingClassifier<f64> =
-            gb_tiny.fit(&x, &y).unwrap();
+        let fitted_tiny: FittedGradientBoostingClassifier<f64> = gb_tiny.fit(&x, &y).unwrap();
         let preds_tiny = fitted_tiny.predict(&x).unwrap();
         let correct_tiny: usize = preds_tiny
             .iter()

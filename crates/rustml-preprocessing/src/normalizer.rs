@@ -1,5 +1,5 @@
 use ndarray::Array2;
-use rustml_core::{Float, FitUnsupervised, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 
 /// The type of norm used to normalize each sample (row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_l2_unit_norm() {
-        let x = array![[3.0, 4.0], [1.0, 0.0], [0.0, 0.0, ]];
+        let x = array![[3.0, 4.0], [1.0, 0.0], [0.0, 0.0,]];
         let normalizer = Normalizer::new();
         let fitted = FitUnsupervised::<f64>::fit(&normalizer, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();

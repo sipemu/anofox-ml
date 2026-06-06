@@ -37,7 +37,10 @@ fn r2(pred: &Array1<f64>, target: &Array1<f64>) -> f64 {
 #[test]
 fn test_golden_extra_trees_classifier_accuracy() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "extra_trees_classifier").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "extra_trees_classifier")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -61,7 +64,10 @@ fn test_golden_extra_trees_classifier_accuracy() {
 #[test]
 fn test_golden_extra_trees_regressor_r2() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "extra_trees_regressor").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "extra_trees_regressor")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -85,13 +91,18 @@ fn test_golden_extra_trees_regressor_r2() {
 #[test]
 fn test_golden_adaboost_classifier_accuracy() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "adaboost_classifier").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "adaboost_classifier")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
     let sklearn_acc = case["accuracy"].as_f64().unwrap();
 
-    let model = AdaBoostClassifier::new().with_n_estimators(20).with_seed(42);
+    let model = AdaBoostClassifier::new()
+        .with_n_estimators(20)
+        .with_seed(42);
     let fitted = Fit::fit(&model, &x, &y).unwrap();
     let preds = fitted.predict(&x).unwrap();
     let our_acc = accuracy(&preds, &y);
@@ -107,7 +118,10 @@ fn test_golden_adaboost_classifier_accuracy() {
 #[test]
 fn test_golden_adaboost_regressor_r2() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "adaboost_regressor").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "adaboost_regressor")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -131,7 +145,10 @@ fn test_golden_adaboost_regressor_r2() {
 #[test]
 fn test_golden_bagging_classifier_accuracy() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "bagging_classifier").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "bagging_classifier")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -153,7 +170,10 @@ fn test_golden_bagging_classifier_accuracy() {
 #[test]
 fn test_golden_bagging_regressor_r2() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "bagging_regressor").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "bagging_regressor")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -175,7 +195,10 @@ fn test_golden_bagging_regressor_r2() {
 #[test]
 fn test_golden_voting_classifier_accuracy() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "voting_classifier").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "voting_classifier")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -219,7 +242,10 @@ fn test_golden_voting_classifier_accuracy() {
 #[test]
 fn test_golden_voting_regressor_r2() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "voting_regressor").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "voting_regressor")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -256,7 +282,10 @@ fn test_golden_voting_regressor_r2() {
 #[test]
 fn test_golden_stacking_regressor_r2() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "stacking_regressor").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "stacking_regressor")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -297,7 +326,10 @@ fn test_golden_stacking_regressor_r2() {
 #[test]
 fn test_golden_random_forest_oob_score() {
     let cases = load_golden_data("ensemble_batch.json");
-    let case = cases.iter().find(|c| c["name"] == "random_forest_oob").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "random_forest_oob")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);

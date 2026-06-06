@@ -197,11 +197,7 @@ mod tests {
     use ndarray::array;
 
     fn make_linear_data(n: usize) -> (Array2<f64>, Array1<f64>) {
-        let x = Array2::from_shape_vec(
-            (n, 1),
-            (0..n).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((n, 1), (0..n).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..n).map(|i| 2.0 + 3.0 * i as f64).collect());
         (x, y)
     }
@@ -210,9 +206,7 @@ mod tests {
     fn test_elastic_net_cv_basic() {
         let (x, y) = make_linear_data(50);
 
-        let fitted = ElasticNetCrossValidated::new()
-            .fit(&x, &y)
-            .unwrap();
+        let fitted = ElasticNetCrossValidated::new().fit(&x, &y).unwrap();
 
         assert!(fitted.r_squared() > 0.99);
         assert!(fitted.best_alpha() > 0.0);
@@ -358,19 +352,13 @@ mod tests {
     fn test_elastic_net_cv_invalid_folds() {
         let (x, y) = make_linear_data(20);
 
-        let result = ElasticNetCrossValidated::new()
-            .with_cv_folds(1)
-            .fit(&x, &y);
+        let result = ElasticNetCrossValidated::new().with_cv_folds(1).fit(&x, &y);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_elastic_net_cv_no_intercept() {
-        let x = Array2::from_shape_vec(
-            (50, 1),
-            (0..50).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((50, 1), (0..50).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..50).map(|i| 3.0 * i as f64).collect());
 
         let fitted = ElasticNetCrossValidated::new()

@@ -135,7 +135,9 @@ impl Predict<f64> for FittedBirch {
         let d = self.subcluster_centers.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", d, x.ncols()
+                "expected {} features, got {}",
+                d,
+                x.ncols()
             )));
         }
         let m = self.subcluster_centers.nrows();
@@ -146,8 +148,7 @@ impl Predict<f64> for FittedBirch {
             let mut best = f64::INFINITY;
             let mut best_k = 0;
             for k in 0..m {
-                let centroid: Vec<f64> =
-                    self.subcluster_centers.row(k).iter().copied().collect();
+                let centroid: Vec<f64> = self.subcluster_centers.row(k).iter().copied().collect();
                 let d2 = euclid_sq(&xi, &centroid);
                 if d2 < best {
                     best = d2;
@@ -168,10 +169,20 @@ mod tests {
     #[test]
     fn test_birch_two_blobs() {
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.2], [0.1, -0.1],
-            [10.0, 10.0], [10.1, 9.9], [9.8, 10.2], [10.2, 9.8],
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.2],
+            [0.1, -0.1],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.8, 10.2],
+            [10.2, 9.8],
         ];
-        let fitted = Birch::new(1.0).with_n_clusters(Some(2)).with_seed(0).fit(&x).unwrap();
+        let fitted = Birch::new(1.0)
+            .with_n_clusters(Some(2))
+            .with_seed(0)
+            .fit(&x)
+            .unwrap();
         let labels = &fitted.labels;
         let l0 = labels[0];
         for i in 1..4 {

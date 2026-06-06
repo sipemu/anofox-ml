@@ -4,13 +4,9 @@ use rand::SeedableRng;
 use rustml_core::{Fit, Float, Predict, Result, RustMlError};
 
 use crate::activation::Activation;
-use crate::network::{
-    adam_update, backward_pass, forward_pass, sgd_update, DenseLayer,
-};
+use crate::network::{adam_update, backward_pass, forward_pass, sgd_update, DenseLayer};
 use crate::solver::{AdamState, Solver};
-use crate::utils::{
-    cross_entropy_loss, one_hot_encode, select_rows, shuffle_indices, softmax,
-};
+use crate::utils::{cross_entropy_loss, one_hot_encode, select_rows, shuffle_indices, softmax};
 
 /// Multi-layer perceptron classifier (unfitted).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -190,7 +186,8 @@ impl<F: Float> Fit<F> for MlpClassifier {
 
                 // Backward: output delta = probs - y_onehot
                 let output_delta = &probs - y_b;
-                let gradients = backward_pass(&layers, &caches, self.activation, output_delta, alpha);
+                let gradients =
+                    backward_pass(&layers, &caches, self.activation, output_delta, alpha);
 
                 // Update
                 match self.solver {
@@ -242,12 +239,7 @@ mod tests {
     #[test]
     fn xor_classification() {
         // XOR is not linearly separable, requires hidden layer
-        let x = array![
-            [0.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-        ];
+        let x = array![[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0],];
         let y = array![0.0, 1.0, 1.0, 0.0];
 
         let mlp = MlpClassifier {
@@ -273,9 +265,15 @@ mod tests {
     #[test]
     fn simple_three_class() {
         let x = array![
-            [0.0, 0.0], [0.1, 0.1], [0.2, 0.0],
-            [5.0, 5.0], [5.1, 5.1], [5.2, 5.0],
-            [10.0, 0.0], [10.1, 0.1], [10.2, 0.0],
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [0.2, 0.0],
+            [5.0, 5.0],
+            [5.1, 5.1],
+            [5.2, 5.0],
+            [10.0, 0.0],
+            [10.1, 0.1],
+            [10.2, 0.0],
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
 

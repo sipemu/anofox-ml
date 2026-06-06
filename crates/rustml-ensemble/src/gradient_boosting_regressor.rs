@@ -495,10 +495,7 @@ mod tests {
 
         let preds = fitted.predict(&x).unwrap();
         for &p in preds.iter() {
-            assert!(
-                p.is_finite(),
-                "prediction must be finite, got {p}"
-            );
+            assert!(p.is_finite(), "prediction must be finite, got {p}");
         }
     }
 

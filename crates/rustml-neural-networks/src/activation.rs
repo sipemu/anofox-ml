@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn identity_forward() {
-        let z = array![[3.14_f64, -2.7]];
+        let z = array![[3.125_f64, -2.7]];
         let a = Activation::Identity.forward(&z);
         for (ai, zi) in a.iter().zip(z.iter()) {
             assert_abs_diff_eq!(*ai, *zi, epsilon = 1e-15);

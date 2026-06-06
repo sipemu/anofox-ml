@@ -37,13 +37,24 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    env:
+      # Run clippy with its own narrower bar: gate on correctness-class
+      # lints (the suspicious / correctness groups) and rustc warnings
+      # promoted via -Dwarnings, but allow style / pedantic noise. Fixing
+      # the full clippy-pedantic backlog is its own workstream.
+      RUSTFLAGS: -Dwarnings
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --exclude rustml-python --all-targets
+      - run: |
+          cargo clippy --workspace --exclude rustml-python --all-targets -- \
+            -A clippy::all \
+            -W clippy::correctness \
+            -W clippy::suspicious \
+            -D warnings
 
   doc:
     name: Documentation
@@ -66,9 +77,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  sklearn-version:
+    name: sklearn Version Pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r test_harness/requirements.txt
+      - name: Verify exact sklearn version
+        run: python test_harness/check_sklearn_version.py
+
   golden-data:
     name: Golden Data Sync
     runs-on: ubuntu-latest
+    needs: sklearn-version
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -79,6 +103,18 @@ jobs:
       - name: Check fixtures unchanged
         run: git diff --exit-code crates/rustml/tests/golden_data/
 
+  python-bindings:
+    name: Python Bindings Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p rustml-python --release
+
   bench:
     name: Benchmarks (dry run)
     runs-on: ubuntu-latest
@@ -87,3 +123,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench --workspace --exclude rustml-python --no-run
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - run: cargo llvm-cov --workspace --exclude rustml-python --summary-only

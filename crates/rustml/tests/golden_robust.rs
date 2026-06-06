@@ -25,7 +25,11 @@ fn test_ransac_recovers_inlier_line() {
         .unwrap();
 
     // Both should recover slope ≈ 2, intercept ≈ 1.
-    assert!((fitted.coef[0] - 2.0).abs() < 0.1, "rustml slope: {}", fitted.coef[0]);
+    assert!(
+        (fitted.coef[0] - 2.0).abs() < 0.1,
+        "rustml slope: {}",
+        fitted.coef[0]
+    );
     assert!((sk_slope - 2.0).abs() < 0.1);
     assert!((fitted.intercept - 1.0).abs() < 0.3);
     assert!((sk_intercept - 1.0).abs() < 0.3);
@@ -34,7 +38,10 @@ fn test_ransac_recovers_inlier_line() {
 #[test]
 fn test_theil_sen_recovers_inlier_line() {
     let cases = load_golden_data("robust.json");
-    let case = cases.iter().find(|c| c["name"] == "theil_sen_line").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "theil_sen_line")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);

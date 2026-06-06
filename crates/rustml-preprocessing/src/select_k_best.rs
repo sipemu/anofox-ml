@@ -79,11 +79,7 @@ impl SelectKBest {
     /// For [`ScoringFunction::FClassif`] and [`ScoringFunction::FRegression`],
     /// `y` is used as the target variable. For [`ScoringFunction::Variance`],
     /// `y` is ignored.
-    pub fn fit<F: Float>(
-        &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-    ) -> Result<FittedSelectKBest<F>> {
+    pub fn fit<F: Float>(&self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedSelectKBest<F>> {
         let (n_samples, n_features) = x.dim();
 
         if n_samples == 0 || n_features == 0 {
@@ -91,9 +87,7 @@ impl SelectKBest {
         }
 
         if self.k == 0 {
-            return Err(RustMlError::InvalidParameter(
-                "k must be at least 1".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("k must be at least 1".into()));
         }
 
         if self.k > n_features {
@@ -121,8 +115,7 @@ impl SelectKBest {
         };
 
         // Select top-k features by score (descending).
-        let mut feature_scores: Vec<(usize, F)> =
-            scores.iter().copied().enumerate().collect();
+        let mut feature_scores: Vec<(usize, F)> = scores.iter().copied().enumerate().collect();
         feature_scores.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -408,13 +401,7 @@ mod tests {
     fn test_f_regression_selects_correlated_feature() {
         // Feature 0: linearly correlated with y.
         // Feature 1: constant (zero correlation).
-        let x = array![
-            [1.0, 5.0],
-            [2.0, 5.0],
-            [3.0, 5.0],
-            [4.0, 5.0],
-            [5.0, 5.0],
-        ];
+        let x = array![[1.0, 5.0], [2.0, 5.0], [3.0, 5.0], [4.0, 5.0], [5.0, 5.0],];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0];
 
         let selector = SelectKBest::new(1, ScoringFunction::FRegression);
@@ -446,11 +433,7 @@ mod tests {
 
     #[test]
     fn test_transform_outputs_correct_columns() {
-        let x = array![
-            [10.0, 20.0, 30.0],
-            [40.0, 50.0, 60.0],
-            [70.0, 80.0, 90.0],
-        ];
+        let x = array![[10.0, 20.0, 30.0], [40.0, 50.0, 60.0], [70.0, 80.0, 90.0],];
         let y = array![1.0, 2.0, 3.0];
 
         let selector = SelectKBest::new(2, ScoringFunction::FRegression);
@@ -556,12 +539,7 @@ mod tests {
 
     #[test]
     fn test_works_with_f32() {
-        let x: Array2<f32> = array![
-            [0.0_f32, 0.5],
-            [0.0, 0.8],
-            [1.0, 0.3],
-            [1.0, 0.7],
-        ];
+        let x: Array2<f32> = array![[0.0_f32, 0.5], [0.0, 0.8], [1.0, 0.3], [1.0, 0.7],];
         let y: Array1<f32> = array![0.0_f32, 0.0, 1.0, 1.0];
 
         let selector = SelectKBest::new(1, ScoringFunction::FClassif);

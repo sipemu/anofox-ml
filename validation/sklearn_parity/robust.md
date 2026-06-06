@@ -37,3 +37,10 @@ slope within 0.1 (RANSAC) / 0.5 (TheilSen).
 - TheilSen subset sampling is uniform random; sklearn uses random combinations
   of indices and falls back to deterministic enumeration when feasible.
 - No `stop_score` / `stop_probability` early termination for RANSAC.
+
+## Complexity
+
+- HuberRegressor: each IRLS step is one weighted OLS of cost **O(np² + p³)**; outer loop iterates until convergence (~20–50 iters).
+- TheilSenRegressor: enumerates n choose (n_subsamples) random subsets; each fits OLS of cost **O(s·p² + p³)** where s = n_subsamples. Total dominated by `n_subsamples_iter`.
+- RANSACRegressor: `max_trials × O(min_samples · p² + p³)` for inlier model fits + `O(n)` consensus checks per trial.
+- Memory: **O(n·p)** for the data matrix; no quadratic blow-up in n.

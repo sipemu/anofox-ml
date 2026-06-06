@@ -1,11 +1,11 @@
 //! GLM (Generalized Linear Model) wrappers for Poisson and Binomial regression.
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
-use anofox_regression::{FittedRegressor as _, Regressor as _};
 use anofox_regression::{
     BinomialRegressor as InnerBinomial, FittedBinomial, FittedPoisson,
     PoissonRegressor as InnerPoisson,
 };
+use anofox_regression::{FittedRegressor as _, Regressor as _};
 use ndarray::{Array1, Array2};
 use rustml_core::{Fit, Predict, Result, RustMlError};
 
@@ -219,11 +219,8 @@ mod tests {
     #[test]
     fn test_poisson_basic() {
         // Simple count data
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
-        )
-        .unwrap();
+        let x =
+            Array2::from_shape_vec((8, 1), vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]).unwrap();
         // Roughly y ~ exp(0.5 * x), i.e. Poisson counts increasing with x
         let y = array![1.0, 1.0, 2.0, 2.0, 3.0, 4.0, 5.0, 8.0];
 
@@ -239,11 +236,8 @@ mod tests {
     #[test]
     fn test_binomial_basic() {
         // Simple binary classification data
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((8, 1), vec![-3.0, -2.0, -1.0, -0.5, 0.5, 1.0, 2.0, 3.0])
+            .unwrap();
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let fitted = BinomialRegressor::new().fit(&x, &y).unwrap();

@@ -30,3 +30,11 @@ is sign-ambiguous (any column of U/V can flip sign), so we compare:
 - `KernelPCA`, `NMF`, `FastICA` are still pending (also in issue #18).
 - No `algorithm='randomized'` — we use the dense SVD.
 - No `inverse_transform` yet (sklearn provides one via `X̂ = T V'`).
+
+## Complexity
+
+- TruncatedSVD via randomised SVD with `n_components = k`, `n_oversamples = ω`, `n_power_iter = q`:
+- Range finding: **O(n · p · (k+ω) · q)**.
+- Per query / transform: **O(n · p · k)**.
+- For sparse X with `nnz` non-zeros, the costs become **O(nnz · (k+ω) · q)** (matvec-bound).
+- Memory: **O(p · (k+ω))** for the range basis + **O(n · k)** for output. Avoids the explicit O(p²) covariance of dense PCA.

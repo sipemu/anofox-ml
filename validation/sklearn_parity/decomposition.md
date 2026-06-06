@@ -33,3 +33,12 @@ isn't pursued.
 - KernelPCA `fit_inverse_transform=True`.
 - NMF `init='nndsvd'` / `'nndsvda'` smarter inits; `solver='cd'` coordinate
   descent.
+
+## Complexity
+
+- PCA (truncated): **O(n · p · k)** via randomised SVD with `k = n_components`.
+- KernelPCA: **O(n²·p)** kernel construction + **O(n³)** eigendecomposition of the centred Gram matrix.
+- TruncatedSVD: **O(n · p · k)** via Lanczos / randomised SVD on possibly-sparse X.
+- FastICA: **O(p² · n + p³)** for whitening + symmetric decorrelation; deflation variant **O(k · p · n)** per component.
+- NMF (multiplicative update): **O(n · p · k · iter)**; coordinate descent shaves a constant factor.
+- Memory dominated by **O(n·p)** for the dense data, plus **O(p²)** scratch for whitening / Gram.

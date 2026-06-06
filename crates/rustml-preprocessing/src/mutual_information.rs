@@ -230,8 +230,7 @@ impl<F: Float> Fit<F> for MutualInformationSelector {
         }
 
         // Select top-k features by MI score.
-        let mut feature_scores: Vec<(usize, F)> =
-            mi_scores.iter().copied().enumerate().collect();
+        let mut feature_scores: Vec<(usize, F)> = mi_scores.iter().copied().enumerate().collect();
         // Sort descending by score; break ties by feature index (ascending).
         feature_scores.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
@@ -429,12 +428,7 @@ mod tests {
 
     #[test]
     fn test_works_with_f32() {
-        let x: Array2<f32> = array![
-            [0.0_f32, 0.5],
-            [0.0, 0.8],
-            [1.0, 0.3],
-            [1.0, 0.7],
-        ];
+        let x: Array2<f32> = array![[0.0_f32, 0.5], [0.0, 0.8], [1.0, 0.3], [1.0, 0.7],];
         let y: Array1<f32> = array![0.0_f32, 0.0, 1.0, 1.0];
 
         let selector = MutualInformationSelector::new(1).with_n_bins(2);

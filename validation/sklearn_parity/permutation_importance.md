@@ -37,3 +37,10 @@ We assert:
 - Single-threaded — sklearn parallelises across features when `n_jobs > 1`.
   Not currently a priority; the loop is small in practice.
 - No support for sample weights (sklearn's `sample_weight` argument).
+
+## Complexity
+
+- `permutation_importance(estimator, X, y, n_repeats)`: each feature is shuffled `n_repeats` times and the estimator is scored on the permuted X.
+- Total: **O(p · n_repeats · cost(predict on n samples))**.
+- Parallelised across features via rayon (no inter-feature dependency).
+- Memory: **O(n·p)** for the working copy of X.

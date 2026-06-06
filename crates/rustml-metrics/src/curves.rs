@@ -347,8 +347,7 @@ mod tests {
         // Perfect separation
         let y_true = array![0.0, 0.0, 1.0, 1.0];
         let y_score = array![0.1, 0.2, 0.8, 0.9];
-        let (precision, recall, _thresholds) =
-            precision_recall_curve(&y_true, &y_score).unwrap();
+        let (precision, recall, _thresholds) = precision_recall_curve(&y_true, &y_score).unwrap();
 
         // Last non-sentinel point should have recall = 1 and precision = 1
         // (since all positives are ranked first)
@@ -364,8 +363,7 @@ mod tests {
         // Sorted desc: (0.9,1), (0.8,0), (0.3,1), (0.2,0)
         let y_true = array![1.0, 0.0, 1.0, 0.0];
         let y_score = array![0.9, 0.8, 0.3, 0.2];
-        let (precision, recall, thresholds) =
-            precision_recall_curve(&y_true, &y_score).unwrap();
+        let (precision, recall, thresholds) = precision_recall_curve(&y_true, &y_score).unwrap();
 
         // Sentinel at start (after reversal): precision=1, recall=0
         assert_abs_diff_eq!(precision[0], 1.0, epsilon = 1e-10);

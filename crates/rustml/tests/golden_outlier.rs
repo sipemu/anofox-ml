@@ -10,7 +10,6 @@ use rustml_neighbors::LocalOutlierFactor;
 fn detection_rate(pred: &ndarray::Array1<f64>, truth: &ndarray::Array1<f64>) -> (f64, f64) {
     let mut tp = 0;
     let mut fp = 0;
-    let mut tn = 0;
     let mut fn_ = 0;
     for (p, t) in pred.iter().zip(truth.iter()) {
         let pn = *p < 0.0;
@@ -18,7 +17,7 @@ fn detection_rate(pred: &ndarray::Array1<f64>, truth: &ndarray::Array1<f64>) -> 
         match (pn, tn_b) {
             (true, true) => tp += 1,
             (true, false) => fp += 1,
-            (false, false) => tn += 1,
+            (false, false) => {}
             (false, true) => fn_ += 1,
         }
     }

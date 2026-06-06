@@ -41,3 +41,11 @@ points can flip due to floating-point differences in the Cholesky solve.
 - No `priors` override; computed from class frequencies only.
 - QDA's `reg_param` shrinks toward identity; we currently only add `reg` to
   the diagonal.
+
+## Complexity
+
+- LDA fit: per-class mean (**O(n·p)**) + within-class scatter (**O(n·p²)**) + generalized eigendecomposition (**O(p³)**).
+- LDA predict: **O(n·p·k)** where k = n_classes − 1 (LDA components).
+- QDA fit: per-class covariance (**O(n·p²)**) + per-class Cholesky (**O(p³)**).
+- QDA predict: per-class Mahalanobis (**O(n·p²)** per class) → total **O(n·p²·k)**.
+- Memory: **O(p²·k)** for covariance store (QDA), **O(p·k)** for LDA scalings.

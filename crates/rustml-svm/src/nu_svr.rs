@@ -83,9 +83,7 @@ impl NuSvr {
 
     fn validate(&self) -> Result<()> {
         if self.nu <= 0.0 || self.nu > 1.0 {
-            return Err(RustMlError::InvalidParameter(
-                "nu must be in (0, 1]".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("nu must be in (0, 1]".into()));
         }
         if self.c <= 0.0 {
             return Err(RustMlError::InvalidParameter("C must be positive".into()));
@@ -96,9 +94,7 @@ impl NuSvr {
             ));
         }
         if self.tol <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "tol must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
         match &self.kernel {
             SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
@@ -517,7 +513,9 @@ impl<'a> NuSvrSolver<'a> {
     /// `bias = -rho`.
     fn finalize(self) -> (Vec<f64>, f64) {
         let ell = self.ell;
-        let w: Vec<f64> = (0..ell).map(|i| self.beta[i] - self.beta[ell + i]).collect();
+        let w: Vec<f64> = (0..ell)
+            .map(|i| self.beta[i] - self.beta[ell + i])
+            .collect();
 
         // For each side, track:
         //   ub = min G[i] over i with β[i] = 0 (is_lower_bound)
@@ -661,7 +659,16 @@ mod tests {
     #[test]
     fn test_linear_regression() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -697,7 +704,16 @@ mod tests {
     #[test]
     fn test_small_nu_fewer_svs() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 

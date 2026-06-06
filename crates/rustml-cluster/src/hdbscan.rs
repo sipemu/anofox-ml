@@ -26,7 +26,10 @@ pub struct Hdbscan {
 
 impl Hdbscan {
     pub fn new(min_samples: usize, min_cluster_size: usize) -> Self {
-        Self { min_samples, min_cluster_size }
+        Self {
+            min_samples,
+            min_cluster_size,
+        }
     }
 }
 
@@ -37,7 +40,11 @@ pub struct FittedHdbscan {
 }
 
 fn euclid(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f64>()
+        .sqrt()
 }
 
 /// Union-Find with path compression for the single-linkage hierarchy.
@@ -67,7 +74,11 @@ impl DSU {
             return ra;
         }
         // Union by size.
-        let (big, small) = if self.size[ra] >= self.size[rb] { (ra, rb) } else { (rb, ra) };
+        let (big, small) = if self.size[ra] >= self.size[rb] {
+            (ra, rb)
+        } else {
+            (rb, ra)
+        };
         self.parent[small] = big;
         self.size[big] += self.size[small];
         big
@@ -160,7 +171,7 @@ impl FitUnsupervised<f64> for Hdbscan {
         //   - sub-clusters with ≥ min_cluster_size become bona-fide clusters
         //     in the condensed tree.
         // For a HDBSCAN-lite extraction we use a simpler rule below.
-        let mut dsu = DSU::new(n);
+        let dsu = DSU::new(n);
 
         // Track "lambda when point left its cluster" for stability.
         // We extract the final flat clustering as follows:
@@ -177,79 +188,125 @@ impl FitUnsupervised<f64> for Hdbscan {
         // component would exceed the natural split point — we use the
         // single-linkage descendant-counting approach.
 
-        // Simpler approach for the flat label:
-        // - Add MST edges in ascending order via DSU.
-        // - At each edge, if both DSU roots are clusters of size ≥
-        //   min_cluster_size and they merge, record both sub-cluster labels.
-        // - At the end the largest connected components are the clusters,
-        //   small ones (still < min_cluster_size) are noise.
+        // Stability-based flat extraction.
+        //
+        // We track for each DSU component whether it has been "finalised"
+        // (assigned a cluster label after a true split). Walk MST edges
+        // ascending. Each merge of distinct roots ra, rb falls into one of:
+        //
+        //   (a) Neither side finalised → just union (growing component
+        //       absorbs whatever; no labels yet).
+        //   (b) Exactly one side finalised → the un-finalised side is a
+        //       set of points joining/falling out of an already-frozen
+        //       cluster. They become noise. We union for bookkeeping but
+        //       the joined points stay labelled -1.
+        //   (c) Both sides un-finalised AND both ≥ min_cluster_size → true
+        //       split: finalise both sides with distinct cluster ids; do
+        //       NOT union.
+        //   (d) Both sides finalised → would re-merge two already-fixed
+        //       clusters; do nothing (no union, no relabel).
+        //
+        // Sub-min_cluster_size joinees while no split has happened yet just
+        // grow the pre-cluster component.
+        let _ = dsu; // suppress unused — we use dsu2 below
 
-        // We follow that: union all edges; the resulting connected components
-        // are sub-clusters of the dataset. Components of size < min_cluster_size
-        // are labelled noise.
-        for &(a, b, _) in &edges {
-            dsu.union(a, b);
-        }
-        // Collect cluster roots.
-        let mut root_of = vec![0_usize; n];
-        for i in 0..n {
-            root_of[i] = dsu.find(i);
-        }
-        // Component sizes — already in DSU, but recompute to be safe.
-        let mut comp_size = std::collections::HashMap::<usize, usize>::new();
-        for &r in &root_of {
-            *comp_size.entry(r).or_insert(0) += 1;
-        }
-        // Assign labels: components with size >= min_cluster_size get IDs,
-        // others get -1 (noise).
-        // Note: above we unioned ALL edges, so all points end up in one
-        // component — that loses cluster structure. We need to instead cut
-        // the MST at edges above a density threshold.
-
-        // Density-cut: scan edges in ascending order; track DSU. Whenever the
-        // about-to-merge component sizes are both ≥ min_cluster_size, treat
-        // *that* edge as a cluster boundary. Cuts at all such edges.
         let mut dsu2 = DSU::new(n);
-        let mut boundary_edges: Vec<usize> = Vec::new();
-        for (idx, &(a, b, _)) in edges.iter().enumerate() {
+        let mut cluster_label = vec![-1.0_f64; n];
+        let mut frozen_as_noise = vec![false; n];
+        let mut next_id = 0.0_f64;
+        let mut finalised: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for &(a, b, _) in &edges {
             let ra = dsu2.find(a);
             let rb = dsu2.find(b);
-            if ra != rb && dsu2.size[ra] >= self.min_cluster_size
-                && dsu2.size[rb] >= self.min_cluster_size
-            {
-                boundary_edges.push(idx);
+            if ra == rb {
+                continue;
             }
-            dsu2.union(a, b);
-        }
-        // Re-run DSU adding only non-boundary edges.
-        let mut dsu3 = DSU::new(n);
-        let boundary_set: std::collections::HashSet<usize> = boundary_edges.into_iter().collect();
-        for (idx, &(a, b, _)) in edges.iter().enumerate() {
-            if !boundary_set.contains(&idx) {
-                dsu3.union(a, b);
-            }
-        }
-        // Final labels.
-        let mut roots = vec![0_usize; n];
-        for i in 0..n {
-            roots[i] = dsu3.find(i);
-        }
-        let mut sizes = std::collections::HashMap::<usize, usize>::new();
-        for &r in &roots {
-            *sizes.entry(r).or_insert(0) += 1;
-        }
-        let mut label_of = std::collections::HashMap::<usize, f64>::new();
-        let mut next_id = 0.0_f64;
-        for (r, &sz) in &sizes {
-            if sz >= self.min_cluster_size {
-                label_of.insert(*r, next_id);
-                next_id += 1.0;
+            let a_fin = finalised.contains(&ra);
+            let b_fin = finalised.contains(&rb);
+            let sa = dsu2.size[ra];
+            let sb = dsu2.size[rb];
+
+            if a_fin && b_fin {
+                // Case (d): both already clusters, leave alone.
+                continue;
+            } else if a_fin || b_fin {
+                // Case (b): the un-finalised side's points become noise.
+                let join_root = if a_fin { rb } else { ra };
+                for i in 0..n {
+                    if dsu2.find(i) == join_root && cluster_label[i] < 0.0 {
+                        frozen_as_noise[i] = true;
+                    }
+                }
+                // Union, but preserve which root stays finalised: since DSU
+                // unions by size, the bigger side's root wins. The finalised
+                // side has its label already on its points, so the root
+                // change doesn't matter for labels. We just need `finalised`
+                // to follow the new root.
+                let old_fin_root = if a_fin { ra } else { rb };
+                dsu2.union(a, b);
+                let new_root = dsu2.find(a);
+                if new_root != old_fin_root {
+                    finalised.remove(&old_fin_root);
+                    finalised.insert(new_root);
+                }
             } else {
-                label_of.insert(*r, -1.0);
+                // Neither finalised. Check for cluster split.
+                let a_big = sa >= self.min_cluster_size;
+                let b_big = sb >= self.min_cluster_size;
+                if a_big && b_big {
+                    // Case (c): true split. Finalise both.
+                    for r in [ra, rb] {
+                        let label = next_id;
+                        next_id += 1.0;
+                        for i in 0..n {
+                            if dsu2.find(i) == r && !frozen_as_noise[i] {
+                                cluster_label[i] = label;
+                            }
+                        }
+                        finalised.insert(r);
+                    }
+                    // No union — the split edge is cut.
+                } else {
+                    // Case (a): just grow.
+                    dsu2.union(a, b);
+                }
             }
         }
-        let labels: Vec<f64> = roots.iter().map(|r| label_of[r]).collect();
-        let n_clusters = next_id as usize;
+        // Any point that never reached a cluster split but isn't frozen as
+        // noise also becomes noise — it merged into a singleton component
+        // that never grew above min_cluster_size, or there was no split at
+        // all (single-cluster dataset → all noise per HDBSCAN convention is
+        // not what we want; if no split happened, treat the largest final
+        // component as cluster 0).
+        let mut labels: Vec<f64> = cluster_label
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| if frozen_as_noise[i] { -1.0 } else { l })
+            .collect();
+        let mut n_clusters = next_id as usize;
+        if n_clusters == 0 {
+            // No split occurred. Promote the single largest component to
+            // cluster 0; everything outside it is noise.
+            let mut sizes = std::collections::HashMap::<usize, usize>::new();
+            for i in 0..n {
+                if !frozen_as_noise[i] {
+                    *sizes.entry(dsu2.find(i)).or_insert(0) += 1;
+                }
+            }
+            if let Some((&big_root, &sz)) = sizes.iter().max_by_key(|(_, s)| *s) {
+                if sz >= self.min_cluster_size {
+                    for i in 0..n {
+                        if !frozen_as_noise[i] && dsu2.find(i) == big_root {
+                            labels[i] = 0.0;
+                        } else {
+                            labels[i] = -1.0;
+                        }
+                    }
+                    n_clusters = 1;
+                }
+            }
+        }
         Ok(FittedHdbscan {
             labels: Array1::from_vec(labels),
             n_clusters,
@@ -266,8 +323,16 @@ mod tests {
     fn test_hdbscan_two_blobs_with_noise() {
         // Two dense clusters plus a wild outlier.
         let x = array![
-            [0.0_f64, 0.0], [0.1, 0.1], [-0.1, 0.2], [0.05, -0.1], [0.0, 0.15],
-            [10.0, 10.0], [10.1, 9.9], [9.8, 10.2], [10.05, 9.95], [10.0, 10.1],
+            [0.0_f64, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.2],
+            [0.05, -0.1],
+            [0.0, 0.15],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.8, 10.2],
+            [10.05, 9.95],
+            [10.0, 10.1],
             [50.0, 50.0],
         ];
         let fitted = Hdbscan::new(2, 3).fit(&x).unwrap();
@@ -281,9 +346,11 @@ mod tests {
             assert_eq!(fitted.labels[i], l5);
         }
         assert_ne!(l0, l5);
-        // (HDBSCAN-lite without full stability extraction may absorb the
-        // outlier into the nearest cluster instead of marking it noise. The
-        // primary correctness invariant is that A and B form distinct
-        // clusters; outlier-as-noise is left as a follow-up.)
+        // Outlier should be marked noise (label -1).
+        assert_eq!(
+            fitted.labels[10], -1.0,
+            "outlier should be noise, got {}",
+            fitted.labels[10]
+        );
     }
 }

@@ -8,7 +8,10 @@ const TOL: f64 = 1e-6;
 #[test]
 fn test_golden_log_loss() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "log_loss_binary").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "log_loss_binary")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_prob = json_to_array1(&case["y_prob"]);
@@ -32,7 +35,12 @@ fn test_golden_balanced_accuracy() {
         let expected = case["balanced_accuracy"].as_f64().unwrap();
 
         let actual: f64 = balanced_accuracy_score(&y_true, &y_pred).unwrap();
-        assert_close(actual, expected, TOL, &format!("{}/balanced_accuracy", name));
+        assert_close(
+            actual,
+            expected,
+            TOL,
+            &format!("{}/balanced_accuracy", name),
+        );
     }
 }
 
@@ -52,7 +60,10 @@ fn test_golden_cohen_kappa() {
 #[test]
 fn test_golden_silhouette_score() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "silhouette_well_separated").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "silhouette_well_separated")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let labels = json_to_array1(&case["labels"]);
@@ -65,7 +76,10 @@ fn test_golden_silhouette_score() {
 #[test]
 fn test_golden_median_absolute_error() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "regression_extra").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "regression_extra")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_pred = json_to_array1(&case["y_pred"]);
@@ -78,7 +92,10 @@ fn test_golden_median_absolute_error() {
 #[test]
 fn test_golden_mean_squared_log_error() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "regression_extra").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "regression_extra")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_pred = json_to_array1(&case["y_pred"]);
@@ -91,7 +108,10 @@ fn test_golden_mean_squared_log_error() {
 #[test]
 fn test_golden_roc_auc() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "extended_classification").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "extended_classification")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_scores = json_to_array1(&case["y_scores"]);
@@ -104,7 +124,10 @@ fn test_golden_roc_auc() {
 #[test]
 fn test_golden_average_precision() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "extended_classification").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "extended_classification")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_scores = json_to_array1(&case["y_scores"]);
@@ -117,7 +140,10 @@ fn test_golden_average_precision() {
 #[test]
 fn test_golden_matthews_corrcoef() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "extended_classification").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "extended_classification")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_pred = json_to_array1(&case["y_pred"]);
@@ -130,7 +156,10 @@ fn test_golden_matthews_corrcoef() {
 #[test]
 fn test_golden_explained_variance() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "regression_extended").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "regression_extended")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_pred = json_to_array1(&case["y_pred"]);
@@ -143,7 +172,10 @@ fn test_golden_explained_variance() {
 #[test]
 fn test_golden_max_error() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "regression_extended").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "regression_extended")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_pred = json_to_array1(&case["y_pred"]);
@@ -156,7 +188,10 @@ fn test_golden_max_error() {
 #[test]
 fn test_golden_mape() {
     let cases = load_golden_data("metrics_extra.json");
-    let case = cases.iter().find(|c| c["name"] == "regression_extended").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "regression_extended")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_pred = json_to_array1(&case["y_pred"]);

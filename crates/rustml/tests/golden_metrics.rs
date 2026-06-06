@@ -1,6 +1,8 @@
 mod common;
 
-use common::{assert_array1_close, assert_array2_close, assert_close, json_to_array1, load_golden_data};
+use common::{
+    assert_array1_close, assert_array2_close, assert_close, json_to_array1, load_golden_data,
+};
 use rustml::prelude::*;
 
 const TOL: f64 = 1e-10;
@@ -68,12 +70,22 @@ fn test_golden_classification_metrics() {
         // Confusion matrix
         let expected_cm = common::json_to_array2(&case["confusion_matrix"]);
         let actual_cm = confusion_matrix(&y_true, &y_pred).unwrap();
-        assert_array2_close(&actual_cm, &expected_cm, TOL, &format!("{}/confusion_matrix", name));
+        assert_array2_close(
+            &actual_cm,
+            &expected_cm,
+            TOL,
+            &format!("{}/confusion_matrix", name),
+        );
 
         // Precision
         let expected_prec = json_to_array1(&case["precision"]);
         let actual_prec = precision(&y_true, &y_pred).unwrap();
-        assert_array1_close(&actual_prec, &expected_prec, TOL, &format!("{}/precision", name));
+        assert_array1_close(
+            &actual_prec,
+            &expected_prec,
+            TOL,
+            &format!("{}/precision", name),
+        );
 
         // Recall
         let expected_rec = json_to_array1(&case["recall"]);

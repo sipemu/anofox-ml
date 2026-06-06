@@ -75,7 +75,10 @@ impl StandardScaler {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::StandardScaler::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::StandardScaler::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -86,7 +89,10 @@ impl StandardScaler {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::StandardScaler::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::StandardScaler::new(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -152,7 +158,10 @@ impl MinMaxScaler {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::MinMaxScaler::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::MinMaxScaler::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -163,7 +172,10 @@ impl MinMaxScaler {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::MinMaxScaler::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::MinMaxScaler::new(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -224,7 +236,10 @@ impl Pca {
     #[getter]
     fn explained_variance<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        Ok(PyArray1::from_owned_array(py, fitted.explained_variance().clone()))
+        Ok(PyArray1::from_owned_array(
+            py,
+            fitted.explained_variance().clone(),
+        ))
     }
 
     fn save_json(&self, path: &str) -> PyResult<()> {
@@ -235,7 +250,10 @@ impl Pca {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::Pca::new(1), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::Pca::new(1),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -246,7 +264,10 @@ impl Pca {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::Pca::new(1), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::Pca::new(1),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -314,7 +335,10 @@ impl VarianceThreshold {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::VarianceThreshold::new(0.0), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::VarianceThreshold::new(0.0),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -325,7 +349,10 @@ impl VarianceThreshold {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::VarianceThreshold::new(0.0), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::VarianceThreshold::new(0.0),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -389,7 +416,10 @@ impl MutualInformationSelector {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::MutualInformationSelector::new(1), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::MutualInformationSelector::new(1),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -400,6 +430,9 @@ impl MutualInformationSelector {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_preprocessing::MutualInformationSelector::new(1), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_preprocessing::MutualInformationSelector::new(1),
+            fitted: Some(fitted),
+        })
     }
 }

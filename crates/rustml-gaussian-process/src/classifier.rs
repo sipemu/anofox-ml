@@ -27,10 +27,20 @@ pub struct GaussianProcessClassifier {
 
 impl GaussianProcessClassifier {
     pub fn new(kernel: GpKernel) -> Self {
-        Self { kernel, max_iter: 100, tol: 1e-6 }
+        Self {
+            kernel,
+            max_iter: 100,
+            tol: 1e-6,
+        }
     }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_tol(mut self, t: f64) -> Self { self.tol = t; self }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_tol(mut self, t: f64) -> Self {
+        self.tol = t;
+        self
+    }
 }
 
 pub struct FittedGaussianProcessClassifier {
@@ -56,19 +66,39 @@ fn sigmoid(z: f64) -> f64 {
 
 fn clone_kernel(k: &GpKernel) -> GpKernel {
     match k {
-        GpKernel::Rbf { length_scale, signal_var } => GpKernel::Rbf {
-            length_scale: *length_scale, signal_var: *signal_var,
+        GpKernel::Rbf {
+            length_scale,
+            signal_var,
+        } => GpKernel::Rbf {
+            length_scale: *length_scale,
+            signal_var: *signal_var,
         },
-        GpKernel::Matern { length_scale, signal_var, nu } => GpKernel::Matern {
-            length_scale: *length_scale, signal_var: *signal_var, nu: *nu,
+        GpKernel::Matern {
+            length_scale,
+            signal_var,
+            nu,
+        } => GpKernel::Matern {
+            length_scale: *length_scale,
+            signal_var: *signal_var,
+            nu: *nu,
         },
-        GpKernel::RationalQuadratic { length_scale, signal_var, alpha } => GpKernel::RationalQuadratic {
-            length_scale: *length_scale, signal_var: *signal_var, alpha: *alpha,
+        GpKernel::RationalQuadratic {
+            length_scale,
+            signal_var,
+            alpha,
+        } => GpKernel::RationalQuadratic {
+            length_scale: *length_scale,
+            signal_var: *signal_var,
+            alpha: *alpha,
         },
-        GpKernel::White { noise_level } => GpKernel::White { noise_level: *noise_level },
+        GpKernel::White { noise_level } => GpKernel::White {
+            noise_level: *noise_level,
+        },
         GpKernel::Constant { value } => GpKernel::Constant { value: *value },
         GpKernel::Sum(a, b) => GpKernel::Sum(Box::new(clone_kernel(a)), Box::new(clone_kernel(b))),
-        GpKernel::Product(a, b) => GpKernel::Product(Box::new(clone_kernel(a)), Box::new(clone_kernel(b))),
+        GpKernel::Product(a, b) => {
+            GpKernel::Product(Box::new(clone_kernel(a)), Box::new(clone_kernel(b)))
+        }
     }
 }
 
@@ -79,7 +109,9 @@ impl Fit<f64> for GaussianProcessClassifier {
         let n = x.nrows();
         if y.len() != n {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", n, y.len()
+                "X has {} rows but y has {}",
+                n,
+                y.len()
             )));
         }
         // Determine classes.
@@ -88,13 +120,17 @@ impl Fit<f64> for GaussianProcessClassifier {
         classes.dedup();
         if classes.len() != 2 {
             return Err(RustMlError::InvalidParameter(format!(
-                "GPC expects 2 classes, found {}", classes.len()
+                "GPC expects 2 classes, found {}",
+                classes.len()
             )));
         }
         let neg = classes[0];
         let pos = classes[1];
         // Encode labels as 0 / 1.
-        let yb: Vec<f64> = y.iter().map(|v| if *v == pos { 1.0 } else { 0.0 }).collect();
+        let yb: Vec<f64> = y
+            .iter()
+            .map(|v| if *v == pos { 1.0 } else { 0.0 })
+            .collect();
 
         let k = build_gram(x, x, &self.kernel);
         let mut f = Array1::<f64>::zeros(n);
@@ -135,7 +171,9 @@ impl Fit<f64> for GaussianProcessClassifier {
             let mut k_b = Array1::<f64>::zeros(n);
             for i in 0..n {
                 let mut s = 0.0;
-                for j in 0..n { s += k[[i, j]] * b_vec[j]; }
+                for j in 0..n {
+                    s += k[[i, j]] * b_vec[j];
+                }
                 k_b[i] = s;
             }
             let ws_kb: Vec<f64> = (0..n).map(|i| ws[i] * k_b[i]).collect();
@@ -149,7 +187,9 @@ impl Fit<f64> for GaussianProcessClassifier {
             let mut new_f = Array1::<f64>::zeros(n);
             for i in 0..n {
                 let mut s = 0.0;
-                for j in 0..n { s += k[[i, j]] * a[j]; }
+                for j in 0..n {
+                    s += k[[i, j]] * a[j];
+                }
                 new_f[i] = s;
             }
 
@@ -159,11 +199,12 @@ impl Fit<f64> for GaussianProcessClassifier {
                 obj -= 0.5 * new_f[i] * a[i];
                 // log p(y_i | f_i) = y log σ(f) + (1-y) log σ(-f)
                 let lp = if yb[i] > 0.5 {
-                    -(-new_f[i]).ln_1p().min(0.0) - if new_f[i] >= 0.0 {
-                        (-new_f[i]).exp().ln_1p()
-                    } else {
-                        -new_f[i] + new_f[i].exp().ln_1p()
-                    }
+                    -(-new_f[i]).ln_1p().min(0.0)
+                        - if new_f[i] >= 0.0 {
+                            (-new_f[i]).exp().ln_1p()
+                        } else {
+                            -new_f[i] + new_f[i].exp().ln_1p()
+                        }
                 } else {
                     if new_f[i] >= 0.0 {
                         -new_f[i] - (-new_f[i]).exp().ln_1p()
@@ -176,7 +217,9 @@ impl Fit<f64> for GaussianProcessClassifier {
 
             f = new_f;
             alpha = a;
-            for i in 0..n { w_sqrt[i] = ws[i]; }
+            for i in 0..n {
+                w_sqrt[i] = ws[i];
+            }
 
             if (obj - prev_obj).abs() < self.tol {
                 break;
@@ -201,7 +244,9 @@ impl FittedGaussianProcessClassifier {
         let n_train = self.x_train.nrows();
         if x.ncols() != self.x_train.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.x_train.ncols(), x.ncols()
+                "expected {} features, got {}",
+                self.x_train.ncols(),
+                x.ncols()
             )));
         }
         let n_new = x.nrows();
@@ -244,7 +289,11 @@ impl Predict<f64> for FittedGaussianProcessClassifier {
         let proba = self.predict_proba(x)?;
         let mut out = Array1::<f64>::zeros(x.nrows());
         for i in 0..x.nrows() {
-            out[i] = if proba[[i, 1]] >= 0.5 { self.classes[1] } else { self.classes[0] };
+            out[i] = if proba[[i, 1]] >= 0.5 {
+                self.classes[1]
+            } else {
+                self.classes[0]
+            };
         }
         Ok(out)
     }
@@ -286,13 +335,21 @@ mod tests {
         }
         let x = Array2::from_shape_vec((12, 2), x_data).unwrap();
         let y = Array1::from_vec(y_data);
-        let kernel = GpKernel::Rbf { length_scale: 2.0, signal_var: 1.0 };
+        let kernel = GpKernel::Rbf {
+            length_scale: 2.0,
+            signal_var: 1.0,
+        };
         let fitted = GaussianProcessClassifier::new(kernel)
             .with_max_iter(50)
-            .fit(&x, &y).unwrap();
+            .fit(&x, &y)
+            .unwrap();
         let preds = fitted.predict(&x).unwrap();
         // Should perfectly classify a well-separated problem.
-        let correct = preds.iter().zip(y.iter()).filter(|(p, t)| (*p - *t).abs() < 0.5).count();
+        let correct = preds
+            .iter()
+            .zip(y.iter())
+            .filter(|(p, t)| (*p - *t).abs() < 0.5)
+            .count();
         assert!(correct >= 11, "got {}/{} correct", correct, y.len());
 
         // predict_proba returns valid probabilities (rows sum to 1).
@@ -323,10 +380,20 @@ pub struct MulticlassGaussianProcessClassifier {
 
 impl MulticlassGaussianProcessClassifier {
     pub fn new(kernel: GpKernel) -> Self {
-        Self { kernel, max_iter: 100, tol: 1e-6 }
+        Self {
+            kernel,
+            max_iter: 100,
+            tol: 1e-6,
+        }
     }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_tol(mut self, t: f64) -> Self { self.tol = t; self }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_tol(mut self, t: f64) -> Self {
+        self.tol = t;
+        self
+    }
 }
 
 pub struct FittedMulticlassGaussianProcessClassifier {
@@ -336,19 +403,43 @@ pub struct FittedMulticlassGaussianProcessClassifier {
 
 fn clone_kernel_local(k: &GpKernel) -> GpKernel {
     match k {
-        GpKernel::Rbf { length_scale, signal_var } => GpKernel::Rbf {
-            length_scale: *length_scale, signal_var: *signal_var,
+        GpKernel::Rbf {
+            length_scale,
+            signal_var,
+        } => GpKernel::Rbf {
+            length_scale: *length_scale,
+            signal_var: *signal_var,
         },
-        GpKernel::Matern { length_scale, signal_var, nu } => GpKernel::Matern {
-            length_scale: *length_scale, signal_var: *signal_var, nu: *nu,
+        GpKernel::Matern {
+            length_scale,
+            signal_var,
+            nu,
+        } => GpKernel::Matern {
+            length_scale: *length_scale,
+            signal_var: *signal_var,
+            nu: *nu,
         },
-        GpKernel::RationalQuadratic { length_scale, signal_var, alpha } => GpKernel::RationalQuadratic {
-            length_scale: *length_scale, signal_var: *signal_var, alpha: *alpha,
+        GpKernel::RationalQuadratic {
+            length_scale,
+            signal_var,
+            alpha,
+        } => GpKernel::RationalQuadratic {
+            length_scale: *length_scale,
+            signal_var: *signal_var,
+            alpha: *alpha,
         },
-        GpKernel::White { noise_level } => GpKernel::White { noise_level: *noise_level },
+        GpKernel::White { noise_level } => GpKernel::White {
+            noise_level: *noise_level,
+        },
         GpKernel::Constant { value } => GpKernel::Constant { value: *value },
-        GpKernel::Sum(a, b) => GpKernel::Sum(Box::new(clone_kernel_local(a)), Box::new(clone_kernel_local(b))),
-        GpKernel::Product(a, b) => GpKernel::Product(Box::new(clone_kernel_local(a)), Box::new(clone_kernel_local(b))),
+        GpKernel::Sum(a, b) => GpKernel::Sum(
+            Box::new(clone_kernel_local(a)),
+            Box::new(clone_kernel_local(b)),
+        ),
+        GpKernel::Product(a, b) => GpKernel::Product(
+            Box::new(clone_kernel_local(a)),
+            Box::new(clone_kernel_local(b)),
+        ),
     }
 }
 
@@ -361,7 +452,8 @@ impl Fit<f64> for MulticlassGaussianProcessClassifier {
         classes.dedup();
         if classes.len() < 2 {
             return Err(RustMlError::InvalidParameter(format!(
-                "multi-class GPC needs ≥2 classes, found {}", classes.len()
+                "multi-class GPC needs ≥2 classes, found {}",
+                classes.len()
             )));
         }
         let mut binary = Vec::with_capacity(classes.len());
@@ -437,20 +529,33 @@ mod multiclass_tests {
         let mut y_data = Vec::new();
         for i in 0..n_per {
             let f = i as f64 * 0.1;
-            x_data.extend([f, f]); y_data.push(0.0);
-            x_data.extend([5.0 + f, f]); y_data.push(1.0);
-            x_data.extend([f, 5.0 + f]); y_data.push(2.0);
+            x_data.extend([f, f]);
+            y_data.push(0.0);
+            x_data.extend([5.0 + f, f]);
+            y_data.push(1.0);
+            x_data.extend([f, 5.0 + f]);
+            y_data.push(2.0);
         }
         let x = Array2::from_shape_vec((n_per * 3, 2), x_data).unwrap();
         let y = Array1::from_vec(y_data);
         let mc = MulticlassGaussianProcessClassifier::new(GpKernel::Rbf {
-            length_scale: 2.0, signal_var: 1.0,
-        }).with_max_iter(50);
+            length_scale: 2.0,
+            signal_var: 1.0,
+        })
+        .with_max_iter(50);
         let fitted = mc.fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();
-        let correct = preds.iter().zip(y.iter())
-            .filter(|(p, t)| (*p - *t).abs() < 0.5).count();
-        assert!(correct >= (n_per * 3) * 9 / 10, "got {}/{} correct", correct, n_per * 3);
+        let correct = preds
+            .iter()
+            .zip(y.iter())
+            .filter(|(p, t)| (*p - *t).abs() < 0.5)
+            .count();
+        assert!(
+            correct >= (n_per * 3) * 9 / 10,
+            "got {}/{} correct",
+            correct,
+            n_per * 3
+        );
         let p = fitted.predict_proba(&x).unwrap();
         for i in 0..(n_per * 3) {
             let s: f64 = (0..3).map(|c| p[[i, c]]).sum();

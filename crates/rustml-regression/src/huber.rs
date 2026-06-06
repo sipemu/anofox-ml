@@ -221,7 +221,10 @@ mod tests {
         let x = Array2::from_shape_vec((50, 1), (1..=50).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((1..=50).map(|i| 1.0 + 3.0 * i as f64).collect());
 
-        let low = HuberRegressor::new().with_alpha(0.0001).fit(&x, &y).unwrap();
+        let low = HuberRegressor::new()
+            .with_alpha(0.0001)
+            .fit(&x, &y)
+            .unwrap();
         let high = HuberRegressor::new().with_alpha(100.0).fit(&x, &y).unwrap();
 
         assert!(

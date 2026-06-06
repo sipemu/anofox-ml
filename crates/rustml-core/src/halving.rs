@@ -44,7 +44,8 @@ pub fn halving_grid_search_cv<F: Float>(
     let n = x.nrows();
     if min_resources < 2 || min_resources > n {
         return Err(RustMlError::InvalidParameter(format!(
-            "min_resources must be in 2..={}", n
+            "min_resources must be in 2..={}",
+            n
         )));
     }
 
@@ -174,17 +175,24 @@ mod tests {
         };
 
         let scorer = |yt: &Array1<f64>, yp: &Array1<f64>| -> Result<f64> {
-            let mse: f64 = yt.iter().zip(yp.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>()
+            let mse: f64 = yt
+                .iter()
+                .zip(yp.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
                 / yt.len() as f64;
             Ok(-mse)
         };
         let result = halving_random_search_cv(&x, &y, 10, 2, 8, 42, factory, scorer).unwrap();
         // The winning candidate's slope should be close to 2.0.
-        let winning_seed = 42_u64.wrapping_add(result.best_params_index as u64).wrapping_add(1);
+        let winning_seed = 42_u64
+            .wrapping_add(result.best_params_index as u64)
+            .wrapping_add(1);
         let winning_slope = 0.5 + (winning_seed as f64 % 30.0) * 0.1;
         assert!(
             (winning_slope - 2.0).abs() < 0.5,
-            "winning slope={} too far from true=2.0", winning_slope
+            "winning slope={} too far from true=2.0",
+            winning_slope
         );
     }
 
@@ -195,21 +203,21 @@ mod tests {
 
         // Two candidates: one predicts true line, the other predicts zeros.
         let good: Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>> =
-            Box::new(|_xt, _yt, xv| {
-                Ok(xv.column(0).mapv(|v| 2.0 * v + 3.0))
-            });
+            Box::new(|_xt, _yt, xv| Ok(xv.column(0).mapv(|v| 2.0 * v + 3.0)));
         let bad: Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>> =
             Box::new(|_xt, _yt, xv| Ok(Array1::<f64>::zeros(xv.nrows())));
 
         let candidates = vec![good, bad];
-        let result = halving_grid_search_cv(
-            &x, &y, 2, 8, 0, &candidates,
-            |yt, yp| {
-                let mse: f64 = yt.iter().zip(yp.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>()
-                    / yt.len() as f64;
-                Ok(-mse)
-            },
-        ).unwrap();
+        let result = halving_grid_search_cv(&x, &y, 2, 8, 0, &candidates, |yt, yp| {
+            let mse: f64 = yt
+                .iter()
+                .zip(yp.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                / yt.len() as f64;
+            Ok(-mse)
+        })
+        .unwrap();
         assert_eq!(result.best_params_index, 0);
         let _ = array![1.0_f64];
     }

@@ -6,7 +6,11 @@ use common::{json_to_array1, json_to_array2, load_golden_data};
 use rustml::prelude::*;
 
 fn accuracy(p: &ndarray::Array1<f64>, t: &ndarray::Array1<f64>) -> f64 {
-    let correct = p.iter().zip(t.iter()).filter(|(a, b)| (*a - *b).abs() < 0.5).count();
+    let correct = p
+        .iter()
+        .zip(t.iter())
+        .filter(|(a, b)| (*a - *b).abs() < 0.5)
+        .count();
     correct as f64 / p.len() as f64
 }
 

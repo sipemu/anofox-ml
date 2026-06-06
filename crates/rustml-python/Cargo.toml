@@ -21,5 +21,8 @@ rustml-naive-bayes = { path = "../rustml-naive-bayes" }
 rustml-metrics = { path = "../rustml-metrics" }
 rustml-svm = { path = "../rustml-svm" }
 rustml-neural-networks = { path = "../rustml-neural-networks" }
+rustml-manifold = { path = "../rustml-manifold" }
+rustml-gaussian-process = { path = "../rustml-gaussian-process" }
+rustml-discriminant = { path = "../rustml-discriminant" }
 serde_json = { workspace = true }
 bincode = { workspace = true }

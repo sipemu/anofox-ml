@@ -32,7 +32,10 @@ fn json_to_array2_with_nan(val: &serde_json::Value) -> Array2<f64> {
 #[test]
 fn test_golden_lgbm_edge_constant_y() {
     let cases = load_golden_data("lgbm_edge_cases.json");
-    let case = cases.iter().find(|c| c["name"] == "edge_constant_y").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "edge_constant_y")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -89,7 +92,10 @@ fn test_golden_lgbm_edge_tiny_lr() {
 #[test]
 fn test_golden_lgbm_edge_extreme_l2() {
     let cases = load_golden_data("lgbm_edge_cases.json");
-    let case = cases.iter().find(|c| c["name"] == "edge_extreme_l2").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "edge_extreme_l2")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -118,7 +124,10 @@ fn test_golden_lgbm_edge_extreme_l2() {
 #[test]
 fn test_golden_lgbm_edge_many_classes() {
     let cases = load_golden_data("lgbm_edge_cases.json");
-    let case = cases.iter().find(|c| c["name"] == "edge_many_classes").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "edge_many_classes")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -136,11 +145,7 @@ fn test_golden_lgbm_edge_many_classes() {
     assert_eq!(fitted.classes().len(), n_classes);
 
     let preds = fitted.predict(&x).unwrap();
-    let correct: usize = preds
-        .iter()
-        .zip(y.iter())
-        .filter(|(&p, &t)| p == t)
-        .count();
+    let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
     let our_acc = correct as f64 / x.nrows() as f64;
 
     assert!(
@@ -154,7 +159,10 @@ fn test_golden_lgbm_edge_many_classes() {
 #[test]
 fn test_golden_lgbm_edge_nan_in_test_only() {
     let cases = load_golden_data("lgbm_edge_cases.json");
-    let case = cases.iter().find(|c| c["name"] == "edge_nan_in_test_only").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "edge_nan_in_test_only")
+        .unwrap();
 
     let x_train = json_to_array2(&case["X_train"]);
     let y_train = json_to_array1(&case["y_train"]);
@@ -177,7 +185,10 @@ fn test_golden_lgbm_edge_nan_in_test_only() {
 #[test]
 fn test_golden_lgbm_edge_duplicate_rows() {
     let cases = load_golden_data("lgbm_edge_cases.json");
-    let case = cases.iter().find(|c| c["name"] == "edge_duplicate_rows").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "edge_duplicate_rows")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -192,11 +203,7 @@ fn test_golden_lgbm_edge_duplicate_rows() {
         .unwrap();
 
     let preds = fitted.predict(&x).unwrap();
-    let correct: usize = preds
-        .iter()
-        .zip(y.iter())
-        .filter(|(&p, &t)| p == t)
-        .count();
+    let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
     let our_acc = correct as f64 / y.len() as f64;
 
     assert!(
@@ -210,12 +217,19 @@ fn test_golden_lgbm_edge_duplicate_rows() {
 #[test]
 fn test_golden_lgbm_edge_constant_feature_zero_importance() {
     let cases = load_golden_data("lgbm_edge_cases.json");
-    let case = cases.iter().find(|c| c["name"] == "edge_constant_feature").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "edge_constant_feature")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
     let lgbm_imp: Vec<f64> = case["feature_importances"]
-        .as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
 
     let fitted = LgbmRegressor::new()
         .with_n_estimators(20)

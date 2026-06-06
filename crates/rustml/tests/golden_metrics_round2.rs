@@ -8,7 +8,10 @@ const TOL: f64 = 1e-6;
 #[test]
 fn test_golden_adjusted_rand_score() {
     let cases = load_golden_data("metrics_round2.json");
-    let case = cases.iter().find(|c| c["name"] == "adjusted_rand_score").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "adjusted_rand_score")
+        .unwrap();
 
     let labels_true = json_to_array1(&case["labels_true"]);
     let labels_pred = json_to_array1(&case["labels_pred"]);
@@ -21,7 +24,10 @@ fn test_golden_adjusted_rand_score() {
 #[test]
 fn test_golden_normalized_mutual_info_score() {
     let cases = load_golden_data("metrics_round2.json");
-    let case = cases.iter().find(|c| c["name"] == "normalized_mutual_info_score").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "normalized_mutual_info_score")
+        .unwrap();
 
     let labels_true = json_to_array1(&case["labels_true"]);
     let labels_pred = json_to_array1(&case["labels_pred"]);
@@ -35,7 +41,10 @@ fn test_golden_normalized_mutual_info_score() {
 #[test]
 fn test_golden_brier_score_loss() {
     let cases = load_golden_data("metrics_round2.json");
-    let case = cases.iter().find(|c| c["name"] == "brier_score_loss").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "brier_score_loss")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_prob = json_to_array1(&case["y_prob"]);
@@ -52,7 +61,7 @@ fn test_golden_roc_curve_shape() {
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_score = json_to_array1(&case["y_score"]);
-    let expected_n = case["n_points"].as_u64().unwrap() as usize;
+    let _expected_n = case["n_points"].as_u64().unwrap() as usize;
 
     let (fpr, tpr, _thresholds) = roc_curve(&y_true, &y_score).unwrap();
 
@@ -64,14 +73,21 @@ fn test_golden_roc_curve_shape() {
 
     // FPR should be monotonically non-decreasing
     for i in 1..fpr.len() {
-        assert!(fpr[i] >= fpr[i-1], "fpr should be non-decreasing at {}", i);
+        assert!(
+            fpr[i] >= fpr[i - 1],
+            "fpr should be non-decreasing at {}",
+            i
+        );
     }
 }
 
 #[test]
 fn test_golden_precision_recall_curve_shape() {
     let cases = load_golden_data("metrics_round2.json");
-    let case = cases.iter().find(|c| c["name"] == "precision_recall_curve").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "precision_recall_curve")
+        .unwrap();
 
     let y_true = json_to_array1(&case["y_true"]);
     let y_score = json_to_array1(&case["y_score"]);

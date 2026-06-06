@@ -324,7 +324,11 @@ mod tests {
     fn test_accuracy_half() {
         let y_true = array![0.0, 1.0, 2.0, 1.0];
         let y_pred = array![0.0, 2.0, 2.0, 0.0];
-        assert_abs_diff_eq!(accuracy_score(&y_true, &y_pred).unwrap(), 0.5, epsilon = 1e-10);
+        assert_abs_diff_eq!(
+            accuracy_score(&y_true, &y_pred).unwrap(),
+            0.5,
+            epsilon = 1e-10
+        );
     }
 
     #[test]
@@ -586,8 +590,8 @@ mod tests {
 
     mod prop_tests {
         use super::*;
-        use proptest::prelude::*;
         use proptest::collection::vec;
+        use proptest::prelude::*;
 
         proptest! {
             #[test]

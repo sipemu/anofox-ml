@@ -122,7 +122,13 @@ mod tests {
 
     #[test]
     fn test_inverse_transform_roundtrip() {
-        let labels = vec![s("apple"), s("banana"), s("cherry"), s("banana"), s("apple")];
+        let labels = vec![
+            s("apple"),
+            s("banana"),
+            s("cherry"),
+            s("banana"),
+            s("apple"),
+        ];
         let encoder = LabelEncoder::new();
         let fitted = encoder.fit(&labels).unwrap();
         let encoded = fitted.transform(&labels).unwrap();

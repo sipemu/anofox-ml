@@ -20,7 +20,10 @@ pub struct Isomap {
 
 impl Isomap {
     pub fn new(n_components: usize, n_neighbors: usize) -> Self {
-        Self { n_components, n_neighbors }
+        Self {
+            n_components,
+            n_neighbors,
+        }
     }
 }
 
@@ -31,7 +34,11 @@ pub struct FittedIsomap {
 }
 
 fn euclid(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f64>()
+        .sqrt()
 }
 
 impl FitUnsupervised<f64> for Isomap {
@@ -89,7 +96,9 @@ impl FitUnsupervised<f64> for Isomap {
         let mut d = g;
         for kk in 0..n {
             for i in 0..n {
-                if !d[i][kk].is_finite() { continue; }
+                if !d[i][kk].is_finite() {
+                    continue;
+                }
                 for j in 0..n {
                     let alt = d[i][kk] + d[kk][j];
                     if alt < d[i][j] {
@@ -103,7 +112,11 @@ impl FitUnsupervised<f64> for Isomap {
         let mut d2 = vec![vec![0.0_f64; n]; n];
         for i in 0..n {
             for j in 0..n {
-                d2[i][j] = if d[i][j].is_finite() { d[i][j] * d[i][j] } else { 0.0 };
+                d2[i][j] = if d[i][j].is_finite() {
+                    d[i][j] * d[i][j]
+                } else {
+                    0.0
+                };
             }
         }
         let mut row_mean = vec![0.0_f64; n];
@@ -117,8 +130,12 @@ impl FitUnsupervised<f64> for Isomap {
             }
         }
         let n_f = n as f64;
-        for v in &mut row_mean { *v /= n_f; }
-        for v in &mut col_mean { *v /= n_f; }
+        for v in &mut row_mean {
+            *v /= n_f;
+        }
+        for v in &mut col_mean {
+            *v /= n_f;
+        }
         let global = global / (n_f * n_f);
 
         let mut b = Array2::<f64>::zeros((n, n));
@@ -143,7 +160,10 @@ impl FitUnsupervised<f64> for Isomap {
                 embedding[[i, c]] = v[(i, src)] * scale;
             }
         }
-        Ok(FittedIsomap { embedding, eigenvalues })
+        Ok(FittedIsomap {
+            embedding,
+            eigenvalues,
+        })
     }
 }
 
@@ -175,9 +195,15 @@ mod tests {
     #[test]
     fn test_isomap_runs_2d_to_2d() {
         let x = array![
-            [0.0_f64, 0.0], [1.0, 0.0], [2.0, 0.0],
-            [0.0, 1.0], [1.0, 1.0], [2.0, 1.0],
-            [0.0, 2.0], [1.0, 2.0], [2.0, 2.0],
+            [0.0_f64, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [0.0, 2.0],
+            [1.0, 2.0],
+            [2.0, 2.0],
         ];
         let fitted = Isomap::new(2, 3).fit(&x).unwrap();
         assert_eq!(fitted.embedding.shape(), &[9, 2]);

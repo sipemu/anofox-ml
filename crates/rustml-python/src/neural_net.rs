@@ -82,7 +82,10 @@ impl MlpClassifier {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neural_networks::MlpClassifier::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neural_networks::MlpClassifier::default(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -93,7 +96,10 @@ impl MlpClassifier {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neural_networks::MlpClassifier::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neural_networks::MlpClassifier::default(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -164,7 +170,10 @@ impl MlpRegressor {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neural_networks::MlpRegressor::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neural_networks::MlpRegressor::default(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -175,6 +184,9 @@ impl MlpRegressor {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_neural_networks::MlpRegressor::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_neural_networks::MlpRegressor::default(),
+            fitted: Some(fitted),
+        })
     }
 }

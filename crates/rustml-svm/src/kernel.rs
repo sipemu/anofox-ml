@@ -33,13 +33,10 @@ impl SvmKernel {
             SvmKernel::Linear => x.dot(y),
             SvmKernel::Rbf { gamma } => {
                 let gamma_f = F::from_f64(*gamma).unwrap();
-                let sq_dist = x
-                    .iter()
-                    .zip(y.iter())
-                    .fold(F::zero(), |acc, (&a, &b)| {
-                        let d = a - b;
-                        acc + d * d
-                    });
+                let sq_dist = x.iter().zip(y.iter()).fold(F::zero(), |acc, (&a, &b)| {
+                    let d = a - b;
+                    acc + d * d
+                });
                 (-gamma_f * sq_dist).exp()
             }
             SvmKernel::Polynomial { degree, coef0 } => {

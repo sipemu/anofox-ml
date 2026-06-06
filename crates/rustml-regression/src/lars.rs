@@ -16,11 +16,19 @@ pub struct Lars {
 
 impl Lars {
     pub fn new(n_nonzero_coefs: usize) -> Self {
-        Self { n_nonzero_coefs, fit_intercept: true, lasso: false }
+        Self {
+            n_nonzero_coefs,
+            fit_intercept: true,
+            lasso: false,
+        }
     }
 
     pub fn lasso(n_nonzero_coefs: usize) -> Self {
-        Self { n_nonzero_coefs, fit_intercept: true, lasso: true }
+        Self {
+            n_nonzero_coefs,
+            fit_intercept: true,
+            lasso: true,
+        }
     }
 }
 
@@ -33,7 +41,13 @@ pub struct FittedLars {
 }
 
 fn sgn(x: f64) -> f64 {
-    if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
 }
 
 impl Fit<f64> for Lars {
@@ -42,7 +56,9 @@ impl Fit<f64> for Lars {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         let n = x.nrows();
@@ -268,7 +284,9 @@ impl Predict<f64> for FittedLars {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
@@ -294,7 +312,11 @@ pub struct LassoLarsIC {
 
 impl LassoLarsIC {
     pub fn new(criterion: IcCriterion) -> Self {
-        Self { criterion, max_features: None, fit_intercept: true }
+        Self {
+            criterion,
+            max_features: None,
+            fit_intercept: true,
+        }
     }
 }
 
@@ -328,11 +350,7 @@ impl Fit<f64> for LassoLarsIC {
                 .zip(y.iter())
                 .map(|(p, t)| (t - p).powi(2))
                 .sum();
-            let nnz = fitted
-                .coef
-                .iter()
-                .filter(|v| v.abs() > 1e-12)
-                .count() as f64;
+            let nnz = fitted.coef.iter().filter(|v| v.abs() > 1e-12).count() as f64;
             // sklearn's formula (matching `linear_model.LassoLarsIC.criterion_`):
             //   AIC = n * log(rss / n) + 2 * df
             //   BIC = n * log(rss / n) + log(n) * df
@@ -431,8 +449,7 @@ mod tests {
             .map(|(i, v)| (i, v.abs()))
             .collect();
         order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        let top: std::collections::HashSet<usize> =
-            order.iter().take(3).map(|(i, _)| *i).collect();
+        let top: std::collections::HashSet<usize> = order.iter().take(3).map(|(i, _)| *i).collect();
         for j in [0_usize, 2, 4] {
             assert!(top.contains(&j), "feature {j} not in top-3: {:?}", top);
         }

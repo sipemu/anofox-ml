@@ -18,7 +18,7 @@ pub mod tsne;
 
 pub use isomap::{FittedIsomap, Isomap};
 pub use lle::{FittedLocallyLinearEmbedding, LocallyLinearEmbedding};
-pub use tsne::{FittedTSne, TSne};
+pub use tsne::{FittedTSne, TSne, TSneMethod};
 
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
@@ -121,7 +121,10 @@ impl FitUnsupervised<f64> for ClassicalMds {
                 embedding[[i, c]] = v[(i, src)] * scale;
             }
         }
-        Ok(FittedClassicalMds { embedding, eigenvalues })
+        Ok(FittedClassicalMds {
+            embedding,
+            eigenvalues,
+        })
     }
 }
 
@@ -134,7 +137,11 @@ mod tests {
     fn test_mds_recovers_planar_distances() {
         // Points in 2D — MDS to 2 components should preserve pairwise distances.
         let x = array![
-            [0.0_f64, 0.0], [1.0, 0.0], [0.0, 1.0], [2.0, 2.0], [-1.0, 3.0],
+            [0.0_f64, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [2.0, 2.0],
+            [-1.0, 3.0],
         ];
         let mds = ClassicalMds::new(2);
         let fitted = mds.fit(&x).unwrap();
@@ -146,7 +153,8 @@ mod tests {
                 assert!(
                     (orig[[i, j]] - emb[[i, j]]).abs() < 1e-6,
                     "dist[{i},{j}]: orig {} vs emb {}",
-                    orig[[i, j]], emb[[i, j]]
+                    orig[[i, j]],
+                    emb[[i, j]]
                 );
             }
         }

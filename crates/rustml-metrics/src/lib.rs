@@ -45,5 +45,7 @@ pub use clustering::silhouette_score;
 pub use clustering_extra::{adjusted_rand_score, normalized_mutual_info_score};
 pub use curves::{brier_score_loss, precision_recall_curve, roc_curve};
 pub use regression::{mae, mse, r2_score};
-pub use regression_extended::{explained_variance_score, max_error, mean_absolute_percentage_error};
+pub use regression_extended::{
+    explained_variance_score, max_error, mean_absolute_percentage_error,
+};
 pub use regression_extra::{mean_squared_log_error, median_absolute_error};

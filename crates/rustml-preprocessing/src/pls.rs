@@ -16,7 +16,11 @@ pub struct PlsRegression {
 
 impl PlsRegression {
     pub fn new(n_components: usize) -> Self {
-        Self { n_components, max_iter: 500, tol: 1e-6 }
+        Self {
+            n_components,
+            max_iter: 500,
+            tol: 1e-6,
+        }
     }
 }
 
@@ -37,14 +41,17 @@ impl Fit<f64> for PlsRegression {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         let n = x.nrows();
         let d = x.ncols();
         if self.n_components == 0 || self.n_components > d.min(n) {
             return Err(RustMlError::InvalidParameter(format!(
-                "n_components must be in 1..={}", d.min(n)
+                "n_components must be in 1..={}",
+                d.min(n)
             )));
         }
 
@@ -228,7 +235,9 @@ impl Predict<f64> for FittedPlsRegression {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -262,7 +271,11 @@ mod tests {
         let y: Array1<f64> = x.column(0).mapv(|v| 2.0 * v) + x.column(1).mapv(|v| 1.5 * v);
         let fitted = PlsRegression::new(2).fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();
-        let rss: f64 = preds.iter().zip(y.iter()).map(|(p, t)| (t - p).powi(2)).sum();
+        let rss: f64 = preds
+            .iter()
+            .zip(y.iter())
+            .map(|(p, t)| (t - p).powi(2))
+            .sum();
         let mean = y.iter().sum::<f64>() / y.len() as f64;
         let tss: f64 = y.iter().map(|t| (t - mean).powi(2)).sum();
         let r2 = 1.0 - rss / tss;

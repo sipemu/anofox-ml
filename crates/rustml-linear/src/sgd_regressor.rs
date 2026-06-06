@@ -218,12 +218,15 @@ impl Fit<f64> for SgdRegressor {
                 // Update weights
                 if dloss != 0.0 {
                     for j in 0..p {
-                        w[j] -= eta * (dloss * x[[i, j]] + penalty_gradient(w[j], self.alpha, self.penalty, self.l1_ratio));
+                        w[j] -= eta
+                            * (dloss * x[[i, j]]
+                                + penalty_gradient(w[j], self.alpha, self.penalty, self.l1_ratio));
                     }
                     b -= eta * dloss;
                 } else {
                     for j in 0..p {
-                        w[j] -= eta * penalty_gradient(w[j], self.alpha, self.penalty, self.l1_ratio);
+                        w[j] -=
+                            eta * penalty_gradient(w[j], self.alpha, self.penalty, self.l1_ratio);
                     }
                 }
             }

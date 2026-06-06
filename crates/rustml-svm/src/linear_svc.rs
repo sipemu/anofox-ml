@@ -64,9 +64,7 @@ impl LinearSvc {
     /// Validate parameters before fitting.
     fn validate(&self) -> Result<()> {
         if self.c <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "C must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("C must be positive".into()));
         }
         if self.max_iter == 0 {
             return Err(RustMlError::InvalidParameter(
@@ -74,9 +72,7 @@ impl LinearSvc {
             ));
         }
         if self.tol <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "tol must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
         Ok(())
     }
@@ -308,11 +304,7 @@ fn fit_binary_linear_svc<F: Float>(
     let mut w = Array1::<F>::zeros(n_features);
     let mut bias = F::zero();
 
-    let sq_norms: Vec<F> = x
-        .rows()
-        .into_iter()
-        .map(|row| row.dot(&row))
-        .collect();
+    let sq_norms: Vec<F> = x.rows().into_iter().map(|row| row.dot(&row)).collect();
 
     let mut rng = StdRng::seed_from_u64(seed);
     let mut indices: Vec<usize> = (0..n_samples).collect();
@@ -321,8 +313,21 @@ fn fit_binary_linear_svc<F: Float>(
         indices.shuffle(&mut rng);
 
         let max_change = indices.iter().fold(F::zero(), |mc, &i| {
-            let change = apply_cd_update(i, &mut alpha, &mut w, &mut bias, x.row(i), y[i], sq_norms[i], c);
-            if change > mc { change } else { mc }
+            let change = apply_cd_update(
+                i,
+                &mut alpha,
+                &mut w,
+                &mut bias,
+                x.row(i),
+                y[i],
+                sq_norms[i],
+                c,
+            );
+            if change > mc {
+                change
+            } else {
+                mc
+            }
         });
 
         if max_change < tol {
@@ -679,10 +684,7 @@ mod tests {
 
         /// Generate well-separated 2D binary classification data using
         /// a deterministic hash-based noise generator.
-        fn make_well_separated_binary(
-            n_per_class: usize,
-            seed: u64,
-        ) -> (Array2<f64>, Array1<f64>) {
+        fn make_well_separated_binary(n_per_class: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
 

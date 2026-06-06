@@ -1,5 +1,8 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Fit, FitWeighted, Float, Predict, PredictLogProba, PredictProba, Result, RustMlError};
+use rustml_core::{
+    Fit, FitWeighted, Float, PartialFit, Predict, PredictLogProba, PredictProba, Result,
+    RustMlError,
+};
 
 /// Gaussian Naive Bayes classifier parameters (unfitted state).
 ///
@@ -48,6 +51,14 @@ pub struct FittedGaussianNB<F: Float> {
     theta: Array2<F>,
     /// Variance of each feature per class + var_smoothing, shape `(n_classes, n_features)`.
     sigma: Array2<F>,
+    /// Per-class cumulative observation count (weighted). Populated by
+    /// `partial_fit`; for a one-shot `fit` it equals `class_prior * n`.
+    #[serde(default = "default_class_count")]
+    class_count: Vec<F>,
+}
+
+fn default_class_count<F: Float>() -> Vec<F> {
+    Vec::new()
 }
 
 impl<F: Float> FittedGaussianNB<F> {
@@ -84,16 +95,22 @@ impl<F: Float> FitWeighted<F> for GaussianNB {
         if let Some(w) = sample_weight {
             if w.len() != y.len() {
                 return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight len {} != y len {}", w.len(), y.len()
+                    "sample_weight len {} != y len {}",
+                    w.len(),
+                    y.len()
                 )));
             }
         }
         if x.is_empty() || y.is_empty() {
-            return Err(RustMlError::EmptyInput("training data must not be empty".into()));
+            return Err(RustMlError::EmptyInput(
+                "training data must not be empty".into(),
+            ));
         }
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
 
@@ -129,7 +146,11 @@ impl<F: Float> FitWeighted<F> for GaussianNB {
                     wmean[j] = wmean[j] + wi * x[[i, j]];
                 }
             }
-            let wsum_safe = if wsum == F::zero() { F::from_f64(1e-12).unwrap() } else { wsum };
+            let wsum_safe = if wsum == F::zero() {
+                F::from_f64(1e-12).unwrap()
+            } else {
+                wsum
+            };
             for j in 0..n_features {
                 wmean[j] = wmean[j] / wsum_safe;
             }
@@ -153,7 +174,14 @@ impl<F: Float> FitWeighted<F> for GaussianNB {
             class_prior.push(wsum / total_w);
         }
 
-        Ok(FittedGaussianNB { class_labels, class_prior, theta, sigma })
+        let class_count: Vec<F> = class_prior.iter().map(|p| *p * total_w).collect();
+        Ok(FittedGaussianNB {
+            class_labels,
+            class_prior,
+            theta,
+            sigma,
+            class_count,
+        })
     }
 }
 
@@ -214,11 +242,138 @@ impl<F: Float> Fit<F> for GaussianNB {
             sigma.row_mut(ci).assign(&(var + smoothing));
         }
 
+        let class_count: Vec<F> = class_prior.iter().map(|p| *p * n_samples).collect();
         Ok(FittedGaussianNB {
             class_labels,
             class_prior,
             theta,
             sigma,
+            class_count,
+        })
+    }
+}
+
+impl<F: Float> PartialFit<F> for GaussianNB {
+    type Fitted = FittedGaussianNB<F>;
+
+    fn partial_fit(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        classes: Option<&[F]>,
+    ) -> Result<Self::Fitted> {
+        if x.is_empty() || y.is_empty() {
+            return Err(RustMlError::EmptyInput(
+                "training data must not be empty".into(),
+            ));
+        }
+        if x.nrows() != y.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
+            )));
+        }
+        let smoothing = F::from_f64(self.var_smoothing).unwrap();
+        let n_features = x.ncols();
+        let eps = F::from_f64(1e-12).unwrap();
+
+        // Determine the global class set. On the first call (state == None)
+        // either honour `classes` or derive from the batch. On subsequent
+        // calls reuse `state.class_labels`.
+        let (class_labels, mut counts, mut means, mut vars) = if let Some(s) = state {
+            // Recover raw (unsmoothed) variance from sigma.
+            let mut raw_var = s.sigma.clone();
+            for v in raw_var.iter_mut() {
+                *v = *v - smoothing;
+                if *v < F::zero() {
+                    *v = F::zero();
+                }
+            }
+            (s.class_labels, s.class_count, s.theta, raw_var)
+        } else {
+            let labels: Vec<F> = if let Some(c) = classes {
+                c.to_vec()
+            } else {
+                let mut v = y.to_vec();
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                v.dedup_by(|a, b| (*a - *b).abs() < eps);
+                v
+            };
+            let n_classes = labels.len();
+            let counts = vec![F::zero(); n_classes];
+            let means = Array2::<F>::zeros((n_classes, n_features));
+            let vars = Array2::<F>::zeros((n_classes, n_features));
+            (labels, counts, means, vars)
+        };
+
+        // Process the batch class-by-class with Chan-Golub-LeVeque parallel
+        // variance combination: stable for streamed updates.
+        for (ci, &label) in class_labels.iter().enumerate() {
+            let mask: Vec<usize> = y
+                .iter()
+                .enumerate()
+                .filter(|(_, &v)| (v - label).abs() < eps)
+                .map(|(i, _)| i)
+                .collect();
+            if mask.is_empty() {
+                continue;
+            }
+            let batch_count = F::from_usize(mask.len()).unwrap();
+            let batch_x = x.select(Axis(0), &mask);
+            let batch_mean = batch_x.mean_axis(Axis(0)).unwrap();
+            let batch_diff = &batch_x - &batch_mean;
+            let batch_var = batch_diff.mapv(|v| v * v).mean_axis(Axis(0)).unwrap();
+
+            let old_count = counts[ci];
+            let new_count = old_count + batch_count;
+
+            if old_count == F::zero() {
+                for j in 0..n_features {
+                    means[[ci, j]] = batch_mean[j];
+                    vars[[ci, j]] = batch_var[j];
+                }
+            } else {
+                for j in 0..n_features {
+                    let m_old = means[[ci, j]];
+                    let m_batch = batch_mean[j];
+                    let v_old = vars[[ci, j]];
+                    let v_batch = batch_var[j];
+                    let m_new = (old_count * m_old + batch_count * m_batch) / new_count;
+                    // Parallel variance: var_new = (n_old*v_old + n_batch*v_batch
+                    //                              + n_old*(m_old - m_new)² + n_batch*(m_batch - m_new)²) / n_new
+                    let d_old = m_old - m_new;
+                    let d_batch = m_batch - m_new;
+                    let v_new = (old_count * v_old
+                        + batch_count * v_batch
+                        + old_count * d_old * d_old
+                        + batch_count * d_batch * d_batch)
+                        / new_count;
+                    means[[ci, j]] = m_new;
+                    vars[[ci, j]] = v_new;
+                }
+            }
+            counts[ci] = new_count;
+        }
+
+        // Final prior and smoothed sigma.
+        let total: F = counts.iter().fold(F::zero(), |a, b| a + *b);
+        let class_prior: Vec<F> = if total > F::zero() {
+            counts.iter().map(|c| *c / total).collect()
+        } else {
+            vec![F::zero(); counts.len()]
+        };
+        let mut sigma = vars;
+        for v in sigma.iter_mut() {
+            *v = *v + smoothing;
+        }
+        Ok(FittedGaussianNB {
+            class_labels,
+            class_prior,
+            theta: means,
+            sigma,
+            class_count: counts,
         })
     }
 }
@@ -253,9 +408,8 @@ impl<F: Float> Predict<F> for FittedGaussianNB<F> {
                     let mu = self.theta[[ci, j]];
                     let var = self.sigma[[ci, j]];
                     let diff = sample[j] - mu;
-                    log_likelihood = log_likelihood
-                        - half * (two_pi * var).ln()
-                        - half * diff * diff / var;
+                    log_likelihood =
+                        log_likelihood - half * (two_pi * var).ln() - half * diff * diff / var;
                 }
 
                 let log_posterior = log_prior + log_likelihood;
@@ -276,7 +430,9 @@ impl<F: Float> PredictProba<F> for FittedGaussianNB<F> {
     fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.theta.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.theta.ncols(), x.ncols()
+                "expected {} features, got {}",
+                self.theta.ncols(),
+                x.ncols()
             )));
         }
         let two = F::from_f64(2.0).unwrap();
@@ -297,7 +453,9 @@ impl<F: Float> PredictProba<F> for FittedGaussianNB<F> {
                     log_post = log_post - half * (two_pi * var).ln() - half * diff * diff / var;
                 }
                 logs[ci] = log_post;
-                if log_post > max_l { max_l = log_post; }
+                if log_post > max_l {
+                    max_l = log_post;
+                }
             }
             let mut z = F::zero();
             for ci in 0..n_classes {
@@ -320,6 +478,42 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_partial_fit_two_halves_matches_one_shot() {
+        // GaussianNB partial_fit on two halves should produce identical
+        // theta/sigma/prior to one-shot fit on the union.
+        let x = array![
+            [1.0_f64, 2.0],
+            [1.5, 2.5],
+            [0.8, 1.7],
+            [1.2, 1.9],
+            [5.0, 5.0],
+            [5.5, 5.5],
+            [4.8, 4.9],
+            [5.1, 5.3]
+        ];
+        let y = array![0.0_f64, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+
+        let nb = GaussianNB::new();
+        let one_shot: FittedGaussianNB<f64> = Fit::fit(&nb, &x, &y).unwrap();
+
+        let classes = [0.0_f64, 1.0];
+        let h1 = x.slice(ndarray::s![0..4, ..]).to_owned();
+        let y1 = y.slice(ndarray::s![0..4]).to_owned();
+        let h2 = x.slice(ndarray::s![4..8, ..]).to_owned();
+        let y2 = y.slice(ndarray::s![4..8]).to_owned();
+        let s1 = PartialFit::partial_fit(&nb, None, &h1, &y1, Some(&classes)).unwrap();
+        let s2 = PartialFit::partial_fit(&nb, Some(s1), &h2, &y2, Some(&classes)).unwrap();
+
+        for i in 0..2 {
+            for j in 0..2 {
+                assert_abs_diff_eq!(one_shot.theta[[i, j]], s2.theta[[i, j]], epsilon = 1e-9);
+                assert_abs_diff_eq!(one_shot.sigma[[i, j]], s2.sigma[[i, j]], epsilon = 1e-9);
+            }
+            assert_abs_diff_eq!(one_shot.class_prior[i], s2.class_prior[i], epsilon = 1e-9);
+        }
+    }
 
     #[test]
     fn test_two_class_well_separated() {
@@ -532,12 +726,7 @@ mod tests {
 
     #[test]
     fn test_f32_support() {
-        let x_train: Array2<f32> = array![
-            [1.0f32, 1.0],
-            [1.1, 1.1],
-            [10.0, 10.0],
-            [10.1, 10.1]
-        ];
+        let x_train: Array2<f32> = array![[1.0f32, 1.0], [1.1, 1.1], [10.0, 10.0], [10.1, 10.1]];
         let y_train: Array1<f32> = array![0.0f32, 0.0, 1.0, 1.0];
 
         let nb = GaussianNB::default();
@@ -593,8 +782,16 @@ mod tests {
     fn test_prior_probabilities() {
         // 6 class-0 and 4 class-1 samples.
         let x_train = array![
-            [1.0], [1.1], [1.2], [0.9], [0.8], [1.3],
-            [10.0], [10.1], [10.2], [9.9]
+            [1.0],
+            [1.1],
+            [1.2],
+            [0.9],
+            [0.8],
+            [1.3],
+            [10.0],
+            [10.1],
+            [10.2],
+            [9.9]
         ];
         let y_train = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 

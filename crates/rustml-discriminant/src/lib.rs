@@ -42,12 +42,7 @@ fn class_mean(x: &Array2<f64>, idx: &[usize]) -> Array1<f64> {
     m.mapv(|v| v / n)
 }
 
-fn outer_subtract_accum(
-    x: &Array2<f64>,
-    mu: &Array1<f64>,
-    idx: &[usize],
-    accum: &mut Array2<f64>,
-) {
+fn outer_subtract_accum(x: &Array2<f64>, mu: &Array1<f64>, idx: &[usize], accum: &mut Array2<f64>) {
     let d = x.ncols();
     for &i in idx {
         let mut dv = vec![0.0; d];
@@ -100,13 +95,21 @@ pub struct LinearDiscriminantAnalysis {
 
 impl LinearDiscriminantAnalysis {
     pub fn new() -> Self {
-        Self { shrinkage: 0.0, reg: 1e-9 }
+        Self {
+            shrinkage: 0.0,
+            reg: 1e-9,
+        }
     }
-    pub fn with_shrinkage(mut self, s: f64) -> Self { self.shrinkage = s; self }
+    pub fn with_shrinkage(mut self, s: f64) -> Self {
+        self.shrinkage = s;
+        self
+    }
 }
 
 impl Default for LinearDiscriminantAnalysis {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -130,7 +133,9 @@ impl Fit<f64> for LinearDiscriminantAnalysis {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         let (classes, groups) = class_indices(y);
@@ -160,7 +165,8 @@ impl Fit<f64> for LinearDiscriminantAnalysis {
             for i in 0..d {
                 for j in 0..d {
                     if i == j {
-                        sigma[[i, j]] = (1.0 - self.shrinkage) * sigma[[i, j]] + self.shrinkage * trace;
+                        sigma[[i, j]] =
+                            (1.0 - self.shrinkage) * sigma[[i, j]] + self.shrinkage * trace;
                     } else {
                         sigma[[i, j]] *= 1.0 - self.shrinkage;
                     }
@@ -265,7 +271,9 @@ impl Transform<f64> for FittedLinearDiscriminantAnalysis {
     fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -288,7 +296,9 @@ impl Predict<f64> for FittedLinearDiscriminantAnalysis {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -314,7 +324,9 @@ impl PredictProba<f64> for FittedLinearDiscriminantAnalysis {
     fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -327,7 +339,9 @@ impl PredictProba<f64> for FittedLinearDiscriminantAnalysis {
             for (c_i, (c, b)) in self.coef.iter().zip(self.intercept.iter()).enumerate() {
                 let s = row.dot(c) + b;
                 logits[c_i] = s;
-                if s > max_l { max_l = s; }
+                if s > max_l {
+                    max_l = s;
+                }
             }
             let mut z = 0.0;
             for c_i in 0..k {
@@ -353,12 +367,19 @@ pub struct QuadraticDiscriminantAnalysis {
 }
 
 impl QuadraticDiscriminantAnalysis {
-    pub fn new() -> Self { Self { reg: 1e-9 } }
-    pub fn with_reg(mut self, r: f64) -> Self { self.reg = r; self }
+    pub fn new() -> Self {
+        Self { reg: 1e-9 }
+    }
+    pub fn with_reg(mut self, r: f64) -> Self {
+        self.reg = r;
+        self
+    }
 }
 
 impl Default for QuadraticDiscriminantAnalysis {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -377,12 +398,16 @@ impl Fit<f64> for QuadraticDiscriminantAnalysis {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         let (classes, groups) = class_indices(y);
         if classes.len() < 2 {
-            return Err(RustMlError::InvalidParameter("need at least 2 classes for QDA".into()));
+            return Err(RustMlError::InvalidParameter(
+                "need at least 2 classes for QDA".into(),
+            ));
         }
         let d = x.ncols();
         let n = x.nrows();
@@ -419,7 +444,9 @@ impl Predict<f64> for FittedQuadraticDiscriminantAnalysis {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -452,7 +479,9 @@ impl PredictProba<f64> for FittedQuadraticDiscriminantAnalysis {
     fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -471,7 +500,9 @@ impl PredictProba<f64> for FittedQuadraticDiscriminantAnalysis {
                 let m = diff.dot(&s_inv_diff);
                 let score = -0.5 * m - 0.5 * self.log_det[c_i] + self.priors[c_i].ln();
                 logits[c_i] = score;
-                if score > max_l { max_l = score; }
+                if score > max_l {
+                    max_l = score;
+                }
             }
             let mut z = 0.0;
             for c_i in 0..k {
@@ -495,8 +526,14 @@ mod tests {
     #[test]
     fn test_lda_two_well_separated_classes() {
         let x = array![
-            [0.0, 0.0], [0.5, 0.1], [-0.3, -0.2], [0.2, -0.1],
-            [5.0, 5.0], [5.1, 4.9], [4.7, 5.3], [5.0, 5.2],
+            [0.0, 0.0],
+            [0.5, 0.1],
+            [-0.3, -0.2],
+            [0.2, -0.1],
+            [5.0, 5.0],
+            [5.1, 4.9],
+            [4.7, 5.3],
+            [5.0, 5.2],
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         let fitted = LinearDiscriminantAnalysis::new().fit(&x, &y).unwrap();
@@ -510,9 +547,15 @@ mod tests {
     fn test_lda_transform_separates() {
         // 3-class problem in 2D — projects to 2 dims (n_classes-1=2).
         let x = array![
-            [0.0, 0.0], [0.5, 0.0], [0.0, 0.3],
-            [4.0, 0.0], [4.2, 0.1], [4.0, 0.3],
-            [0.0, 4.0], [0.1, 4.2], [-0.1, 4.0],
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [0.0, 0.3],
+            [4.0, 0.0],
+            [4.2, 0.1],
+            [4.0, 0.3],
+            [0.0, 4.0],
+            [0.1, 4.2],
+            [-0.1, 4.0],
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
         let fitted = LinearDiscriminantAnalysis::new().fit(&x, &y).unwrap();
@@ -524,23 +567,36 @@ mod tests {
             .map(|c| {
                 let base = 3 * c;
                 ((t[[base, 0]] - t[[base + 1, 0]]).powi(2)
-                    + (t[[base, 1]] - t[[base + 1, 1]]).powi(2)).sqrt()
+                    + (t[[base, 1]] - t[[base + 1, 1]]).powi(2))
+                .sqrt()
             })
-            .sum::<f64>() / 3.0;
-        let d_between: f64 = ((t[[0, 0]] - t[[3, 0]]).powi(2)
-            + (t[[0, 1]] - t[[3, 1]]).powi(2)).sqrt();
-        assert!(d_between > 5.0 * d_within,
-                "within={d_within}, between={d_between}");
+            .sum::<f64>()
+            / 3.0;
+        let d_between: f64 =
+            ((t[[0, 0]] - t[[3, 0]]).powi(2) + (t[[0, 1]] - t[[3, 1]]).powi(2)).sqrt();
+        assert!(
+            d_between > 5.0 * d_within,
+            "within={d_within}, between={d_between}"
+        );
     }
 
     #[test]
     fn test_qda_two_well_separated_classes() {
         let x = array![
-            [0.0, 0.0], [0.5, 0.1], [-0.3, -0.2], [0.2, -0.1], [0.1, 0.2], [-0.1, 0.0],
-            [5.0, 5.0], [5.1, 4.9], [4.7, 5.3], [5.0, 5.2], [5.2, 5.1], [4.8, 5.0],
+            [0.0, 0.0],
+            [0.5, 0.1],
+            [-0.3, -0.2],
+            [0.2, -0.1],
+            [0.1, 0.2],
+            [-0.1, 0.0],
+            [5.0, 5.0],
+            [5.1, 4.9],
+            [4.7, 5.3],
+            [5.0, 5.2],
+            [5.2, 5.1],
+            [4.8, 5.0],
         ];
-        let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                       1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
         let fitted = QuadraticDiscriminantAnalysis::new().fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();
         for (p, t) in preds.iter().zip(y.iter()) {
@@ -556,10 +612,15 @@ impl rustml_core::PredictLogProba<f64> for FittedLinearDiscriminantAnalysis {}
 impl rustml_core::PredictLogProba<f64> for FittedQuadraticDiscriminantAnalysis {}
 
 impl rustml_core::DecisionFunction<f64> for FittedLinearDiscriminantAnalysis {
-    fn decision_function(&self, x: &ndarray::Array2<f64>) -> rustml_core::Result<ndarray::Array2<f64>> {
+    fn decision_function(
+        &self,
+        x: &ndarray::Array2<f64>,
+    ) -> rustml_core::Result<ndarray::Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(rustml_core::RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();

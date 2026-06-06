@@ -192,10 +192,7 @@ fn assemble_result<F: Float>(
 /// - If `options.target_column` is set, that column is extracted as `y` and
 ///   excluded from `X`.
 /// - If `options.has_header` is true, header names are returned.
-pub fn read_csv<F, P>(
-    path: P,
-    options: &CsvReadOptions,
-) -> CsvReadResult<F>
+pub fn read_csv<F, P>(path: P, options: &CsvReadOptions) -> CsvReadResult<F>
 where
     F: Float + FromStr,
     P: AsRef<Path>,
@@ -225,9 +222,7 @@ where
     let (x, y, _) = read_csv(path, &options)?;
     match y {
         Some(y) => Ok((x, y)),
-        None => Err(CsvError::Parse(
-            "target_column should have been set".into(),
-        )),
+        None => Err(CsvError::Parse("target_column should have been set".into())),
     }
 }
 
@@ -324,8 +319,7 @@ mod tests {
     fn test_read_csv_convenience() {
         let csv = "f1,f2,y\n1.0,2.0,10.0\n3.0,4.0,20.0\n";
         let file = write_temp_csv(csv);
-        let (x, y): (Array2<f64>, Array1<f64>) =
-            read_csv_with_header(file.path(), 2).unwrap();
+        let (x, y): (Array2<f64>, Array1<f64>) = read_csv_with_header(file.path(), 2).unwrap();
 
         assert_eq!(x.shape(), &[2, 2]);
         assert_abs_diff_eq!(y[0], 10.0);

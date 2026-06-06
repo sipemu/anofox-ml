@@ -22,7 +22,11 @@ fn test_pa_classifier_accuracy_band() {
         .fit(&x, &y)
         .unwrap();
     let preds = fitted.predict(&x).unwrap();
-    let correct = preds.iter().zip(y.iter()).filter(|(p, t)| (*p - *t).abs() < 0.5).count();
+    let correct = preds
+        .iter()
+        .zip(y.iter())
+        .filter(|(p, t)| (*p - *t).abs() < 0.5)
+        .count();
     let acc = correct as f64 / y.len() as f64;
     // sklearn averages updates and converges to ~0.98+; we don't average.
     // Allow a wider band but still require strong accuracy.

@@ -25,7 +25,11 @@ fn adjusted_rand(a: &Array1<f64>, b: &Array1<f64>) -> f64 {
         *col_marg.entry(bi).or_default() += 1;
     }
     let comb2 = |n: usize| -> f64 {
-        if n < 2 { 0.0 } else { (n * (n - 1)) as f64 / 2.0 }
+        if n < 2 {
+            0.0
+        } else {
+            (n * (n - 1)) as f64 / 2.0
+        }
     };
     let mut sum_nij_c2 = 0.0;
     for (_, &c) in &contingency {
@@ -68,7 +72,9 @@ fn test_agglomerative_all_linkages_match_sklearn() {
         assert!(
             ari >= sklearn_ari - 0.05,
             "{}: rustml ARI {} vs sklearn {}",
-            case["name"].as_str().unwrap(), ari, sklearn_ari
+            case["name"].as_str().unwrap(),
+            ari,
+            sklearn_ari
         );
     }
 }

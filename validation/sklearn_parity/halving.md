@@ -31,3 +31,10 @@ internal split, and the two are not directly comparable on the same
   each round, to keep cost down. sklearn does k-fold within each round.
 - No `min_resources='exhaust' | 'smallest'` heuristic — caller supplies.
 - No `aggressive_elimination`.
+
+## Complexity
+
+- HalvingGridSearchCV / HalvingRandomSearchCV: at iteration `i` (i = 0, 1, …), evaluate `n_candidates_i = max(1, n_candidates_0 / factor^i)` candidates on `n_resources_i = min_resources · factor^i` samples.
+- Total cost ≈ `Σ_i n_candidates_i · cost(estimator on n_resources_i)`.
+- For estimators linear in n_samples this is a geometric series, dominated by the final iteration → close to one full-data fit, but with the search effectively free.
+- Memory: **O(p · candidates)** for parameter tables; negligible compared to the estimator footprint.

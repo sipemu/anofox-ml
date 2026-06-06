@@ -1,6 +1,6 @@
 mod common;
 
-use common::{assert_close, json_to_array1, json_to_array2, load_golden_data};
+use common::{json_to_array1, json_to_array2, load_golden_data};
 use rustml::prelude::*;
 
 #[test]
@@ -12,10 +12,18 @@ fn test_golden_one_class_svm_inliers() {
     let x_inlier = json_to_array2(&case["X_test_inlier"]);
     let x_outlier = json_to_array2(&case["X_test_outlier"]);
 
-    let expected_inlier: Vec<f64> = case["pred_inlier"]
-        .as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
-    let expected_outlier: Vec<f64> = case["pred_outlier"]
-        .as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    let _expected_inlier: Vec<f64> = case["pred_inlier"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let _expected_outlier: Vec<f64> = case["pred_outlier"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
 
     let model = OneClassSvm {
         nu: 0.3,
@@ -31,7 +39,8 @@ fn test_golden_one_class_svm_inliers() {
     assert!(
         inlier_correct >= pred_in.len() / 2,
         "at least half of inliers should be +1, got {}/{}",
-        inlier_correct, pred_in.len()
+        inlier_correct,
+        pred_in.len()
     );
 
     // Outliers (far away) should be predicted as -1
@@ -40,7 +49,8 @@ fn test_golden_one_class_svm_inliers() {
     assert!(
         outlier_correct >= pred_out.len() / 2,
         "at least half of outliers should be -1, got {}/{}",
-        outlier_correct, pred_out.len()
+        outlier_correct,
+        pred_out.len()
     );
 }
 
@@ -68,7 +78,9 @@ fn test_golden_linear_svr_predictions() {
         assert!(
             (p - e).abs() < 3.0,
             "prediction {} differs too much: rustml={:.3}, sklearn={:.3}",
-            i, p, e
+            i,
+            p,
+            e
         );
     }
 }

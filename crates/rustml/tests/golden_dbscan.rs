@@ -42,7 +42,10 @@ fn test_golden_dbscan() {
             assert!(
                 l >= -1 && l < n_clusters as i64,
                 "{}: label {} at index {} is out of range [-1, {})",
-                name, l, i, n_clusters
+                name,
+                l,
+                i,
+                n_clusters
             );
         }
 
@@ -52,7 +55,10 @@ fn test_golden_dbscan() {
             n_noise + n_clustered,
             labels.len(),
             "{}: noise ({}) + clustered ({}) != total ({})",
-            name, n_noise, n_clustered, labels.len()
+            name,
+            n_noise,
+            n_clustered,
+            labels.len()
         );
     }
 }

@@ -2,8 +2,8 @@ use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
-use rustml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
-use serde::{Serialize, Deserialize};
+use rustml_core::{FitUnsupervised, FitUnsupervisedWeighted, Float, Predict, Result, RustMlError};
+use serde::{Deserialize, Serialize};
 
 /// Parameters for K-Means clustering (unfitted state).
 ///
@@ -171,68 +171,117 @@ fn weighted_random_choice<F: Float>(min_dists: &Array1<F>, rng: &mut StdRng) -> 
 }
 
 /// Initialize centroids using the k-means++ algorithm.
+///
+/// When `sample_weight` is provided, the first centroid is sampled with
+/// probability ∝ w_i, and subsequent centroids with probability ∝ w_i · D²(x_i).
+/// Equivalent to running k-means++ on the empirical weighted distribution.
 fn kmeans_plus_plus<F: Float>(
     x: &Array2<F>,
     n_clusters: usize,
     rng: &mut StdRng,
+    sample_weight: Option<&Array1<F>>,
 ) -> Array2<F> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
     let mut centroids = Array2::<F>::zeros((n_clusters, n_features));
 
-    // Pick first centroid randomly from data.
-    let first_idx = rng.gen_range(0..n_samples);
+    // Pick first centroid: ∝ w_i if weighted, else uniform.
+    let first_idx = if let Some(w) = sample_weight {
+        let total: F = w.iter().copied().fold(F::zero(), |acc, v| acc + v);
+        if total == F::zero() {
+            rng.gen_range(0..n_samples)
+        } else {
+            let threshold = F::from_f64(rng.gen_range(0.0..1.0)).unwrap() * total;
+            let mut cum = F::zero();
+            let mut chosen = n_samples - 1;
+            for i in 0..n_samples {
+                cum += w[i];
+                if cum >= threshold {
+                    chosen = i;
+                    break;
+                }
+            }
+            chosen
+        }
+    } else {
+        rng.gen_range(0..n_samples)
+    };
     centroids.row_mut(0).assign(&x.row(first_idx));
 
     // Distance from each point to its nearest existing centroid.
     let mut min_dists = Array1::<F>::from_elem(n_samples, F::infinity());
 
     for k in 1..n_clusters {
-        // Update min distances with the centroid just added (index k-1).
         update_min_distances(x, &mut min_dists, centroids.row(k - 1));
 
-        // All remaining points coincide with existing centroids; pick randomly.
-        let total: F = min_dists.iter().copied().fold(F::zero(), |acc, v| acc + v);
+        // Compute the sampling weights: w_i · D²(x_i) if weighted, else D²(x_i).
+        let mut sample_probs = min_dists.clone();
+        if let Some(w) = sample_weight {
+            for i in 0..n_samples {
+                sample_probs[i] = sample_probs[i] * w[i];
+            }
+        }
+        let total: F = sample_probs
+            .iter()
+            .copied()
+            .fold(F::zero(), |acc, v| acc + v);
         if total == F::zero() {
             let idx = rng.gen_range(0..n_samples);
             centroids.row_mut(k).assign(&x.row(idx));
             continue;
         }
-
-        // Sample next centroid proportional to distance squared.
-        let chosen = weighted_random_choice(&min_dists, rng);
+        let chosen = weighted_random_choice(&sample_probs, rng);
         centroids.row_mut(k).assign(&x.row(chosen));
     }
 
     centroids
 }
 
-impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
-    type Fitted = FittedKMeans<F>;
-
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+impl KMeans {
+    /// Shared Lloyd loop used by both unweighted and weighted fits. When
+    /// `sample_weight` is `None`, behaviour is bit-identical to the
+    /// unweighted code path (uniform weights).
+    fn fit_inner<F: Float + Send + Sync>(
+        &self,
+        x: &Array2<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedKMeans<F>> {
         let n_samples = x.nrows();
         let n_features = x.ncols();
 
         if n_samples == 0 {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
-
         if self.n_clusters == 0 {
             return Err(RustMlError::InvalidParameter(
                 "n_clusters must be at least 1".into(),
             ));
         }
-
         if self.n_clusters > n_samples {
             return Err(RustMlError::InvalidParameter(format!(
                 "n_clusters ({}) must not exceed n_samples ({})",
                 self.n_clusters, n_samples
             )));
         }
+        if let Some(w) = sample_weight {
+            if w.len() != n_samples {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "sample_weight length {} does not match n_samples {}",
+                    w.len(),
+                    n_samples
+                )));
+            }
+            for &v in w.iter() {
+                if v < F::zero() {
+                    return Err(RustMlError::InvalidParameter(
+                        "sample_weight must be non-negative".into(),
+                    ));
+                }
+            }
+        }
 
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let mut centroids = kmeans_plus_plus(x, self.n_clusters, &mut rng);
+        let mut centroids = kmeans_plus_plus(x, self.n_clusters, &mut rng, sample_weight);
         let mut labels = vec![0usize; n_samples];
         let tol = F::from_f64(self.tol).unwrap();
         let mut n_iter = 0;
@@ -240,42 +289,47 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
         for iter in 0..self.max_iter {
             n_iter = iter + 1;
 
-            // Assignment step: parallel assignment of each point to nearest centroid.
+            // Assignment step: parallel.
             let new_labels: Vec<usize> = (0..n_samples)
                 .into_par_iter()
                 .map(|i| {
-                    let (best_idx, _) =
-                        nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
+                    let (best_idx, _) = nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
                     best_idx
                 })
                 .collect();
             labels = new_labels;
 
-            // Update step: recompute centroids as mean of assigned points.
+            // Update step: weighted mean per cluster.
+            //
+            //   c_k = Σ_{i: z_i=k} w_i x_i  /  Σ_{i: z_i=k} w_i
+            //
+            // With uniform w_i = 1 this reduces to the usual mean.
             let mut new_centroids = Array2::<F>::zeros((self.n_clusters, n_features));
-            let mut counts = vec![0usize; self.n_clusters];
+            let mut weight_sums = vec![F::zero(); self.n_clusters];
 
             for i in 0..n_samples {
                 let cluster = labels[i];
-                counts[cluster] += 1;
+                let w = sample_weight.map(|sw| sw[i]).unwrap_or_else(F::one);
+                if w == F::zero() {
+                    continue;
+                }
+                weight_sums[cluster] += w;
                 for j in 0..n_features {
-                    new_centroids[[cluster, j]] += x[[i, j]];
+                    new_centroids[[cluster, j]] += x[[i, j]] * w;
                 }
             }
 
             for k in 0..self.n_clusters {
-                if counts[k] > 0 {
-                    let count = F::from_usize(counts[k]).unwrap();
+                if weight_sums[k] > F::zero() {
+                    let denom = weight_sums[k];
                     for j in 0..n_features {
-                        new_centroids[[k, j]] /= count;
+                        new_centroids[[k, j]] /= denom;
                     }
                 } else {
-                    // Empty cluster: keep previous centroid.
                     new_centroids.row_mut(k).assign(&centroids.row(k));
                 }
             }
 
-            // Check convergence: max centroid shift.
             let mut max_shift = F::zero();
             for k in 0..self.n_clusters {
                 let shift = squared_euclidean(
@@ -286,22 +340,20 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
                     max_shift = shift;
                 }
             }
-
             centroids = new_centroids;
-
             if max_shift < tol {
                 break;
             }
         }
 
-        // Compute final labels and inertia.
+        // Final labels + weighted inertia.
         let mut float_labels = Array1::<F>::zeros(n_samples);
         let mut inertia = F::zero();
         for i in 0..n_samples {
-            let (best_idx, dist) =
-                nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
+            let (best_idx, dist) = nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
             float_labels[i] = F::from_usize(best_idx).unwrap();
-            inertia += dist;
+            let w = sample_weight.map(|sw| sw[i]).unwrap_or_else(F::one);
+            inertia += dist * w;
         }
 
         Ok(FittedKMeans {
@@ -310,6 +362,26 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
             inertia,
             n_iter,
         })
+    }
+}
+
+impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
+    type Fitted = FittedKMeans<F>;
+
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        self.fit_inner(x, None)
+    }
+}
+
+impl<F: Float + Send + Sync> FitUnsupervisedWeighted<F> for KMeans {
+    type Fitted = FittedKMeans<F>;
+
+    fn fit_unsupervised_weighted(
+        &self,
+        x: &Array2<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_inner(x, sample_weight)
     }
 }
 
@@ -326,8 +398,7 @@ impl<F: Float> Predict<F> for FittedKMeans<F> {
         let n_samples = x.nrows();
         let mut labels = Array1::<F>::zeros(n_samples);
         for i in 0..n_samples {
-            let (best_idx, _) =
-                nearest_centroid(x.row(i).as_slice().unwrap(), &self.centroids);
+            let (best_idx, _) = nearest_centroid(x.row(i).as_slice().unwrap(), &self.centroids);
             labels[i] = F::from_usize(best_idx).unwrap();
         }
         Ok(labels)
@@ -487,6 +558,70 @@ mod tests {
     }
 
     #[test]
+    fn test_weighted_equiv_to_duplication() {
+        // Duplicating point i k times should be equivalent to weighting it
+        // by k. We verify on a small dataset that fitted centroids match.
+        let base = array![
+            [0.0_f64, 0.0],
+            [0.2, 0.1],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [10.2, 10.1],
+        ];
+        // Weight: blob B has 3 points (rows 2..5), but assign them weights
+        // (1, 1, 3) so total weight 5; compare against duplicating row 4 3×.
+        let weights = array![1.0_f64, 1.0, 1.0, 1.0, 3.0];
+
+        let mut dup = Vec::new();
+        for i in 0..base.nrows() {
+            let times = weights[i] as usize;
+            for _ in 0..times {
+                for j in 0..base.ncols() {
+                    dup.push(base[[i, j]]);
+                }
+            }
+        }
+        let dup = Array2::from_shape_vec((dup.len() / 2, 2), dup).unwrap();
+
+        let km = KMeans::new(2).with_seed(7);
+        let f_w = km.fit_unsupervised_weighted(&base, Some(&weights)).unwrap();
+        let f_d = FitUnsupervised::<f64>::fit(&km, &dup).unwrap();
+
+        // Centroids may permute label order. Match by nearest centroid.
+        let cw = f_w.centroids();
+        let cd = f_d.centroids();
+        for i in 0..2 {
+            let mut best = f64::INFINITY;
+            for j in 0..2 {
+                let d =
+                    squared_euclidean(cw.row(i).as_slice().unwrap(), cd.row(j).as_slice().unwrap());
+                if d < best {
+                    best = d;
+                }
+            }
+            assert!(
+                best < 1e-9,
+                "weighted centroid {} not close to any duplication centroid (best d² = {})",
+                i,
+                best
+            );
+        }
+    }
+
+    #[test]
+    fn test_weighted_unweighted_equals_uniform() {
+        let x = make_blobs();
+        let km = KMeans::new(3).with_seed(42);
+        let unweighted = FitUnsupervised::<f64>::fit(&km, &x).unwrap();
+        let uniform = Array1::<f64>::from_elem(x.nrows(), 1.0);
+        let weighted = km.fit_unsupervised_weighted(&x, Some(&uniform)).unwrap();
+        for (a, b) in unweighted.labels().iter().zip(weighted.labels().iter()) {
+            assert_abs_diff_eq!(a, b, epsilon = 1e-15);
+        }
+        assert_abs_diff_eq!(unweighted.inertia(), weighted.inertia(), epsilon = 1e-9);
+    }
+
+    #[test]
     fn test_reproducibility() {
         let x = make_blobs();
         let kmeans = KMeans::new(3);
@@ -516,8 +651,8 @@ mod tests {
                 let cy = (c as f64) * 100.0;
                 for i in 0..points_per_cluster {
                     let row = c * points_per_cluster + i;
-                    data[[row, 0]] = cx + rng.gen_range(-1.0..1.0);
-                    data[[row, 1]] = cy + rng.gen_range(-1.0..1.0);
+                    data[[row, 0]] = cx + <StdRng as rand::Rng>::gen_range(&mut rng, -1.0..1.0);
+                    data[[row, 1]] = cy + <StdRng as rand::Rng>::gen_range(&mut rng, -1.0..1.0);
                 }
             }
             data

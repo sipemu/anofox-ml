@@ -121,19 +121,25 @@ impl FitWeighted<f64> for KernelRidge {
     ) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
         if self.alpha < 0.0 {
-            return Err(RustMlError::InvalidParameter("alpha must be non-negative".into()));
+            return Err(RustMlError::InvalidParameter(
+                "alpha must be non-negative".into(),
+            ));
         }
         if let Some(w) = sample_weight {
             if w.len() != y.len() {
                 return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight len {} != y len {}", w.len(), y.len()
+                    "sample_weight len {} != y len {}",
+                    w.len(),
+                    y.len()
                 )));
             }
             for &wi in w.iter() {
@@ -276,7 +282,11 @@ mod tests {
         let w = array![1.0, 1.0, 1.0, 1.0, 1.0, 1e6];
         let fitted = kr.fit_weighted(&x, &y, Some(&w)).unwrap();
         let p = fitted.predict(&array![[10.0]]).unwrap();
-        assert!((p[0] - 100.0).abs() < 1.0, "high-weight anchor pred={}", p[0]);
+        assert!(
+            (p[0] - 100.0).abs() < 1.0,
+            "high-weight anchor pred={}",
+            p[0]
+        );
     }
 }
 

@@ -31,3 +31,10 @@ matched greedily against sklearn's; we require **max matched-pair distance
 - No `init='random'` option; always k-means++.
 - Convergence test is on the squared centroid shift across a full pass, not
   on running EWMA inertia like sklearn.
+
+## Complexity
+
+- Per mini-batch of size b: assignment **O(b·k·d)** + centroid update **O(b·d)**.
+- Total over all batches: **O(b·k·d · n_batches)**.
+- Memory: **O(k·d)** for centroids + **O(b·d)** for the batch window. Constant in n_samples.
+- Trade-off vs full KMeans: faster on huge n at the cost of stochasticity in centroid updates.

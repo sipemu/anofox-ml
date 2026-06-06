@@ -97,14 +97,8 @@ pub fn cohen_kappa_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Re
     // Build confusion matrix
     let mut cm = vec![vec![F::zero(); n_classes]; n_classes];
     for (&t, &p) in y_true.iter().zip(y_pred.iter()) {
-        let i = classes
-            .iter()
-            .position(|&c| (c - t).abs() < eps)
-            .unwrap();
-        let j = classes
-            .iter()
-            .position(|&c| (c - p).abs() < eps)
-            .unwrap();
+        let i = classes.iter().position(|&c| (c - t).abs() < eps).unwrap();
+        let j = classes.iter().position(|&c| (c - p).abs() < eps).unwrap();
         cm[i][j] += F::one();
     }
 
@@ -118,8 +112,12 @@ pub fn cohen_kappa_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Re
     // Expected agreement: sum over classes of (row_sum_i * col_sum_i) / n^2
     let mut p_e = F::zero();
     for i in 0..n_classes {
-        let row_sum: F = (0..n_classes).map(|j| cm[i][j]).fold(F::zero(), |a, b| a + b);
-        let col_sum: F = (0..n_classes).map(|j| cm[j][i]).fold(F::zero(), |a, b| a + b);
+        let row_sum: F = (0..n_classes)
+            .map(|j| cm[i][j])
+            .fold(F::zero(), |a, b| a + b);
+        let col_sum: F = (0..n_classes)
+            .map(|j| cm[j][i])
+            .fold(F::zero(), |a, b| a + b);
         p_e += row_sum * col_sum;
     }
     p_e = p_e / (n_f * n_f);

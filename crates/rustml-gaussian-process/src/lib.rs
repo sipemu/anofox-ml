@@ -292,7 +292,9 @@ pub fn log_marginal_likelihood(
     let n = x.nrows();
     if y.len() != n {
         return Err(RustMlError::ShapeMismatch(format!(
-            "X has {} rows but y has {}", n, y.len()
+            "X has {} rows but y has {}",
+            n,
+            y.len()
         )));
     }
     let mut k = build_gram(x, x, kernel);
@@ -319,6 +321,162 @@ pub fn log_marginal_likelihood(
     let log_det = 2.0 * log_det;
     let two_pi = 2.0 * std::f64::consts::PI;
     Ok(-0.5 * yt_k_inv_y - 0.5 * log_det - 0.5 * n as f64 * two_pi.ln())
+}
+
+/// Result of multi-parameter hyperparameter optimisation.
+#[derive(Debug, Clone)]
+pub struct KernelOptimResult {
+    pub log_params: Vec<f64>,
+    pub log_marginal_likelihood: f64,
+    pub n_iter: usize,
+    pub converged: bool,
+}
+
+/// Multivariate quasi-Newton (BFGS) optimisation of arbitrary kernel
+/// hyperparameters on the log-scale, maximising log-marginal likelihood.
+///
+/// `build` turns a parameter vector (in log-space) into a `GpKernel`. The
+/// optimiser starts from `log_params_init`, computes finite-difference
+/// gradients with step `fd_step`, and updates a dense inverse-Hessian
+/// approximation via the BFGS formula. Backtracking line search guarantees
+/// monotone increase in log-likelihood.
+///
+/// For low-dim problems (typical kernel zoo has ≤ 5 params) BFGS converges
+/// in a handful of iterations and is more practical than L-BFGS, which adds
+/// history-buffer bookkeeping for negligible benefit at this scale.
+///
+/// Returns the optimised log-parameters, the achieved log-marginal
+/// likelihood, iteration count, and whether the gradient-norm stop
+/// criterion fired.
+pub fn optimize_kernel_lbfgs(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    alpha: f64,
+    log_params_init: &[f64],
+    build: impl Fn(&[f64]) -> GpKernel,
+    n_iter: usize,
+    fd_step: f64,
+    grad_tol: f64,
+) -> Result<KernelOptimResult> {
+    let n_params = log_params_init.len();
+    let neg_lml =
+        |p: &[f64]| -> Result<f64> { log_marginal_likelihood(x, y, &build(p), alpha).map(|v| -v) };
+    let grad_fd = |p: &[f64], f0: f64| -> Result<Vec<f64>> {
+        let mut g = vec![0.0_f64; n_params];
+        let mut p_mut = p.to_vec();
+        for i in 0..n_params {
+            let orig = p_mut[i];
+            p_mut[i] = orig + fd_step;
+            let fp = neg_lml(&p_mut)?;
+            p_mut[i] = orig;
+            // Forward-difference. Cheaper than central, accurate enough for
+            // log-space hyperparameters where fd_step ~ 1e-4.
+            g[i] = (fp - f0) / fd_step;
+        }
+        Ok(g)
+    };
+
+    let mut p = log_params_init.to_vec();
+    let mut f = neg_lml(&p)?;
+    let mut g = grad_fd(&p, f)?;
+    // Inverse-Hessian approximation, initially identity.
+    let mut h = vec![vec![0.0_f64; n_params]; n_params];
+    for i in 0..n_params {
+        h[i][i] = 1.0;
+    }
+
+    let mut converged = false;
+    let mut iters = 0;
+    for it in 0..n_iter {
+        iters = it + 1;
+        // Search direction d = -H g
+        let mut d = vec![0.0_f64; n_params];
+        for i in 0..n_params {
+            let mut s = 0.0;
+            for j in 0..n_params {
+                s -= h[i][j] * g[j];
+            }
+            d[i] = s;
+        }
+        // Backtracking line search (Armijo with c1 = 1e-4).
+        let g_dot_d: f64 = g.iter().zip(d.iter()).map(|(a, b)| a * b).sum();
+        if g_dot_d >= 0.0 {
+            // Not a descent direction (numerical issue) — reset H.
+            for i in 0..n_params {
+                for j in 0..n_params {
+                    h[i][j] = 0.0;
+                }
+                h[i][i] = 1.0;
+            }
+            for i in 0..n_params {
+                d[i] = -g[i];
+            }
+        }
+        let mut step = 1.0_f64;
+        let c1 = 1e-4;
+        let mut p_new;
+        let mut f_new;
+        let mut ls_iter = 0;
+        loop {
+            ls_iter += 1;
+            p_new = p
+                .iter()
+                .zip(d.iter())
+                .map(|(a, b)| a + step * b)
+                .collect::<Vec<_>>();
+            f_new = neg_lml(&p_new)?;
+            if f_new.is_finite() && f_new <= f + c1 * step * g_dot_d {
+                break;
+            }
+            step *= 0.5;
+            if step < 1e-12 || ls_iter > 50 {
+                // Line search failed — accept whatever we have and stop.
+                break;
+            }
+        }
+
+        let s_vec: Vec<f64> = p_new.iter().zip(p.iter()).map(|(a, b)| a - b).collect();
+        let g_new = grad_fd(&p_new, f_new)?;
+        let y_vec: Vec<f64> = g_new.iter().zip(g.iter()).map(|(a, b)| a - b).collect();
+        let sy: f64 = s_vec.iter().zip(y_vec.iter()).map(|(a, b)| a * b).sum();
+
+        if sy > 1e-12 {
+            // BFGS inverse-Hessian update:
+            //   H_new = (I - ρ s yᵀ) H (I - ρ y sᵀ) + ρ s sᵀ
+            // Compute H y, then update.
+            let rho = 1.0 / sy;
+            let mut hy = vec![0.0_f64; n_params];
+            for i in 0..n_params {
+                for j in 0..n_params {
+                    hy[i] += h[i][j] * y_vec[j];
+                }
+            }
+            let yhy: f64 = y_vec.iter().zip(hy.iter()).map(|(a, b)| a * b).sum();
+            for i in 0..n_params {
+                for j in 0..n_params {
+                    h[i][j] = h[i][j] - rho * (s_vec[i] * hy[j] + hy[i] * s_vec[j])
+                        + rho * (rho * yhy + 1.0) * s_vec[i] * s_vec[j];
+                }
+            }
+        }
+
+        p = p_new;
+        f = f_new;
+        g = g_new;
+
+        let gnorm: f64 = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if gnorm < grad_tol {
+            converged = true;
+            break;
+        }
+    }
+
+    Ok(KernelOptimResult {
+        log_params: p,
+        log_marginal_likelihood: -f,
+        n_iter: iters,
+        converged,
+    })
 }
 
 /// Find the length_scale (RBF kernel) that maximises log-marginal-likelihood
@@ -399,7 +557,9 @@ impl FittedGaussianProcessRegressor {
             }
             let v_sq: f64 = v.iter().map(|x| x * x).sum();
             let xi = x.row(i).to_owned();
-            let k_xx = self.kernel.compute(xi.as_slice().unwrap(), xi.as_slice().unwrap());
+            let k_xx = self
+                .kernel
+                .compute(xi.as_slice().unwrap(), xi.as_slice().unwrap());
             let var = (k_xx - v_sq).max(0.0);
             std_out[i] = var.sqrt() * self.y_std;
         }
@@ -416,7 +576,10 @@ mod tests {
     fn test_gp_rbf_interpolates_with_low_noise() {
         let x = Array2::from_shape_vec((6, 1), vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
         let y: Array1<f64> = x.column(0).mapv(|v: f64| v.sin());
-        let kernel = GpKernel::Rbf { length_scale: 1.0, signal_var: 1.0 };
+        let kernel = GpKernel::Rbf {
+            length_scale: 1.0,
+            signal_var: 1.0,
+        };
         let fitted = GaussianProcessRegressor::new(kernel)
             .with_alpha(1e-8)
             .fit(&x, &y)
@@ -432,7 +595,11 @@ mod tests {
     fn test_gp_matern_nu_2p5_interpolates() {
         let x = Array2::from_shape_vec((5, 1), vec![0.0, 1.0, 2.0, 3.0, 4.0]).unwrap();
         let y: Array1<f64> = x.column(0).mapv(|v: f64| v.cos());
-        let kernel = GpKernel::Matern { length_scale: 1.0, signal_var: 1.0, nu: 2.5 };
+        let kernel = GpKernel::Matern {
+            length_scale: 1.0,
+            signal_var: 1.0,
+            nu: 2.5,
+        };
         let fitted = GaussianProcessRegressor::new(kernel)
             .with_alpha(1e-8)
             .fit(&x, &y)
@@ -466,10 +633,54 @@ mod tests {
     fn test_optimize_rbf_length_scale_picks_sensible_value() {
         // Generate y = sin(x); the "right" length scale should be around 1 (the
         // period of the function in x ∈ [0,5]).
-        let x = Array2::from_shape_vec((20, 1), (0..20).map(|i| (i as f64) * 0.3).collect()).unwrap();
+        let x =
+            Array2::from_shape_vec((20, 1), (0..20).map(|i| (i as f64) * 0.3).collect()).unwrap();
         let y: Array1<f64> = x.column(0).mapv(|v: f64| v.sin());
         let best = optimize_rbf_length_scale(&x, &y, 1.0, 1e-6, -2.0, 2.0, 30).unwrap();
         assert!(best > 0.3 && best < 4.0, "best length_scale = {best}");
+    }
+
+    #[test]
+    fn test_optimize_kernel_lbfgs_rbf_two_params() {
+        // Jointly optimise log(length_scale) and log(signal_var) on a sine.
+        let x =
+            Array2::from_shape_vec((20, 1), (0..20).map(|i| (i as f64) * 0.3).collect()).unwrap();
+        let y: Array1<f64> = x.column(0).mapv(|v: f64| v.sin());
+        let init = vec![0.0_f64, 0.0]; // log ls, log var (both = 1.0 in linear)
+        let res = optimize_kernel_lbfgs(
+            &x,
+            &y,
+            1e-6,
+            &init,
+            |p| GpKernel::Rbf {
+                length_scale: p[0].exp(),
+                signal_var: p[1].exp(),
+            },
+            50,
+            1e-4,
+            1e-3,
+        )
+        .unwrap();
+        // Should beat the initial point.
+        let lml_init = log_marginal_likelihood(
+            &x,
+            &y,
+            &GpKernel::Rbf {
+                length_scale: 1.0,
+                signal_var: 1.0,
+            },
+            1e-6,
+        )
+        .unwrap();
+        assert!(
+            res.log_marginal_likelihood >= lml_init - 1e-9,
+            "optimiser regressed: init {} → final {}",
+            lml_init,
+            res.log_marginal_likelihood
+        );
+        // Optimised length_scale should be in a plausible range.
+        let ls_opt = res.log_params[0].exp();
+        assert!(ls_opt > 0.1 && ls_opt < 20.0, "length_scale {ls_opt}");
     }
 
     #[test]
@@ -477,8 +688,14 @@ mod tests {
         // Likelihood should be higher for the kernel that better matches data.
         let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64 * 0.3).collect()).unwrap();
         let y: Array1<f64> = x.column(0).mapv(|v: f64| v.sin());
-        let good = GpKernel::Rbf { length_scale: 1.0, signal_var: 1.0 };
-        let bad = GpKernel::Rbf { length_scale: 100.0, signal_var: 1.0 };
+        let good = GpKernel::Rbf {
+            length_scale: 1.0,
+            signal_var: 1.0,
+        };
+        let bad = GpKernel::Rbf {
+            length_scale: 100.0,
+            signal_var: 1.0,
+        };
         let lml_good = log_marginal_likelihood(&x, &y, &good, 1e-6).unwrap();
         let lml_bad = log_marginal_likelihood(&x, &y, &bad, 1e-6).unwrap();
         assert!(lml_good > lml_bad, "good={lml_good}, bad={lml_bad}");
@@ -489,8 +706,11 @@ mod tests {
         // RBF + White: should interpolate noisy data without exploding.
         let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64).collect()).unwrap();
         let y: Array1<f64> = x.column(0).mapv(|v: f64| v.sin() + 0.05);
-        let kernel = GpKernel::Rbf { length_scale: 2.0, signal_var: 1.0 }
-            .add(GpKernel::White { noise_level: 0.01 });
+        let kernel = GpKernel::Rbf {
+            length_scale: 2.0,
+            signal_var: 1.0,
+        }
+        .add(GpKernel::White { noise_level: 0.01 });
         let fitted = GaussianProcessRegressor::new(kernel)
             .with_alpha(1e-8)
             .fit(&x, &y)

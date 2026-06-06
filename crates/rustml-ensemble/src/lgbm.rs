@@ -55,8 +55,7 @@ fn compute_bins(
     let mut binned = Array2::zeros((n, p));
     let mut all_bins = Vec::with_capacity(p);
 
-    let cat_set: std::collections::HashSet<usize> =
-        categorical_features.iter().copied().collect();
+    let cat_set: std::collections::HashSet<usize> = categorical_features.iter().copied().collect();
 
     for j in 0..p {
         let is_categorical = cat_set.contains(&j);
@@ -65,8 +64,7 @@ fn compute_bins(
 
         if is_categorical {
             // For categorical features, bin edges are the unique values themselves.
-            let mut col: Vec<f64> =
-                (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
+            let mut col: Vec<f64> = (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
             col.sort_by(|a, b| a.partial_cmp(b).unwrap());
             col.dedup();
             for &v in col.iter().take(max_bins - 1) {
@@ -78,8 +76,7 @@ fn compute_bins(
             // `min_data_in_bin` samples.  Bin boundaries are placed at the
             // midpoint between the last value of one group and the first of
             // the next.
-            let mut raw: Vec<f64> =
-                (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
+            let mut raw: Vec<f64> = (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
             raw.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
             // Distinct values with counts.
@@ -333,8 +330,11 @@ fn find_best_split(
         for &missing_left in &[true, false] {
             let mut left_grad = if missing_left { hist.missing_grad } else { 0.0 };
             let mut left_hess = if missing_left { hist.missing_hess } else { 0.0 };
-            let mut left_count: usize =
-                if missing_left { hist.missing_count as usize } else { 0 };
+            let mut left_count: usize = if missing_left {
+                hist.missing_count as usize
+            } else {
+                0
+            };
 
             for (idx, &bin) in scan_order.iter().enumerate() {
                 if idx >= scan_order.len() - 1 {
@@ -380,9 +380,7 @@ fn find_best_split(
                     }
                 }
 
-                if gain > min_split_gain
-                    && gain > best.as_ref().map_or(0.0, |b| b.gain)
-                {
+                if gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain) {
                     best = Some(BestSplit {
                         feature: feat,
                         bin_threshold: bin,
@@ -445,8 +443,7 @@ impl TreeNode {
                 } else if let Some(order) = categorical_order {
                     // Categorical: find position in order; bins at positions <= threshold go left
                     let pos = order.iter().position(|&b| b == bin).unwrap_or(order.len());
-                    let thresh_pos =
-                        order.iter().position(|&b| b == *bin_threshold).unwrap_or(0);
+                    let thresh_pos = order.iter().position(|&b| b == *bin_threshold).unwrap_or(0);
                     pos <= thresh_pos
                 } else {
                     bin <= *bin_threshold
@@ -487,13 +484,17 @@ impl PartialOrd for LeafCandidate {
 }
 impl Ord for LeafCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.gain.partial_cmp(&other.gain).unwrap_or(Ordering::Equal)
+        self.gain
+            .partial_cmp(&other.gain)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
 /// Flat node storage during construction.
 enum BuildNode {
-    Leaf { value: f64 },
+    Leaf {
+        value: f64,
+    },
     Internal {
         feature: usize,
         bin_threshold: u8,
@@ -575,27 +576,31 @@ fn build_lgbm_tree(
         let indices = candidate.indices;
 
         // Partition samples
-        let (left_idx, right_idx): (Vec<usize>, Vec<usize>) = indices
-            .iter()
-            .partition(|&&i| {
-                let bin = binned_x[[i, split.feature]];
-                if bin == MISSING_BIN {
-                    split.missing_left
-                } else if let Some(ref order) = split.categorical_order {
-                    let pos = order.iter().position(|&b| b == bin).unwrap_or(order.len());
-                    let thresh_pos =
-                        order.iter().position(|&b| b == split.bin_threshold).unwrap_or(0);
-                    pos <= thresh_pos
-                } else {
-                    bin <= split.bin_threshold
-                }
-            });
+        let (left_idx, right_idx): (Vec<usize>, Vec<usize>) = indices.iter().partition(|&&i| {
+            let bin = binned_x[[i, split.feature]];
+            if bin == MISSING_BIN {
+                split.missing_left
+            } else if let Some(ref order) = split.categorical_order {
+                let pos = order.iter().position(|&b| b == bin).unwrap_or(order.len());
+                let thresh_pos = order
+                    .iter()
+                    .position(|&b| b == split.bin_threshold)
+                    .unwrap_or(0);
+                pos <= thresh_pos
+            } else {
+                bin <= split.bin_threshold
+            }
+        });
 
         // Create left and right leaf nodes
         let left_id = nodes.len();
-        nodes.push(BuildNode::Leaf { value: split.left_value });
+        nodes.push(BuildNode::Leaf {
+            value: split.left_value,
+        });
         let right_id = nodes.len();
-        nodes.push(BuildNode::Leaf { value: split.right_value });
+        nodes.push(BuildNode::Leaf {
+            value: split.right_value,
+        });
 
         // Convert the parent from Leaf to Internal
         nodes[candidate.node_id] = BuildNode::Internal {
@@ -780,7 +785,6 @@ struct LgbmParams {
     monotone_constraints: Vec<i8>,
 }
 
-
 // ============================================================
 // LgbmRegressor
 // ============================================================
@@ -858,26 +862,71 @@ impl LgbmRegressor {
     }
 
     // Builder methods
-    pub fn with_n_estimators(mut self, n: usize) -> Self { self.n_estimators = n; self }
-    pub fn with_num_leaves(mut self, n: usize) -> Self { self.num_leaves = n; self }
-    pub fn with_max_depth(mut self, d: Option<usize>) -> Self { self.max_depth = d; self }
-    pub fn with_learning_rate(mut self, lr: f64) -> Self { self.learning_rate = lr; self }
-    pub fn with_min_child_samples(mut self, n: usize) -> Self { self.min_child_samples = n; self }
-    pub fn with_min_child_weight(mut self, w: f64) -> Self { self.min_child_weight = w; self }
-    pub fn with_min_split_gain(mut self, g: f64) -> Self { self.min_split_gain = g; self }
-    pub fn with_reg_alpha(mut self, a: f64) -> Self { self.reg_alpha = a; self }
-    pub fn with_reg_lambda(mut self, l: f64) -> Self { self.reg_lambda = l; self }
-    pub fn with_subsample(mut self, s: f64) -> Self { self.subsample = s; self }
-    pub fn with_colsample_bytree(mut self, c: f64) -> Self { self.colsample_bytree = c; self }
-    pub fn with_min_data_in_bin(mut self, n: usize) -> Self { self.min_data_in_bin = n; self }
-    pub fn with_boosting_type(mut self, b: BoostingType) -> Self { self.boosting_type = b; self }
+    pub fn with_n_estimators(mut self, n: usize) -> Self {
+        self.n_estimators = n;
+        self
+    }
+    pub fn with_num_leaves(mut self, n: usize) -> Self {
+        self.num_leaves = n;
+        self
+    }
+    pub fn with_max_depth(mut self, d: Option<usize>) -> Self {
+        self.max_depth = d;
+        self
+    }
+    pub fn with_learning_rate(mut self, lr: f64) -> Self {
+        self.learning_rate = lr;
+        self
+    }
+    pub fn with_min_child_samples(mut self, n: usize) -> Self {
+        self.min_child_samples = n;
+        self
+    }
+    pub fn with_min_child_weight(mut self, w: f64) -> Self {
+        self.min_child_weight = w;
+        self
+    }
+    pub fn with_min_split_gain(mut self, g: f64) -> Self {
+        self.min_split_gain = g;
+        self
+    }
+    pub fn with_reg_alpha(mut self, a: f64) -> Self {
+        self.reg_alpha = a;
+        self
+    }
+    pub fn with_reg_lambda(mut self, l: f64) -> Self {
+        self.reg_lambda = l;
+        self
+    }
+    pub fn with_subsample(mut self, s: f64) -> Self {
+        self.subsample = s;
+        self
+    }
+    pub fn with_colsample_bytree(mut self, c: f64) -> Self {
+        self.colsample_bytree = c;
+        self
+    }
+    pub fn with_min_data_in_bin(mut self, n: usize) -> Self {
+        self.min_data_in_bin = n;
+        self
+    }
+    pub fn with_boosting_type(mut self, b: BoostingType) -> Self {
+        self.boosting_type = b;
+        self
+    }
     pub fn with_goss_rates(mut self, top: f64, other: f64) -> Self {
         self.goss_top_rate = top;
         self.goss_other_rate = other;
         self
     }
-    pub fn with_objective(mut self, o: LgbmObjective) -> Self { self.objective = o; self }
-    pub fn with_huber_delta(mut self, d: f64) -> Self { self.huber_delta = d; self }
+    pub fn with_objective(mut self, o: LgbmObjective) -> Self {
+        self.objective = o;
+        self
+    }
+    pub fn with_huber_delta(mut self, d: f64) -> Self {
+        self.huber_delta = d;
+        self
+    }
     pub fn with_early_stopping(mut self, r: Option<usize>) -> Self {
         self.early_stopping_rounds = r;
         self
@@ -890,7 +939,10 @@ impl LgbmRegressor {
         self.monotone_constraints = constraints;
         self
     }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 
     fn params(&self) -> LgbmParams {
         LgbmParams {
@@ -907,7 +959,9 @@ impl LgbmRegressor {
 }
 
 impl Default for LgbmRegressor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Options for training with an evaluation set.
@@ -954,8 +1008,12 @@ pub struct FittedLgbmRegressor {
 }
 
 impl FittedLgbmRegressor {
-    pub fn n_estimators(&self) -> usize { self.trees.len() }
-    pub fn best_iteration(&self) -> usize { self.best_iteration }
+    pub fn n_estimators(&self) -> usize {
+        self.trees.len()
+    }
+    pub fn best_iteration(&self) -> usize {
+        self.best_iteration
+    }
 
     /// Feature importance by total gain (normalized to sum to 1).
     pub fn feature_importances(&self) -> Array1<f64> {
@@ -1076,9 +1134,7 @@ impl LgbmRegressor {
                 )));
             }
         }
-        if !self.monotone_constraints.is_empty()
-            && self.monotone_constraints.len() != x.ncols()
-        {
+        if !self.monotone_constraints.is_empty() && self.monotone_constraints.len() != x.ncols() {
             return Err(RustMlError::InvalidParameter(format!(
                 "monotone_constraints has {} entries but X has {} features",
                 self.monotone_constraints.len(),
@@ -1088,8 +1144,12 @@ impl LgbmRegressor {
 
         let n = x.nrows();
         let p = x.ncols();
-        let (binned_x, bins) =
-            compute_bins(x, self.max_bins, &self.categorical_features, self.min_data_in_bin);
+        let (binned_x, bins) = compute_bins(
+            x,
+            self.max_bins,
+            &self.categorical_features,
+            self.min_data_in_bin,
+        );
 
         // Baseline / init_score
         let mean_y: f64 = y.iter().sum::<f64>() / n as f64;
@@ -1112,12 +1172,18 @@ impl LgbmRegressor {
 
         // Prepare eval set predictions if present
         let eval_binned = opts.eval_set.as_ref().map(|(xe, _)| {
-            let (b, _) = compute_bins(xe, self.max_bins, &self.categorical_features, self.min_data_in_bin);
+            let (b, _) = compute_bins(
+                xe,
+                self.max_bins,
+                &self.categorical_features,
+                self.min_data_in_bin,
+            );
             b
         });
-        let mut eval_preds: Option<Vec<f64>> = opts.eval_set.as_ref().map(|(xe, _)| {
-            vec![baseline; xe.nrows()]
-        });
+        let mut eval_preds: Option<Vec<f64>> = opts
+            .eval_set
+            .as_ref()
+            .map(|(xe, _)| vec![baseline; xe.nrows()]);
 
         let mut best_eval_loss = f64::INFINITY;
         let mut best_iteration = 0usize;
@@ -1378,18 +1444,54 @@ impl LgbmClassifier {
         }
     }
 
-    pub fn with_n_estimators(mut self, n: usize) -> Self { self.n_estimators = n; self }
-    pub fn with_num_leaves(mut self, n: usize) -> Self { self.num_leaves = n; self }
-    pub fn with_max_depth(mut self, d: Option<usize>) -> Self { self.max_depth = d; self }
-    pub fn with_learning_rate(mut self, lr: f64) -> Self { self.learning_rate = lr; self }
-    pub fn with_min_child_samples(mut self, n: usize) -> Self { self.min_child_samples = n; self }
-    pub fn with_min_child_weight(mut self, w: f64) -> Self { self.min_child_weight = w; self }
-    pub fn with_reg_alpha(mut self, a: f64) -> Self { self.reg_alpha = a; self }
-    pub fn with_reg_lambda(mut self, l: f64) -> Self { self.reg_lambda = l; self }
-    pub fn with_subsample(mut self, s: f64) -> Self { self.subsample = s; self }
-    pub fn with_colsample_bytree(mut self, c: f64) -> Self { self.colsample_bytree = c; self }
-    pub fn with_min_data_in_bin(mut self, n: usize) -> Self { self.min_data_in_bin = n; self }
-    pub fn with_boosting_type(mut self, b: BoostingType) -> Self { self.boosting_type = b; self }
+    pub fn with_n_estimators(mut self, n: usize) -> Self {
+        self.n_estimators = n;
+        self
+    }
+    pub fn with_num_leaves(mut self, n: usize) -> Self {
+        self.num_leaves = n;
+        self
+    }
+    pub fn with_max_depth(mut self, d: Option<usize>) -> Self {
+        self.max_depth = d;
+        self
+    }
+    pub fn with_learning_rate(mut self, lr: f64) -> Self {
+        self.learning_rate = lr;
+        self
+    }
+    pub fn with_min_child_samples(mut self, n: usize) -> Self {
+        self.min_child_samples = n;
+        self
+    }
+    pub fn with_min_child_weight(mut self, w: f64) -> Self {
+        self.min_child_weight = w;
+        self
+    }
+    pub fn with_reg_alpha(mut self, a: f64) -> Self {
+        self.reg_alpha = a;
+        self
+    }
+    pub fn with_reg_lambda(mut self, l: f64) -> Self {
+        self.reg_lambda = l;
+        self
+    }
+    pub fn with_subsample(mut self, s: f64) -> Self {
+        self.subsample = s;
+        self
+    }
+    pub fn with_colsample_bytree(mut self, c: f64) -> Self {
+        self.colsample_bytree = c;
+        self
+    }
+    pub fn with_min_data_in_bin(mut self, n: usize) -> Self {
+        self.min_data_in_bin = n;
+        self
+    }
+    pub fn with_boosting_type(mut self, b: BoostingType) -> Self {
+        self.boosting_type = b;
+        self
+    }
     pub fn with_categorical_features(mut self, feats: Vec<usize>) -> Self {
         self.categorical_features = feats;
         self
@@ -1406,7 +1508,10 @@ impl LgbmClassifier {
         self.early_stopping_rounds = r;
         self
     }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 
     fn params(&self) -> LgbmParams {
         LgbmParams {
@@ -1455,7 +1560,9 @@ impl LgbmClassifier {
 }
 
 impl Default for LgbmClassifier {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted LightGBM-style classifier.
@@ -1473,7 +1580,9 @@ pub struct FittedLgbmClassifier {
 }
 
 impl FittedLgbmClassifier {
-    pub fn classes(&self) -> &[f64] { &self.classes }
+    pub fn classes(&self) -> &[f64] {
+        &self.classes
+    }
     pub fn n_estimators(&self) -> usize {
         self.tree_sets.first().map_or(0, |ts| ts.len())
     }
@@ -1554,9 +1663,7 @@ impl LgbmClassifier {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
-        if !self.monotone_constraints.is_empty()
-            && self.monotone_constraints.len() != x.ncols()
-        {
+        if !self.monotone_constraints.is_empty() && self.monotone_constraints.len() != x.ncols() {
             return Err(RustMlError::InvalidParameter(format!(
                 "monotone_constraints has {} entries but X has {} features",
                 self.monotone_constraints.len(),
@@ -1566,8 +1673,12 @@ impl LgbmClassifier {
 
         let n = x.nrows();
         let p = x.ncols();
-        let (binned_x, bins) =
-            compute_bins(x, self.max_bins, &self.categorical_features, self.min_data_in_bin);
+        let (binned_x, bins) = compute_bins(
+            x,
+            self.max_bins,
+            &self.categorical_features,
+            self.min_data_in_bin,
+        );
 
         let mut classes: Vec<f64> = y.iter().copied().collect();
         classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1583,9 +1694,7 @@ impl LgbmClassifier {
         // Combine class_weight + sample_weight into a single effective weight per row.
         let class_weights = self.compute_class_weights(y, &classes);
         let effective_weights: Vec<f64> = (0..n)
-            .map(|i| {
-                class_weights[i] * opts.sample_weight.map_or(1.0, |sw| sw[i])
-            })
+            .map(|i| class_weights[i] * opts.sample_weight.map_or(1.0, |sw| sw[i]))
             .collect();
 
         let mut rng = StdRng::seed_from_u64(self.seed);
@@ -1710,8 +1819,7 @@ impl LgbmClassifier {
                         .collect();
                     let mut hessians: Vec<f64> = (0..n)
                         .map(|i| {
-                            (probas[i][c] * (1.0 - probas[i][c])).max(1e-12)
-                                * effective_weights[i]
+                            (probas[i][c] * (1.0 - probas[i][c])).max(1e-12) * effective_weights[i]
                         })
                         .collect();
 
@@ -1748,10 +1856,8 @@ impl LgbmClassifier {
                     );
 
                     for i in 0..n {
-                        let row_bins: Vec<u8> =
-                            (0..p).map(|j| binned_x[[i, j]]).collect();
-                        raw_scores[c][i] +=
-                            self.learning_rate * tree.predict_binned(&row_bins);
+                        let row_bins: Vec<u8> = (0..p).map(|j| binned_x[[i, j]]).collect();
+                        raw_scores[c][i] += self.learning_rate * tree.predict_binned(&row_bins);
                     }
 
                     tree_sets[c].push(tree);
@@ -1809,8 +1915,16 @@ mod tests {
     #[test]
     fn test_lgbm_regressor_basic() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -1832,8 +1946,16 @@ mod tests {
     fn test_lgbm_regressor_nan_handling() {
         // Data with NaN values
         let x = array![
-            [1.0], [2.0], [f64::NAN], [4.0], [5.0],
-            [6.0], [7.0], [f64::NAN], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [f64::NAN],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [f64::NAN],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -1853,8 +1975,16 @@ mod tests {
     #[test]
     fn test_lgbm_classifier_binary() {
         let x = array![
-            [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0], [5.0, 0.0],
-            [10.0, 1.0], [11.0, 1.0], [12.0, 1.0], [13.0, 1.0], [14.0, 1.0]
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [5.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0],
+            [13.0, 1.0],
+            [14.0, 1.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
@@ -1867,15 +1997,25 @@ mod tests {
 
         let preds = fitted.predict(&x).unwrap();
         let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
-        assert!(correct >= 9, "should classify most correctly, got {}/10", correct);
+        assert!(
+            correct >= 9,
+            "should classify most correctly, got {}/10",
+            correct
+        );
     }
 
     #[test]
     fn test_lgbm_classifier_multiclass() {
         let x = array![
-            [0.0, 0.0], [0.5, 0.5], [0.0, 0.5],
-            [5.0, 0.0], [5.5, 0.5], [5.0, 0.5],
-            [0.0, 10.0], [0.5, 10.5], [0.0, 10.5]
+            [0.0, 0.0],
+            [0.5, 0.5],
+            [0.0, 0.5],
+            [5.0, 0.0],
+            [5.5, 0.5],
+            [5.0, 0.5],
+            [0.0, 10.0],
+            [0.5, 10.5],
+            [0.0, 10.5]
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
 
@@ -1900,8 +2040,16 @@ mod tests {
     #[test]
     fn test_lgbm_regressor_goss() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -1923,8 +2071,16 @@ mod tests {
     #[test]
     fn test_lgbm_regressor_l1_l2() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -1946,8 +2102,16 @@ mod tests {
     #[test]
     fn test_lgbm_regressor_subsample() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -1967,11 +2131,7 @@ mod tests {
     #[test]
     fn test_lgbm_regressor_num_leaves_controls_complexity() {
         // y = 2*x; deeper trees (more leaves) should fit training data more closely.
-        let x = Array2::from_shape_vec(
-            (20, 1),
-            (0..20).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let x = Array2::from_shape_vec((20, 1), (0..20).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..20).map(|i| 2.0 * i as f64).collect());
 
         let fitted_small = LgbmRegressor::new()
@@ -2013,8 +2173,12 @@ mod tests {
     #[test]
     fn test_lgbm_feature_importances() {
         let x = array![
-            [1.0, 100.0], [2.0, 100.0], [3.0, 100.0],
-            [10.0, 100.0], [11.0, 100.0], [12.0, 100.0]
+            [1.0, 100.0],
+            [2.0, 100.0],
+            [3.0, 100.0],
+            [10.0, 100.0],
+            [11.0, 100.0],
+            [12.0, 100.0]
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
@@ -2057,13 +2221,20 @@ mod tests {
     fn test_lgbm_regressor_sample_weight() {
         // Weight the high-x rows heavily so the model focuses there.
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
         let sw = Array1::from_vec(vec![
-            0.01, 0.01, 0.01, 0.01, 0.01,
-            10.0, 10.0, 10.0, 10.0, 10.0,
+            0.01, 0.01, 0.01, 0.01, 0.01, 10.0, 10.0, 10.0, 10.0, 10.0,
         ]);
 
         let opts = LgbmFitOptions {
@@ -2090,8 +2261,16 @@ mod tests {
     fn test_lgbm_regressor_init_score() {
         // If we pass init_score close to the target, training converges in few rounds.
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
         let init = Array1::from_vec(y.to_vec());
@@ -2120,8 +2299,16 @@ mod tests {
     #[test]
     fn test_lgbm_regressor_early_stopping() {
         let x_train = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y_train = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
         let x_eval = array![[11.0], [12.0], [13.0]];
@@ -2153,8 +2340,16 @@ mod tests {
     fn test_lgbm_classifier_class_weight_balanced() {
         // Imbalanced data: 80% class 0, 20% class 1.
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0],
-            [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
 
@@ -2170,15 +2365,26 @@ mod tests {
         // With class balancing, the model should at least predict the minority
         // class somewhere.
         let n_minority: usize = preds.iter().filter(|&&v| v == 1.0).count();
-        assert!(n_minority >= 1, "class balancing should predict minority class");
+        assert!(
+            n_minority >= 1,
+            "class balancing should predict minority class"
+        );
     }
 
     #[test]
     fn test_lgbm_regressor_monotone_constraint_increasing() {
         // y increases with x[0], decreases with x[1].
         let x = array![
-            [1.0, 10.0], [2.0, 9.0], [3.0, 8.0], [4.0, 7.0], [5.0, 6.0],
-            [6.0, 5.0], [7.0, 4.0], [8.0, 3.0], [9.0, 2.0], [10.0, 1.0],
+            [1.0, 10.0],
+            [2.0, 9.0],
+            [3.0, 8.0],
+            [4.0, 7.0],
+            [5.0, 6.0],
+            [6.0, 5.0],
+            [7.0, 4.0],
+            [8.0, 3.0],
+            [9.0, 2.0],
+            [10.0, 1.0],
         ];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
 
@@ -2212,8 +2418,14 @@ mod tests {
     fn test_lgbm_feature_importance_reflects_gain() {
         // Feature 0 drives prediction, feature 1 is noise.
         let x = array![
-            [1.0, 50.0], [2.0, 50.0], [3.0, 50.0], [4.0, 50.0],
-            [10.0, 50.0], [11.0, 50.0], [12.0, 50.0], [13.0, 50.0],
+            [1.0, 50.0],
+            [2.0, 50.0],
+            [3.0, 50.0],
+            [4.0, 50.0],
+            [10.0, 50.0],
+            [11.0, 50.0],
+            [12.0, 50.0],
+            [13.0, 50.0],
         ];
         let y = array![1.0, 2.0, 3.0, 4.0, 10.0, 11.0, 12.0, 13.0];
 
@@ -2238,8 +2450,16 @@ mod tests {
     fn test_lgbm_goss_unbiased_vs_gbdt() {
         // On well-separated data, GOSS and GBDT should both converge to high accuracy.
         let x = array![
-            [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0], [5.0, 0.0],
-            [10.0, 1.0], [11.0, 1.0], [12.0, 1.0], [13.0, 1.0], [14.0, 1.0]
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [5.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0],
+            [13.0, 1.0],
+            [14.0, 1.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
@@ -2260,11 +2480,19 @@ mod tests {
             .unwrap();
 
         let gbdt_correct: usize = gbdt
-            .predict(&x).unwrap().iter().zip(y.iter())
-            .filter(|(&p, &t)| p == t).count();
+            .predict(&x)
+            .unwrap()
+            .iter()
+            .zip(y.iter())
+            .filter(|(&p, &t)| p == t)
+            .count();
         let goss_correct: usize = goss
-            .predict(&x).unwrap().iter().zip(y.iter())
-            .filter(|(&p, &t)| p == t).count();
+            .predict(&x)
+            .unwrap()
+            .iter()
+            .zip(y.iter())
+            .filter(|(&p, &t)| p == t)
+            .count();
 
         // Both should classify essentially everything correctly.
         assert!(gbdt_correct >= 9);
@@ -2389,9 +2617,7 @@ mod tests {
 
     #[test]
     fn test_lgbm_all_nan_row_predict() {
-        let x_train = array![
-            [1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0]
-        ];
+        let x_train = array![[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0]];
         let y_train = array![1.0, 2.0, 3.0, 4.0, 5.0];
 
         let fitted = LgbmRegressor::new()
@@ -2427,9 +2653,7 @@ mod tests {
 
     #[test]
     fn test_lgbm_infinity_in_features() {
-        let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0], [f64::INFINITY]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [f64::INFINITY]];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 10.0];
 
         let fitted = LgbmRegressor::new()
@@ -2448,8 +2672,12 @@ mod tests {
     #[test]
     fn test_lgbm_duplicate_rows() {
         let x = array![
-            [1.0, 2.0], [1.0, 2.0], [1.0, 2.0],
-            [3.0, 4.0], [3.0, 4.0], [3.0, 4.0]
+            [1.0, 2.0],
+            [1.0, 2.0],
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [3.0, 4.0],
+            [3.0, 4.0]
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
@@ -2468,14 +2696,8 @@ mod tests {
 
     #[test]
     fn test_lgbm_highly_imbalanced_with_balanced_weight() {
-        let x = Array2::from_shape_vec(
-            (20, 1),
-            (0..20).map(|i| i as f64).collect(),
-        )
-        .unwrap();
-        let y = Array1::from_vec(
-            (0..20).map(|i| if i >= 19 { 1.0 } else { 0.0 }).collect(),
-        );
+        let x = Array2::from_shape_vec((20, 1), (0..20).map(|i| i as f64).collect()).unwrap();
+        let y = Array1::from_vec((0..20).map(|i| if i >= 19 { 1.0 } else { 0.0 }).collect());
 
         let fitted = LgbmClassifier::new()
             .with_n_estimators(20)
@@ -2536,8 +2758,16 @@ mod tests {
     #[test]
     fn test_lgbm_goss_extreme_rates() {
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -2578,7 +2808,11 @@ mod tests {
     #[test]
     fn test_lgbm_feature_never_used_zero_importance() {
         let x = array![
-            [1.0, 42.0], [2.0, 42.0], [3.0, 42.0], [4.0, 42.0], [5.0, 42.0]
+            [1.0, 42.0],
+            [2.0, 42.0],
+            [3.0, 42.0],
+            [4.0, 42.0],
+            [5.0, 42.0]
         ];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0];
 
@@ -2630,7 +2864,11 @@ mod tests {
     #[test]
     fn test_lgbm_monotone_on_constant_feature() {
         let x = array![
-            [1.0, 50.0], [2.0, 50.0], [3.0, 50.0], [4.0, 50.0], [5.0, 50.0]
+            [1.0, 50.0],
+            [2.0, 50.0],
+            [3.0, 50.0],
+            [4.0, 50.0],
+            [5.0, 50.0]
         ];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0];
 
@@ -2651,16 +2889,23 @@ mod tests {
     #[test]
     fn test_lgbm_many_classes() {
         let x = array![
-            [0.0], [0.1], [0.2],
-            [1.0], [1.1], [1.2],
-            [2.0], [2.1], [2.2],
-            [3.0], [3.1], [3.2],
-            [4.0], [4.1], [4.2]
+            [0.0],
+            [0.1],
+            [0.2],
+            [1.0],
+            [1.1],
+            [1.2],
+            [2.0],
+            [2.1],
+            [2.2],
+            [3.0],
+            [3.1],
+            [3.2],
+            [4.0],
+            [4.1],
+            [4.2]
         ];
-        let y = array![
-            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0,
-            3.0, 3.0, 3.0, 4.0, 4.0, 4.0
-        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0];
 
         let fitted = LgbmClassifier::new()
             .with_n_estimators(20)
@@ -2681,8 +2926,11 @@ mod tests {
     #[test]
     fn test_lgbm_all_nan_column() {
         let x = array![
-            [1.0, f64::NAN], [2.0, f64::NAN], [3.0, f64::NAN],
-            [4.0, f64::NAN], [5.0, f64::NAN]
+            [1.0, f64::NAN],
+            [2.0, f64::NAN],
+            [3.0, f64::NAN],
+            [4.0, f64::NAN],
+            [5.0, f64::NAN]
         ];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0];
 
@@ -2737,9 +2985,15 @@ mod tests {
     #[test]
     fn test_lgbm_classifier_categorical_multiclass() {
         let x = array![
-            [0.0, 1.0], [1.0, 1.0], [2.0, 1.0],
-            [0.0, 2.0], [1.0, 2.0], [2.0, 2.0],
-            [0.0, 3.0], [1.0, 3.0], [2.0, 3.0]
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [0.0, 2.0],
+            [1.0, 2.0],
+            [2.0, 2.0],
+            [0.0, 3.0],
+            [1.0, 3.0],
+            [2.0, 3.0]
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
 
@@ -2794,7 +3048,9 @@ mod tests {
         let mut y_data = Vec::with_capacity(n);
         let mut rng_state = 42u64;
         let mut next = || {
-            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((rng_state >> 33) as f64) / (u32::MAX as f64) - 0.5
         };
         for i in 0..n {
@@ -2821,10 +3077,18 @@ mod tests {
         let preds = fitted.predict(&x).unwrap();
         // R² should be reasonably high
         let y_mean: f64 = y.iter().sum::<f64>() / n as f64;
-        let ss_res: f64 = preds.iter().zip(y.iter()).map(|(&p, &t)| (p - t).powi(2)).sum();
+        let ss_res: f64 = preds
+            .iter()
+            .zip(y.iter())
+            .map(|(&p, &t)| (p - t).powi(2))
+            .sum();
         let ss_tot: f64 = y.iter().map(|&t| (t - y_mean).powi(2)).sum();
         let r2 = 1.0 - ss_res / ss_tot;
-        assert!(r2 > 0.5, "R² should be > 0.5 on noisy linear data, got {:.4}", r2);
+        assert!(
+            r2 > 0.5,
+            "R² should be > 0.5 on noisy linear data, got {:.4}",
+            r2
+        );
 
         // Feature importance should reflect the true signal: f0 (coef 2.0) > f1 (coef 1.5) > others
         let imp = fitted.feature_importances();
@@ -2837,8 +3101,16 @@ mod tests {
     fn test_lgbm_stress_many_estimators() {
         // 500 estimators on small data — shouldn't overflow or NaN.
         let x = array![
-            [1.0], [2.0], [3.0], [4.0], [5.0],
-            [6.0], [7.0], [8.0], [9.0], [10.0]
+            [1.0],
+            [2.0],
+            [3.0],
+            [4.0],
+            [5.0],
+            [6.0],
+            [7.0],
+            [8.0],
+            [9.0],
+            [10.0]
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
@@ -2861,8 +3133,14 @@ mod tests {
     #[test]
     fn test_lgbm_reproducible_with_seed() {
         let x = array![
-            [1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0],
-            [11.0, 12.0], [13.0, 14.0], [15.0, 16.0]
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [5.0, 6.0],
+            [7.0, 8.0],
+            [9.0, 10.0],
+            [11.0, 12.0],
+            [13.0, 14.0],
+            [15.0, 16.0]
         ];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
@@ -2888,8 +3166,14 @@ mod tests {
     #[test]
     fn test_lgbm_different_seeds_differ() {
         let x = array![
-            [1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0],
-            [9.0, 10.0], [11.0, 12.0], [13.0, 14.0], [15.0, 16.0]
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [5.0, 6.0],
+            [7.0, 8.0],
+            [9.0, 10.0],
+            [11.0, 12.0],
+            [13.0, 14.0],
+            [15.0, 16.0]
         ];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
@@ -2914,7 +3198,10 @@ mod tests {
 
         // At least one prediction should differ with different seeds
         let any_diff = p1.iter().zip(p2.iter()).any(|(a, b)| (a - b).abs() > 1e-10);
-        assert!(any_diff, "different seeds should give different predictions");
+        assert!(
+            any_diff,
+            "different seeds should give different predictions"
+        );
     }
 
     #[test]
@@ -2940,11 +3227,7 @@ mod tests {
 
     #[test]
     fn test_lgbm_early_stopping_respects_rounds() {
-        let x_train = Array2::from_shape_vec(
-            (20, 1),
-            (0..20).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let x_train = Array2::from_shape_vec((20, 1), (0..20).map(|i| i as f64).collect()).unwrap();
         let y_train = Array1::from_vec((0..20).map(|i| 2.0 * i as f64).collect());
         let x_eval = array![[5.0], [10.0], [15.0]];
         let y_eval = array![10.0, 20.0, 30.0];
@@ -2970,8 +3253,14 @@ mod tests {
     fn test_lgbm_regressor_categorical_features() {
         // x[:, 0] is numeric, x[:, 1] is categorical
         let x = array![
-            [1.0, 0.0], [2.0, 0.0], [3.0, 1.0], [4.0, 1.0],
-            [5.0, 2.0], [6.0, 2.0], [7.0, 0.0], [8.0, 1.0]
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 1.0],
+            [4.0, 1.0],
+            [5.0, 2.0],
+            [6.0, 2.0],
+            [7.0, 0.0],
+            [8.0, 1.0]
         ];
         let y = array![1.0, 2.0, 10.0, 11.0, 20.0, 21.0, 3.0, 12.0];
 

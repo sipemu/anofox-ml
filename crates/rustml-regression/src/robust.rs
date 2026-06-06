@@ -96,14 +96,28 @@ impl RansacRegressor {
             fit_intercept: true,
         }
     }
-    pub fn with_min_samples(mut self, m: usize) -> Self { self.min_samples = Some(m); self }
-    pub fn with_residual_threshold(mut self, t: f64) -> Self { self.residual_threshold = Some(t); self }
-    pub fn with_max_trials(mut self, n: usize) -> Self { self.max_trials = n; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_min_samples(mut self, m: usize) -> Self {
+        self.min_samples = Some(m);
+        self
+    }
+    pub fn with_residual_threshold(mut self, t: f64) -> Self {
+        self.residual_threshold = Some(t);
+        self
+    }
+    pub fn with_max_trials(mut self, n: usize) -> Self {
+        self.max_trials = n;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 }
 
 impl Default for RansacRegressor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -121,7 +135,9 @@ impl Fit<f64> for RansacRegressor {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         let n = x.nrows();
@@ -215,7 +231,9 @@ impl Predict<f64> for FittedRansacRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
@@ -247,12 +265,20 @@ impl TheilSenRegressor {
             fit_intercept: true,
         }
     }
-    pub fn with_max_subpopulation(mut self, m: usize) -> Self { self.max_subpopulation = m; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_max_subpopulation(mut self, m: usize) -> Self {
+        self.max_subpopulation = m;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 }
 
 impl Default for TheilSenRegressor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -293,7 +319,10 @@ fn spatial_median(points: &Array2<f64>, max_iter: usize, tol: f64) -> Array1<f64
             m_new[j] = num[j] / den;
         }
         // Convergence.
-        let shift: f64 = (0..d).map(|j| (m_new[j] - m[j]).powi(2)).sum::<f64>().sqrt();
+        let shift: f64 = (0..d)
+            .map(|j| (m_new[j] - m[j]).powi(2))
+            .sum::<f64>()
+            .sqrt();
         m = m_new;
         if shift < tol {
             break;
@@ -308,15 +337,20 @@ impl Fit<f64> for TheilSenRegressor {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         let n = x.nrows();
         let d = x.ncols();
-        let k = self.n_subsamples.unwrap_or(if self.fit_intercept { d + 1 } else { d });
+        let k = self
+            .n_subsamples
+            .unwrap_or(if self.fit_intercept { d + 1 } else { d });
         if n < k {
             return Err(RustMlError::InvalidParameter(format!(
-                "n_subsamples={} > n={}", k, n
+                "n_subsamples={} > n={}",
+                k, n
             )));
         }
 
@@ -328,9 +362,7 @@ impl Fit<f64> for TheilSenRegressor {
         let mut seen = HashSet::<Vec<usize>>::new();
         let cap = self.max_subpopulation.min(1_000_000);
         for _ in 0..cap {
-            let mut s: Vec<usize> = (0..k)
-                .map(|_| rng.gen_range(0..n))
-                .collect();
+            let mut s: Vec<usize> = (0..k).map(|_| rng.gen_range(0..n)).collect();
             s.sort();
             s.dedup();
             if s.len() < k {
@@ -388,7 +420,9 @@ impl Predict<f64> for FittedTheilSenRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))

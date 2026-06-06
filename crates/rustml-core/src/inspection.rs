@@ -52,7 +52,9 @@ where
     let per_feature: Vec<Vec<f64>> = (0..n_features)
         .into_par_iter()
         .map(|j| -> Result<Vec<f64>> {
-            let mut sub_rng = StdRng::seed_from_u64(seed.wrapping_add((j as u64).wrapping_mul(0x9E3779B97F4A7C15)));
+            let mut sub_rng = StdRng::seed_from_u64(
+                seed.wrapping_add((j as u64).wrapping_mul(0x9E3779B97F4A7C15)),
+            );
             let original_col: Vec<f64> = x.column(j).iter().copied().collect();
             let mut out = Vec::with_capacity(n_repeats);
             for _ in 0..n_repeats {
@@ -136,8 +138,7 @@ mod tests {
             x[[i, 1]] = ((i * 7 % 13) as f64) - 6.0;
             x[[i, 2]] = ((i * 3 % 11) as f64) - 5.0;
         }
-        let y = x.column(0).mapv(|v| 10.0 * v)
-            + x.column(2).mapv(|v| 0.1 * v);
+        let y = x.column(0).mapv(|v| 10.0 * v) + x.column(2).mapv(|v| 0.1 * v);
 
         let model = Linear {
             coef: array![10.0, 0.0, 0.1],
@@ -156,7 +157,10 @@ mod tests {
     fn test_zero_repeats_gives_zero_size_matrix() {
         let x = array![[1.0], [2.0], [3.0]];
         let y = array![1.0, 2.0, 3.0];
-        let model = Linear { coef: array![1.0], bias: 0.0 };
+        let model = Linear {
+            coef: array![1.0],
+            bias: 0.0,
+        };
         let r = permutation_importance(&model, &x, &y, 0, 0, neg_mse).unwrap();
         assert_eq!(r.importances.shape(), &[1, 0]);
     }

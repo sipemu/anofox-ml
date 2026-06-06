@@ -17,7 +17,10 @@ fn rel(a: f64, b: f64) -> f64 {
 #[test]
 fn test_bayesian_ridge_matches_sklearn() {
     let cases = load_golden_data("bayesian_ridge.json");
-    let case = cases.iter().find(|c| c["name"] == "bayesian_ridge").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "bayesian_ridge")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
@@ -32,10 +35,7 @@ fn test_bayesian_ridge_matches_sklearn() {
     let sk_std = json_to_array1(&case["sklearn_std"]);
     let std = fitted.predict_std(&x).unwrap();
     for (i, (&a, &b)) in std.iter().zip(sk_std.iter()).enumerate() {
-        assert!(
-            rel(a, b) < 0.05,
-            "[std {}] rustml={}, sklearn={}", i, a, b
-        );
+        assert!(rel(a, b) < 0.05, "[std {}] rustml={}, sklearn={}", i, a, b);
     }
 }
 
@@ -54,7 +54,11 @@ fn test_ard_matches_sklearn_in_relevance() {
     let fitted = ARDRegression::new().fit(&x, &y).unwrap();
     // R² high enough — sklearn typically nails this.
     let preds = fitted.predict(&x).unwrap();
-    let ss_res: f64 = preds.iter().zip(y.iter()).map(|(p, t)| (t - p).powi(2)).sum();
+    let ss_res: f64 = preds
+        .iter()
+        .zip(y.iter())
+        .map(|(p, t)| (t - p).powi(2))
+        .sum();
     let y_mean: f64 = y.iter().sum::<f64>() / y.len() as f64;
     let ss_tot: f64 = y.iter().map(|t| (t - y_mean).powi(2)).sum();
     let r2 = 1.0 - ss_res / ss_tot;
@@ -62,7 +66,11 @@ fn test_ard_matches_sklearn_in_relevance() {
 
     // Both must drive feature 1, 2, 4 to ~0.
     for &j in &[1usize, 2, 4] {
-        assert!(fitted.coef[j].abs() < 0.1, "ard coef[{j}] = {}", fitted.coef[j]);
+        assert!(
+            fitted.coef[j].abs() < 0.1,
+            "ard coef[{j}] = {}",
+            fitted.coef[j]
+        );
         assert!(sklearn_coef[j].abs() < 0.1);
     }
     // Both must keep feature 0 and 3 large.

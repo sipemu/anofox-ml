@@ -24,3 +24,11 @@ the median-of-similarities default differs in edge cases.
 - **HDBSCAN**, **OPTICS**, **Birch** — still pending in #16.
 - `affinity='precomputed'` / arbitrary similarity matrices.
 - `predict` on new points.
+
+## Complexity
+
+- Time (dense): **O(n² · iter)** per iteration over the full responsibility/availability matrices, total `O(n² · max_iter)`.
+- Time (sparse k-NN path, `n_neighbors=k`): **O(n·k · iter)** — message updates scan only the sparse pattern.
+- Memory (dense): **O(n²)**.
+- Memory (sparse): **O(n·k)** — viable for n ≈ 50k–100k where dense AP OOMs.
+- Convergence is judged by `convergence_iter` consecutive identical exemplar sets.

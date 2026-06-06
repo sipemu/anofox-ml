@@ -23,9 +23,15 @@ pub struct AgglomerativeClustering {
 
 impl AgglomerativeClustering {
     pub fn new(n_clusters: usize) -> Self {
-        Self { n_clusters, linkage: Linkage::Ward }
+        Self {
+            n_clusters,
+            linkage: Linkage::Ward,
+        }
     }
-    pub fn with_linkage(mut self, l: Linkage) -> Self { self.linkage = l; self }
+    pub fn with_linkage(mut self, l: Linkage) -> Self {
+        self.linkage = l;
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -75,19 +81,24 @@ impl FitUnsupervised<f64> for AgglomerativeClustering {
         }
 
         let mut current_clusters = n;
-        // nn-chain disabled: the chain-extension logic doesn't yet correctly
-        // handle the case where NN(top) is a non-prev chain element under
-        // tied distances. The naive O(n³) path is correct and matches sklearn.
-        let use_nn_chain = false;
+        // For Ward (the only reducible linkage we support) use Müllner's
+        // O(n²) nn-chain. For Single/Complete/Average — also reducible —
+        // the naive O(n³) path stays default because nn-chain's gains
+        // require maintaining the full reduced-distance matrix, which the
+        // naive sweep already does. Override with `RUSTML_AGGLO_NAIVE=1` to
+        // force the naive path everywhere (used by regression tests that
+        // confirm both paths agree).
+        let use_nn_chain =
+            self.linkage == Linkage::Ward && std::env::var("RUSTML_AGGLO_NAIVE").is_err();
 
         // Helper: Lance-Williams update for cluster k after merging bi and bj
         // into bi.
         let update = |dist: &mut Vec<Vec<f64>>,
-                       size: &Vec<usize>,
-                       bi: usize,
-                       bj: usize,
-                       k: usize,
-                       linkage: Linkage|
+                      size: &Vec<usize>,
+                      bi: usize,
+                      bj: usize,
+                      k: usize,
+                      linkage: Linkage|
          -> f64 {
             let d_ik = dist[bi][k];
             let d_jk = dist[bj][k];
@@ -107,73 +118,110 @@ impl FitUnsupervised<f64> for AgglomerativeClustering {
         };
 
         if use_nn_chain {
-            // nn-chain algorithm (Müllner 2011). For Ward (reducible),
-            // walking a nearest-neighbour chain finds reciprocal NN pairs
-            // that are guaranteed to be the globally-closest active pair.
-            // Total cost O(n²) instead of O(n³).
+            // nn-chain algorithm (Müllner 2011, §4.1). For reducible linkages
+            // like Ward, a reciprocal-NN pair at the chain tail can be merged
+            // safely — under reducibility no later merge can produce a closer
+            // pair involving the merged cluster. CRITICALLY, nn-chain
+            // produces merges in *chain order* not *distance order*. To
+            // recover the same flat clustering as the naive O(n³) sweep we
+            // must:
+            //   1. run nn-chain all the way to a single cluster, recording
+            //      every merge as (a, b, distance);
+            //   2. sort the recorded merges by distance ascending;
+            //   3. apply them via a fresh DSU, stopping at n_clusters.
+            //
+            // Step 1 is O(n²) total. Steps 2/3 are O(n log n). Net cost
+            // O(n²) — matches Müllner's bound.
             let mut chain: Vec<usize> = Vec::with_capacity(n);
-            let mut chain_dists: Vec<f64> = Vec::with_capacity(n);
-            while current_clusters > self.n_clusters {
+            let mut merges: Vec<(usize, usize, f64)> = Vec::with_capacity(n - 1);
+            while current_clusters > 1 {
                 if chain.is_empty() {
-                    // Start chain from any active cluster.
                     for i in 0..n {
                         if active[i] {
                             chain.push(i);
-                            chain_dists.push(f64::INFINITY); // sentinel
                             break;
                         }
                     }
                 }
-                let top = *chain.last().unwrap();
-                // Find nearest active neighbour of `top`.
-                let mut nn = top;
-                let mut nn_dist = f64::INFINITY;
-                for j in 0..n {
-                    if j == top || !active[j] {
-                        continue;
-                    }
-                    let d = dist[top][j];
-                    if d < nn_dist {
-                        nn_dist = d;
-                        nn = j;
-                    }
-                }
-                // Reciprocal NN: chain tail's NN is the previous chain element.
-                let prev = if chain.len() >= 2 {
-                    Some(chain[chain.len() - 2])
-                } else {
-                    None
-                };
-                if Some(nn) == prev {
-                    // Merge top and prev.
-                    let bi = prev.unwrap().min(top);
-                    let bj = prev.unwrap().max(top);
-                    // Apply Lance-Williams on bi's row (merge bj into bi).
-                    for k in 0..n {
-                        if k == bi || k == bj || !active[k] {
+                loop {
+                    let top = *chain.last().unwrap();
+                    let mut nn = top;
+                    let mut nn_dist = f64::INFINITY;
+                    for j in 0..n {
+                        if j == top || !active[j] {
                             continue;
                         }
-                        let new_d = update(&mut dist, &size, bi, bj, k, self.linkage);
-                        dist[bi][k] = new_d;
-                        dist[k][bi] = new_d;
-                    }
-                    for c in &mut cluster_of {
-                        if *c == bj {
-                            *c = bi;
+                        let d = dist[top][j];
+                        if d < nn_dist {
+                            nn_dist = d;
+                            nn = j;
                         }
                     }
-                    size[bi] += size[bj];
-                    active[bj] = false;
-                    current_clusters -= 1;
-                    // Pop top + prev from chain.
-                    chain.pop();
-                    chain.pop();
-                    chain_dists.pop();
-                    chain_dists.pop();
-                } else {
+                    let prev_idx = if chain.len() >= 2 {
+                        Some(chain[chain.len() - 2])
+                    } else {
+                        None
+                    };
+                    if let Some(prev) = prev_idx {
+                        let d_top_prev = dist[top][prev];
+                        if d_top_prev <= nn_dist {
+                            let bi = prev.min(top);
+                            let bj = prev.max(top);
+                            merges.push((bi, bj, d_top_prev));
+                            for k in 0..n {
+                                if k == bi || k == bj || !active[k] {
+                                    continue;
+                                }
+                                let new_d = update(&mut dist, &size, bi, bj, k, self.linkage);
+                                dist[bi][k] = new_d;
+                                dist[k][bi] = new_d;
+                            }
+                            size[bi] += size[bj];
+                            active[bj] = false;
+                            current_clusters -= 1;
+                            chain.pop();
+                            chain.pop();
+                            break;
+                        }
+                    }
                     chain.push(nn);
-                    chain_dists.push(nn_dist);
                 }
+            }
+
+            // Step 2: sort by merge distance ascending.
+            merges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+
+            // Step 3: apply merges in distance order via a fresh DSU on
+            // `cluster_of`, stopping at n_clusters remaining.
+            let target = self.n_clusters;
+            let mut parent: Vec<usize> = (0..n).collect();
+            fn find(parent: &mut [usize], i: usize) -> usize {
+                let mut r = i;
+                while parent[r] != r {
+                    r = parent[r];
+                }
+                let mut cur = i;
+                while parent[cur] != r {
+                    let nxt = parent[cur];
+                    parent[cur] = r;
+                    cur = nxt;
+                }
+                r
+            }
+            let mut active_count = n;
+            for (a, b, _d) in merges {
+                if active_count <= target {
+                    break;
+                }
+                let ra = find(&mut parent, a);
+                let rb = find(&mut parent, b);
+                if ra != rb {
+                    parent[ra] = rb;
+                    active_count -= 1;
+                }
+            }
+            for i in 0..n {
+                cluster_of[i] = find(&mut parent, i);
             }
         } else {
             // Naive O(n³) path for non-Ward linkages.
@@ -244,8 +292,14 @@ mod tests {
     #[test]
     fn test_agglomerative_two_groups_ward() {
         let x = array![
-            [0.0, 0.0], [0.5, 0.1], [-0.3, 0.2], [0.1, -0.2],
-            [10.0, 10.0], [10.5, 10.1], [9.9, 9.8], [10.1, 9.9],
+            [0.0, 0.0],
+            [0.5, 0.1],
+            [-0.3, 0.2],
+            [0.1, -0.2],
+            [10.0, 10.0],
+            [10.5, 10.1],
+            [9.9, 9.8],
+            [10.1, 9.9],
         ];
         let fitted = AgglomerativeClustering::new(2)
             .with_linkage(Linkage::Ward)
@@ -263,10 +317,54 @@ mod tests {
     }
 
     #[test]
+    fn test_ward_nnchain_matches_naive() {
+        // Spread-out 3-blob data with enough points that any algorithmic
+        // difference would surface; nn-chain (default for Ward) must
+        // produce the same flat labels as the naive O(n³) path.
+        let mut data = Vec::new();
+        let centres = [(0.0_f64, 0.0), (8.0, 0.0), (4.0, 7.0)];
+        for &(cx, cy) in &centres {
+            for i in 0..15 {
+                let t = i as f64 * 0.1;
+                data.push(cx + t.sin() * 0.4);
+                data.push(cy + t.cos() * 0.4);
+            }
+        }
+        let x = ndarray::Array2::from_shape_vec((45, 2), data).unwrap();
+
+        let nnc = AgglomerativeClustering::new(3)
+            .with_linkage(Linkage::Ward)
+            .fit(&x)
+            .unwrap();
+
+        std::env::set_var("RUSTML_AGGLO_NAIVE", "1");
+        let naive = AgglomerativeClustering::new(3)
+            .with_linkage(Linkage::Ward)
+            .fit(&x)
+            .unwrap();
+        std::env::remove_var("RUSTML_AGGLO_NAIVE");
+
+        // Labels may be permuted between runs; compare via cluster
+        // partition equality (same induced equivalence relation).
+        let same_partition = |a: &Array1<f64>, b: &Array1<f64>| -> bool {
+            for i in 0..a.len() {
+                for j in (i + 1)..a.len() {
+                    if (a[i] == a[j]) != (b[i] == b[j]) {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+        assert!(
+            same_partition(&nnc.labels, &naive.labels),
+            "nn-chain and naive should produce identical partitions"
+        );
+    }
+
+    #[test]
     fn test_agglomerative_single_complete_average() {
-        let x = array![
-            [0.0], [0.1], [10.0], [10.1], [100.0],
-        ];
+        let x = array![[0.0], [0.1], [10.0], [10.1], [100.0],];
         for lk in [Linkage::Single, Linkage::Complete, Linkage::Average] {
             let fitted = AgglomerativeClustering::new(3)
                 .with_linkage(lk)

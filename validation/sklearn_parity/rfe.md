@@ -34,3 +34,10 @@ which is biased — a tighter comparison would need CV in our scorer).
   to `estimator.coef_` / `feature_importances_`. This generalises but loses
   the convenience of `RFE(estimator=Ridge())`.
 - No `n_features_to_select='auto'`.
+
+## Complexity
+
+- RFE: at each step, fit the estimator (**O(fit(n, p_current))**) and rank features by importance, removing the bottom `step` features. Repeat until `n_features_to_select` features remain.
+- Total: **O((p - target) / step · cost(fit))**.
+- RFECV: above, performed independently on each of K CV folds, with the optimal feature count chosen by cross-validated score. Memory: **O(K · p)** for fold-wise rankings.
+- Parallelisable across CV folds.

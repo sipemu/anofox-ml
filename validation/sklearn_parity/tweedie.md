@@ -47,3 +47,10 @@ to avoid the trap.
 
 - Identity / inverse links beyond what anofox supports.
 - `link='auto'` mode — caller must pass `link_power` explicitly for non-defaults.
+
+## Complexity
+
+- TweedieRegressor / PoissonRegressor / GammaRegressor: GLM IRLS — each iteration solves a weighted-least-squares of cost **O(n·p² + p³)**.
+- Typical convergence in 5–20 iterations.
+- Total: **O((n·p² + p³) · iter)**.
+- Memory: **O(n·p)** for design matrix + **O(p²)** for the Hessian factorisation.

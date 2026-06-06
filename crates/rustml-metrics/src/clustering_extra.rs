@@ -51,9 +51,7 @@ pub fn adjusted_rand_score<F: Float>(
     }
 
     // Compute row sums (a_i) and column sums (b_j)
-    let a: Vec<usize> = (0..n_true)
-        .map(|i| contingency[i].iter().sum())
-        .collect();
+    let a: Vec<usize> = (0..n_true).map(|i| contingency[i].iter().sum()).collect();
     let b: Vec<usize> = (0..n_pred)
         .map(|j| (0..n_true).map(|i| contingency[i][j]).sum())
         .collect();
@@ -180,9 +178,7 @@ pub fn normalized_mutual_info_score<F: Float>(
     }
 
     // Row sums and column sums
-    let a: Vec<usize> = (0..n_true)
-        .map(|i| contingency[i].iter().sum())
-        .collect();
+    let a: Vec<usize> = (0..n_true).map(|i| contingency[i].iter().sum()).collect();
     let b: Vec<usize> = (0..n_pred)
         .map(|j| (0..n_true).map(|i| contingency[i][j]).sum())
         .collect();

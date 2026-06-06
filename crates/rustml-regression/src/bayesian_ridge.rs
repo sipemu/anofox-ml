@@ -84,7 +84,9 @@ impl BayesianRidge {
 }
 
 impl Default for BayesianRidge {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -108,7 +110,9 @@ impl FittedBayesianRidge {
     pub fn predict_std(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -148,7 +152,9 @@ impl Fit<f64> for BayesianRidge {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
@@ -285,7 +291,9 @@ impl Predict<f64> for FittedBayesianRidge {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
@@ -323,7 +331,9 @@ impl ARDRegression {
 }
 
 impl Default for ARDRegression {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -342,7 +352,9 @@ impl Fit<f64> for ARDRegression {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}", x.nrows(), y.len()
+                "X has {} rows but y has {}",
+                x.nrows(),
+                y.len()
             )));
         }
         let n = x.nrows() as f64;
@@ -395,7 +407,8 @@ impl Fit<f64> for ARDRegression {
                 }
                 a[[ii, ii]] += lambdas[i];
             }
-            let rhs: Array1<f64> = Array1::from_vec(active.iter().map(|&j| alpha * xty[j]).collect());
+            let rhs: Array1<f64> =
+                Array1::from_vec(active.iter().map(|&j| alpha * xty[j]).collect());
             let mu_act = solve_psd(&a, &rhs)?;
             let s = invert_psd(&a)?;
 
@@ -459,7 +472,9 @@ impl Predict<f64> for FittedARDRegression {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
@@ -469,7 +484,6 @@ impl Predict<f64> for FittedARDRegression {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
 
     #[test]
     fn test_bayesian_ridge_recovers_simple_line() {

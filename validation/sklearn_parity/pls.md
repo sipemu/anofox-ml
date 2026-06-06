@@ -28,3 +28,9 @@ deterministic — predictions match sklearn element-wise to `1e-6`.
 - `PLSCanonical`, `CCA`, `PLSSVD` — issue #11 still tracks these.
 - 2-D `y` (PLS2 / PLS-DA) — current code is PLS1 only.
 - `transform` / `x_scores_` / `y_scores_` exposed publicly.
+
+## Complexity
+
+- Time per component: **O(n · p · q + n · p² + n · q²)** for PLSCanonical/PLSRegression NIPALS power iterations until convergence.
+- Total: **O(k · iter · (np + p² + q²))** for `k = n_components`.
+- Memory: **O(n·p + n·q + p·q)** for scores, loadings, weight matrices.

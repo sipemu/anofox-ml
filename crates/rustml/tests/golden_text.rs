@@ -54,7 +54,11 @@ fn test_tfidf_vectorizer_matches_sklearn() {
         for j in 0..x.ncols() {
             assert!(
                 (x[[i, j]] - sk_tfidf[[i, j]]).abs() < 1e-6,
-                "[{},{}]: {} vs {}", i, j, x[[i, j]], sk_tfidf[[i, j]]
+                "[{},{}]: {} vs {}",
+                i,
+                j,
+                x[[i, j]],
+                sk_tfidf[[i, j]]
             );
         }
     }

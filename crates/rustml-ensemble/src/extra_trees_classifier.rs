@@ -179,10 +179,7 @@ impl<F: Float> Fit<F> for ExtraTreesClassifier {
             })
             .collect();
 
-        Ok(FittedExtraTreesClassifier {
-            trees,
-            n_features,
-        })
+        Ok(FittedExtraTreesClassifier { trees, n_features })
     }
 }
 
@@ -241,10 +238,9 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
 
         for forest_tree in &self.trees {
             let total_samples = tree_n_samples(&forest_tree.tree);
-            let tree_raw =
-                forest_tree
-                    .tree
-                    .feature_importances(forest_tree.n_features_tree, total_samples);
+            let tree_raw = forest_tree
+                .tree
+                .feature_importances(forest_tree.n_features_tree, total_samples);
             // Normalize individual tree importances
             let sum: F = tree_raw.iter().copied().fold(F::zero(), |a, b| a + b);
             for (local_idx, &original_idx) in forest_tree.feature_indices.iter().enumerate() {
@@ -356,7 +352,9 @@ fn build_extra_tree<F: Float>(
     }
 
     // Use a depth-dependent seed so left/right children get different randomness
-    let split_seed = seed.wrapping_add(depth as u64).wrapping_mul(0x517CC1B727220A95);
+    let split_seed = seed
+        .wrapping_add(depth as u64)
+        .wrapping_mul(0x517CC1B727220A95);
 
     match find_random_split(x, y, indices, criterion, min_samples_leaf, split_seed) {
         Some(split) => {
@@ -462,10 +460,7 @@ fn majority_vote<F: Float>(votes: &[F]) -> F {
     let mut counts: HashMap<u64, (F, usize)> = HashMap::new();
     for &v in votes {
         let key = v.to_f64().unwrap().to_bits();
-        counts
-            .entry(key)
-            .and_modify(|e| e.1 += 1)
-            .or_insert((v, 1));
+        counts.entry(key).and_modify(|e| e.1 += 1).or_insert((v, 1));
     }
     counts
         .into_values()
@@ -737,8 +732,7 @@ mod tests {
         let fitted: FittedExtraTreesClassifier<f64> = et.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
-        let valid_labels: std::collections::HashSet<u64> =
-            y.iter().map(|v| v.to_bits()).collect();
+        let valid_labels: std::collections::HashSet<u64> = y.iter().map(|v| v.to_bits()).collect();
         for &p in preds.iter() {
             assert!(
                 valid_labels.contains(&p.to_bits()),
@@ -783,10 +777,7 @@ mod tests {
                 .find(|&&(c, _)| (c - 0.0).abs() < 1e-10)
                 .map(|&(_, p)| p)
                 .unwrap_or(0.0);
-            assert!(
-                p_class0 > 0.5,
-                "expected P(class=0) > 0.5, got {p_class0}"
-            );
+            assert!(p_class0 > 0.5, "expected P(class=0) > 0.5, got {p_class0}");
         }
     }
 

@@ -68,8 +68,12 @@ fn build_tree(
         let mut mx = f64::NEG_INFINITY;
         for &i in indices {
             let v = x[[i, f]];
-            if v < mn { mn = v; }
-            if v > mx { mx = v; }
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
         }
         if mx > mn {
             chosen_feature = Some(f);
@@ -137,14 +141,28 @@ impl IsolationForest {
             seed: 0,
         }
     }
-    pub fn with_n_estimators(mut self, n: usize) -> Self { self.n_estimators = n; self }
-    pub fn with_max_samples(mut self, n: usize) -> Self { self.max_samples = n; self }
-    pub fn with_contamination(mut self, c: f64) -> Self { self.contamination = c; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_n_estimators(mut self, n: usize) -> Self {
+        self.n_estimators = n;
+        self
+    }
+    pub fn with_max_samples(mut self, n: usize) -> Self {
+        self.max_samples = n;
+        self
+    }
+    pub fn with_contamination(mut self, c: f64) -> Self {
+        self.contamination = c;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 }
 
 impl Default for IsolationForest {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -230,7 +248,9 @@ impl Predict<f64> for FittedIsolationForest {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         let scores = self.score_samples(x);

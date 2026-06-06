@@ -31,10 +31,7 @@ pub fn median_absolute_error<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -
 ///
 /// Penalizes under-prediction more than over-prediction relative to the magnitude.
 /// Only valid for non-negative values; returns an error if any value is negative.
-pub fn mean_squared_log_error<F: Float>(
-    y_true: &Array1<F>,
-    y_pred: &Array1<F>,
-) -> Result<F> {
+pub fn mean_squared_log_error<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
     check_lengths(y_true, y_pred)?;
 
     let zero = F::zero();
@@ -96,11 +93,7 @@ mod tests {
     #[test]
     fn test_median_absolute_error_perfect() {
         let y = array![1.0, 2.0, 3.0];
-        assert_abs_diff_eq!(
-            median_absolute_error(&y, &y).unwrap(),
-            0.0,
-            epsilon = 1e-10
-        );
+        assert_abs_diff_eq!(median_absolute_error(&y, &y).unwrap(), 0.0, epsilon = 1e-10);
     }
 
     #[test]
@@ -223,12 +216,11 @@ mod tests {
         // Compute each term manually:
         let y_true = array![3.0, 5.0, 2.5, 7.0];
         let y_pred = array![2.5, 5.0, 4.0, 8.0];
-        let expected = (
-            (4.0_f64.ln() - 3.5_f64.ln()).powi(2)
+        let expected = ((4.0_f64.ln() - 3.5_f64.ln()).powi(2)
             + (6.0_f64.ln() - 6.0_f64.ln()).powi(2)
             + (3.5_f64.ln() - 5.0_f64.ln()).powi(2)
-            + (8.0_f64.ln() - 9.0_f64.ln()).powi(2)
-        ) / 4.0;
+            + (8.0_f64.ln() - 9.0_f64.ln()).powi(2))
+            / 4.0;
         assert_abs_diff_eq!(
             mean_squared_log_error(&y_true, &y_pred).unwrap(),
             expected,

@@ -33,10 +33,7 @@ pub fn mean_absolute_percentage_error<F: Float>(
 ///
 /// The variance is computed as the population variance (dividing by N, not N-1).
 /// If `Var(y_true)` is zero (constant input), returns zero.
-pub fn explained_variance_score<F: Float>(
-    y_true: &Array1<F>,
-    y_pred: &Array1<F>,
-) -> Result<F> {
+pub fn explained_variance_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
     check_lengths(y_true, y_pred)?;
 
     let n = F::from_usize(y_true.len()).unwrap();
@@ -80,7 +77,10 @@ pub fn max_error<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> 
         .iter()
         .zip(y_pred.iter())
         .map(|(&t, &p)| (t - p).abs())
-        .fold(F::zero(), |max_val, v| if v > max_val { v } else { max_val });
+        .fold(
+            F::zero(),
+            |max_val, v| if v > max_val { v } else { max_val },
+        );
 
     Ok(result)
 }
@@ -263,11 +263,7 @@ mod tests {
         let y_true = array![1.0, 2.0, 3.0];
         let y_pred = array![1.5, 2.5, 5.0];
         // max(|0.5|, |0.5|, |2.0|) = 2.0
-        assert_abs_diff_eq!(
-            max_error(&y_true, &y_pred).unwrap(),
-            2.0,
-            epsilon = 1e-10
-        );
+        assert_abs_diff_eq!(max_error(&y_true, &y_pred).unwrap(), 2.0, epsilon = 1e-10);
     }
 
     #[test]
@@ -275,22 +271,14 @@ mod tests {
         let y_true = array![5.0, 10.0, 15.0];
         let y_pred = array![4.0, 3.0, 14.0];
         // max(|1|, |7|, |1|) = 7.0
-        assert_abs_diff_eq!(
-            max_error(&y_true, &y_pred).unwrap(),
-            7.0,
-            epsilon = 1e-10
-        );
+        assert_abs_diff_eq!(max_error(&y_true, &y_pred).unwrap(), 7.0, epsilon = 1e-10);
     }
 
     #[test]
     fn test_max_error_single_element() {
         let y_true = array![3.0];
         let y_pred = array![5.0];
-        assert_abs_diff_eq!(
-            max_error(&y_true, &y_pred).unwrap(),
-            2.0,
-            epsilon = 1e-10
-        );
+        assert_abs_diff_eq!(max_error(&y_true, &y_pred).unwrap(), 2.0, epsilon = 1e-10);
     }
 
     #[test]

@@ -237,14 +237,14 @@ mod tests {
 
         let _doubler: &FittedDoubler = fitted_union.get_transformer("double").unwrap();
         let _tripler: &FittedTripler = fitted_union.get_transformer("triple").unwrap();
-        assert!(fitted_union.get_transformer::<FittedDoubler>("missing").is_err());
+        assert!(fitted_union
+            .get_transformer::<FittedDoubler>("missing")
+            .is_err());
     }
 
     #[test]
     fn test_feature_union_branch_names() {
-        let union = FeatureUnion::new()
-            .push("a", Doubler)
-            .push("b", Tripler);
+        let union = FeatureUnion::new().push("a", Doubler).push("b", Tripler);
 
         let x = array![[1.0], [2.0]];
         let (fitted_step, _) = union.fit_transform(&x).unwrap();

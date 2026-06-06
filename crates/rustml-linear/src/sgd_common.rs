@@ -45,9 +45,7 @@ pub fn penalty_gradient(w: f64, alpha: f64, penalty: Penalty, l1_ratio: f64) -> 
         Penalty::None => 0.0,
         Penalty::L2 => alpha * w,
         Penalty::L1 => alpha * w.signum(),
-        Penalty::ElasticNet => {
-            alpha * (l1_ratio * w.signum() + (1.0 - l1_ratio) * w)
-        }
+        Penalty::ElasticNet => alpha * (l1_ratio * w.signum() + (1.0 - l1_ratio) * w),
     }
 }
 
@@ -60,8 +58,6 @@ pub fn compute_lr(schedule: LearningRate, eta0: f64, alpha: f64, t: usize, power
             let t0 = 1.0 / (eta0 * alpha);
             1.0 / (alpha * (t as f64 + t0))
         }
-        LearningRate::InvScaling => {
-            eta0 / (t as f64 + 1.0).powf(power_t)
-        }
+        LearningRate::InvScaling => eta0 / (t as f64 + 1.0).powf(power_t),
     }
 }

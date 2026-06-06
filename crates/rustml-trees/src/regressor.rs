@@ -96,9 +96,10 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
         let indices: Vec<usize> = (0..x.nrows()).collect();
         let n_features = x.ncols();
         let max_features_k = self.max_features.map(|mf| mf.resolve(n_features));
-        let effective_weights: Option<Array1<F>> = self.sample_weight.as_ref().map(|sw| {
-            sw.mapv(|v| F::from_f64(v).unwrap())
-        });
+        let effective_weights: Option<Array1<F>> = self
+            .sample_weight
+            .as_ref()
+            .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
         let tree = build_tree(
             x,
             y,
@@ -113,10 +114,7 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
             effective_weights.as_ref(),
         );
 
-        Ok(FittedDecisionTreeRegressor {
-            tree,
-            n_features,
-        })
+        Ok(FittedDecisionTreeRegressor { tree, n_features })
     }
 }
 

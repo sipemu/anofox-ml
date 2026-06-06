@@ -116,7 +116,9 @@ impl Predict<f64> for FittedWeightedRidgeRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.n_features, x.ncols()
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
             )));
         }
         Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
@@ -134,7 +136,9 @@ impl FitWeighted<f64> for RidgeRegressor {
     ) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
@@ -148,7 +152,9 @@ impl FitWeighted<f64> for RidgeRegressor {
         if let Some(w) = sample_weight {
             if w.len() != y.len() {
                 return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight len {} != y len {}", w.len(), y.len()
+                    "sample_weight len {} != y len {}",
+                    w.len(),
+                    y.len()
                 )));
             }
             for &wi in w.iter() {
@@ -172,9 +178,7 @@ impl FitWeighted<f64> for RidgeRegressor {
                 1.0
             }
         };
-        let w = |i: usize| -> f64 {
-            sample_weight.map(|s| s[i]).unwrap_or(1.0)
-        };
+        let w = |i: usize| -> f64 { sample_weight.map(|s| s[i]).unwrap_or(1.0) };
 
         // XᵀWX (ext × ext).
         let mut xtwx = Array2::<f64>::zeros((ext, ext));
@@ -213,7 +217,11 @@ impl FitWeighted<f64> for RidgeRegressor {
         for j in 0..d {
             beta[j] = sol[(j, 0)];
         }
-        let intercept = if self.with_intercept { sol[(d, 0)] } else { 0.0 };
+        let intercept = if self.with_intercept {
+            sol[(d, 0)]
+        } else {
+            0.0
+        };
         Ok(FittedWeightedRidgeRegressor {
             coef: beta,
             intercept,
@@ -250,10 +258,7 @@ mod tests {
         let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..10).map(|i| 2.0 + 3.0 * i as f64).collect());
 
-        let fitted = RidgeRegressor::new()
-            .with_lambda(0.01)
-            .fit(&x, &y)
-            .unwrap();
+        let fitted = RidgeRegressor::new().with_lambda(0.01).fit(&x, &y).unwrap();
 
         // Ridge with small lambda should be close to OLS
         assert!(fitted.r_squared() > 0.99);
@@ -265,10 +270,7 @@ mod tests {
         let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..10).map(|i| 2.0 + 3.0 * i as f64).collect());
 
-        let fitted_small = RidgeRegressor::new()
-            .with_lambda(0.01)
-            .fit(&x, &y)
-            .unwrap();
+        let fitted_small = RidgeRegressor::new().with_lambda(0.01).fit(&x, &y).unwrap();
         let fitted_large = RidgeRegressor::new()
             .with_lambda(100.0)
             .fit(&x, &y)
@@ -313,17 +315,16 @@ mod tests {
     fn test_ridge_high_weight_anchor_dominates() {
         // 5 noisy points + 1 high-weight anchor at (10, 100). The fit should
         // pull strongly toward the anchor.
-        let x = Array2::from_shape_vec(
-            (6, 1),
-            vec![0.0, 1.0, 2.0, 3.0, 4.0, 10.0],
-        ).unwrap();
+        let x = Array2::from_shape_vec((6, 1), vec![0.0, 1.0, 2.0, 3.0, 4.0, 10.0]).unwrap();
         let y = array![0.0, 0.5, 0.5, 0.0, 0.0, 100.0];
         let w = array![1.0, 1.0, 1.0, 1.0, 1.0, 1e6];
         let fitted = RidgeRegressor::new()
             .with_lambda(1e-6)
             .fit_weighted(&x, &y, Some(&w))
             .unwrap();
-        let p = fitted.predict(&Array2::from_shape_vec((1, 1), vec![10.0]).unwrap()).unwrap();
+        let p = fitted
+            .predict(&Array2::from_shape_vec((1, 1), vec![10.0]).unwrap())
+            .unwrap();
         assert!((p[0] - 100.0).abs() < 1.0, "anchor pred = {}", p[0]);
     }
 }

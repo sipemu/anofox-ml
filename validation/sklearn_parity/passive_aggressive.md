@@ -42,3 +42,11 @@ a tol-based early stop.
 - No `early_stopping` / `validation_fraction`.
 - `PaVariant::Pa`, `PaI`, `PaII` map to the original / PA-I (sklearn default) /
   PA-II respectively.
+
+## Complexity
+
+- Each sample requires computing the prediction (**O(p)**), the loss-margin update step (**O(p)**), and weight regularisation.
+- One epoch: **O(n·p)**.
+- Total over `max_iter` epochs: **O(n·p·max_iter)**, but in practice convergence is reached well before `max_iter`.
+- Memory: **O(p · k)** for one weight vector per class (k=1 for binary, OvR otherwise).
+- Online-friendly: `partial_fit` extends to streaming data via the same update.

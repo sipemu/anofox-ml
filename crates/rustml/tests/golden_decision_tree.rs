@@ -46,7 +46,12 @@ fn test_golden_decision_tree_classifier() {
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();
         let preds = fitted.predict(&x_test).unwrap();
 
-        assert_array1_close(&preds, &expected_pred, PRED_TOL, &format!("{}/predict", name));
+        assert_array1_close(
+            &preds,
+            &expected_pred,
+            PRED_TOL,
+            &format!("{}/predict", name),
+        );
 
         // Check feature importances (looser tolerance due to different split strategies)
         let expected_importances = json_to_array1(&case["feature_importances"]);
@@ -90,7 +95,12 @@ fn test_golden_decision_tree_regressor() {
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();
         let preds = fitted.predict(&x_test).unwrap();
 
-        assert_array1_close(&preds, &expected_pred, PRED_TOL, &format!("{}/predict", name));
+        assert_array1_close(
+            &preds,
+            &expected_pred,
+            PRED_TOL,
+            &format!("{}/predict", name),
+        );
 
         // Check feature importances
         let expected_importances = json_to_array1(&case["feature_importances"]);

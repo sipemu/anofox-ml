@@ -1,8 +1,8 @@
 //! Quantile regression wrapper.
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
-use anofox_regression::{FittedRegressor as _, Regressor as _};
 use anofox_regression::{FittedQuantile, QuantileRegressor as InnerQuantile};
+use anofox_regression::{FittedRegressor as _, Regressor as _};
 use ndarray::{Array1, Array2};
 use rustml_core::{Fit, Predict, Result, RustMlError};
 

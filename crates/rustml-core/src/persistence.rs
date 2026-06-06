@@ -47,8 +47,7 @@ pub fn load_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 
 /// Serialize a model to a bincode file (compact binary format).
 pub fn save_bincode<T: Serialize>(model: &T, path: impl AsRef<Path>) -> Result<()> {
-    let bytes =
-        bincode::serialize(model).map_err(|e| RustMlError::Serialization(e.to_string()))?;
+    let bytes = bincode::serialize(model).map_err(|e| RustMlError::Serialization(e.to_string()))?;
     std::fs::write(path, bytes).map_err(|e| RustMlError::Io(e.to_string()))
 }
 
@@ -101,7 +100,7 @@ mod tests {
 
     fn sample_model() -> DummyModel {
         DummyModel {
-            weights: vec![1.0, -2.5, 3.14],
+            weights: vec![1.0, -2.5, 3.125],
             bias: 0.42,
             label: "test_model".to_string(),
         }
@@ -165,11 +164,8 @@ mod tests {
     /// because cargo runs tests in parallel threads of a single process, so
     /// keying only on PID causes races between file roundtrip tests.
     fn tempfile(test_name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rustml_test_{}_{}",
-            std::process::id(),
-            test_name
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rustml_test_{}_{}", std::process::id(), test_name));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

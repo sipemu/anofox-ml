@@ -36,3 +36,10 @@ The test asserts:
 - Uses simple sequential KFold — sklearn defaults to StratifiedKFold.
 - No `passthrough` option (sklearn can forward the original features to the
   meta-estimator alongside base predictions).
+
+## Complexity
+
+- StackingClassifier/StackingRegressor: K-fold cross-validation to produce out-of-fold predictions for each base estimator → **K × O(fit(base_i, n_samples · (K-1)/K))** per base estimator.
+- Plus one final fit of each base estimator on the full data and one fit of the meta-estimator on the OOF features.
+- Memory: **O(n · n_base · n_outputs)** for the meta-feature matrix.
+- Parallelisable across base estimators (independent), and within each base estimator's K folds.

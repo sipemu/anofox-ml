@@ -19,11 +19,7 @@ pub trait TransformStep<F: Float>: Send + Sync {
 
 /// A supervised estimator that can be fit and then predict.
 pub trait FitPredict<F: Float>: Send + Sync {
-    fn fit_predict_step(
-        &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-    ) -> Result<Box<dyn PredictStep<F>>>;
+    fn fit_predict_step(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictStep<F>>>;
 }
 
 /// A fitted estimator step that can predict.
@@ -72,11 +68,7 @@ where
     T: Fit<F> + Send + Sync,
     T::Fitted: Predict<F> + Send + Sync + 'static,
 {
-    fn fit_predict_step(
-        &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-    ) -> Result<Box<dyn PredictStep<F>>> {
+    fn fit_predict_step(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictStep<F>>> {
         let fitted = Fit::fit(self, x, y)?;
         Ok(Box::new(FittedPredictWrapper(fitted)))
     }
@@ -87,9 +79,7 @@ struct FittedPredictWrapper<T>(T);
 unsafe impl<T: Send> Send for FittedPredictWrapper<T> {}
 unsafe impl<T: Sync> Sync for FittedPredictWrapper<T> {}
 
-impl<F: Float, T: Predict<F> + Send + Sync + 'static> PredictStep<F>
-    for FittedPredictWrapper<T>
-{
+impl<F: Float, T: Predict<F> + Send + Sync + 'static> PredictStep<F> for FittedPredictWrapper<T> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
         self.0.predict(x)
     }
@@ -134,8 +124,7 @@ impl<F: Float> Pipeline<F> {
         name: impl Into<String>,
         transformer: impl FitTransform<F> + 'static,
     ) -> Self {
-        self.transformers
-            .push((name.into(), Box::new(transformer)));
+        self.transformers.push((name.into(), Box::new(transformer)));
         self
     }
 
@@ -218,9 +207,7 @@ impl<F: Float> FittedPipeline<F> {
             .transformers
             .iter()
             .find(|(n, _)| n == name)
-            .ok_or_else(|| {
-                RustMlError::NotFitted(format!("No transformer step named '{name}'"))
-            })?;
+            .ok_or_else(|| RustMlError::NotFitted(format!("No transformer step named '{name}'")))?;
         step.1.as_any().downcast_ref::<T>().ok_or_else(|| {
             RustMlError::NotFitted(format!(
                 "Transformer '{name}' could not be downcast to the requested type"
@@ -230,13 +217,12 @@ impl<F: Float> FittedPipeline<F> {
 
     /// Downcast the final estimator to its concrete fitted type.
     pub fn get_estimator<T: 'static>(&self) -> Result<&T> {
-        let (_, estimator) = self.estimator.as_ref().ok_or_else(|| {
-            RustMlError::NotFitted("Pipeline has no estimator set".into())
-        })?;
+        let (_, estimator) = self
+            .estimator
+            .as_ref()
+            .ok_or_else(|| RustMlError::NotFitted("Pipeline has no estimator set".into()))?;
         estimator.as_any().downcast_ref::<T>().ok_or_else(|| {
-            RustMlError::NotFitted(
-                "Estimator could not be downcast to the requested type".into(),
-            )
+            RustMlError::NotFitted("Estimator could not be downcast to the requested type".into())
         })
     }
 
@@ -370,7 +356,9 @@ mod tests {
         let y = array![0.0, 1.0];
         let fitted = pipeline.fit(&x, &y).unwrap();
 
-        assert!(fitted.get_transformer::<FittedDoubler>("wrong_name").is_err());
+        assert!(fitted
+            .get_transformer::<FittedDoubler>("wrong_name")
+            .is_err());
     }
 
     #[test]

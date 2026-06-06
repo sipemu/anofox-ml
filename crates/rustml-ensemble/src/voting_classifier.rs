@@ -15,11 +15,7 @@ struct NamedEstimator<F: Float> {
 
 /// Internal trait combining Fit + Send + Sync for trait objects.
 trait FitPredictClone<F: Float>: Send + Sync {
-    fn fit_box(
-        &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-    ) -> Result<Box<dyn PredictBox<F>>>;
+    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictBox<F>>>;
 }
 
 trait PredictBox<F: Float>: Send + Sync {
@@ -33,11 +29,7 @@ where
     T: Fit<F> + Send + Sync,
     T::Fitted: Predict<F> + Send + Sync + 'static,
 {
-    fn fit_box(
-        &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-    ) -> Result<Box<dyn PredictBox<F>>> {
+    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictBox<F>>> {
         let fitted = Fit::fit(self, x, y)?;
         Ok(Box::new(fitted))
     }
@@ -195,18 +187,27 @@ mod tests {
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
         let vc = VotingClassifier::new()
-            .push("tree1", DecisionTreeClassifier {
-                max_depth: Some(3),
-                ..Default::default()
-            })
-            .push("tree2", DecisionTreeClassifier {
-                max_depth: Some(2),
-                ..Default::default()
-            })
-            .push("tree3", DecisionTreeClassifier {
-                max_depth: Some(5),
-                ..Default::default()
-            });
+            .push(
+                "tree1",
+                DecisionTreeClassifier {
+                    max_depth: Some(3),
+                    ..Default::default()
+                },
+            )
+            .push(
+                "tree2",
+                DecisionTreeClassifier {
+                    max_depth: Some(2),
+                    ..Default::default()
+                },
+            )
+            .push(
+                "tree3",
+                DecisionTreeClassifier {
+                    max_depth: Some(5),
+                    ..Default::default()
+                },
+            );
 
         let fitted: FittedVotingClassifier<f64> = vc.fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();
@@ -231,12 +232,7 @@ mod tests {
 
     #[test]
     fn test_voting_classifier_score() {
-        let x = array![
-            [1.0, 0.0],
-            [2.0, 0.0],
-            [10.0, 1.0],
-            [11.0, 1.0]
-        ];
+        let x = array![[1.0, 0.0], [2.0, 0.0], [10.0, 1.0], [11.0, 1.0]];
         let y = array![0.0, 0.0, 1.0, 1.0];
 
         let vc = VotingClassifier::new()

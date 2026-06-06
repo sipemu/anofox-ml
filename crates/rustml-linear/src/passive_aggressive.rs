@@ -60,14 +60,28 @@ impl PassiveAggressiveClassifier {
             seed: 0,
         }
     }
-    pub fn with_c(mut self, c: f64) -> Self { self.c = c; self }
-    pub fn with_variant(mut self, v: PaVariant) -> Self { self.variant = v; self }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_c(mut self, c: f64) -> Self {
+        self.c = c;
+        self
+    }
+    pub fn with_variant(mut self, v: PaVariant) -> Self {
+        self.variant = v;
+        self
+    }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 }
 
 impl Default for PassiveAggressiveClassifier {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Fitted binary PA classifier.
@@ -84,7 +98,9 @@ impl Fit<f64> for PassiveAggressiveClassifier {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
@@ -173,13 +189,19 @@ impl Predict<f64> for FittedPassiveAggressiveClassifier {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.coef.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.coef.len(), x.ncols()
+                "expected {} features, got {}",
+                self.coef.len(),
+                x.ncols()
             )));
         }
         let mut out = Array1::<f64>::zeros(x.nrows());
         for i in 0..x.nrows() {
             let s = x.row(i).dot(&self.coef) + self.intercept;
-            out[i] = if s >= 0.0 { self.classes[1] } else { self.classes[0] };
+            out[i] = if s >= 0.0 {
+                self.classes[1]
+            } else {
+                self.classes[0]
+            };
         }
         Ok(out)
     }
@@ -214,15 +236,32 @@ impl PassiveAggressiveRegressor {
             seed: 0,
         }
     }
-    pub fn with_c(mut self, c: f64) -> Self { self.c = c; self }
-    pub fn with_epsilon(mut self, e: f64) -> Self { self.epsilon = e; self }
-    pub fn with_variant(mut self, v: PaVariant) -> Self { self.variant = v; self }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
+    pub fn with_c(mut self, c: f64) -> Self {
+        self.c = c;
+        self
+    }
+    pub fn with_epsilon(mut self, e: f64) -> Self {
+        self.epsilon = e;
+        self
+    }
+    pub fn with_variant(mut self, v: PaVariant) -> Self {
+        self.variant = v;
+        self
+    }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
 }
 
 impl Default for PassiveAggressiveRegressor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -237,7 +276,9 @@ impl Fit<f64> for PassiveAggressiveRegressor {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements", x.nrows(), y.len()
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
             )));
         }
         if x.is_empty() {
@@ -307,7 +348,9 @@ impl Predict<f64> for FittedPassiveAggressiveRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.coef.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", self.coef.len(), x.ncols()
+                "expected {} features, got {}",
+                self.coef.len(),
+                x.ncols()
             )));
         }
         let mut out = Array1::<f64>::zeros(x.nrows());
@@ -326,15 +369,20 @@ mod tests {
     #[test]
     fn test_pa_classifier_separable() {
         let x = array![
-            [-2.0, -1.0], [-1.0, -2.0], [-2.0, -2.0],
-            [2.0, 1.0],   [1.0, 2.0],   [2.0, 2.0],
+            [-2.0, -1.0],
+            [-1.0, -2.0],
+            [-2.0, -2.0],
+            [2.0, 1.0],
+            [1.0, 2.0],
+            [2.0, 2.0],
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
         let fitted = PassiveAggressiveClassifier::new()
             .with_max_iter(100)
             .with_seed(42)
-            .fit(&x, &y).unwrap();
+            .fit(&x, &y)
+            .unwrap();
         let preds = fitted.predict(&x).unwrap();
         for (p, t) in preds.iter().zip(y.iter()) {
             assert_eq!(*p, *t);
@@ -352,10 +400,16 @@ mod tests {
             .with_epsilon(0.01)
             .with_max_iter(2000)
             .with_seed(0)
-            .fit(&x, &y).unwrap();
+            .fit(&x, &y)
+            .unwrap();
         // Predictions should be reasonably close.
         let preds = fitted.predict(&x).unwrap();
-        let mae: f64 = preds.iter().zip(y.iter()).map(|(p, t)| (p - t).abs()).sum::<f64>() / 20.0;
+        let mae: f64 = preds
+            .iter()
+            .zip(y.iter())
+            .map(|(p, t)| (p - t).abs())
+            .sum::<f64>()
+            / 20.0;
         assert!(mae < 1.0, "MAE too high: {mae}");
     }
 }

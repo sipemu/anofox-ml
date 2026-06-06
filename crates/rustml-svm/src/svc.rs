@@ -70,9 +70,7 @@ impl Svc {
     /// Validate parameters before fitting.
     fn validate(&self) -> Result<()> {
         if self.c <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "C must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("C must be positive".into()));
         }
         if self.max_iter == 0 {
             return Err(RustMlError::InvalidParameter(
@@ -80,9 +78,7 @@ impl Svc {
             ));
         }
         if self.tol <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "tol must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
         match &self.kernel {
             SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
@@ -161,7 +157,11 @@ impl<F: Float> FittedSvc<F> {
             return self.classifiers[0].support_vectors.clone();
         }
         let n_features = self.classifiers[0].support_vectors.ncols();
-        let total_rows: usize = self.classifiers.iter().map(|c| c.support_vectors.nrows()).sum();
+        let total_rows: usize = self
+            .classifiers
+            .iter()
+            .map(|c| c.support_vectors.nrows())
+            .sum();
         let mut result = Array2::zeros((total_rows, n_features));
         let mut offset = 0;
         for clf in &self.classifiers {
@@ -176,7 +176,10 @@ impl<F: Float> FittedSvc<F> {
 
     /// Returns the total number of support vectors across all classifiers.
     pub fn n_support(&self) -> usize {
-        self.classifiers.iter().map(|c| c.support_vectors.nrows()).sum()
+        self.classifiers
+            .iter()
+            .map(|c| c.support_vectors.nrows())
+            .sum()
     }
 
     /// Compute raw decision function scores for each sample.
@@ -297,13 +300,7 @@ fn select_second_alpha<F: Float>(
 }
 
 /// Compute the L and H bounds for the new alpha_j value.
-fn compute_alpha_bounds<F: Float>(
-    alpha_i: F,
-    alpha_j: F,
-    y_i: F,
-    y_j: F,
-    c: F,
-) -> (F, F) {
+fn compute_alpha_bounds<F: Float>(alpha_i: F, alpha_j: F, y_i: F, y_j: F, c: F) -> (F, F) {
     let zero = F::zero();
     let eps = F::from_f64(1e-12).unwrap();
     if (y_i - y_j).abs() > eps {
@@ -353,12 +350,8 @@ fn update_bias<F: Float>(
 ) -> F {
     let zero = F::zero();
     let two = F::from_f64(2.0).unwrap();
-    let b1 = bias - e_i
-        - y_i * (alpha_i - old_ai) * k_ii
-        - y_j * (alpha_j - old_aj) * k_ij;
-    let b2 = bias - e_j
-        - y_i * (alpha_i - old_ai) * k_ij
-        - y_j * (alpha_j - old_aj) * k_jj;
+    let b1 = bias - e_i - y_i * (alpha_i - old_ai) * k_ii - y_j * (alpha_j - old_aj) * k_ij;
+    let b2 = bias - e_j - y_i * (alpha_i - old_ai) * k_ij - y_j * (alpha_j - old_aj) * k_jj;
 
     if alpha_i > zero && alpha_i < c {
         b1
@@ -386,9 +379,7 @@ fn extract_support_vectors<F: Float>(
         .collect();
 
     if sv_indices.is_empty() {
-        let dual_coefs = Array1::from_vec(
-            (0..n_samples).map(|i| alpha[i] * y[i]).collect(),
-        );
+        let dual_coefs = Array1::from_vec((0..n_samples).map(|i| alpha[i] * y[i]).collect());
         return BinarySvc {
             support_vectors: x.to_owned(),
             dual_coefs,
@@ -477,20 +468,14 @@ impl<F: Float> SmoState<'_, F> {
         let old_ai = self.alpha[i];
         let old_aj = self.alpha[j];
 
-        let (l, h) = compute_alpha_bounds(
-            self.alpha[i],
-            self.alpha[j],
-            self.y[i],
-            self.y[j],
-            self.c,
-        );
+        let (l, h) =
+            compute_alpha_bounds(self.alpha[i], self.alpha[j], self.y[i], self.y[j], self.c);
         if (l - h).abs() < near_zero {
             return false;
         }
 
         // Compute eta = 2*K(i,j) - K(i,i) - K(j,j)
-        let eta =
-            two * self.k_matrix[[i, j]] - self.k_matrix[[i, i]] - self.k_matrix[[j, j]];
+        let eta = two * self.k_matrix[[i, j]] - self.k_matrix[[i, i]] - self.k_matrix[[j, j]];
         if eta >= zero {
             return false;
         }
@@ -605,15 +590,7 @@ impl<F: Float> Fit<F> for Svc {
                 }
             });
 
-            let clf = fit_binary_svc(
-                x,
-                &y_binary,
-                &self.kernel,
-                c,
-                self.max_iter,
-                tol,
-                self.seed,
-            );
+            let clf = fit_binary_svc(x, &y_binary, &self.kernel, c, self.max_iter, tol, self.seed);
             Ok(FittedSvc {
                 class_labels,
                 classifiers: vec![clf],
@@ -771,7 +748,10 @@ mod tests {
         let n_sv = fitted.n_support();
         assert_eq!(sv.nrows(), n_sv);
         assert!(n_sv > 0, "should have at least one support vector");
-        assert!(n_sv <= x.nrows(), "cannot have more SVs than training samples");
+        assert!(
+            n_sv <= x.nrows(),
+            "cannot have more SVs than training samples"
+        );
     }
 
     #[test]

@@ -249,7 +249,11 @@ fn fit_isotonic(scores: &[f64], labels: &[f64]) -> (Vec<f64>, Vec<f64>) {
     }
 
     // Sort by score
-    let mut pairs: Vec<(f64, f64)> = scores.iter().zip(labels.iter()).map(|(&s, &l)| (s, l)).collect();
+    let mut pairs: Vec<(f64, f64)> = scores
+        .iter()
+        .zip(labels.iter())
+        .map(|(&s, &l)| (s, l))
+        .collect();
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     // Pool adjacent violators
@@ -341,7 +345,8 @@ fn stratified_k_fold<F: Float>(y: &Array1<F>, k: usize) -> Vec<(Vec<usize>, Vec<
     }
 
     // Build (train, test) index pairs per fold.
-    let mut folds: Vec<(Vec<usize>, Vec<usize>)> = (0..k).map(|_| (Vec::new(), Vec::new())).collect();
+    let mut folds: Vec<(Vec<usize>, Vec<usize>)> =
+        (0..k).map(|_| (Vec::new(), Vec::new())).collect();
     for i in 0..n {
         for (f, (train, test)) in folds.iter_mut().enumerate() {
             if fold_of[i] == f {
@@ -378,8 +383,14 @@ mod tests {
     #[test]
     fn test_calibrated_classifier_sigmoid() {
         let x = array![
-            [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0],
-            [10.0, 1.0], [11.0, 1.0], [12.0, 1.0], [13.0, 1.0]
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0],
+            [13.0, 1.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
@@ -394,7 +405,11 @@ mod tests {
 
         let proba = fitted.predict_proba(&x).unwrap();
         for &p in proba.iter() {
-            assert!(p >= 0.0 && p <= 1.0, "probability must be in [0,1], got {}", p);
+            assert!(
+                p >= 0.0 && p <= 1.0,
+                "probability must be in [0,1], got {}",
+                p
+            );
         }
 
         let preds = fitted.predict(&x).unwrap();
@@ -406,8 +421,14 @@ mod tests {
     #[test]
     fn test_calibrated_classifier_isotonic() {
         let x = array![
-            [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0],
-            [10.0, 1.0], [11.0, 1.0], [12.0, 1.0], [13.0, 1.0]
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0],
+            [13.0, 1.0]
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
@@ -425,13 +446,16 @@ mod tests {
     #[test]
     fn test_calibrated_classifier_predict_classes() {
         let x = array![
-            [0.0, 0.0], [1.0, 0.0], [2.0, 0.0],
-            [10.0, 1.0], [11.0, 1.0], [12.0, 1.0]
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [10.0, 1.0],
+            [11.0, 1.0],
+            [12.0, 1.0]
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-        let cal = CalibratedClassifierCV::new(DecisionTreeClassifier::default())
-            .with_cv_folds(2);
+        let cal = CalibratedClassifierCV::new(DecisionTreeClassifier::default()).with_cv_folds(2);
 
         let fitted: FittedCalibratedClassifier<f64> = cal.fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();
@@ -443,8 +467,7 @@ mod tests {
         let x = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
         let y = array![0.0, 0.0, 1.0, 1.0];
 
-        let cal = CalibratedClassifierCV::new(DecisionTreeClassifier::default())
-            .with_cv_folds(2);
+        let cal = CalibratedClassifierCV::new(DecisionTreeClassifier::default()).with_cv_folds(2);
         let fitted: FittedCalibratedClassifier<f64> = cal.fit(&x, &y).unwrap();
 
         let x_bad = array![[1.0]];

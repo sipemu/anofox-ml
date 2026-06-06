@@ -29,7 +29,10 @@ fn json_to_array2_with_nan(val: &serde_json::Value) -> Array2<f64> {
 #[test]
 fn test_golden_simple_imputer_mean() {
     let cases = load_golden_data("preprocessing_round2.json");
-    let case = cases.iter().find(|c| c["name"] == "simple_imputer_mean").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "simple_imputer_mean")
+        .unwrap();
 
     let x = json_to_array2_with_nan(&case["X"]);
     let expected = json_to_array2(&case["X_transformed"]);
@@ -43,7 +46,10 @@ fn test_golden_simple_imputer_mean() {
 #[test]
 fn test_golden_simple_imputer_median() {
     let cases = load_golden_data("preprocessing_round2.json");
-    let case = cases.iter().find(|c| c["name"] == "simple_imputer_median").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "simple_imputer_median")
+        .unwrap();
 
     let x = json_to_array2_with_nan(&case["X"]);
     let expected = json_to_array2(&case["X_transformed"]);
@@ -60,7 +66,10 @@ fn test_golden_simple_imputer_median() {
 #[test]
 fn test_golden_kbins_uniform_ordinal() {
     let cases = load_golden_data("preprocessing_round2.json");
-    let case = cases.iter().find(|c| c["name"] == "kbins_uniform_ordinal").unwrap();
+    let case = cases
+        .iter()
+        .find(|c| c["name"] == "kbins_uniform_ordinal")
+        .unwrap();
 
     let x = json_to_array2(&case["X"]);
     let expected = json_to_array2(&case["X_transformed"]);

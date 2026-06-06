@@ -235,7 +235,10 @@ fn concat_horizontal<F: Float>(n_rows: usize, parts: &[Array2<F>]) -> Result<Arr
 impl<F: Float> FittedColumnTransformer<F> {
     /// Return the branch names.
     pub fn branch_names(&self) -> Vec<&str> {
-        self.fitted_branches.iter().map(|b| b.name.as_str()).collect()
+        self.fitted_branches
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect()
     }
 }
 
@@ -288,8 +291,16 @@ mod tests {
         let x = array![[1.0, 10.0, 100.0], [2.0, 20.0, 200.0]];
 
         let ct = ColumnTransformer::<f64>::new()
-            .push("double_01", ColumnSelector::Indices(vec![0, 1]), DoubleScaler)
-            .push("identity_2", ColumnSelector::Indices(vec![2]), IdentityTransformer);
+            .push(
+                "double_01",
+                ColumnSelector::Indices(vec![0, 1]),
+                DoubleScaler,
+            )
+            .push(
+                "identity_2",
+                ColumnSelector::Indices(vec![2]),
+                IdentityTransformer,
+            );
 
         let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
@@ -318,8 +329,11 @@ mod tests {
     fn test_column_transformer_drop_remainder() {
         let x = array![[1.0, 10.0, 100.0], [2.0, 20.0, 200.0]];
 
-        let ct = ColumnTransformer::<f64>::new()
-            .push("double_0", ColumnSelector::Indices(vec![0]), DoubleScaler);
+        let ct = ColumnTransformer::<f64>::new().push(
+            "double_0",
+            ColumnSelector::Indices(vec![0]),
+            DoubleScaler,
+        );
 
         let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
@@ -333,8 +347,8 @@ mod tests {
     fn test_column_transformer_all_selector() {
         let x = array![[1.0, 2.0], [3.0, 4.0]];
 
-        let ct = ColumnTransformer::<f64>::new()
-            .push("double_all", ColumnSelector::All, DoubleScaler);
+        let ct =
+            ColumnTransformer::<f64>::new().push("double_all", ColumnSelector::All, DoubleScaler);
 
         let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
@@ -345,8 +359,11 @@ mod tests {
     fn test_column_transformer_shape_mismatch_predict() {
         let x = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
 
-        let ct = ColumnTransformer::<f64>::new()
-            .push("a", ColumnSelector::Indices(vec![0]), IdentityTransformer);
+        let ct = ColumnTransformer::<f64>::new().push(
+            "a",
+            ColumnSelector::Indices(vec![0]),
+            IdentityTransformer,
+        );
 
         let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
         let x_bad = array![[1.0, 2.0]];
@@ -357,8 +374,11 @@ mod tests {
     fn test_column_transformer_invalid_column() {
         let x = array![[1.0, 2.0]];
 
-        let ct = ColumnTransformer::<f64>::new()
-            .push("bad", ColumnSelector::Indices(vec![5]), IdentityTransformer);
+        let ct = ColumnTransformer::<f64>::new().push(
+            "bad",
+            ColumnSelector::Indices(vec![5]),
+            IdentityTransformer,
+        );
 
         assert!(FitUnsupervised::fit(&ct, &x).is_err());
     }

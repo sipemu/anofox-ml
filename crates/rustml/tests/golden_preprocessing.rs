@@ -33,12 +33,7 @@ fn test_golden_standard_scaler() {
 
         // Check std
         let expected_std = common::json_to_array1(&case["std"]);
-        common::assert_array1_close(
-            fitted.std(),
-            &expected_std,
-            TOL,
-            &format!("{}/std", name),
-        );
+        common::assert_array1_close(fitted.std(), &expected_std, TOL, &format!("{}/std", name));
 
         // Check transform
         let transformed = fitted.transform(&x).unwrap();

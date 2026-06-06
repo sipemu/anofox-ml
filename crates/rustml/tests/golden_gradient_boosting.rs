@@ -41,7 +41,8 @@ fn test_golden_gradient_boosting_classifier() {
             assert!(
                 classes.iter().any(|&c| (c - p).abs() < 1e-10),
                 "{}: prediction {} is not a valid class label",
-                name, p
+                name,
+                p
             );
         }
 
@@ -56,7 +57,8 @@ fn test_golden_gradient_boosting_classifier() {
         assert!(
             accuracy >= 0.6,
             "{}: accuracy {} is too low (expected >= 0.6)",
-            name, accuracy
+            name,
+            accuracy
         );
     }
 }
@@ -93,7 +95,9 @@ fn test_golden_gradient_boosting_regressor() {
             assert!(
                 p.is_finite(),
                 "{}: prediction at index {} is not finite: {}",
-                name, i, p
+                name,
+                i,
+                p
             );
         }
 
@@ -105,7 +109,11 @@ fn test_golden_gradient_boosting_regressor() {
             assert!(
                 p >= y_min - y_range && p <= y_max + y_range,
                 "{}: prediction {} at index {} is out of reasonable range [{}, {}]",
-                name, p, i, y_min - y_range, y_max + y_range
+                name,
+                p,
+                i,
+                y_min - y_range,
+                y_max + y_range
             );
         }
     }

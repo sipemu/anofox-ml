@@ -4,7 +4,6 @@ mod common;
 
 use common::{json_to_array1, json_to_array2, load_golden_data};
 use rustml::core::{FitUnsupervised, Transform};
-use rustml::prelude::*;
 
 #[test]
 fn test_truncated_svd_matches_sklearn_abs() {
@@ -24,7 +23,9 @@ fn test_truncated_svd_matches_sklearn_abs() {
         assert!(
             (svd.singular_values[j] - sv_sk[j]).abs() < 1e-6,
             "σ[{}]: rustml={}, sklearn={}",
-            j, svd.singular_values[j], sv_sk[j]
+            j,
+            svd.singular_values[j],
+            sv_sk[j]
         );
     }
 
@@ -34,7 +35,10 @@ fn test_truncated_svd_matches_sklearn_abs() {
             assert!(
                 (t[[i, j]].abs() - abs_sk[[i, j]]).abs() < 1e-6,
                 "|T[{},{}]| mismatch: {} vs {}",
-                i, j, t[[i, j]].abs(), abs_sk[[i, j]]
+                i,
+                j,
+                t[[i, j]].abs(),
+                abs_sk[[i, j]]
             );
         }
     }

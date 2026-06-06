@@ -8,7 +8,7 @@ use rustml_trees::{DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCr
 /// Bagging (Bootstrap Aggregating) classifier parameters (unfitted state).
 ///
 /// Trains an ensemble of decision tree classifiers, each on a bootstrap sample
-/// of the data using the **full** feature set. Unlike [`RandomForestClassifier`],
+/// of the data using the **full** feature set. Unlike `RandomForestClassifier`,
 /// bagging does not perform random feature subsampling at the tree level --
 /// every tree sees all features.
 ///
@@ -137,9 +137,7 @@ impl<F: Float> Fit<F> for BaggingClassifier {
             .into_par_iter()
             .map(|row_indices| {
                 let x_sub = build_sub_matrix_rows(x, &row_indices);
-                let y_sub = Array1::from_vec(
-                    row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
-                );
+                let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
                 tree_params.fit(&x_sub, &y_sub)
             })
             .collect();
@@ -163,11 +161,8 @@ impl<F: Float> Predict<F> for FittedBaggingClassifier<F> {
         let n_trees = self.trees.len();
 
         // Collect all tree predictions in parallel
-        let all_preds: Result<Vec<Array1<F>>> = self
-            .trees
-            .par_iter()
-            .map(|tree| tree.predict(x))
-            .collect();
+        let all_preds: Result<Vec<Array1<F>>> =
+            self.trees.par_iter().map(|tree| tree.predict(x)).collect();
         let all_preds = all_preds?;
 
         // Aggregate votes per sample (majority vote)
@@ -256,9 +251,7 @@ impl<F: Float> FittedBaggingClassifier<F> {
             let tree_proba = &all_proba[tree_idx];
 
             for (local_ci, &tc) in tree_classes.iter().enumerate() {
-                if let Some(global_ci) = global_classes
-                    .iter()
-                    .position(|&gc| (gc - tc).abs() < eps)
+                if let Some(global_ci) = global_classes.iter().position(|&gc| (gc - tc).abs() < eps)
                 {
                     for i in 0..n_samples {
                         avg_proba[[i, global_ci]] += tree_proba[[i, local_ci]] / n_trees_f;
@@ -318,10 +311,7 @@ fn majority_vote<F: Float>(votes: &[F]) -> F {
     let mut counts: HashMap<u64, (F, usize)> = HashMap::new();
     for &v in votes {
         let key = v.to_f64().unwrap().to_bits();
-        counts
-            .entry(key)
-            .and_modify(|e| e.1 += 1)
-            .or_insert((v, 1));
+        counts.entry(key).and_modify(|e| e.1 += 1).or_insert((v, 1));
     }
     counts
         .into_values()
@@ -517,8 +507,7 @@ mod tests {
         let fitted: FittedBaggingClassifier<f64> = bc.fit(&x, &y).unwrap();
 
         let preds = fitted.predict(&x).unwrap();
-        let valid_labels: std::collections::HashSet<u64> =
-            y.iter().map(|v| v.to_bits()).collect();
+        let valid_labels: std::collections::HashSet<u64> = y.iter().map(|v| v.to_bits()).collect();
         for &p in preds.iter() {
             assert!(
                 valid_labels.contains(&p.to_bits()),

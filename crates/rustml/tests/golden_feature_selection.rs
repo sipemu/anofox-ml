@@ -35,19 +35,24 @@ fn test_golden_variance_threshold() {
         // Verify selected indices match
         let actual_selected = fitted.selected_indices();
         assert_eq!(
-            actual_selected, &expected_selected[..],
+            actual_selected,
+            &expected_selected[..],
             "{}: selected indices mismatch",
             name
         );
 
         // Verify transformed shape matches
         assert_eq!(
-            x_transformed.nrows(), expected_shape[0],
-            "{}: row count mismatch", name
+            x_transformed.nrows(),
+            expected_shape[0],
+            "{}: row count mismatch",
+            name
         );
         assert_eq!(
-            x_transformed.ncols(), expected_shape[1],
-            "{}: col count mismatch", name
+            x_transformed.ncols(),
+            expected_shape[1],
+            "{}: col count mismatch",
+            name
         );
 
         // Variances should all be non-negative
@@ -56,7 +61,9 @@ fn test_golden_variance_threshold() {
             assert!(
                 v >= 0.0,
                 "{}: variance at feature {} is negative: {}",
-                name, i, v
+                name,
+                i,
+                v
             );
         }
     }
@@ -87,22 +94,28 @@ fn test_golden_mutual_information() {
             assert!(
                 score >= 0.0,
                 "{}: MI score at feature {} is negative: {}",
-                name, i, score
+                name,
+                i,
+                score
             );
         }
 
         // Should have the right number of scores
         assert_eq!(
-            mi_scores.len(), n_features,
-            "{}: MI scores length mismatch", name
+            mi_scores.len(),
+            n_features,
+            "{}: MI scores length mismatch",
+            name
         );
 
         // Transform should reduce to 1 feature
         let x_transformed = fitted.transform(&x).unwrap();
         assert_eq!(
-            x_transformed.ncols(), 1,
+            x_transformed.ncols(),
+            1,
             "{}: expected 1 column after selection, got {}",
-            name, x_transformed.ncols()
+            name,
+            x_transformed.ncols()
         );
     }
 }

@@ -132,7 +132,9 @@ impl FittedOrdinalEncoder {
                 if idx >= vocab.len() {
                     return Err(RustMlError::InvalidParameter(format!(
                         "encoded index {} is out of range for column {} (vocabulary size {})",
-                        idx, j, vocab.len()
+                        idx,
+                        j,
+                        vocab.len()
                     )));
                 }
                 decoded.push(vocab[idx].clone());
@@ -286,10 +288,7 @@ mod tests {
 
     #[test]
     fn test_n_categories() {
-        let columns = vec![
-            vec![s("a"), s("b"), s("c")],
-            vec![s("x"), s("y"), s("x")],
-        ];
+        let columns = vec![vec![s("a"), s("b"), s("c")], vec![s("x"), s("y"), s("x")]];
         let encoder = OrdinalEncoder::new();
         let fitted = encoder.fit(&columns).unwrap();
 

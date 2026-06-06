@@ -187,11 +187,8 @@ mod tests {
     #[test]
     fn test_gamma_predictions_positive() {
         // Positive-target dataset for Gamma regression (log link → exp output).
-        let x = Array2::from_shape_vec(
-            (8, 1),
-            vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
-        )
-        .unwrap();
+        let x =
+            Array2::from_shape_vec((8, 1), vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]).unwrap();
         let y = array![1.0, 1.5, 2.0, 2.5, 3.5, 5.0, 7.0, 12.0];
 
         let fitted = GammaRegressor::new().fit(&x, &y).unwrap();
@@ -204,10 +201,7 @@ mod tests {
     #[test]
     fn test_tweedie_power_1p5() {
         // Compound Poisson-Gamma (typical for insurance frequency-severity).
-        let x = Array2::from_shape_vec(
-            (10, 1),
-            (0..10).map(|i| i as f64).collect(),
-        ).unwrap();
+        let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64).collect()).unwrap();
         let y = array![0.0, 0.1, 0.5, 0.0, 1.2, 0.0, 2.0, 3.5, 0.0, 4.0];
         let fitted = TweedieRegressor::new(1.5).fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();

@@ -76,9 +76,7 @@ impl Svr {
             ));
         }
         if self.tol <= 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "tol must be positive".into(),
-            ));
+            return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
         match &self.kernel {
             SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
@@ -399,7 +397,8 @@ impl<F: Float> Fit<F> for Svr {
         let y_mean = y.iter().copied().fold(F::zero(), |a, b| a + b) / n;
         let y_centered = y.mapv(|v| v - y_mean);
 
-        let (coefs, bias_centered) = smo_svr(x, &y_centered, &self.kernel, c, epsilon, self.max_iter, tol);
+        let (coefs, bias_centered) =
+            smo_svr(x, &y_centered, &self.kernel, c, epsilon, self.max_iter, tol);
         let bias = bias_centered + y_mean;
 
         // Extract support vectors (non-zero coefficients)
@@ -478,16 +477,7 @@ mod tests {
 
     #[test]
     fn test_rbf_regression() {
-        let x = array![
-            [1.0],
-            [2.0],
-            [3.0],
-            [4.0],
-            [5.0],
-            [6.0],
-            [7.0],
-            [8.0]
-        ];
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
         let y = array![1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0];
 
         let svr = Svr::new()
@@ -516,7 +506,10 @@ mod tests {
             .with_max_iter(5000);
         let fitted: FittedSvr<f64> = svr.fit(&x, &y).unwrap();
 
-        assert!(fitted.n_support() > 0, "should have at least one support vector");
+        assert!(
+            fitted.n_support() > 0,
+            "should have at least one support vector"
+        );
         assert!(
             fitted.n_support() <= x.nrows(),
             "cannot have more SVs than training samples"

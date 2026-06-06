@@ -12,8 +12,14 @@ use rustml_core::{FitUnsupervised, InverseTransform, Result, RustMlError, Transf
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KpcaKernel {
     Linear,
-    Rbf { gamma: f64 },
-    Polynomial { degree: usize, coef0: f64, gamma: f64 },
+    Rbf {
+        gamma: f64,
+    },
+    Polynomial {
+        degree: usize,
+        coef0: f64,
+        gamma: f64,
+    },
 }
 
 impl KpcaKernel {
@@ -24,7 +30,11 @@ impl KpcaKernel {
                 let sd: f64 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum();
                 (-gamma * sd).exp()
             }
-            KpcaKernel::Polynomial { degree, coef0, gamma } => {
+            KpcaKernel::Polynomial {
+                degree,
+                coef0,
+                gamma,
+            } => {
                 let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                 (gamma * dot + coef0).powi(*degree as i32)
             }
@@ -40,16 +50,19 @@ pub struct KernelPca {
 
 impl KernelPca {
     pub fn new(n_components: usize, kernel: KpcaKernel) -> Self {
-        Self { n_components, kernel }
+        Self {
+            n_components,
+            kernel,
+        }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedKernelPca {
     pub x_train: Array2<f64>,
-    pub alphas: Array2<f64>,        // n_train × k
-    pub eigenvalues: Array1<f64>,   // k
-    pub row_means: Array1<f64>,     // training kernel row means
+    pub alphas: Array2<f64>,      // n_train × k
+    pub eigenvalues: Array1<f64>, // k
+    pub row_means: Array1<f64>,   // training kernel row means
     pub global_mean: f64,
     pub kernel: KpcaKernel,
 }
@@ -78,14 +91,15 @@ impl FitUnsupervised<f64> for KernelPca {
         }
         let k_target = self.n_components.min(n);
         if k_target == 0 {
-            return Err(RustMlError::InvalidParameter("n_components must be >= 1".into()));
+            return Err(RustMlError::InvalidParameter(
+                "n_components must be >= 1".into(),
+            ));
         }
 
         let mut k = build_kernel(x, x, &self.kernel);
         // Centre: K_c = K - 1ₙ K - K 1ₙ + 1ₙ K 1ₙ where 1ₙ = ones(n,n) / n.
-        let row_means: Array1<f64> = Array1::from_vec(
-            (0..n).map(|i| k.row(i).sum() / n as f64).collect(),
-        );
+        let row_means: Array1<f64> =
+            Array1::from_vec((0..n).map(|i| k.row(i).sum() / n as f64).collect());
         let col_means: Array1<f64> = row_means.clone(); // K symmetric
         let global_mean: f64 = k.iter().copied().sum::<f64>() / (n as f64).powi(2);
         for i in 0..n {
@@ -141,7 +155,9 @@ impl Transform<f64> for FittedKernelPca {
         // Centre: K_new[i,j] - K_new_row_mean[i] - K_train_row_mean[j] + global_mean
         // Compute row means of k_new along training axis.
         let new_row_means: Array1<f64> = Array1::from_vec(
-            (0..n_new).map(|i| k_new.row(i).sum() / n_train as f64).collect(),
+            (0..n_new)
+                .map(|i| k_new.row(i).sum() / n_train as f64)
+                .collect(),
         );
         for i in 0..n_new {
             for j in 0..n_train {
@@ -182,11 +198,12 @@ impl InverseTransform<f64> for FittedKernelPca {
         let k = self.alphas.ncols();
         if t.ncols() != k {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} components, got {}", k, t.ncols()
+                "expected {} components, got {}",
+                k,
+                t.ncols()
             )));
         }
         let n_train = self.x_train.nrows();
-        let d_orig = self.x_train.ncols();
         let n_new = t.nrows();
 
         // Reconstruct dual coefficients in training-sample space:
@@ -217,7 +234,11 @@ mod tests {
     #[test]
     fn test_kernel_pca_runs_rbf() {
         let x = array![
-            [0.0_f64, 0.0], [1.0, 1.0], [2.0, 4.0], [3.0, 9.0], [4.0, 16.0],
+            [0.0_f64, 0.0],
+            [1.0, 1.0],
+            [2.0, 4.0],
+            [3.0, 9.0],
+            [4.0, 16.0],
         ];
         let kpca = KernelPca::new(2, KpcaKernel::Rbf { gamma: 0.1 });
         let fitted = kpca.fit(&x).unwrap();
@@ -229,8 +250,11 @@ mod tests {
     #[test]
     fn test_kernel_pca_inverse_transform_runs() {
         let x = array![
-            [0.0_f64, 0.0, 1.0], [1.0, 1.0, 0.0], [2.0, 4.0, -1.0],
-            [3.0, 9.0, 2.0], [4.0, 16.0, 0.5],
+            [0.0_f64, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [2.0, 4.0, -1.0],
+            [3.0, 9.0, 2.0],
+            [4.0, 16.0, 0.5],
         ];
         let fitted = KernelPca::new(2, KpcaKernel::Linear).fit(&x).unwrap();
         let t = fitted.transform(&x).unwrap();

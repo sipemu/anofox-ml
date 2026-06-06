@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2, Axis};
-use rustml_core::{Float, FitUnsupervised, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 
 /// Parameters for `VarianceThreshold` feature selector (unfitted state).
 ///

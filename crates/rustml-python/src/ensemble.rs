@@ -52,10 +52,7 @@ impl RandomForestClassifier {
         Ok(PyArray1::from_owned_array(py, result))
     }
 
-    fn feature_importances<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    fn feature_importances<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
         Ok(PyArray1::from_owned_array(py, fitted.feature_importances()))
     }
@@ -68,7 +65,10 @@ impl RandomForestClassifier {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::RandomForestClassifier::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::RandomForestClassifier::default(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -79,7 +79,10 @@ impl RandomForestClassifier {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::RandomForestClassifier::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::RandomForestClassifier::default(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -138,7 +141,10 @@ impl RandomForestRegressor {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::RandomForestRegressor::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::RandomForestRegressor::default(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -149,7 +155,10 @@ impl RandomForestRegressor {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::RandomForestRegressor::default(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::RandomForestRegressor::default(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -211,7 +220,10 @@ impl GradientBoostingClassifier {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::GradientBoostingClassifier::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::GradientBoostingClassifier::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -222,7 +234,10 @@ impl GradientBoostingClassifier {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::GradientBoostingClassifier::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::GradientBoostingClassifier::new(),
+            fitted: Some(fitted),
+        })
     }
 }
 
@@ -284,7 +299,10 @@ impl GradientBoostingRegressor {
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_json(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::GradientBoostingRegressor::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::GradientBoostingRegressor::new(),
+            fitted: Some(fitted),
+        })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
@@ -295,6 +313,9 @@ impl GradientBoostingRegressor {
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
         let fitted = rustml_core::persistence::load_bincode(path).map_err(py_err)?;
-        Ok(Self { inner: rustml_ensemble::GradientBoostingRegressor::new(), fitted: Some(fitted) })
+        Ok(Self {
+            inner: rustml_ensemble::GradientBoostingRegressor::new(),
+            fitted: Some(fitted),
+        })
     }
 }

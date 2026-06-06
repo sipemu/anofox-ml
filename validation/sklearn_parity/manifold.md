@@ -28,3 +28,11 @@ rotation/reflection — distance matrix is invariant).
 - SMACOF stress minimisation MDS (sklearn's default).
 - Non-Euclidean dissimilarity matrices (would be easy: skip `pairwise_dist`
   and accept the matrix directly).
+
+## Complexity
+
+- Isomap: k-NN graph O(n²·p) + Dijkstra/Floyd geodesic distances O(n²·log n) + classical MDS eigendecomposition O(n³). Memory **O(n²)**.
+- LocallyLinearEmbedding: k-NN graph + per-point local reconstruction (k×k least squares) + bottom-eigendecomposition of (I-W)ᵀ(I-W). Time **O(n·k³ + n²·k)**, memory **O(n²)**.
+- ClassicalMDS: double-centring D² + eigendecomposition. Time **O(n³)**, memory **O(n²)**.
+- t-SNE (exact): **O(n²·iter)**, memory **O(n²)**.
+- t-SNE (Barnes-Hut): **O(n·log n · iter)** with quadtree, memory **O(n)**.

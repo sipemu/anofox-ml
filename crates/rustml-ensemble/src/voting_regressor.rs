@@ -87,7 +87,10 @@ pub struct FittedVotingRegressor<F: Float> {
 
 impl<F: Float> FittedVotingRegressor<F> {
     pub fn estimator_names(&self) -> Vec<&str> {
-        self.fitted_models.iter().map(|(n, _, _)| n.as_str()).collect()
+        self.fitted_models
+            .iter()
+            .map(|(n, _, _)| n.as_str())
+            .collect()
     }
 
     /// Compute R² score on the given data.
@@ -104,7 +107,11 @@ impl<F: Float> FittedVotingRegressor<F> {
             .iter()
             .map(|&t| (t - y_mean).to_f64().unwrap().powi(2))
             .sum();
-        Ok(if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 })
+        Ok(if ss_tot > 0.0 {
+            1.0 - ss_res / ss_tot
+        } else {
+            0.0
+        })
     }
 }
 
@@ -186,7 +193,13 @@ mod tests {
 
         let vr = VotingRegressor::new()
             .push("t1", DecisionTreeRegressor::default())
-            .push("t2", DecisionTreeRegressor { max_depth: Some(2), ..Default::default() });
+            .push(
+                "t2",
+                DecisionTreeRegressor {
+                    max_depth: Some(2),
+                    ..Default::default()
+                },
+            );
 
         let fitted: FittedVotingRegressor<f64> = vr.fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();
@@ -228,8 +241,7 @@ mod tests {
         let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0];
 
-        let vr = VotingRegressor::new()
-            .push("t1", DecisionTreeRegressor::default());
+        let vr = VotingRegressor::new().push("t1", DecisionTreeRegressor::default());
 
         let fitted: FittedVotingRegressor<f64> = vr.fit(&x, &y).unwrap();
         let r2 = fitted.score(&x, &y).unwrap();

@@ -1,5 +1,5 @@
 use ndarray::Array2;
-use rustml_core::{Float, FitUnsupervised, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 
 /// Generates polynomial and interaction features.
 ///
@@ -92,11 +92,7 @@ fn enumerate_combinations(
             return;
         }
         for feat in start_feature..n_features {
-            let max_power = if interaction_only {
-                1
-            } else {
-                target_degree
-            };
+            let max_power = if interaction_only { 1 } else { target_degree };
             for power in (1..=max_power).rev() {
                 current.push((feat, power));
                 // Remaining degree allocated to features with index > feat
@@ -121,7 +117,14 @@ fn enumerate_combinations(
     // Generate degree by degree to ensure correct ordering
     for d in 1..=max_degree {
         let mut current = Vec::new();
-        recurse_exact(0, d, n_features, interaction_only, &mut current, &mut combos);
+        recurse_exact(
+            0,
+            d,
+            n_features,
+            interaction_only,
+            &mut current,
+            &mut combos,
+        );
     }
 
     combos
@@ -141,8 +144,7 @@ impl<F: Float> FitUnsupervised<F> for PolynomialFeatures {
         }
 
         let n_features = x.ncols();
-        let combinations =
-            enumerate_combinations(n_features, self.degree, self.interaction_only);
+        let combinations = enumerate_combinations(n_features, self.degree, self.interaction_only);
 
         Ok(FittedPolynomialFeatures {
             n_features,
@@ -258,9 +260,9 @@ mod tests {
         let out = fitted.transform(&x).unwrap();
 
         assert_eq!(out.ncols(), 4);
-        assert_abs_diff_eq!(out[[0, 0]], 1.0, epsilon = 1e-10);  // 1
-        assert_abs_diff_eq!(out[[0, 1]], 3.0, epsilon = 1e-10);  // a
-        assert_abs_diff_eq!(out[[0, 2]], 9.0, epsilon = 1e-10);  // a^2
+        assert_abs_diff_eq!(out[[0, 0]], 1.0, epsilon = 1e-10); // 1
+        assert_abs_diff_eq!(out[[0, 1]], 3.0, epsilon = 1e-10); // a
+        assert_abs_diff_eq!(out[[0, 2]], 9.0, epsilon = 1e-10); // a^2
         assert_abs_diff_eq!(out[[0, 3]], 27.0, epsilon = 1e-10); // a^3
     }
 
@@ -322,16 +324,16 @@ mod tests {
         let out = fitted.transform(&x).unwrap();
 
         assert_eq!(out.ncols(), 10);
-        assert_abs_diff_eq!(out[[0, 0]], 1.0, epsilon = 1e-10);  // 1
-        assert_abs_diff_eq!(out[[0, 1]], 1.0, epsilon = 1e-10);  // a
-        assert_abs_diff_eq!(out[[0, 2]], 2.0, epsilon = 1e-10);  // b
-        assert_abs_diff_eq!(out[[0, 3]], 3.0, epsilon = 1e-10);  // c
-        assert_abs_diff_eq!(out[[0, 4]], 1.0, epsilon = 1e-10);  // a^2
-        assert_abs_diff_eq!(out[[0, 5]], 2.0, epsilon = 1e-10);  // ab
-        assert_abs_diff_eq!(out[[0, 6]], 3.0, epsilon = 1e-10);  // ac
-        assert_abs_diff_eq!(out[[0, 7]], 4.0, epsilon = 1e-10);  // b^2
-        assert_abs_diff_eq!(out[[0, 8]], 6.0, epsilon = 1e-10);  // bc
-        assert_abs_diff_eq!(out[[0, 9]], 9.0, epsilon = 1e-10);  // c^2
+        assert_abs_diff_eq!(out[[0, 0]], 1.0, epsilon = 1e-10); // 1
+        assert_abs_diff_eq!(out[[0, 1]], 1.0, epsilon = 1e-10); // a
+        assert_abs_diff_eq!(out[[0, 2]], 2.0, epsilon = 1e-10); // b
+        assert_abs_diff_eq!(out[[0, 3]], 3.0, epsilon = 1e-10); // c
+        assert_abs_diff_eq!(out[[0, 4]], 1.0, epsilon = 1e-10); // a^2
+        assert_abs_diff_eq!(out[[0, 5]], 2.0, epsilon = 1e-10); // ab
+        assert_abs_diff_eq!(out[[0, 6]], 3.0, epsilon = 1e-10); // ac
+        assert_abs_diff_eq!(out[[0, 7]], 4.0, epsilon = 1e-10); // b^2
+        assert_abs_diff_eq!(out[[0, 8]], 6.0, epsilon = 1e-10); // bc
+        assert_abs_diff_eq!(out[[0, 9]], 9.0, epsilon = 1e-10); // c^2
     }
 
     #[test]
@@ -343,13 +345,13 @@ mod tests {
         let out = fitted.transform(&x).unwrap();
 
         assert_eq!(out.ncols(), 7);
-        assert_abs_diff_eq!(out[[0, 0]], 1.0, epsilon = 1e-10);   // 1
-        assert_abs_diff_eq!(out[[0, 1]], 2.0, epsilon = 1e-10);   // a
-        assert_abs_diff_eq!(out[[0, 2]], 3.0, epsilon = 1e-10);   // b
-        assert_abs_diff_eq!(out[[0, 3]], 5.0, epsilon = 1e-10);   // c
-        assert_abs_diff_eq!(out[[0, 4]], 6.0, epsilon = 1e-10);   // ab
-        assert_abs_diff_eq!(out[[0, 5]], 10.0, epsilon = 1e-10);  // ac
-        assert_abs_diff_eq!(out[[0, 6]], 15.0, epsilon = 1e-10);  // bc
+        assert_abs_diff_eq!(out[[0, 0]], 1.0, epsilon = 1e-10); // 1
+        assert_abs_diff_eq!(out[[0, 1]], 2.0, epsilon = 1e-10); // a
+        assert_abs_diff_eq!(out[[0, 2]], 3.0, epsilon = 1e-10); // b
+        assert_abs_diff_eq!(out[[0, 3]], 5.0, epsilon = 1e-10); // c
+        assert_abs_diff_eq!(out[[0, 4]], 6.0, epsilon = 1e-10); // ab
+        assert_abs_diff_eq!(out[[0, 5]], 10.0, epsilon = 1e-10); // ac
+        assert_abs_diff_eq!(out[[0, 6]], 15.0, epsilon = 1e-10); // bc
     }
 
     #[test]

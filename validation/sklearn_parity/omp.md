@@ -28,3 +28,10 @@ element-wise — both do the same OLS refit on the active set).
   implemented.
 - `precompute=False` only — sklearn can precompute `X'X` for repeated calls.
 - No `return_path` (full path of fits).
+
+## Complexity
+
+- OrthogonalMatchingPursuit with `n_nonzero_coefs = s`: each iteration selects the column most correlated with the current residual and refits OLS on the active set.
+- Per iteration: **O(n·p + s²)**.
+- Total: **O(s · (np + s²))** — pleasantly subquadratic in p when s ≪ p.
+- Memory: **O(s²)** for the active Gram + **O(n·p)** for the dictionary.

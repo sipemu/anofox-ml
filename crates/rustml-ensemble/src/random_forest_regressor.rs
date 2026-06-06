@@ -197,9 +197,7 @@ impl<F: Float> Fit<F> for RandomForestRegressor {
             .into_par_iter()
             .map(|(row_indices, feature_indices)| {
                 let x_sub = build_sub_matrix(x, &row_indices, &feature_indices);
-                let y_sub = Array1::from_vec(
-                    row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
-                );
+                let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
                 let fitted_tree: FittedDecisionTreeRegressor<F> =
                     tree_params.fit(&x_sub, &y_sub)?;
                 Ok(ForestTree {
@@ -238,7 +236,8 @@ impl<F: Float> Predict<F> for FittedRandomForestRegressor<F> {
         let n_trees_f = F::from_usize(self.trees.len()).unwrap();
 
         // Collect all tree predictions in parallel
-        let all_preds: Result<Vec<Array1<F>>> = self.trees
+        let all_preds: Result<Vec<Array1<F>>> = self
+            .trees
             .par_iter()
             .map(|forest_tree| {
                 let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
@@ -311,7 +310,11 @@ impl<F: Float> FittedRandomForestRegressor<F> {
             .iter()
             .map(|&t| (t - y_mean).to_f64().unwrap().powi(2))
             .sum();
-        Ok(if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 })
+        Ok(if ss_tot > 0.0 {
+            1.0 - ss_res / ss_tot
+        } else {
+            0.0
+        })
     }
 }
 
@@ -368,7 +371,11 @@ fn compute_oob_score_regression<F: Float>(
         }
     }
 
-    Some(if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 })
+    Some(if ss_tot > 0.0 {
+        1.0 - ss_res / ss_tot
+    } else {
+        0.0
+    })
 }
 
 /// Build a single-row sub-matrix selecting specific columns for one sample.
@@ -383,10 +390,7 @@ fn build_sub_matrix_cols_single<F: Float>(
 }
 
 /// Build a sub-matrix selecting all rows but only specific columns from `x`.
-fn build_sub_matrix_cols<F: Float>(
-    x: &Array2<F>,
-    col_indices: &[usize],
-) -> Array2<F> {
+fn build_sub_matrix_cols<F: Float>(x: &Array2<F>, col_indices: &[usize]) -> Array2<F> {
     let n_rows = x.nrows();
     let n_cols = col_indices.len();
     let mut data = Vec::with_capacity(n_rows * n_cols);

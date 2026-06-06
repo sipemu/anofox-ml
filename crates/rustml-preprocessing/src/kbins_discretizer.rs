@@ -1,5 +1,5 @@
 use ndarray::Array2;
-use rustml_core::{Float, FitUnsupervised, Result, RustMlError, Transform};
+use rustml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 
 /// Strategy for computing bin edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

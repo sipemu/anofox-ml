@@ -40,16 +40,28 @@ impl GaussianMixture {
             n_init: 1,
         }
     }
-    pub fn with_covariance_type(mut self, c: CovarianceType) -> Self { self.covariance_type = c; self }
-    pub fn with_max_iter(mut self, m: usize) -> Self { self.max_iter = m; self }
-    pub fn with_seed(mut self, s: u64) -> Self { self.seed = s; self }
-    pub fn with_n_init(mut self, n: usize) -> Self { self.n_init = n.max(1); self }
+    pub fn with_covariance_type(mut self, c: CovarianceType) -> Self {
+        self.covariance_type = c;
+        self
+    }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_seed(mut self, s: u64) -> Self {
+        self.seed = s;
+        self
+    }
+    pub fn with_n_init(mut self, n: usize) -> Self {
+        self.n_init = n.max(1);
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct FittedGaussianMixture {
     pub weights: Array1<f64>,
-    pub means: Array2<f64>,      // k × d
+    pub means: Array2<f64>, // k × d
     /// Stored as either k×d (diag) or k row-major d×d (full).
     pub covariances: Vec<Array2<f64>>,
     pub log_likelihood: f64,
@@ -173,11 +185,7 @@ impl FitUnsupervised<f64> for GaussianMixture {
     }
 }
 
-fn single_fit(
-    cfg: &GaussianMixture,
-    x: &Array2<f64>,
-    seed: u64,
-) -> Result<FittedGaussianMixture> {
+fn single_fit(cfg: &GaussianMixture, x: &Array2<f64>, seed: u64) -> Result<FittedGaussianMixture> {
     let n = x.nrows();
     let d = x.ncols();
     let k = cfg.n_components;
@@ -213,7 +221,8 @@ fn single_fit(
                     for j in 0..d {
                         diff[j] = xi[j] - means[[c, j]];
                     }
-                    logs[c] = weights[c].ln() + log_gauss(&diff, &covariances[c], cfg.covariance_type);
+                    logs[c] =
+                        weights[c].ln() + log_gauss(&diff, &covariances[c], cfg.covariance_type);
                 }
                 let lse = logsumexp(&logs);
                 total_ll += lse;
@@ -297,7 +306,9 @@ impl Predict<f64> for FittedGaussianMixture {
         let d = self.means.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", d, x.ncols()
+                "expected {} features, got {}",
+                d,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -330,7 +341,9 @@ impl PredictProba<f64> for FittedGaussianMixture {
         let d = self.means.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}", d, x.ncols()
+                "expected {} features, got {}",
+                d,
+                x.ncols()
             )));
         }
         let n = x.nrows();
@@ -369,13 +382,16 @@ mod tests {
     #[test]
     fn test_gmm_two_well_separated_blobs() {
         let x = array![
-            [0.0_f64, 0.0], [0.2, 0.1], [-0.1, 0.2], [0.1, -0.2],
-            [10.0, 10.0], [10.1, 9.9], [9.8, 10.2], [10.2, 9.8],
+            [0.0_f64, 0.0],
+            [0.2, 0.1],
+            [-0.1, 0.2],
+            [0.1, -0.2],
+            [10.0, 10.0],
+            [10.1, 9.9],
+            [9.8, 10.2],
+            [10.2, 9.8],
         ];
-        let fitted = GaussianMixture::new(2)
-            .with_seed(0)
-            .fit(&x)
-            .unwrap();
+        let fitted = GaussianMixture::new(2).with_seed(0).fit(&x).unwrap();
         let labels = fitted.predict(&x).unwrap();
         let l0 = labels[0];
         for i in 1..4 {

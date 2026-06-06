@@ -8,7 +8,7 @@ use rustml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 /// Bagging (Bootstrap Aggregating) regressor parameters (unfitted state).
 ///
 /// Trains an ensemble of decision tree regressors, each on a bootstrap sample
-/// of the data using the **full** feature set. Unlike [`RandomForestRegressor`],
+/// of the data using the **full** feature set. Unlike `RandomForestRegressor`,
 /// bagging does not perform random feature subsampling at the tree level --
 /// every tree sees all features.
 ///
@@ -135,9 +135,7 @@ impl<F: Float> Fit<F> for BaggingRegressor {
             .into_par_iter()
             .map(|row_indices| {
                 let x_sub = build_sub_matrix_rows(x, &row_indices);
-                let y_sub = Array1::from_vec(
-                    row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>(),
-                );
+                let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
                 tree_params.fit(&x_sub, &y_sub)
             })
             .collect();
@@ -161,11 +159,8 @@ impl<F: Float> Predict<F> for FittedBaggingRegressor<F> {
         let n_trees_f = F::from_usize(self.trees.len()).unwrap();
 
         // Collect all tree predictions in parallel
-        let all_preds: Result<Vec<Array1<F>>> = self
-            .trees
-            .par_iter()
-            .map(|tree| tree.predict(x))
-            .collect();
+        let all_preds: Result<Vec<Array1<F>>> =
+            self.trees.par_iter().map(|tree| tree.predict(x)).collect();
         let all_preds = all_preds?;
 
         // Average predictions across trees
