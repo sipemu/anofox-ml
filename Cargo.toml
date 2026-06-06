@@ -34,7 +34,7 @@ homepage = "https://github.com/sipemu/rustml"
 readme = "README.md"
 keywords = ["machine-learning", "ml", "scikit-learn", "classification", "regression"]
 categories = ["science", "algorithms"]
-rust-version = "1.85"
+rust-version = "1.87"
 authors = ["Simon Müller <sm@data-zoo.de>"]
 
 [workspace.dependencies]
