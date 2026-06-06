@@ -282,7 +282,6 @@ impl KMeans {
 
         let mut rng = StdRng::seed_from_u64(self.seed);
         let mut centroids = kmeans_plus_plus(x, self.n_clusters, &mut rng, sample_weight);
-        let mut labels = vec![0usize; n_samples];
         let tol = F::from_f64(self.tol).unwrap();
         let mut n_iter = 0;
 
@@ -290,14 +289,13 @@ impl KMeans {
             n_iter = iter + 1;
 
             // Assignment step: parallel.
-            let new_labels: Vec<usize> = (0..n_samples)
+            let labels: Vec<usize> = (0..n_samples)
                 .into_par_iter()
                 .map(|i| {
                     let (best_idx, _) = nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
                     best_idx
                 })
                 .collect();
-            labels = new_labels;
 
             // Update step: weighted mean per cluster.
             //
