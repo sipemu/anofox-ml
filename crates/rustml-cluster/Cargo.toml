@@ -1,19 +1,21 @@
 [package]
 name = "rustml-cluster"
-version = "0.1.0"
-edition = "2021"
-description = "KMeans and DBSCAN clustering algorithms for the RustML machine learning library"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/sipemu/rustml"
-documentation = "https://docs.rs/rustml-cluster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 readme = "../../README.md"
-keywords = ["machine-learning", "clustering", "kmeans", "dbscan", "ndarray"]
+rust-version.workspace = true
+authors.workspace = true
+description = "Clustering algorithms (KMeans, DBSCAN, HDBSCAN, GMM, BGMM, MeanShift, OPTICS, Birch, Spectral, AffinityPropagation, Agglomerative) for RustML"
+documentation = "https://docs.rs/rustml-cluster"
+keywords = ["machine-learning", "clustering", "kmeans", "dbscan", "hdbscan"]
 categories = ["science", "algorithms"]
-rust-version = "1.70"
 
 [dependencies]
-rustml-core = { path = "../rustml-core" }
-faer = "0.23"
+rustml-core = { workspace = true }
+faer = { workspace = true }
 ndarray = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }

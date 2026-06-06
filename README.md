@@ -241,6 +241,32 @@ Contributions are welcome. Please open an issue to discuss proposed changes
 before submitting a pull request. All code should include tests and pass
 `cargo clippy` and `cargo fmt --check`.
 
+## Releasing
+
+The workspace is split into 17 publishable crates plus an umbrella `rustml`.
+Versions are kept in lockstep via `[workspace.package].version` in the root
+`Cargo.toml` — bumping there moves every crate at once.
+
+To publish a release:
+
+```bash
+# 1. Bump workspace.package.version in Cargo.toml (e.g. 0.1.0 → 0.2.0)
+# 2. Bump workspace.dependencies.rustml-* versions to match
+# 3. Tag and push
+git tag v0.2.0 && git push --tags
+
+# 4. Dry-run (catches metadata issues without uploading)
+scripts/publish.sh
+
+# 5. Real publish (requires `cargo login` against crates.io)
+scripts/publish.sh --execute
+```
+
+The script walks crates in topological order (leaf-first) and sleeps
+between uploads to let the crates.io index catch up. `rustml-python` is
+marked `publish = false` — it's a PyO3 extension module distributed via
+maturin, not crates.io.
+
 ## License
 
 Licensed under either of

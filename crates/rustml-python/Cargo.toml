@@ -1,7 +1,12 @@
 [package]
 name = "rustml-python"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# Not published on crates.io — this is a PyO3 cdylib extension module built
+# with maturin, not a normal Rust crate.
+publish = false
 
 [lib]
 name = "rustml_python"
@@ -11,18 +16,18 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 numpy = "0.28"
 ndarray = { workspace = true }
-rustml-core = { path = "../rustml-core" }
-rustml-preprocessing = { path = "../rustml-preprocessing" }
-rustml-neighbors = { path = "../rustml-neighbors" }
-rustml-trees = { path = "../rustml-trees" }
-rustml-ensemble = { path = "../rustml-ensemble" }
-rustml-cluster = { path = "../rustml-cluster" }
-rustml-naive-bayes = { path = "../rustml-naive-bayes" }
-rustml-metrics = { path = "../rustml-metrics" }
-rustml-svm = { path = "../rustml-svm" }
-rustml-neural-networks = { path = "../rustml-neural-networks" }
-rustml-manifold = { path = "../rustml-manifold" }
-rustml-gaussian-process = { path = "../rustml-gaussian-process" }
-rustml-discriminant = { path = "../rustml-discriminant" }
+rustml-core = { workspace = true }
+rustml-preprocessing = { workspace = true }
+rustml-neighbors = { workspace = true }
+rustml-trees = { workspace = true }
+rustml-ensemble = { workspace = true }
+rustml-cluster = { workspace = true }
+rustml-naive-bayes = { workspace = true }
+rustml-metrics = { workspace = true }
+rustml-svm = { workspace = true }
+rustml-neural-networks = { workspace = true }
+rustml-manifold = { workspace = true }
+rustml-gaussian-process = { workspace = true }
+rustml-discriminant = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }

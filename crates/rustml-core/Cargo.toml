@@ -1,22 +1,24 @@
 [package]
 name = "rustml-core"
-version = "0.1.0"
-edition = "2021"
-description = "Core traits and types for the RustML machine learning library"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/sipemu/rustml"
-documentation = "https://docs.rs/rustml-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 readme = "../../README.md"
+rust-version.workspace = true
+authors.workspace = true
+description = "Core traits and types for the RustML machine learning library"
+documentation = "https://docs.rs/rustml-core"
 keywords = ["machine-learning", "ml", "scikit-learn", "traits", "ndarray"]
 categories = ["science", "algorithms"]
-rust-version = "1.70"
 
 [dependencies]
 ndarray = { workspace = true }
 num-traits = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
-rand = "0.8"
+rand = { workspace = true }
 rayon = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }

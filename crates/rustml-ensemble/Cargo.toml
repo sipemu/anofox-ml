@@ -1,22 +1,24 @@
 [package]
 name = "rustml-ensemble"
-version = "0.1.0"
-edition = "2021"
-description = "Random forest and gradient boosting ensemble methods for the RustML library"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/sipemu/rustml"
-documentation = "https://docs.rs/rustml-ensemble"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 readme = "../../README.md"
+rust-version.workspace = true
+authors.workspace = true
+description = "Random forest and gradient boosting ensemble methods for the RustML library"
+documentation = "https://docs.rs/rustml-ensemble"
 keywords = ["machine-learning", "random-forest", "gradient-boosting", "ensemble", "ndarray"]
 categories = ["science", "algorithms"]
-rust-version = "1.70"
 
 [dependencies]
-rustml-core = { path = "../rustml-core" }
-rustml-trees = { path = "../rustml-trees" }
+rustml-core = { workspace = true }
+rustml-trees = { workspace = true }
 ndarray = { workspace = true }
 num-traits = { workspace = true }
-rand = "0.8"
+rand = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 

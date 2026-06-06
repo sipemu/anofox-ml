@@ -22,6 +22,21 @@ members = [
     "crates/rustml",
 ]
 
+# Shared package metadata. Every publishable crate inherits version, license,
+# repository, etc. via `field.workspace = true`. Bumping the version here
+# updates every crate at once — only do that between full-stack releases.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sipemu/rustml"
+homepage = "https://github.com/sipemu/rustml"
+readme = "README.md"
+keywords = ["machine-learning", "ml", "scikit-learn", "classification", "regression"]
+categories = ["science", "algorithms"]
+rust-version = "1.70"
+authors = ["Simon Müller <sm@data-zoo.de>"]
+
 [workspace.dependencies]
 ndarray = { version = "0.16", features = ["serde"] }
 num-traits = "0.2"
@@ -33,3 +48,25 @@ rand = "0.8"
 rayon = "1.10"
 proptest = "1.4"
 bincode = "1.3"
+faer = "0.23"
+
+# Internal workspace crates. Each carries both `path` (for local builds)
+# and `version` (for crates.io); without `version` cargo refuses to
+# publish. Bump these in lock-step with `workspace.package.version`.
+rustml-core = { version = "0.1.0", path = "crates/rustml-core" }
+rustml-metrics = { version = "0.1.0", path = "crates/rustml-metrics" }
+rustml-preprocessing = { version = "0.1.0", path = "crates/rustml-preprocessing" }
+rustml-neighbors = { version = "0.1.0", path = "crates/rustml-neighbors" }
+rustml-trees = { version = "0.1.0", path = "crates/rustml-trees" }
+rustml-ensemble = { version = "0.1.0", path = "crates/rustml-ensemble" }
+rustml-cluster = { version = "0.1.0", path = "crates/rustml-cluster" }
+rustml-naive-bayes = { version = "0.1.0", path = "crates/rustml-naive-bayes" }
+rustml-discriminant = { version = "0.1.0", path = "crates/rustml-discriminant" }
+rustml-text = { version = "0.1.0", path = "crates/rustml-text" }
+rustml-gaussian-process = { version = "0.1.0", path = "crates/rustml-gaussian-process" }
+rustml-manifold = { version = "0.1.0", path = "crates/rustml-manifold" }
+rustml-io = { version = "0.1.0", path = "crates/rustml-io" }
+rustml-svm = { version = "0.1.0", path = "crates/rustml-svm" }
+rustml-neural-networks = { version = "0.1.0", path = "crates/rustml-neural-networks" }
+rustml-regression = { version = "0.1.0", path = "crates/rustml-regression" }
+rustml-linear = { version = "0.1.0", path = "crates/rustml-linear" }
