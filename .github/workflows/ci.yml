@@ -134,14 +134,15 @@ jobs:
   codspeed:
     name: Codspeed perf tracking
     runs-on: ubuntu-latest
-    # Tracks per-commit perf via codspeed.io. codspeed uses cachegrind to
-    # count CPU instructions instead of wall-time, so results are
-    # deterministic across noisy GH runners — a 1 % drift in this number
-    # is a real algorithmic change, not a hot/cold cache. Advisory
-    # (continue-on-error) so a missing CODSPEED_TOKEN doesn't block CI;
-    # register the repo at https://codspeed.io/ and add the token as a
-    # repo secret to enable.
-    continue-on-error: true
+    # Tracks per-commit perf via codspeed.io. codspeed's simulation
+    # instrument counts CPU instructions via cachegrind instead of
+    # wall-time, so results are deterministic across noisy GH runners —
+    # a 1 % drift in this number is a real algorithmic change, not a
+    # hot/cold cache. Authentication is handled via GitHub OIDC, so no
+    # CODSPEED_TOKEN secret is required.
+    permissions:
+      contents: read
+      id-token: write
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/master')
       || (github.event_name == 'pull_request')
@@ -156,10 +157,10 @@ jobs:
       - name: Build benchmarks under codspeed
         run: cargo codspeed build -p anofox-ml
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@v3
+        uses: CodSpeedHQ/action@v4
         with:
+          mode: simulation
           run: cargo codspeed run -p anofox-ml
-          token: ${{ secrets.CODSPEED_TOKEN }}
 
   coverage:
     name: Coverage

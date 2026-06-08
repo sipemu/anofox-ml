@@ -3,6 +3,7 @@
 A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 
 [![CI](https://github.com/sipemu/anofox-ml/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/anofox-ml/actions/workflows/ci.yml)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/sipemu/anofox-ml?utm_source=badge)
 [![Crates.io](https://img.shields.io/crates/v/anofox-ml.svg)](https://crates.io/crates/anofox-ml)
 [![Documentation](https://docs.rs/anofox-ml/badge.svg)](https://docs.rs/anofox-ml)
 [![codecov](https://codecov.io/gh/sipemu/anofox-ml/branch/master/graph/badge.svg)](https://codecov.io/gh/sipemu/anofox-ml)
