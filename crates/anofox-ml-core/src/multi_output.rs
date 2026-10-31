@@ -73,13 +73,15 @@ impl<F: Float> MultiOutputRegressor<F> {
         if y.is_empty() {
             return Err(RustMlError::EmptyInput("y is empty".into()));
         }
-        let n_outputs = y.ncols();
-        let mut fitted = Vec::with_capacity(n_outputs);
-        for k in 0..n_outputs {
-            let yk = y.index_axis(Axis(1), k).to_owned();
-            let m = self.template.fit_box(x, &yk)?;
-            fitted.push(m);
-        }
+        use rayon::prelude::*;
+        // Independent per-target fits run in parallel.
+        let fitted = (0..y.ncols())
+            .into_par_iter()
+            .map(|k| {
+                self.template
+                    .fit_box(x, &y.index_axis(Axis(1), k).to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(FittedMultiOutputRegressor {
             models: fitted,
             n_features: x.ncols(),

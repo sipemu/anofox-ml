@@ -109,15 +109,7 @@ fn resolve_columns(selector: &ColumnSelector, n_cols: usize) -> Vec<usize> {
 
 /// Select specific columns from a matrix, returning a new C-contiguous array.
 fn select_columns<F: Float>(x: &Array2<F>, cols: &[usize]) -> Array2<F> {
-    let n_rows = x.nrows();
-    let n_cols = cols.len();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for i in 0..n_rows {
-        for &c in cols {
-            data.push(x[[i, c]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
+    x.select(ndarray::Axis(1), cols)
 }
 
 /// Fitted ColumnTransformer.
@@ -172,11 +164,9 @@ impl<F: Float + 'static> FitUnsupervised<F> for ColumnTransformer<F> {
         let n_cols = x.ncols();
 
         let mut used_cols = std::collections::HashSet::new();
-        let mut fitted_branches = Vec::with_capacity(self.branches.len());
-
+        let mut branch_cols = Vec::with_capacity(self.branches.len());
         for branch in &self.branches {
             let cols = resolve_columns(&branch.selector, n_cols);
-
             for &c in &cols {
                 if c >= n_cols {
                     return Err(RustMlError::InvalidParameter(format!(
@@ -186,16 +176,25 @@ impl<F: Float + 'static> FitUnsupervised<F> for ColumnTransformer<F> {
                 }
                 used_cols.insert(c);
             }
-
-            let sub_x = select_columns(x, &cols);
-            let (fitted_step, _) = branch.transformer.fit_transform(&sub_x)?;
-
-            fitted_branches.push(FittedBranch {
-                name: branch.name.clone(),
-                cols,
-                fitted: fitted_step,
-            });
+            branch_cols.push(cols);
         }
+
+        // Branches are independent: fit them in parallel.
+        use rayon::prelude::*;
+        let fitted_branches = self
+            .branches
+            .par_iter()
+            .zip(branch_cols.into_par_iter())
+            .map(|(branch, cols)| {
+                let sub_x = select_columns(x, &cols);
+                let (fitted_step, _) = branch.transformer.fit_transform(&sub_x)?;
+                Ok(FittedBranch {
+                    name: branch.name.clone(),
+                    cols,
+                    fitted: fitted_step,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let passthrough_cols: Vec<usize> = if self.remainder == Remainder::Passthrough {
             (0..n_cols).filter(|c| !used_cols.contains(c)).collect()

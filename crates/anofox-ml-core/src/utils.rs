@@ -54,12 +54,7 @@ pub fn train_test_split<F: Float>(
 
 /// Select rows from a 2D array by indices.
 fn select_rows<F: Float>(x: &Array2<F>, indices: &[usize]) -> Array2<F> {
-    let ncols = x.ncols();
-    let mut result = Array2::<F>::zeros((indices.len(), ncols));
-    for (i, &idx) in indices.iter().enumerate() {
-        result.row_mut(i).assign(&x.row(idx));
-    }
-    result
+    x.select(ndarray::Axis(0), indices)
 }
 
 /// Select elements from a 1D array by indices.
@@ -442,6 +437,65 @@ pub fn cross_val_score_with_splits<F: Float>(
         .iter()
         .map(|(train, test)| evaluate_fold(x, y, train, test, &fit_predict, &scorer))
         .collect()
+}
+
+/// Parallel [`cross_val_score_with_splits`]: folds are evaluated with rayon
+/// (the closures must be `Sync`). Results are in split order and identical
+/// to the sequential version.
+pub fn cross_val_score_with_splits_par<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>> + Sync,
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F> + Sync,
+) -> Result<Vec<F>> {
+    use rayon::prelude::*;
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
+    splits
+        .par_iter()
+        .map(|(train, test)| evaluate_fold(x, y, train, test, &fit_predict, &scorer))
+        .collect()
+}
+
+/// Parallel [`grid_search_cv_with_splits`]: every (configuration, fold)
+/// pair is evaluated with rayon (the closures must be `Sync`). Results are
+/// identical to the sequential version.
+pub fn grid_search_cv_with_splits_par<F: Float, P>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    param_configs: &[P],
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F> + Sync,
+) -> Result<GridSearchResult<F>>
+where
+    P: Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>> + Sync,
+{
+    use rayon::prelude::*;
+    if param_configs.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "param_configs must not be empty".into(),
+        ));
+    }
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
+    let k = splits.len();
+    let flat: Vec<F> = (0..param_configs.len() * k)
+        .into_par_iter()
+        .map(|t| {
+            let (train, test) = &splits[t % k];
+            evaluate_fold(x, y, train, test, &param_configs[t / k], &scorer)
+        })
+        .collect::<Result<Vec<F>>>()?;
+    let cv_scores: Vec<Vec<F>> = flat.chunks(k).map(|c| c.to_vec()).collect();
+    let mean_scores: Vec<F> = cv_scores.iter().map(|s| mean_of(s)).collect();
+    let (best_params_index, best_score) = argmax(&mean_scores);
+    Ok(GridSearchResult {
+        best_score,
+        best_params_index,
+        cv_scores,
+        mean_scores,
+    })
 }
 
 /// Stratified k-fold cross-validation score.
@@ -2710,5 +2764,29 @@ mod tests {
                 assert!(a <= b);
             }
         }
+    }
+
+    #[test]
+    fn test_parallel_search_matches_sequential() {
+        let x = Array2::from_shape_fn((30, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(30, |i| 2.0 * i as f64 + ((i * 7) % 3) as f64);
+        let splits = shuffled_k_fold(30, 5, 3).unwrap();
+        let configs: Vec<_> = (0..4)
+            .map(|c| {
+                move |_: &Array2<f64>, _: &Array1<f64>, xs: &Array2<f64>| -> Result<Array1<f64>> {
+                    Ok(xs.column(0).mapv(|v| c as f64 * v))
+                }
+            })
+            .collect();
+        let neg_mse = |t: &Array1<f64>, p: &Array1<f64>| -> Result<f64> {
+            Ok(-t.iter().zip(p).map(|(a, b)| (a - b) * (a - b)).sum::<f64>())
+        };
+        let seq = grid_search_cv_with_splits(&x, &y, &splits, &configs, neg_mse).unwrap();
+        let par = grid_search_cv_with_splits_par(&x, &y, &splits, &configs, neg_mse).unwrap();
+        assert_eq!(seq.cv_scores, par.cv_scores);
+        assert_eq!(seq.best_params_index, par.best_params_index);
+        let a = cross_val_score_with_splits(&x, &y, &splits, &configs[2], neg_mse).unwrap();
+        let b = cross_val_score_with_splits_par(&x, &y, &splits, &configs[2], neg_mse).unwrap();
+        assert_eq!(a, b);
     }
 }

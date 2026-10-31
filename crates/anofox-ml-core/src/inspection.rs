@@ -57,9 +57,10 @@ where
             );
             let original_col: Vec<f64> = x.column(j).iter().copied().collect();
             let mut out = Vec::with_capacity(n_repeats);
+            // One copy of X per feature; only column j is rewritten per repeat.
+            let mut x_perm = x.clone();
+            let mut idx: Vec<usize> = (0..n_samples).collect();
             for _ in 0..n_repeats {
-                let mut x_perm = x.clone();
-                let mut idx: Vec<usize> = (0..n_samples).collect();
                 idx.shuffle(&mut sub_rng);
                 for (i, &p) in idx.iter().enumerate() {
                     x_perm[[i, j]] = original_col[p];

@@ -317,6 +317,16 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     match the columns of X, and `CsvError` converts into `RustMlError`.
   - `CsrMatrix::from_triplets` checks bounds; new `try_from_triplets`.
 
+- **Parallelism (#38):**
+  - New `grid_search_cv_with_splits_par` and `cross_val_score_with_splits_par`
+    evaluate in parallel with rayon and give results identical to the
+    sequential versions.
+  - Multi-output targets and ColumnTransformer branches are fitted in
+    parallel.
+  - `permutation_importance` copies X once per feature instead of once per
+    repeat.
+  - Row and column selection use ndarray's `select`.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by
