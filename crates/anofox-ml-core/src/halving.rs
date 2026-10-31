@@ -142,7 +142,7 @@ pub fn halving_grid_search_cv<F: Float>(
 ///
 /// `splitter(x_sub, y_sub, seed)` receives the iteration's subsample and must
 /// return `(train, test)` index pairs into it (e.g. [`crate::utils::shuffled_k_fold`],
-/// [`crate::utils::stratified_k_fold`], [`crate::utils::group_k_fold`]). Each
+/// [`crate::utils::stratified_k_fold`], [`crate::splitters::group_k_fold`]). Each
 /// candidate's iteration score is the mean of its per-split scores.
 #[allow(clippy::too_many_arguments)]
 pub fn halving_grid_search_cv_with_splitter<F, P, S, Sp>(

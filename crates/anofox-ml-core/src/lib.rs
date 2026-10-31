@@ -68,9 +68,10 @@ pub use pipeline::{
 pub use sparse::CsrMatrix;
 pub use splitters::{
     buffered_leave_one_out, combinatorial_purged_cv, group_k_fold, group_k_fold_shuffled,
-    group_shuffle_split, leave_one_group_out, leave_p_groups_out, purged_k_fold,
-    spatial_block_k_fold, spatial_buffer, stratified_group_k_fold, CombinatorialPurgedCv,
-    SpatialMetric, MAX_LEAVE_P_GROUPS_OUT_SPLITS,
+    group_shuffle_split, group_time_series_split, leave_one_group_out, leave_p_groups_out,
+    purged_k_fold, quantile_strata, spatial_block_k_fold, spatial_buffer, stratified_group_k_fold,
+    stratified_k_fold_continuous, time_series_split_with, CombinatorialPurgedCv, SpatialMetric,
+    TimeSeriesSplitOptions, MAX_LEAVE_P_GROUPS_OUT_SPLITS,
 };
 pub use traits::{
     ClassifierScore, DecisionFunction, Fit, FitUnsupervised, FitUnsupervisedWeighted, FitWeighted,
@@ -88,6 +89,7 @@ pub use utils::{
     GridSearchResult, LearningCurveResult, ScorerFn, ValidationCurveResult,
 };
 pub use validation::{
-    bootstrap_splits, bootstrap_splits_stratified, bootstrap_validate, permutation_test_score,
-    BootstrapValidation, PermutationTestResult, MAX_NO_INFORMATION_PAIRS,
+    bootstrap_splits, bootstrap_splits_stratified, bootstrap_validate, nested_cross_validate,
+    permutation_test_score, BootstrapValidation, NestedCvResult, PermutationTestResult,
+    MAX_NO_INFORMATION_PAIRS,
 };

@@ -3,6 +3,8 @@
 //! - [`permutation_test_score`]: significance of a cross-validated score
 //!   against label-permuted refits (scikit-learn `permutation_test_score`,
 //!   Ojala & Garriga 2010).
+//! - [`nested_cross_validate`]: unbiased performance estimate of a
+//!   hyperparameter search (inner search on each outer training fold).
 //! - [`bootstrap_splits`] / [`bootstrap_validate`]: bootstrap estimates of
 //!   the prediction error — out-of-bag, Efron's .632, the .632+ estimator
 //!   (Efron & Tibshirani 1997) and the optimism-corrected (Harrell) error.
@@ -14,7 +16,7 @@ use rayon::prelude::*;
 
 use crate::error::{Result, RustMlError};
 use crate::float::Float;
-use crate::utils::{cross_val_score_with_splits, CvSplit};
+use crate::utils::{cross_val_score_with_splits, grid_search_cv_with_splits, CvSplit};
 
 /// Result of [`permutation_test_score`].
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +108,82 @@ pub fn permutation_test_score<F: Float>(
         score,
         permutation_scores,
         p_value: (at_least + 1) as f64 / (n_permutations + 1) as f64,
+    })
+}
+
+/// Result of [`nested_cross_validate`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NestedCvResult<F> {
+    /// Score of the selected configuration on every outer test fold.
+    pub outer_scores: Vec<F>,
+    /// Mean of `outer_scores`: the performance estimate of the whole
+    /// tuning procedure.
+    pub mean_score: F,
+    /// Configuration chosen by the inner search in every outer fold.
+    pub best_params_index: Vec<usize>,
+    /// Best mean inner-CV score in every outer fold.
+    pub inner_best_scores: Vec<F>,
+}
+
+/// Nested cross-validation of a grid search.
+///
+/// For every outer split, `inner_splits(x_train, y_train)` provides the
+/// inner splits, [`grid_search_cv_with_splits`] selects the best of
+/// `param_configs` on the outer training data only, and that configuration
+/// is refitted on the outer training data and scored on the outer test
+/// fold. The mean outer score estimates the performance of the *tuning
+/// procedure* without the optimistic bias of reporting the inner best score
+/// (Cawley & Talbot 2010). `scorer` is greater-is-better.
+pub fn nested_cross_validate<F, P>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    outer_splits: &[CvSplit],
+    inner_splits: impl Fn(&Array2<F>, &Array1<F>) -> Result<Vec<CvSplit>>,
+    param_configs: &[P],
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
+) -> Result<NestedCvResult<F>>
+where
+    F: Float,
+    P: Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+{
+    if outer_splits.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "need at least one outer split".into(),
+        ));
+    }
+    if x.nrows() != y.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "X has {} rows but y has {} elements",
+            x.nrows(),
+            y.len()
+        )));
+    }
+    let n = y.len();
+    let mut outer_scores = Vec::with_capacity(outer_splits.len());
+    let mut best_params_index = Vec::with_capacity(outer_splits.len());
+    let mut inner_best_scores = Vec::with_capacity(outer_splits.len());
+    for (s, (train, test)) in outer_splits.iter().enumerate() {
+        if train.is_empty() || test.is_empty() || train.iter().chain(test).any(|&i| i >= n) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "outer split {s} is empty or out of range"
+            )));
+        }
+        let (xtr, ytr) = (x.select(Axis(0), train), y.select(Axis(0), train));
+        let (xte, yte) = (x.select(Axis(0), test), y.select(Axis(0), test));
+        let inner = inner_splits(&xtr, &ytr)?;
+        let search = grid_search_cv_with_splits(&xtr, &ytr, &inner, param_configs, &scorer)?;
+        let pred = param_configs[search.best_params_index](&xtr, &ytr, &xte)?;
+        outer_scores.push(scorer(&yte, &pred)?);
+        best_params_index.push(search.best_params_index);
+        inner_best_scores.push(search.best_score);
+    }
+    let mean_score =
+        outer_scores.iter().fold(F::zero(), |a, &b| a + b) / F::from(outer_scores.len()).unwrap();
+    Ok(NestedCvResult {
+        outer_scores,
+        mean_score,
+        best_params_index,
+        inner_best_scores,
     })
 }
 
@@ -522,5 +600,39 @@ mod tests {
         assert_eq!(r.relative_overfitting, 0.0);
         let expected = 0.368 * r.apparent + 0.632 * r.out_of_bag.min(r.no_information);
         assert!((r.point632_plus - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nested_cv_selects_on_inner_folds_only() {
+        // y = 2x + noise; candidates predict c·x for c in {0, 1, 2, 3}.
+        let n = 30;
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(n, |i| 2.0 * i as f64 + ((i * 7) % 5) as f64 - 2.0);
+        let neg_mse = |t: &Array1<f64>, p: &Array1<f64>| -> Result<f64> { mse(t, p).map(|v| -v) };
+        let configs: Vec<
+            Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>,
+        > = (0..4)
+            .map(|c| {
+                Box::new(move |_: &Array2<f64>, _: &Array1<f64>, xs: &Array2<f64>| {
+                    Ok(xs.column(0).mapv(|v| c as f64 * v))
+                })
+                    as Box<dyn Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>>
+            })
+            .collect();
+        let outer = crate::utils::shuffled_k_fold(n, 5, 0).unwrap();
+        let r = nested_cross_validate(
+            &x,
+            &y,
+            &outer,
+            |xt, _| crate::utils::shuffled_k_fold(xt.nrows(), 3, 1),
+            &configs,
+            neg_mse,
+        )
+        .unwrap();
+        assert_eq!(r.outer_scores.len(), 5);
+        assert!(r.best_params_index.iter().all(|&b| b == 2));
+        let mean = r.outer_scores.iter().sum::<f64>() / 5.0;
+        assert!((r.mean_score - mean).abs() < 1e-12);
+        assert!(nested_cross_validate(&x, &y, &[], |_, _| Ok(vec![]), &configs, neg_mse).is_err());
     }
 }

@@ -428,7 +428,7 @@ fn fit_predict_train_and_test<F: Float>(
 /// Cross-validation score over user-supplied `(train, test)` splits.
 ///
 /// Returns one score per split. Use this to plug in any splitter
-/// ([`group_k_fold`], [`time_series_split`], [`shuffled_k_fold`], ...).
+/// ([`group_k_fold`](crate::splitters::group_k_fold), [`time_series_split`], [`shuffled_k_fold`], ...).
 pub fn cross_val_score_with_splits<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
@@ -521,7 +521,7 @@ pub fn grid_search_cv<F: Float>(
 /// Grid search over user-supplied `(train, test)` splits.
 ///
 /// Same as [`grid_search_cv`] but the cross-validation splits are given
-/// explicitly (e.g. from [`group_k_fold`], [`time_series_split`] or
+/// explicitly (e.g. from [`group_k_fold`](crate::splitters::group_k_fold), [`time_series_split`] or
 /// [`shuffled_k_fold`]).
 pub fn grid_search_cv_with_splits<F: Float>(
     x: &Array2<F>,

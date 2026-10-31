@@ -18,6 +18,12 @@
 //! cross-validation for forecasting models; these splitters are for ML
 //! models fitted on time-indexed features.
 //!
+//! [`time_series_split_with`] and [`group_time_series_split`] are
+//! scikit-learn's `TimeSeriesSplit` with `test_size` / `gap` /
+//! `max_train_size` (plus a `min_train_size` check, as anofox-regression's
+//! `TimeSeriesSplitOptions`); [`stratified_k_fold_continuous`] stratifies a
+//! continuous target on its quantile bins.
+//!
 //! [`spatial_block_k_fold`], [`spatial_buffer`] and
 //! [`buffered_leave_one_out`] are for spatially autocorrelated data, where
 //! random k-fold overstates skill (Roberts et al. 2017): whole spatial blocks
@@ -581,6 +587,167 @@ pub fn combinatorial_purged_cv(
 }
 
 // ---------------------------------------------------------------------------
+// Time-series splits with options, group time-series splits
+// ---------------------------------------------------------------------------
+
+/// Options of [`time_series_split_with`] (scikit-learn `TimeSeriesSplit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSeriesSplitOptions {
+    /// Number of splits (test blocks), at least 1. Default 5.
+    pub n_splits: usize,
+    /// Samples per test block; default `n / (n_splits + 1)`.
+    pub test_size: Option<usize>,
+    /// Samples left out between the end of the training window and each
+    /// test block. Default 0.
+    pub gap: usize,
+    /// Keep at most this many samples right before the gap (sliding
+    /// window); default `None` = expanding window.
+    pub max_train_size: Option<usize>,
+    /// Smallest admissible training window: an error is returned when a
+    /// split has fewer training samples. Default `None`.
+    pub min_train_size: Option<usize>,
+}
+
+impl Default for TimeSeriesSplitOptions {
+    fn default() -> Self {
+        Self {
+            n_splits: 5,
+            test_size: None,
+            gap: 0,
+            max_train_size: None,
+            min_train_size: None,
+        }
+    }
+}
+
+impl TimeSeriesSplitOptions {
+    /// Default options with `n_splits` splits.
+    pub fn new(n_splits: usize) -> Self {
+        Self {
+            n_splits,
+            ..Self::default()
+        }
+    }
+}
+
+/// Forward-chaining splits of `n` time-ordered samples with scikit-learn's
+/// `TimeSeriesSplit(n_splits, test_size, gap, max_train_size)` semantics:
+/// the last `n_splits · test_size` samples form the test blocks, each
+/// training window ends `gap` samples before its block and is truncated to
+/// the most recent `max_train_size` samples when given.
+pub fn time_series_split_with(n: usize, opts: &TimeSeriesSplitOptions) -> Result<Vec<CvSplit>> {
+    let k = opts.n_splits;
+    if k < 1 {
+        return Err(RustMlError::InvalidParameter(
+            "n_splits must be >= 1".into(),
+        ));
+    }
+    let test_size = opts.test_size.unwrap_or(n / (k + 1));
+    if test_size == 0 {
+        return Err(RustMlError::InvalidParameter(format!(
+            "n_samples={n} is too small for {k} splits"
+        )));
+    }
+    if n <= opts.gap + test_size * k {
+        return Err(RustMlError::InvalidParameter(format!(
+            "too many splits={k} with test_size={test_size} and gap={} for n_samples={n}",
+            opts.gap
+        )));
+    }
+    let first_test = n - k * test_size;
+    let mut out = Vec::with_capacity(k);
+    for b in 0..k {
+        let test_start = first_test + b * test_size;
+        let train_end = test_start - opts.gap;
+        let train_start = match opts.max_train_size {
+            Some(m) if m < train_end => train_end - m,
+            _ => 0,
+        };
+        if let Some(min) = opts.min_train_size {
+            if train_end - train_start < min {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "split {b} has {} training samples, fewer than min_train_size={min}",
+                    train_end - train_start
+                )));
+            }
+        }
+        out.push((
+            (train_start..train_end).collect(),
+            (test_start..test_start + test_size).collect(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Time-series splits over **time keys** (e.g. dates, with several samples
+/// per date): the distinct keys, sorted, are split by
+/// [`time_series_split_with`] and every sample follows its key, so samples
+/// sharing a time point never straddle a split (anofox-regression's
+/// `group_time_series_splits`).
+pub fn group_time_series_split<T: Ord + Clone>(
+    time_keys: &[T],
+    opts: &TimeSeriesSplitOptions,
+) -> Result<Vec<CvSplit>> {
+    let mut keys: Vec<T> = time_keys.to_vec();
+    keys.sort();
+    keys.dedup();
+    let code: Vec<usize> = time_keys
+        .iter()
+        .map(|t| keys.binary_search(t).expect("key present"))
+        .collect();
+    let splits = time_series_split_with(keys.len(), opts)?;
+    Ok(splits
+        .into_iter()
+        .map(|(tr, te)| {
+            let mut side = vec![0u8; keys.len()];
+            tr.iter().for_each(|&t| side[t] = 1);
+            te.iter().for_each(|&t| side[t] = 2);
+            (
+                (0..code.len()).filter(|&i| side[code[i]] == 1).collect(),
+                (0..code.len()).filter(|&i| side[code[i]] == 2).collect(),
+            )
+        })
+        .collect())
+}
+
+/// Quantile strata of a continuous target: the sorted values are cut into
+/// `n_bins` equally populated bins; tied values share a bin
+/// (anofox-regression's `quantile_strata`).
+pub fn quantile_strata<F: Float>(y: &Array1<F>, n_bins: usize) -> Vec<usize> {
+    let n = y.len();
+    let n_bins = n_bins.max(1);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| y[a].partial_cmp(&y[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = vec![0usize; n];
+    let mut prev_bin = 0;
+    for (r, &i) in order.iter().enumerate() {
+        let tied = r > 0 && y[order[r - 1]] == y[i];
+        let bin = if tied { prev_bin } else { r * n_bins / n };
+        out[i] = bin;
+        prev_bin = bin;
+    }
+    out
+}
+
+/// Stratified k-fold for a **continuous** target: stratify on
+/// [`quantile_strata`] with `n_bins` bins, so every fold covers the whole
+/// range of `y`.
+pub fn stratified_k_fold_continuous<F: Float>(
+    y: &Array1<F>,
+    k: usize,
+    n_bins: usize,
+    seed: u64,
+) -> Result<Vec<CvSplit>> {
+    if y.iter().any(|v| v.is_nan()) {
+        return Err(RustMlError::InvalidParameter("y contains NaN".into()));
+    }
+    let strata = quantile_strata(y, n_bins);
+    let labels: Array1<f64> = strata.iter().map(|&s| s as f64).collect();
+    let placeholder = Array2::<f64>::zeros((labels.len(), 1));
+    crate::utils::stratified_k_fold(&placeholder, &labels, k, seed)
+}
+
+// ---------------------------------------------------------------------------
 // Spatial cross-validation
 // ---------------------------------------------------------------------------
 
@@ -1000,5 +1167,84 @@ mod tests {
         let loo = buffered_leave_one_out(&c, 500.0, SpatialMetric::Haversine).unwrap();
         assert_eq!(loo[0].0, vec![1]);
         assert!(buffered_leave_one_out(&c, 1000.0, SpatialMetric::Haversine).is_err());
+    }
+
+    fn bounds(s: &[CvSplit]) -> Vec<(usize, usize, usize, usize)> {
+        s.iter()
+            .map(|(tr, te)| (tr[0], tr[tr.len() - 1] + 1, te[0], te[te.len() - 1] + 1))
+            .collect()
+    }
+
+    #[test]
+    fn time_series_split_with_matches_sklearn() {
+        // sklearn 1.8 TimeSeriesSplit on 20 samples.
+        let o = |k, test_size, gap, max_train_size| TimeSeriesSplitOptions {
+            n_splits: k,
+            test_size,
+            gap,
+            max_train_size,
+            min_train_size: None,
+        };
+        assert_eq!(
+            bounds(&time_series_split_with(20, &o(3, None, 0, None)).unwrap()),
+            vec![(0, 5, 5, 10), (0, 10, 10, 15), (0, 15, 15, 20)]
+        );
+        assert_eq!(
+            time_series_split_with(20, &o(3, None, 0, None)).unwrap(),
+            crate::utils::time_series_split(20, 3).unwrap()
+        );
+        assert_eq!(
+            bounds(&time_series_split_with(20, &o(3, None, 2, None)).unwrap()),
+            vec![(0, 3, 5, 10), (0, 8, 10, 15), (0, 13, 15, 20)]
+        );
+        assert_eq!(
+            bounds(&time_series_split_with(20, &o(4, Some(3), 1, None)).unwrap()),
+            vec![
+                (0, 7, 8, 11),
+                (0, 10, 11, 14),
+                (0, 13, 14, 17),
+                (0, 16, 17, 20)
+            ]
+        );
+        assert_eq!(
+            bounds(&time_series_split_with(20, &o(3, None, 1, Some(5))).unwrap()),
+            vec![(0, 4, 5, 10), (4, 9, 10, 15), (9, 14, 15, 20)]
+        );
+        assert!(time_series_split_with(10, &o(3, Some(3), 1, None)).is_err());
+        let min = TimeSeriesSplitOptions {
+            min_train_size: Some(6),
+            ..TimeSeriesSplitOptions::new(3)
+        };
+        assert!(time_series_split_with(20, &min).is_err());
+    }
+
+    #[test]
+    fn group_time_series_split_keeps_time_points_together() {
+        // Two samples per day, days unsorted in the input.
+        let days = [3, 1, 2, 1, 3, 2, 4, 4, 5, 5, 6, 6];
+        let s = group_time_series_split(&days, &TimeSeriesSplitOptions::new(2)).unwrap();
+        assert_eq!(s.len(), 2);
+        for (train, test) in &s {
+            let max_train = train.iter().map(|&i| days[i]).max().unwrap();
+            let min_test = test.iter().map(|&i| days[i]).min().unwrap();
+            assert!(max_train < min_test);
+            assert_eq!(test.len(), 4); // 2 days x 2 samples
+        }
+    }
+
+    #[test]
+    fn quantile_stratification() {
+        let y = array![5.0, 1.0, 3.0, 3.0, 9.0, 0.0, 7.0, 2.0, 8.0, 6.0];
+        // Same bins as anofox-regression's quantile_strata test.
+        assert_eq!(quantile_strata(&y, 5), vec![2, 0, 1, 1, 4, 0, 3, 1, 4, 3]);
+        let yc = Array1::from_shape_fn(50, |i| ((i * 37) % 50) as f64 * 0.1);
+        let s = stratified_k_fold_continuous(&yc, 5, 5, 0).unwrap();
+        // Every fold gets two samples of every quantile bin.
+        let strata = quantile_strata(&yc, 5);
+        for (_, test) in &s {
+            for b in 0..5 {
+                assert_eq!(test.iter().filter(|&&i| strata[i] == b).count(), 2);
+            }
+        }
     }
 }
