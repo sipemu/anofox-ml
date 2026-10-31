@@ -17,7 +17,7 @@ fn test_golden_pca() {
         let n_components = case["n_components"].as_u64().unwrap() as usize;
         let expected_variance = json_to_array1(&case["explained_variance"]);
 
-        let pca = Pca { n_components };
+        let pca = Pca::new(n_components);
         let fitted = FitUnsupervised::<f64>::fit(&pca, &x).unwrap();
 
         // Check explained variance (power iteration may not converge perfectly)

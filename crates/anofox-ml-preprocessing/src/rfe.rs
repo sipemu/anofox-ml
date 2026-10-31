@@ -102,7 +102,7 @@ impl Rfe {
             // least-important without going below the target.
             let n_drop = self.step.min(active.len() - self.n_features_to_select);
             let mut order: Vec<usize> = (0..active.len()).collect();
-            order.sort_by(|&a, &b| imp[a].abs().partial_cmp(&imp[b].abs()).unwrap());
+            order.sort_by(|&a, &b| crate::quantile::total_cmp(&imp[a].abs(), &imp[b].abs()));
             let to_drop: Vec<usize> = order[..n_drop].iter().map(|&i| active[i]).collect();
             for &j in &to_drop {
                 ranking[j] = active.len(); // ranking number set at time of drop
@@ -199,7 +199,7 @@ impl Rfecv {
         let (best_i, _) = mean_scores
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| crate::quantile::total_cmp_nan_low(a.1, b.1))
             .unwrap();
         let best_size = sizes[best_i];
 
@@ -233,7 +233,7 @@ fn run_rfe(
         let imp = importance(&sub, y)?;
         let n_drop = step.min(active.len() - n_features_to_select);
         let mut order: Vec<usize> = (0..active.len()).collect();
-        order.sort_by(|&a, &b| imp[a].abs().partial_cmp(&imp[b].abs()).unwrap());
+        order.sort_by(|&a, &b| crate::quantile::total_cmp(&imp[a].abs(), &imp[b].abs()));
         let to_drop: Vec<usize> = order[..n_drop].iter().map(|&i| active[i]).collect();
         active.retain(|i| !to_drop.contains(i));
     }

@@ -1,3 +1,4 @@
+use crate::quantile::{percentile_sorted, sorted_non_nan};
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 use ndarray::Array2;
 
@@ -183,8 +184,9 @@ impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
         let mut quantiles = Vec::with_capacity(ncols);
 
         for j in 0..ncols {
-            let mut col: Vec<F> = x.column(j).to_vec();
-            col.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // NaNs are ignored at fit time (sklearn uses `np.nanpercentile`)
+            // and pass through `transform` unchanged.
+            let col = sorted_non_nan(x.column(j).iter().copied());
 
             // Compute quantiles at the reference positions
             let q: Vec<F> = references
@@ -200,23 +202,6 @@ impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
             references,
             output_distribution: self.output_distribution,
         })
-    }
-}
-
-/// Compute a percentile from a sorted slice using linear interpolation.
-fn percentile_sorted<F: Float>(sorted: &[F], p: f64) -> F {
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let idx = p * (n - 1) as f64;
-    let lo = idx.floor() as usize;
-    let hi = idx.ceil().min((n - 1) as f64) as usize;
-    if lo == hi {
-        sorted[lo]
-    } else {
-        let frac = F::from_f64(idx - lo as f64).unwrap();
-        sorted[lo] * (F::one() - frac) + sorted[hi] * frac
     }
 }
 
@@ -241,6 +226,12 @@ impl<F: Float> Transform<F> for FittedQuantileTransformer<F> {
 
             for i in 0..x.nrows() {
                 let val = x[[i, j]].to_f64().unwrap();
+                // NaN passes through; an all-NaN training column has NaN
+                // quantiles and maps everything to NaN.
+                if val.is_nan() || xp.first().is_none_or(|v| v.is_nan()) {
+                    result[[i, j]] = F::nan();
+                    continue;
+                }
                 // Interpolate: map from data space to [0, 1]
                 let mut u = interp(val, &xp, fp);
 
@@ -278,6 +269,25 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_nan_ignored_at_fit_and_passed_through() {
+        // Regression for #42: NaN used to panic in `partial_cmp().unwrap()`.
+        let x = array![[1.0], [f64::NAN], [2.0], [3.0], [4.0], [5.0]];
+        let qt = QuantileTransformer::new()
+            .n_quantiles(5)
+            .output_distribution(OutputDistribution::Uniform);
+        let fitted = FitUnsupervised::<f64>::fit(&qt, &x).unwrap();
+        assert_eq!(fitted.quantiles()[0], vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let t = fitted.transform(&x).unwrap();
+        assert!(t[[1, 0]].is_nan());
+        assert_abs_diff_eq!(t[[3, 0]], 0.5, epsilon = 1e-9);
+
+        // All-NaN column: no panic, NaN out.
+        let all_nan = array![[f64::NAN], [f64::NAN]];
+        let fitted = FitUnsupervised::<f64>::fit(&qt, &all_nan).unwrap();
+        assert!(fitted.transform(&array![[1.0]]).unwrap()[[0, 0]].is_nan());
+    }
 
     #[test]
     fn test_uniform_output() {

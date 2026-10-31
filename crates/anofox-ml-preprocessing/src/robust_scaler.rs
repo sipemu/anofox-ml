@@ -1,3 +1,4 @@
+use crate::quantile::{percentile_sorted, sorted_non_nan};
 use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 use ndarray::{Array1, Array2};
 
@@ -53,25 +54,6 @@ pub struct FittedRobustScaler<F: Float> {
     with_scaling: bool,
 }
 
-/// Compute a percentile value using linear interpolation.
-///
-/// `sorted` must be a sorted slice of values and `p` must be in [0, 1].
-fn percentile<F: Float>(sorted: &[F], p: f64) -> F {
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let idx = p * (n - 1) as f64;
-    let lo = idx.floor() as usize;
-    let hi = idx.ceil() as usize;
-    if lo == hi {
-        sorted[lo]
-    } else {
-        let frac = F::from_f64(idx - lo as f64).unwrap();
-        sorted[lo] * (F::one() - frac) + sorted[hi] * frac
-    }
-}
-
 impl<F: Float> FitUnsupervised<F> for RobustScaler {
     type Fitted = FittedRobustScaler<F>;
 
@@ -85,15 +67,15 @@ impl<F: Float> FitUnsupervised<F> for RobustScaler {
         let mut iqr = Array1::<F>::ones(ncols);
 
         for j in 0..ncols {
-            let col = x.column(j);
-            let mut sorted: Vec<F> = col.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // NaNs are ignored when computing the statistics (like sklearn's
+            // `np.nanpercentile`) and pass through `transform` unchanged.
+            let sorted = sorted_non_nan(x.column(j).iter().copied());
 
-            median[j] = percentile(&sorted, 0.5);
+            median[j] = percentile_sorted(&sorted, 0.5);
 
             if self.with_scaling {
-                let q1 = percentile(&sorted, 0.25);
-                let q3 = percentile(&sorted, 0.75);
+                let q1 = percentile_sorted(&sorted, 0.25);
+                let q3 = percentile_sorted(&sorted, 0.75);
                 iqr[j] = q3 - q1;
             }
         }
@@ -174,6 +156,28 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_nan_ignored_at_fit_and_passed_through() {
+        // Regression for #42: NaN used to panic in `partial_cmp().unwrap()`.
+        let x = array![
+            [1.0, 10.0],
+            [f64::NAN, 20.0],
+            [2.0, f64::NAN],
+            [3.0, 30.0],
+            [4.0, 40.0]
+        ];
+        let fitted = FitUnsupervised::<f64>::fit(&RobustScaler::new(), &x).unwrap();
+        // Column 0 stats over [1, 2, 3, 4]: median 2.5, IQR 3.25 - 1.75 = 1.5.
+        assert_abs_diff_eq!(fitted.median[0], 2.5, epsilon = 1e-12);
+        assert_abs_diff_eq!(fitted.iqr[0], 1.5, epsilon = 1e-12);
+        // Column 1 stats over [10, 20, 30, 40]: median 25, IQR 15.
+        assert_abs_diff_eq!(fitted.median[1], 25.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(fitted.iqr[1], 15.0, epsilon = 1e-12);
+        let t = fitted.transform(&x).unwrap();
+        assert!(t[[1, 0]].is_nan() && t[[2, 1]].is_nan());
+        assert_abs_diff_eq!(t[[0, 0]], (1.0 - 2.5) / 1.5, epsilon = 1e-12);
+    }
 
     #[test]
     fn test_fit_transform() {
@@ -366,9 +370,8 @@ mod tests {
                 // After centering, the median of each column should be ~0
                 for col_idx in 0..cols {
                     let col = transformed.column(col_idx);
-                    let mut sorted: Vec<f64> = col.to_vec();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let median = super::super::percentile(&sorted, 0.5);
+                    let sorted = crate::quantile::sorted_non_nan(col.iter().copied());
+                    let median = crate::quantile::percentile_sorted(&sorted, 0.5);
                     prop_assert!(median.abs() < 1e-8,
                         "column {} median should be ~0, got {}", col_idx, median);
                 }

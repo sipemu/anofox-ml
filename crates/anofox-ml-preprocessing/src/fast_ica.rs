@@ -94,7 +94,7 @@ impl FitUnsupervised<f64> for FastIca {
 
         // 2. Whiten via SVD: X_centered = U Σ Vᵀ. Whitening matrix K = V Σ⁻¹ √(n-1).
         let xm = Mat::from_fn(n, d, |i, j| xc[[i, j]]);
-        let svd = Svd::new(xm.as_ref())
+        let svd = Svd::new_thin(xm.as_ref())
             .map_err(|e| RustMlError::InvalidParameter(format!("SVD failed: {e:?}")))?;
         let s = svd.S();
         let v = svd.V();
