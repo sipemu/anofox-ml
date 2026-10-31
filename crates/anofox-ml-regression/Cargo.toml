@@ -18,7 +18,7 @@ serde = { workspace = true }
 anofox-ml-core = { workspace = true }
 anofox-ml-metrics = { workspace = true }
 anofox-ml-svm = { workspace = true }
-anofox-regression = "0.5"
+anofox-regression = "0.7"
 faer = { workspace = true }
 rand = { workspace = true }
 ndarray = { workspace = true }
