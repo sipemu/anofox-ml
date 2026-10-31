@@ -1099,59 +1099,6 @@ pub fn leave_p_out(n_samples: usize, p: usize) -> Result<Vec<(Vec<usize>, Vec<us
     Ok(result)
 }
 
-/// Group K-fold cross-validation.
-///
-/// Splits data so that samples from the same group are always in the same
-/// fold. This prevents data leakage when samples within a group are
-/// correlated (e.g., multiple measurements from the same subject).
-///
-/// `groups` is an array of group labels (integers) with one entry per sample.
-pub fn group_k_fold(groups: &Array1<usize>, k: usize) -> Result<Vec<(Vec<usize>, Vec<usize>)>> {
-    if k < 2 {
-        return Err(RustMlError::InvalidParameter("k must be >= 2".into()));
-    }
-
-    // Collect unique groups
-    let mut unique_groups: Vec<usize> = groups.iter().copied().collect();
-    unique_groups.sort_unstable();
-    unique_groups.dedup();
-
-    let n_groups = unique_groups.len();
-    if k > n_groups {
-        return Err(RustMlError::InvalidParameter(format!(
-            "k={} exceeds number of groups={}",
-            k, n_groups
-        )));
-    }
-
-    // Assign each group to a fold (round-robin)
-    let mut group_to_fold: std::collections::HashMap<usize, usize> =
-        std::collections::HashMap::new();
-    for (i, &g) in unique_groups.iter().enumerate() {
-        group_to_fold.insert(g, i % k);
-    }
-
-    // Build fold index lists
-    let mut fold_indices: Vec<Vec<usize>> = vec![Vec::new(); k];
-    for (i, &g) in groups.iter().enumerate() {
-        let fold = group_to_fold[&g];
-        fold_indices[fold].push(i);
-    }
-
-    // Generate train/test pairs
-    let mut result = Vec::with_capacity(k);
-    for test_fold in 0..k {
-        let test_indices = fold_indices[test_fold].clone();
-        let train_indices: Vec<usize> = (0..k)
-            .filter(|&f| f != test_fold)
-            .flat_map(|f| fold_indices[f].iter().copied())
-            .collect();
-        result.push((train_indices, test_indices));
-    }
-
-    Ok(result)
-}
-
 /// Result from [`cross_validate`].
 pub struct CrossValidateResult<F: Float> {
     /// Per-fold scores for each metric.
@@ -2381,7 +2328,7 @@ mod tests {
     #[test]
     fn test_group_k_fold_basic() {
         let groups = array![0, 0, 1, 1, 2, 2, 3, 3];
-        let folds = group_k_fold(&groups, 2).unwrap();
+        let folds = crate::splitters::group_k_fold(&groups, 2).unwrap();
         assert_eq!(folds.len(), 2);
 
         // No group should appear in both train and test
@@ -2397,7 +2344,7 @@ mod tests {
     #[test]
     fn test_group_k_fold_error_k_gt_groups() {
         let groups = array![0, 0, 1, 1];
-        assert!(group_k_fold(&groups, 3).is_err());
+        assert!(crate::splitters::group_k_fold(&groups, 3).is_err());
     }
 
     // --- cross_validate ---
