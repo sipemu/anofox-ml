@@ -56,28 +56,30 @@ impl KMeans {
 
     fn save_json(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_json(fitted, path).map_err(py_err)
+        crate::helpers::save_model_json(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_json(path).map_err(py_err)?;
+        let (inner, fitted) =
+            crate::helpers::load_model_json(path, || anofox_ml_cluster::KMeans::new(3))?;
         Ok(Self {
-            inner: anofox_ml_cluster::KMeans::new(3),
+            inner,
             fitted: Some(fitted),
         })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_bincode(fitted, path).map_err(py_err)
+        crate::helpers::save_model_bincode(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_bincode(path).map_err(py_err)?;
+        let (inner, fitted) =
+            crate::helpers::load_model_bincode(path, || anofox_ml_cluster::KMeans::new(3))?;
         Ok(Self {
-            inner: anofox_ml_cluster::KMeans::new(3),
+            inner,
             fitted: Some(fitted),
         })
     }
@@ -138,28 +140,30 @@ impl Dbscan {
 
     fn save_json(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_json(fitted, path).map_err(py_err)
+        crate::helpers::save_model_json(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_json(path).map_err(py_err)?;
+        let (inner, fitted) =
+            crate::helpers::load_model_json(path, || anofox_ml_cluster::Dbscan::new(0.5, 5))?;
         Ok(Self {
-            inner: anofox_ml_cluster::Dbscan::new(0.5, 5),
+            inner,
             fitted: Some(fitted),
         })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_bincode(fitted, path).map_err(py_err)
+        crate::helpers::save_model_bincode(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_bincode(path).map_err(py_err)?;
+        let (inner, fitted) =
+            crate::helpers::load_model_bincode(path, || anofox_ml_cluster::Dbscan::new(0.5, 5))?;
         Ok(Self {
-            inner: anofox_ml_cluster::Dbscan::new(0.5, 5),
+            inner,
             fitted: Some(fitted),
         })
     }

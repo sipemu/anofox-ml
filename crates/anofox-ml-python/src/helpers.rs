@@ -1,6 +1,8 @@
+use anofox_ml_core::persistence::{self, ModelBundle};
 use ndarray::{Array1, Array2};
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::PyErr;
+use serde::{de::DeserializeOwned, Serialize};
 
 pub(crate) fn to_array2(x: PyReadonlyArray2<'_, f64>) -> Array2<f64> {
     x.as_array().to_owned()
@@ -12,6 +14,63 @@ pub(crate) fn to_array1(y: PyReadonlyArray1<'_, f64>) -> Array1<f64> {
 
 pub(crate) fn py_err(e: impl std::fmt::Display) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+}
+
+/// Persist an estimator's configuration together with its fitted state, so
+/// a reloaded object keeps its hyperparameters.
+pub(crate) fn save_model_json<C: Serialize, M: Serialize>(
+    config: &C,
+    fitted: &M,
+    path: &str,
+) -> pyo3::PyResult<()> {
+    persistence::save_json(&ModelBundle { config, fitted }, path).map_err(py_err)
+}
+
+/// Bincode variant of [`save_model_json`].
+pub(crate) fn save_model_bincode<C: Serialize, M: Serialize>(
+    config: &C,
+    fitted: &M,
+    path: &str,
+) -> pyo3::PyResult<()> {
+    persistence::save_bincode(&ModelBundle { config, fitted }, path).map_err(py_err)
+}
+
+/// Load `(config, fitted)`. Files holding only the fitted model (written by
+/// older versions, or by `anofox_ml_core::persistence` directly) load with
+/// `default_config`.
+pub(crate) fn load_model_json<C: DeserializeOwned, M: DeserializeOwned>(
+    path: &str,
+    default_config: impl FnOnce() -> C,
+) -> pyo3::PyResult<(C, M)> {
+    let s = std::fs::read_to_string(path).map_err(py_err)?;
+    match persistence::json_header(&s).map_err(py_err)? {
+        Some(h) if h.type_name == persistence::short_type_name::<ModelBundle<C, M>>() => {
+            let b: ModelBundle<C, M> = persistence::from_json_string(&s).map_err(py_err)?;
+            Ok((b.config, b.fitted))
+        }
+        _ => Ok((
+            default_config(),
+            persistence::from_json_string(&s).map_err(py_err)?,
+        )),
+    }
+}
+
+/// Bincode variant of [`load_model_json`].
+pub(crate) fn load_model_bincode<C: DeserializeOwned, M: DeserializeOwned>(
+    path: &str,
+    default_config: impl FnOnce() -> C,
+) -> pyo3::PyResult<(C, M)> {
+    let bytes = std::fs::read(path).map_err(py_err)?;
+    match persistence::bincode_header(&bytes).map_err(py_err)? {
+        Some(h) if h.type_name == persistence::short_type_name::<ModelBundle<C, M>>() => {
+            let b: ModelBundle<C, M> = persistence::from_bincode_bytes(&bytes).map_err(py_err)?;
+            Ok((b.config, b.fitted))
+        }
+        _ => Ok((
+            default_config(),
+            persistence::from_bincode_bytes(&bytes).map_err(py_err)?,
+        )),
+    }
 }
 
 pub(crate) fn not_fitted() -> PyErr {

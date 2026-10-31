@@ -69,28 +69,32 @@ impl StandardScaler {
 
     fn save_json(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_json(fitted, path).map_err(py_err)
+        crate::helpers::save_model_json(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_json(path).map_err(py_err)?;
+        let (inner, fitted) = crate::helpers::load_model_json(path, || {
+            anofox_ml_preprocessing::StandardScaler::new()
+        })?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::StandardScaler::new(),
+            inner,
             fitted: Some(fitted),
         })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_bincode(fitted, path).map_err(py_err)
+        crate::helpers::save_model_bincode(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_bincode(path).map_err(py_err)?;
+        let (inner, fitted) = crate::helpers::load_model_bincode(path, || {
+            anofox_ml_preprocessing::StandardScaler::new()
+        })?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::StandardScaler::new(),
+            inner,
             fitted: Some(fitted),
         })
     }
@@ -153,28 +157,31 @@ impl MinMaxScaler {
 
     fn save_json(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_json(fitted, path).map_err(py_err)
+        crate::helpers::save_model_json(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_json(path).map_err(py_err)?;
+        let (inner, fitted) =
+            crate::helpers::load_model_json(path, || anofox_ml_preprocessing::MinMaxScaler::new())?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::MinMaxScaler::new(),
+            inner,
             fitted: Some(fitted),
         })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_bincode(fitted, path).map_err(py_err)
+        crate::helpers::save_model_bincode(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_bincode(path).map_err(py_err)?;
+        let (inner, fitted) = crate::helpers::load_model_bincode(path, || {
+            anofox_ml_preprocessing::MinMaxScaler::new()
+        })?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::MinMaxScaler::new(),
+            inner,
             fitted: Some(fitted),
         })
     }
@@ -245,28 +252,30 @@ impl Pca {
 
     fn save_json(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_json(fitted, path).map_err(py_err)
+        crate::helpers::save_model_json(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_json(path).map_err(py_err)?;
+        let (inner, fitted) =
+            crate::helpers::load_model_json(path, || anofox_ml_preprocessing::Pca::new(1))?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::Pca::new(1),
+            inner,
             fitted: Some(fitted),
         })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_bincode(fitted, path).map_err(py_err)
+        crate::helpers::save_model_bincode(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_bincode(path).map_err(py_err)?;
+        let (inner, fitted) =
+            crate::helpers::load_model_bincode(path, || anofox_ml_preprocessing::Pca::new(1))?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::Pca::new(1),
+            inner,
             fitted: Some(fitted),
         })
     }
@@ -330,28 +339,32 @@ impl VarianceThreshold {
 
     fn save_json(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_json(fitted, path).map_err(py_err)
+        crate::helpers::save_model_json(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_json(path).map_err(py_err)?;
+        let (inner, fitted) = crate::helpers::load_model_json(path, || {
+            anofox_ml_preprocessing::VarianceThreshold::new(0.0)
+        })?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::VarianceThreshold::new(0.0),
+            inner,
             fitted: Some(fitted),
         })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_bincode(fitted, path).map_err(py_err)
+        crate::helpers::save_model_bincode(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_bincode(path).map_err(py_err)?;
+        let (inner, fitted) = crate::helpers::load_model_bincode(path, || {
+            anofox_ml_preprocessing::VarianceThreshold::new(0.0)
+        })?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::VarianceThreshold::new(0.0),
+            inner,
             fitted: Some(fitted),
         })
     }
@@ -412,28 +425,32 @@ impl MutualInformationSelector {
 
     fn save_json(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_json(fitted, path).map_err(py_err)
+        crate::helpers::save_model_json(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_json(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_json(path).map_err(py_err)?;
+        let (inner, fitted) = crate::helpers::load_model_json(path, || {
+            anofox_ml_preprocessing::MutualInformationSelector::new(1)
+        })?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::MutualInformationSelector::new(1),
+            inner,
             fitted: Some(fitted),
         })
     }
 
     fn save_bincode(&self, path: &str) -> PyResult<()> {
         let fitted = self.fitted.as_ref().ok_or_else(not_fitted)?;
-        anofox_ml_core::persistence::save_bincode(fitted, path).map_err(py_err)
+        crate::helpers::save_model_bincode(&self.inner, fitted, path)
     }
 
     #[staticmethod]
     fn load_bincode(path: &str) -> PyResult<Self> {
-        let fitted = anofox_ml_core::persistence::load_bincode(path).map_err(py_err)?;
+        let (inner, fitted) = crate::helpers::load_model_bincode(path, || {
+            anofox_ml_preprocessing::MutualInformationSelector::new(1)
+        })?;
         Ok(Self {
-            inner: anofox_ml_preprocessing::MutualInformationSelector::new(1),
+            inner,
             fitted: Some(fitted),
         })
     }

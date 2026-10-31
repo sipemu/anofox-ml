@@ -380,6 +380,21 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     and to the scorer.
   - Not done: view-based (`ArrayView2`) trait inputs.
 
+- **Persistence (#39):**
+  - Saved models carry a versioned envelope (`format`, `format_version`,
+    `crate_version`, `type_name`, `payload`; bincode files start with the
+    magic bytes `ANOFOXML`). Loading checks it, so a file read as the wrong
+    type or written in a newer format fails with a clear error. Type names
+    are compared without module paths. Files without an envelope still
+    load.
+  - New `ModelHeader`, `json_header` / `bincode_header` (read the header
+    only), `short_type_name` and `ModelBundle { config, fitted }`.
+  - Python `save_json` / `save_bincode` store the estimator's configuration
+    with the fitted model, so `load_json` / `load_bincode` restore the
+    hyperparameters instead of the defaults (older files still load, with
+    default hyperparameters).
+  - Pipelines with boxed steps remain non-persistable (documented).
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by
