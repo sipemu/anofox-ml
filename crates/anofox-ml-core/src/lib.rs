@@ -66,9 +66,10 @@ pub use pipeline::{
 };
 pub use sparse::CsrMatrix;
 pub use splitters::{
-    combinatorial_purged_cv, group_k_fold, group_k_fold_shuffled, group_shuffle_split,
-    leave_one_group_out, leave_p_groups_out, purged_k_fold, stratified_group_k_fold,
-    CombinatorialPurgedCv, MAX_LEAVE_P_GROUPS_OUT_SPLITS,
+    buffered_leave_one_out, combinatorial_purged_cv, group_k_fold, group_k_fold_shuffled,
+    group_shuffle_split, leave_one_group_out, leave_p_groups_out, purged_k_fold,
+    spatial_block_k_fold, spatial_buffer, stratified_group_k_fold, CombinatorialPurgedCv,
+    SpatialMetric, MAX_LEAVE_P_GROUPS_OUT_SPLITS,
 };
 pub use traits::{
     ClassifierScore, DecisionFunction, Fit, FitUnsupervised, FitUnsupervisedWeighted, FitWeighted,

@@ -17,8 +17,14 @@
 //! samples right after each test block. Use anofox-forecast's walk-forward
 //! cross-validation for forecasting models; these splitters are for ML
 //! models fitted on time-indexed features.
+//!
+//! [`spatial_block_k_fold`], [`spatial_buffer`] and
+//! [`buffered_leave_one_out`] are for spatially autocorrelated data, where
+//! random k-fold overstates skill (Roberts et al. 2017): whole spatial blocks
+//! are held out and/or training points within a buffer distance of the test
+//! points are dropped.
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
@@ -574,6 +580,162 @@ pub fn combinatorial_purged_cv(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Spatial cross-validation
+// ---------------------------------------------------------------------------
+
+/// Distance between two coordinate rows for spatial cross-validation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpatialMetric {
+    /// Euclidean distance in the units of the coordinates.
+    Euclidean,
+    /// Great-circle distance in kilometres; coordinates are
+    /// `(latitude, longitude)` in degrees (mean Earth radius 6371.0088 km).
+    Haversine,
+}
+
+impl SpatialMetric {
+    fn distance(self, a: ndarray::ArrayView1<f64>, b: ndarray::ArrayView1<f64>) -> f64 {
+        match self {
+            SpatialMetric::Euclidean => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y) * (x - y))
+                .sum::<f64>()
+                .sqrt(),
+            SpatialMetric::Haversine => {
+                let (la1, lo1) = (a[0].to_radians(), a[1].to_radians());
+                let (la2, lo2) = (b[0].to_radians(), b[1].to_radians());
+                let h = ((la2 - la1) / 2.0).sin().powi(2)
+                    + la1.cos() * la2.cos() * ((lo2 - lo1) / 2.0).sin().powi(2);
+                2.0 * 6371.0088 * h.sqrt().min(1.0).asin()
+            }
+        }
+    }
+}
+
+fn check_coords(coords: &Array2<f64>, metric: SpatialMetric) -> Result<()> {
+    if coords.nrows() == 0 || coords.ncols() == 0 {
+        return Err(RustMlError::EmptyInput("coordinates are empty".into()));
+    }
+    if coords.iter().any(|v| !v.is_finite()) {
+        return Err(RustMlError::InvalidParameter(
+            "coordinates must be finite".into(),
+        ));
+    }
+    if metric == SpatialMetric::Haversine && coords.ncols() != 2 {
+        return Err(RustMlError::InvalidParameter(
+            "haversine needs (latitude, longitude) coordinates".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Spatial block k-fold (as R's `blockCV::cv_spatial` with square blocks).
+///
+/// Points are binned into a regular grid of `block_size`-wide cells (one
+/// cell index per coordinate column, in the coordinate units); whole cells
+/// are then assigned to `k` folds in random order (`seed`), each to the fold
+/// with the fewest points so far. Points of one cell always share a fold.
+/// For irregular blocks (e.g. k-means clusters of the coordinates), pass the
+/// block labels as groups to [`group_k_fold`] instead.
+pub fn spatial_block_k_fold(
+    coords: &Array2<f64>,
+    block_size: f64,
+    k: usize,
+    seed: u64,
+) -> Result<Vec<CvSplit>> {
+    check_coords(coords, SpatialMetric::Euclidean)?;
+    if !(block_size > 0.0 && block_size.is_finite()) {
+        return Err(RustMlError::InvalidParameter(
+            "block_size must be positive and finite".into(),
+        ));
+    }
+    let cells: Vec<Vec<i64>> = coords
+        .rows()
+        .into_iter()
+        .map(|r| r.iter().map(|v| (v / block_size).floor() as i64).collect())
+        .collect();
+    let mut unique = cells.clone();
+    unique.sort();
+    unique.dedup();
+    let cell_of: Vec<usize> = cells
+        .iter()
+        .map(|c| unique.binary_search(c).expect("cell present"))
+        .collect();
+    check_n_splits_groups(k, unique.len())?;
+    let mut sizes = vec![0usize; unique.len()];
+    for &c in &cell_of {
+        sizes[c] += 1;
+    }
+    let mut order: Vec<usize> = (0..unique.len()).collect();
+    order.shuffle(&mut rand::rngs::StdRng::seed_from_u64(seed));
+    let mut fold_size = vec![0usize; k];
+    let mut cell_fold = vec![0usize; unique.len()];
+    for c in order {
+        let lightest = (0..k).min_by_key(|&f| (fold_size[f], f)).expect("k >= 2");
+        fold_size[lightest] += sizes[c];
+        cell_fold[c] = lightest;
+    }
+    Ok(splits_from_group_folds(&cell_of, &cell_fold, k))
+}
+
+/// Apply a spatial buffer to existing splits: every training point within
+/// `radius` of any test point of the same split is removed (spatialsample's
+/// `buffer`). Works with any splitter, e.g. [`spatial_block_k_fold`] or a
+/// plain k-fold.
+pub fn spatial_buffer(
+    splits: &[CvSplit],
+    coords: &Array2<f64>,
+    radius: f64,
+    metric: SpatialMetric,
+) -> Result<Vec<CvSplit>> {
+    check_coords(coords, metric)?;
+    if !(radius >= 0.0 && radius.is_finite()) {
+        return Err(RustMlError::InvalidParameter(
+            "radius must be finite and >= 0".into(),
+        ));
+    }
+    let n = coords.nrows();
+    let mut out = Vec::with_capacity(splits.len());
+    for (s, (train, test)) in splits.iter().enumerate() {
+        if let Some(&bad) = train.iter().chain(test.iter()).find(|&&i| i >= n) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "split {s} contains index {bad} >= n_samples ({n})"
+            )));
+        }
+        let kept: Vec<usize> = train
+            .iter()
+            .copied()
+            .filter(|&i| {
+                test.iter()
+                    .all(|&j| metric.distance(coords.row(i), coords.row(j)) > radius)
+            })
+            .collect();
+        if kept.is_empty() {
+            return Err(RustMlError::InvalidParameter(format!(
+                "the buffer removed every training point of split {s}"
+            )));
+        }
+        out.push((kept, test.clone()));
+    }
+    Ok(out)
+}
+
+/// Buffered leave-one-out (Le Rest et al. 2014): one split per point, whose
+/// training set excludes every point within `radius` of it.
+pub fn buffered_leave_one_out(
+    coords: &Array2<f64>,
+    radius: f64,
+    metric: SpatialMetric,
+) -> Result<Vec<CvSplit>> {
+    let n = coords.nrows();
+    let loo: Vec<CvSplit> = (0..n)
+        .map(|i| ((0..n).filter(|&j| j != i).collect(), vec![i]))
+        .collect();
+    spatial_buffer(&loo, coords, radius, metric)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,5 +934,71 @@ mod tests {
         // Labels spanning everything leave no training data.
         let wide: Vec<f64> = vec![100.0; 10];
         assert!(purged_k_fold(&t0, &wide, 2, 0).is_err());
+    }
+
+    fn grid_coords() -> Array2<f64> {
+        // 6 x 4 points on a unit grid.
+        Array2::from_shape_fn((24, 2), |(i, j)| {
+            if j == 0 {
+                (i % 6) as f64
+            } else {
+                (i / 6) as f64
+            }
+        })
+    }
+
+    #[test]
+    fn spatial_block_k_fold_keeps_cells_together() {
+        let c = grid_coords();
+        let s = spatial_block_k_fold(&c, 2.0, 3, 5).unwrap();
+        assert_eq!(s.len(), 3);
+        let cell = |i: usize| {
+            (
+                (c[[i, 0]] / 2.0).floor() as i64,
+                (c[[i, 1]] / 2.0).floor() as i64,
+            )
+        };
+        let mut seen = vec![0; 24];
+        for (train, test) in &s {
+            for &i in test {
+                seen[i] += 1;
+                assert!(train.iter().all(|&j| cell(j) != cell(i)));
+            }
+        }
+        assert!(seen.iter().all(|&v| v == 1));
+        // 6 cells of 4 points over 3 folds: 8 points each.
+        assert!(s.iter().all(|(_, te)| te.len() == 8));
+        assert_eq!(s, spatial_block_k_fold(&c, 2.0, 3, 5).unwrap());
+    }
+
+    #[test]
+    fn spatial_buffer_drops_close_training_points() {
+        let c = grid_coords();
+        let folds = crate::utils::k_fold(24, 4).unwrap();
+        let b = spatial_buffer(&folds, &c, 1.5, SpatialMetric::Euclidean).unwrap();
+        for (train, test) in &b {
+            for &i in train {
+                for &j in test {
+                    let d =
+                        ((c[[i, 0]] - c[[j, 0]]).powi(2) + (c[[i, 1]] - c[[j, 1]]).powi(2)).sqrt();
+                    assert!(d > 1.5);
+                }
+            }
+        }
+        let loo = buffered_leave_one_out(&c, 1.0, SpatialMetric::Euclidean).unwrap();
+        // Corner point 0 at (0, 0): neighbours (1, 0) and (0, 1) removed.
+        assert_eq!(loo[0].0.len(), 24 - 1 - 2);
+        assert!(spatial_buffer(&folds, &c, 100.0, SpatialMetric::Euclidean).is_err());
+    }
+
+    #[test]
+    fn haversine_distance() {
+        // Berlin (52.52, 13.405) to Paris (48.8566, 2.3522): ~878 km.
+        let c = ndarray::array![[52.52, 13.405], [48.8566, 2.3522]];
+        let d = SpatialMetric::Haversine.distance(c.row(0), c.row(1));
+        assert!((d - 878.0).abs() < 5.0, "{d}");
+        let loo = buffered_leave_one_out(&c, 500.0, SpatialMetric::Haversine).unwrap();
+        assert_eq!(loo[0].0, vec![1]);
+        assert!(buffered_leave_one_out(&c, 1000.0, SpatialMetric::Haversine).is_err());
     }
 }
