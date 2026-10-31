@@ -189,7 +189,7 @@ impl FitUnsupervised<f64> for AgglomerativeClustering {
             }
 
             // Step 2: sort by merge distance ascending.
-            merges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+            merges.sort_by(|a, b| a.2.total_cmp(&b.2));
 
             // Step 3: apply merges in distance order via a fresh DSU on
             // `cluster_of`, stopping at n_clusters remaining.

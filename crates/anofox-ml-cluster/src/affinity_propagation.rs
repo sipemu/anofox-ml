@@ -2,6 +2,24 @@
 //!
 //! Mirrors `sklearn.cluster.AffinityPropagation`. Message-passing on a
 //! similarity matrix `s_{i,k} = -||x_i - x_k||²` until exemplars stabilise.
+//!
+//! # Label extraction and non-convergence
+//!
+//! Follows `sklearn.cluster._affinity_propagation` (≥ 1.0):
+//!
+//! - Every exemplar is labelled with its own cluster (`c[I] = arange(K)`),
+//!   even if another exemplar happens to be at least as similar.
+//! - The dense path then refines each cluster's exemplar to the member that
+//!   maximises the summed within-cluster similarity and re-assigns once more
+//!   (the sparse k-NN path skips the refinement to stay O(n·k)).
+//! - If the message passing ends with **no exemplars**, every label is `-1`
+//!   and `cluster_centers_indices` is empty (sklearn emits a
+//!   `ConvergenceWarning` in this case).
+//! - If `max_iter` is exhausted before the exemplar set has been stable for
+//!   `convergence_iter` iterations but some exemplars exist, labels are still
+//!   returned (as sklearn does, with a warning) and
+//!   [`FittedAffinityPropagation::converged`] is `false`, so callers can
+//!   treat the result as degenerate.
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use ndarray::{Array1, Array2};
@@ -51,8 +69,104 @@ impl Default for AffinityPropagation {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedAffinityPropagation {
+    /// Cluster label per sample (`0..n_clusters`), or `-1` for every sample
+    /// when no exemplar emerged.
     pub labels: Array1<f64>,
+    /// Indices (into the training data) of the exemplars, sorted ascending.
+    /// Empty when no exemplar emerged.
     pub cluster_centers_indices: Vec<usize>,
+    /// `true` when the exemplar set was stable for `convergence_iter`
+    /// consecutive iterations before `max_iter` was reached.
+    #[serde(default)]
+    pub converged: bool,
+    /// Number of message-passing iterations performed.
+    #[serde(default)]
+    pub n_iter: usize,
+}
+
+/// Median of a non-empty slice (mean of the two middle values for an even
+/// length, like `numpy.median`). NaN-safe ordering via `total_cmp`.
+fn median_in_place(v: &mut [f64]) -> f64 {
+    let n = v.len();
+    let mid = n / 2;
+    let (_, &mut upper, _) = v.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+    if n % 2 == 1 {
+        upper
+    } else {
+        let lower = v[..mid]
+            .iter()
+            .copied()
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap_or(upper);
+        0.5 * (lower + upper)
+    }
+}
+
+/// Turn an exemplar mask into (labels, sorted exemplar indices) following
+/// sklearn: assign each point to its most similar exemplar, force exemplars
+/// to label themselves, optionally refine exemplars, then relabel.
+///
+/// `sim(i, k)` must return the similarity used for assignment (with the
+/// preference on the diagonal for the refinement step).
+fn extract_labels(
+    n: usize,
+    exemplars: &[bool],
+    sim: &dyn Fn(usize, usize) -> f64,
+    refine: bool,
+) -> (Array1<f64>, Vec<usize>) {
+    let mut centers: Vec<usize> = (0..n).filter(|&k| exemplars[k]).collect();
+    if centers.is_empty() {
+        return (Array1::from_elem(n, -1.0), Vec::new());
+    }
+    let assign = |centers: &[usize]| -> Vec<usize> {
+        let mut c: Vec<usize> = (0..n)
+            .map(|i| {
+                let mut best = f64::NEG_INFINITY;
+                let mut best_c = 0;
+                for (ci, &k) in centers.iter().enumerate() {
+                    let v = sim(i, k);
+                    if v > best {
+                        best = v;
+                        best_c = ci;
+                    }
+                }
+                best_c
+            })
+            .collect();
+        // c[I] = arange(K): exemplars always label themselves.
+        for (ci, &k) in centers.iter().enumerate() {
+            c[k] = ci;
+        }
+        c
+    };
+    let mut c = assign(&centers);
+    if refine {
+        for (ci, center) in centers.iter_mut().enumerate() {
+            let members: Vec<usize> = (0..n).filter(|&i| c[i] == ci).collect();
+            let mut best = f64::NEG_INFINITY;
+            let mut best_j = *center;
+            for &j in &members {
+                let tot: f64 = members.iter().map(|&i| sim(i, j)).sum();
+                if tot > best {
+                    best = tot;
+                    best_j = j;
+                }
+            }
+            *center = best_j;
+        }
+        c = assign(&centers);
+    }
+    // labels = I[c]; cluster_centers_indices = unique(labels);
+    // labels = searchsorted(cluster_centers_indices, labels)
+    let raw: Vec<usize> = c.iter().map(|&ci| centers[ci]).collect();
+    let mut uniq = raw.clone();
+    uniq.sort_unstable();
+    uniq.dedup();
+    let labels = raw
+        .iter()
+        .map(|k| uniq.binary_search(k).unwrap() as f64)
+        .collect();
+    (labels, uniq)
 }
 
 impl FitUnsupervised<f64> for AffinityPropagation {
@@ -94,8 +208,10 @@ impl FitUnsupervised<f64> for AffinityPropagation {
                     }
                 }
             }
-            offdiag.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            offdiag[offdiag.len() / 2]
+            if offdiag.is_empty() {
+                return 0.0;
+            }
+            median_in_place(&mut offdiag)
         });
         for i in 0..n {
             s[[i, i]] = pref;
@@ -114,8 +230,11 @@ impl FitUnsupervised<f64> for AffinityPropagation {
         let mut a = Array2::<f64>::zeros((n, n));
         let mut last_exemplars: Option<Vec<bool>> = None;
         let mut converge_count = 0usize;
+        let mut converged = false;
+        let mut n_iter = 0usize;
 
-        for _iter in 0..self.max_iter {
+        for iter in 0..self.max_iter {
+            n_iter = iter + 1;
             // Update responsibilities r_{i,k} = s_{i,k} - max_{k' != k}(a_{i,k'} + s_{i,k'})
             let mut new_r = Array2::<f64>::zeros((n, n));
             for i in 0..n {
@@ -178,7 +297,8 @@ impl FitUnsupervised<f64> for AffinityPropagation {
             if let Some(prev) = &last_exemplars {
                 if prev == &exemplars {
                     converge_count += 1;
-                    if converge_count >= self.convergence_iter {
+                    if converge_count >= self.convergence_iter && exemplars.iter().any(|&e| e) {
+                        converged = true;
                         break;
                     }
                 } else {
@@ -188,38 +308,15 @@ impl FitUnsupervised<f64> for AffinityPropagation {
             last_exemplars = Some(exemplars);
         }
 
-        // Final cluster centers and labels.
-        let exemplars = last_exemplars.unwrap_or_else(|| vec![true; n]);
-        let cluster_centers_indices: Vec<usize> = exemplars
-            .iter()
-            .enumerate()
-            .filter(|(_, &b)| b)
-            .map(|(i, _)| i)
-            .collect();
-        if cluster_centers_indices.is_empty() {
-            // Pathological — return single cluster.
-            return Ok(FittedAffinityPropagation {
-                labels: Array1::<f64>::zeros(n),
-                cluster_centers_indices: vec![0],
-            });
-        }
-
-        let mut labels = Array1::<f64>::zeros(n);
-        for i in 0..n {
-            let mut best = f64::NEG_INFINITY;
-            let mut best_c = 0;
-            for (c, &k) in cluster_centers_indices.iter().enumerate() {
-                let sim = s[[i, k]];
-                if sim > best {
-                    best = sim;
-                    best_c = c;
-                }
-            }
-            labels[i] = best_c as f64;
-        }
+        // Final cluster centers and labels (sklearn semantics, see module docs).
+        let exemplars = last_exemplars.unwrap_or_else(|| vec![false; n]);
+        let (labels, cluster_centers_indices) =
+            extract_labels(n, &exemplars, &|i, k| s[[i, k]], true);
         Ok(FittedAffinityPropagation {
             labels,
             cluster_centers_indices,
+            converged,
+            n_iter,
         })
     }
 }
@@ -262,7 +359,7 @@ impl AffinityPropagation {
         struct DPair(usize, f64);
         impl Ord for DPair {
             fn cmp(&self, other: &Self) -> Ordering {
-                self.1.partial_cmp(&other.1).unwrap_or(Ordering::Equal)
+                self.1.total_cmp(&other.1)
             }
         }
         impl PartialOrd for DPair {
@@ -311,8 +408,7 @@ impl AffinityPropagation {
             if vals.is_empty() {
                 return 0.0;
             }
-            vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            vals[vals.len() / 2]
+            median_in_place(&mut vals)
         });
 
         // Materialise per-row neighbours including the self-loop. Edges are
@@ -378,8 +474,11 @@ impl AffinityPropagation {
 
         let mut last_exemplars: Option<Vec<bool>> = None;
         let mut converge_count = 0usize;
+        let mut converged = false;
+        let mut n_iter = 0usize;
 
-        for _iter in 0..self.max_iter {
+        for iter in 0..self.max_iter {
+            n_iter = iter + 1;
             // ─── r-update ──────────────────────────────────────────────
             // r_{i,k} = s_{i,k} - max_{k' ∈ N(i), k' ≠ k}(a_{i,k'} + s_{i,k'})
             for i in 0..n {
@@ -450,7 +549,8 @@ impl AffinityPropagation {
             if let Some(prev) = &last_exemplars {
                 if prev == &exemplars {
                     converge_count += 1;
-                    if converge_count >= self.convergence_iter {
+                    if converge_count >= self.convergence_iter && exemplars.iter().any(|&e| e) {
+                        converged = true;
                         break;
                     }
                 } else {
@@ -460,38 +560,21 @@ impl AffinityPropagation {
             last_exemplars = Some(exemplars);
         }
 
-        let exemplars = last_exemplars.unwrap_or_else(|| vec![true; n]);
-        let cluster_centers_indices: Vec<usize> = exemplars
-            .iter()
-            .enumerate()
-            .filter(|(_, &b)| b)
-            .map(|(i, _)| i)
-            .collect();
-        if cluster_centers_indices.is_empty() {
-            return Ok(FittedAffinityPropagation {
-                labels: Array1::<f64>::zeros(n),
-                cluster_centers_indices: vec![0],
-            });
-        }
-
-        // Assign each point to nearest exemplar (using dense distance since
-        // exemplars are O(n_clusters) and matter for label assignment).
-        let mut labels = Array1::<f64>::zeros(n);
-        for i in 0..n {
-            let mut best = f64::NEG_INFINITY;
-            let mut best_c = 0;
-            for (c, &kk) in cluster_centers_indices.iter().enumerate() {
-                let sim_ik = -sq(i, kk);
-                if sim_ik > best {
-                    best = sim_ik;
-                    best_c = c;
-                }
-            }
-            labels[i] = best_c as f64;
-        }
+        let exemplars = last_exemplars.unwrap_or_else(|| vec![false; n]);
+        // Assign each point to its most similar exemplar using the dense
+        // distance (exemplars are O(n_clusters)); exemplars label themselves.
+        // The O(Σ|C|²) exemplar refinement of the dense path is skipped here.
+        let (labels, cluster_centers_indices) = extract_labels(
+            n,
+            &exemplars,
+            &|i, kk| if i == kk { pref } else { -sq(i, kk) },
+            false,
+        );
         Ok(FittedAffinityPropagation {
             labels,
             cluster_centers_indices,
+            converged,
+            n_iter,
         })
     }
 }
@@ -574,5 +657,81 @@ mod tests {
         );
         // Also verify the sparse path produced at least 2 exemplars.
         assert!(fitted.cluster_centers_indices.len() >= 2);
+    }
+    /// Regression for #57: exemplars must label themselves (sklearn
+    /// `c[I] = arange(K)`), even when the preference (diagonal similarity)
+    /// is lower than the similarity to another exemplar.
+    #[test]
+    fn test_extract_labels_forces_exemplar_self_label() {
+        let pts = [0.0_f64, 0.1, 5.0];
+        let pref = -100.0;
+        let sim = |i: usize, k: usize| {
+            if i == k {
+                pref
+            } else {
+                -(pts[i] - pts[k]).powi(2)
+            }
+        };
+        let (labels, centers) = extract_labels(3, &[true, true, false], &sim, false);
+        assert_eq!(centers, vec![0, 1]);
+        assert_eq!(labels[0], 0.0);
+        assert_eq!(labels[1], 1.0);
+    }
+
+    #[test]
+    fn test_ap_exemplars_label_themselves_dense_and_sparse() {
+        let mut data = Vec::new();
+        for i in 0..40 {
+            let t = i as f64 * 0.37;
+            let off = if i < 20 { 0.0 } else { 6.0 };
+            data.push(off + t.sin() * (1.0 + 0.1 * i as f64 % 1.0));
+            data.push(t.cos() * 0.8);
+        }
+        let x = ndarray::Array2::from_shape_vec((40, 2), data).unwrap();
+        for sparse in [false, true] {
+            let mut ap = AffinityPropagation::new().with_damping(0.5);
+            if sparse {
+                ap = ap.with_n_neighbors(8);
+            }
+            let f = ap.fit(&x).unwrap();
+            assert_eq!(f.labels.len(), 40);
+            for (c, &k) in f.cluster_centers_indices.iter().enumerate() {
+                assert_eq!(f.labels[k], c as f64, "sparse={sparse}: exemplar {k}");
+            }
+        }
+    }
+
+    /// No exemplar (here: `max_iter = 0`) -> all labels -1 and no centers,
+    /// as sklearn.
+    #[test]
+    fn test_ap_no_exemplars_gives_noise_labels() {
+        let x = array![[0.0_f64, 0.0], [1.0, 0.0], [5.0, 5.0]];
+        let mut ap = AffinityPropagation::new();
+        ap.max_iter = 0;
+        let f = ap.fit(&x).unwrap();
+        assert!(f.cluster_centers_indices.is_empty());
+        assert!(f.labels.iter().all(|&l| l == -1.0));
+        assert!(!f.converged);
+    }
+
+    #[test]
+    fn test_ap_converged_flag_and_median_preference() {
+        let x = array![
+            [0.0_f64, 0.0],
+            [0.2, 0.1],
+            [-0.1, 0.2],
+            [10.0, 10.0],
+            [10.2, 9.9],
+            [9.8, 10.1],
+        ];
+        let f = AffinityPropagation::new()
+            .with_damping(0.5)
+            .fit(&x)
+            .unwrap();
+        assert!(f.converged);
+        assert!(f.n_iter > 0 && f.n_iter <= 200);
+        assert_eq!(f.cluster_centers_indices.len(), 2);
+        assert_eq!(median_in_place(&mut [3.0, 1.0, 2.0, 4.0]), 2.5);
+        assert_eq!(median_in_place(&mut [3.0, 1.0, 2.0]), 2.0);
     }
 }

@@ -42,3 +42,24 @@ pub use distance::DistanceMetric;
 pub use knn_classifier::{FittedKnnClassifier, KnnClassifier, WeightFunction};
 pub use knn_regressor::{FittedKnnRegressor, KnnRegressor};
 pub use lof::{FittedLocalOutlierFactor, LocalOutlierFactor, LofAlgorithm};
+
+/// Return `x` in standard (C-contiguous) layout: borrowed when it already is,
+/// otherwise a one-off row-major copy. Lets `row(i).as_slice()` fast paths
+/// work on Fortran-order / transposed input (#42).
+pub(crate) fn standard_layout<F: Clone>(
+    x: &ndarray::Array2<F>,
+) -> std::borrow::Cow<'_, ndarray::Array2<F>> {
+    if x.is_standard_layout() {
+        std::borrow::Cow::Borrowed(x)
+    } else {
+        std::borrow::Cow::Owned(x.as_standard_layout().into_owned())
+    }
+}
+
+/// Total order on floats (NaN-safe, never panics) via `f64::total_cmp`.
+#[inline]
+pub(crate) fn total_cmp<F: anofox_ml_core::Float>(a: &F, b: &F) -> std::cmp::Ordering {
+    a.to_f64()
+        .unwrap_or(f64::NAN)
+        .total_cmp(&b.to_f64().unwrap_or(f64::NAN))
+}

@@ -97,7 +97,8 @@ impl<F: Float> Fit<F> for KnnRegressor {
         };
 
         Ok(FittedKnnRegressor {
-            x_train: x.to_owned(),
+            // Stored C-contiguous so the brute-force path can use row slices.
+            x_train: x.as_standard_layout().into_owned(),
             y_train: y.to_owned(),
             kdtree,
             n_neighbors: self.n_neighbors,
@@ -118,11 +119,13 @@ impl<F: Float + Send + Sync> Predict<F> for FittedKnnRegressor<F> {
         }
 
         // Iterate ndarray rows directly — avoid unnecessary to_vec()
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<F> = &x_std;
         let predictions: Vec<F> = (0..x.nrows())
             .into_par_iter()
             .map(|i| {
                 let row = x.row(i);
-                let row_slice = row.as_slice().unwrap();
+                let row_slice = row.as_slice().expect("standard layout");
                 let neighbors = self.find_neighbors(row_slice);
                 weighted_mean(&neighbors, self.weights)
             })
@@ -148,7 +151,8 @@ impl<F: Float> FittedKnnRegressor<F> {
                 .into_iter()
                 .zip(self.y_train.iter().copied())
                 .collect();
-            distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            // Stable sort: equal distances keep training order (lower index first).
+            distances.sort_by(|a, b| crate::total_cmp(&a.0, &b.0));
             distances.truncate(self.n_neighbors);
             distances
         }
@@ -325,5 +329,22 @@ mod tests {
         let x_test: Array2<f32> = array![[3.0f32]];
         let preds = fitted.predict(&x_test).unwrap();
         assert_abs_diff_eq!(preds[0], 6.0f32, epsilon = 1e-4);
+    }
+
+    /// Regression for #42: Fortran-order input used to panic.
+    #[test]
+    fn test_fortran_order_input() {
+        use ndarray::{Array2, ShapeBuilder};
+        let x = array![[0.0, 0.0], [1.0, 0.5], [2.0, 1.0], [3.0, 1.5], [4.0, 2.0]];
+        let y = array![0.0, 1.0, 2.0, 3.0, 4.0];
+        let v: Vec<f64> = x.t().iter().copied().collect();
+        let xf = Array2::from_shape_vec((5, 2).f(), v).unwrap();
+        assert!(!xf.is_standard_layout());
+        for metric in [DistanceMetric::Euclidean, DistanceMetric::Manhattan] {
+            let knn = KnnRegressor::new(2).with_metric(metric);
+            let a = Fit::fit(&knn, &x, &y).unwrap().predict(&x).unwrap();
+            let b = Fit::fit(&knn, &xf, &y).unwrap().predict(&xf).unwrap();
+            assert_eq!(a, b, "metric={metric:?}");
+        }
     }
 }

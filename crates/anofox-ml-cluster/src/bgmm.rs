@@ -233,6 +233,8 @@ impl FitUnsupervised<f64> for BayesianGaussianMixture {
     type Fitted = FittedBayesianGaussianMixture;
 
     fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<f64> = &x_std;
         let n = x.nrows();
         let d = x.ncols();
         let k = self.n_components;

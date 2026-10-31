@@ -108,7 +108,8 @@ impl<F: Float> Fit<F> for KnnClassifier {
         };
 
         Ok(FittedKnnClassifier {
-            x_train: x.to_owned(),
+            // Stored C-contiguous so the brute-force path can use row slices.
+            x_train: x.as_standard_layout().into_owned(),
             y_train: y.to_owned(),
             kdtree,
             n_neighbors: self.n_neighbors,
@@ -129,11 +130,13 @@ impl<F: Float + Send + Sync> Predict<F> for FittedKnnClassifier<F> {
         }
 
         // Parallel prediction using rayon — iterate ndarray rows directly
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<F> = &x_std;
         let predictions: Vec<F> = (0..x.nrows())
             .into_par_iter()
             .map(|i| {
                 let row = x.row(i);
-                let row_slice = row.as_slice().unwrap();
+                let row_slice = row.as_slice().expect("standard layout");
                 let neighbors = self.find_neighbors(row_slice);
                 weighted_majority_vote(&neighbors, self.weights)
             })
@@ -161,7 +164,8 @@ impl<F: Float> FittedKnnClassifier<F> {
                 .into_iter()
                 .zip(self.y_train.iter().copied())
                 .collect();
-            distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            // Stable sort: equal distances keep training order (lower index first).
+            distances.sort_by(|a, b| crate::total_cmp(&a.0, &b.0));
             distances.truncate(self.n_neighbors);
             distances
         }
@@ -169,37 +173,49 @@ impl<F: Float> FittedKnnClassifier<F> {
 }
 
 /// Weighted majority vote among neighbors.
-/// Uses HashMap with f64 bit representation for O(1) class lookup.
+///
+/// Deterministic: per-class weights are accumulated over classes sorted
+/// ascending and the first maximum wins, so ties resolve to the **smallest
+/// class label**, exactly like sklearn (`stats.mode` / `weighted_mode` over
+/// the sorted `classes_`). The previous `HashMap` iteration order made tied
+/// votes random across runs (#42).
 #[inline]
 fn weighted_majority_vote<F: Float>(neighbors: &[(F, F)], weights: WeightFunction) -> F {
-    use std::collections::HashMap;
-
-    // Accumulate weights per class using HashMap for O(1) lookup
-    let mut class_weights: HashMap<u64, (F, F)> = HashMap::new(); // key -> (class_value, total_weight)
-
-    for &(dist, class) in neighbors {
-        let w = match weights {
-            WeightFunction::Uniform => F::one(),
-            WeightFunction::Distance => {
-                if dist < F::from_f64(1e-15).unwrap() {
-                    F::from_f64(1e15).unwrap()
-                } else {
-                    F::one() / dist
+    // (class, weight) pairs; k is small, so a sorted Vec beats a map.
+    let mut votes: Vec<(F, F)> = neighbors
+        .iter()
+        .map(|&(dist, class)| {
+            let w = match weights {
+                WeightFunction::Uniform => F::one(),
+                WeightFunction::Distance => {
+                    if dist < F::from_f64(1e-15).unwrap() {
+                        F::from_f64(1e15).unwrap()
+                    } else {
+                        F::one() / dist
+                    }
                 }
-            }
-        };
-        let key = class.to_f64().unwrap().to_bits();
-        class_weights
-            .entry(key)
-            .and_modify(|e| e.1 += w)
-            .or_insert((class, w));
-    }
+            };
+            (class, w)
+        })
+        .collect();
+    votes.sort_by(|a, b| crate::total_cmp(&a.0, &b.0));
 
-    class_weights
-        .into_values()
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-        .unwrap()
-        .0
+    let mut best_class = votes[0].0;
+    let mut best_weight = F::neg_infinity();
+    let mut i = 0;
+    while i < votes.len() {
+        let class = votes[i].0;
+        let mut total = F::zero();
+        while i < votes.len() && crate::total_cmp(&votes[i].0, &class).is_eq() {
+            total += votes[i].1;
+            i += 1;
+        }
+        if total > best_weight {
+            best_weight = total;
+            best_class = class;
+        }
+    }
+    best_class
 }
 
 #[cfg(test)]
@@ -422,6 +438,72 @@ mod tests {
                 assert!(msg.contains("2"), "error should mention sample count");
             }
             other => panic!("expected InvalidParameter error, got {:?}", other),
+        }
+    }
+
+    /// Regression for #42: a tied vote used to depend on `HashMap`
+    /// iteration order (0.0 in ~half the runs, 1.0 in the rest). Ties must
+    /// resolve to the smallest class label, as sklearn does.
+    #[test]
+    fn test_tied_vote_is_deterministic_smallest_label() {
+        let x_train = array![[-1.0, 0.0], [1.0, 0.0], [0.0, -2.0], [0.0, 2.0]];
+        let y_train = array![1.0, 0.0, 3.0, 2.0];
+        let query = array![[0.0, 0.0], [0.0, 0.1]];
+        for _ in 0..20 {
+            for weights in [WeightFunction::Uniform, WeightFunction::Distance] {
+                let knn = KnnClassifier::new(2).with_weights(weights);
+                let fitted = Fit::fit(&knn, &x_train, &y_train).unwrap();
+                let p = fitted.predict(&query).unwrap();
+                // Neighbours of (0,0)/(0,0.1): the two points at distance 1
+                // (classes 1 and 0) -> tie -> 0.
+                assert_eq!(p[0], 0.0, "weights={weights:?}");
+                assert_eq!(p[1], 0.0, "weights={weights:?}");
+            }
+            // Four-way tie with k = 4 -> smallest label 0; brute-force path too.
+            for metric in [DistanceMetric::Euclidean, DistanceMetric::Manhattan] {
+                let knn = KnnClassifier::new(4).with_metric(metric);
+                let fitted = Fit::fit(&knn, &x_train, &array![2.0, 1.0, 2.0, 1.0]).unwrap();
+                assert_eq!(fitted.predict(&array![[0.0, 0.0]]).unwrap()[0], 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_weighted_majority_vote_direct() {
+        let n = [(1.0, 5.0), (1.0, 3.0), (1.0, 5.0), (1.0, 3.0), (2.0, 7.0)];
+        assert_eq!(weighted_majority_vote(&n, WeightFunction::Uniform), 3.0);
+        assert_eq!(
+            weighted_majority_vote(&n[..3], WeightFunction::Uniform),
+            5.0
+        );
+    }
+
+    /// Regression for #42: Fortran-order training / query data used to
+    /// panic in `row(i).as_slice().unwrap()`.
+    #[test]
+    fn test_fortran_order_input() {
+        use ndarray::{Array2, ShapeBuilder};
+        let x = array![
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [0.2, 0.2],
+            [10.0, 10.0],
+            [10.1, 10.1],
+            [10.2, 10.2]
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let v: Vec<f64> = x.t().iter().copied().collect();
+        let xf = Array2::from_shape_vec((6, 2).f(), v).unwrap();
+        assert!(!xf.is_standard_layout());
+        for metric in [
+            DistanceMetric::Euclidean,
+            DistanceMetric::Manhattan,
+            DistanceMetric::Cosine,
+        ] {
+            let knn = KnnClassifier::new(3).with_metric(metric);
+            let a = Fit::fit(&knn, &x, &y).unwrap().predict(&x).unwrap();
+            let b = Fit::fit(&knn, &xf, &y).unwrap().predict(&xf).unwrap();
+            assert_eq!(a, b, "metric={metric:?}");
         }
     }
 

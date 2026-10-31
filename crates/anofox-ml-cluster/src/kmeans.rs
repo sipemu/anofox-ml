@@ -248,6 +248,8 @@ impl KMeans {
         x: &Array2<F>,
         sample_weight: Option<&Array1<F>>,
     ) -> Result<FittedKMeans<F>> {
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<F> = &x_std;
         let n_samples = x.nrows();
         let n_features = x.ncols();
 
@@ -395,6 +397,8 @@ impl<F: Float> Predict<F> for FittedKMeans<F> {
             )));
         }
 
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<F> = &x_std;
         let n_samples = x.nrows();
         let mut labels = Array1::<F>::zeros(n_samples);
         for i in 0..n_samples {
