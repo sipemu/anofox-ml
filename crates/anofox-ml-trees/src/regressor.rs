@@ -175,6 +175,43 @@ impl<F: Float> FittedDecisionTreeRegressor<F> {
     pub fn tree(&self) -> &TreeNode<F> {
         &self.tree
     }
+
+    /// Number of leaves of the fitted tree.
+    pub fn n_leaves(&self) -> usize {
+        self.tree.n_leaves()
+    }
+
+    /// Index of the leaf each row of `x` ends up in (like sklearn's
+    /// `apply`, but with leaves numbered `0..n_leaves()` in pre-order, left
+    /// subtree first).
+    pub fn apply(&self, x: &Array2<F>) -> Result<Vec<usize>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+        Ok(self.tree.apply(x))
+    }
+
+    /// Overwrite the leaf values, indexed like [`Self::apply`]. Used by
+    /// boosting to replace the fitted mean with a loss-specific leaf
+    /// estimate (e.g. a Newton step).
+    pub fn set_leaf_values(&mut self, values: &[F]) -> Result<()> {
+        let mut leaves = self.tree.leaf_values_mut();
+        if leaves.len() != values.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "tree has {} leaves but {} values were given",
+                leaves.len(),
+                values.len()
+            )));
+        }
+        for (leaf, &v) in leaves.iter_mut().zip(values) {
+            **leaf = v;
+        }
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -459,5 +496,35 @@ mod tests {
             RustMlError::ShapeMismatch(_) => {} // expected
             other => panic!("expected ShapeMismatch, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_apply_and_set_leaf_values() {
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0]];
+        let y = array![1.0, 1.0, 5.0, 5.0, 9.0, 9.0];
+        let mut fitted = DecisionTreeRegressor::new()
+            .with_max_depth(Some(2))
+            .fit(&x, &y)
+            .unwrap();
+        let n_leaves = fitted.n_leaves();
+        assert_eq!(n_leaves, 3);
+        let leaves = fitted.apply(&x).unwrap();
+        // Same leaf <=> same prediction; numbering covers 0..n_leaves.
+        let preds = fitted.predict(&x).unwrap();
+        for i in 0..6 {
+            for j in 0..6 {
+                assert_eq!(leaves[i] == leaves[j], preds[i] == preds[j]);
+            }
+        }
+        assert!(leaves.iter().all(|&l| l < n_leaves));
+        // Overwrite leaf values with their index and check predict routes there.
+        let vals: Vec<f64> = (0..n_leaves).map(|l| l as f64 * 10.0).collect();
+        fitted.set_leaf_values(&vals).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        for i in 0..6 {
+            assert_eq!(preds[i], leaves[i] as f64 * 10.0);
+        }
+        assert!(fitted.set_leaf_values(&[1.0]).is_err());
+        assert!(fitted.apply(&array![[1.0, 2.0]]).is_err());
     }
 }

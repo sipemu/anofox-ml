@@ -5,14 +5,28 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
+use crate::forest_common::{argmax_first, class_index, select_rows, sorted_classes};
+
 /// Gradient boosting classifier parameters (unfitted state).
 ///
-/// For binary classification, fits trees to the negative gradient of the
-/// log loss (logistic regression loss). For multi-class (>2 classes), uses
-/// a one-vs-rest strategy with separate sets of trees for each class.
+/// Follows Friedman's gradient boosting as implemented by scikit-learn's
+/// `GradientBoostingClassifier`:
+///
+/// - **Binary**: one regression tree per round fitted to the negative
+///   gradient `y - p` of the log loss; each leaf then takes the Newton step
+///   `sum(y - p) / sum(p (1 - p))`. The initial score is the log-odds of the
+///   positive class.
+/// - **Multiclass** (K > 2): K trees per round, tree k fitted to `y_k - p_k`
+///   of the multinomial deviance (softmax probabilities), with leaf values
+///   `(K - 1) / K * sum(y_k - p_k) / sum(p_k (1 - p_k))`. Initial scores are
+///   the (centred) log class priors.
+///
+/// With `subsample < 1` one in-bag sample (`max(1, floor(subsample * n))`
+/// rows, drawn without replacement) is drawn per round and shared by all K
+/// trees; leaf values are estimated from in-bag rows only.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GradientBoostingClassifier {
-    /// Number of boosting rounds (trees per class for multi-class).
+    /// Number of boosting rounds (each round adds K trees for K > 2 classes).
     pub n_estimators: usize,
     /// Shrinkage applied to each tree's contribution.
     pub learning_rate: f64,
@@ -98,9 +112,10 @@ pub struct FittedGradientBoostingClassifier<F: Float> {
     /// Unique class labels sorted in ascending order.
     classes: Vec<F>,
     /// For binary: a single list of trees operating on log-odds.
-    /// For multi-class OVR: one list of trees per class.
+    /// For multiclass: one list of trees per class (`tree_sets[k][m]` is the
+    /// class-k tree of round m of the multinomial model).
     tree_sets: Vec<Vec<FittedDecisionTreeRegressor<F>>>,
-    /// Initial log-odds per class set.
+    /// Initial raw score per tree set.
     initial_values: Vec<F>,
     /// Learning rate.
     learning_rate: F,
@@ -138,8 +153,7 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
             ));
         }
 
-        // Discover unique classes.
-        let classes = unique_sorted(y);
+        let classes = sorted_classes(y);
         let n_classes = classes.len();
         if n_classes < 2 {
             return Err(RustMlError::InvalidParameter(
@@ -147,69 +161,40 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
             ));
         }
 
+        let n_samples = x.nrows();
         let n_features = x.ncols();
         let lr = F::from_f64(self.learning_rate).unwrap();
+        // Binary: one tree per round on the log-odds. Multiclass: K trees per
+        // round, one per class, on the multinomial deviance.
+        let n_trees_per_round = if n_classes == 2 { 1 } else { n_classes };
 
-        if n_classes == 2 {
-            // Binary classification: single set of trees on log-odds.
-            let (initial, trees) = self.fit_binary(x, y, &classes[1], lr)?;
-            Ok(FittedGradientBoostingClassifier {
-                classes,
-                tree_sets: vec![trees],
-                initial_values: vec![initial],
-                learning_rate: lr,
-                n_features,
-            })
-        } else {
-            // Multi-class: one-vs-rest, one tree set per class.
-            let mut tree_sets = Vec::with_capacity(n_classes);
-            let mut initial_values = Vec::with_capacity(n_classes);
+        // Encoded labels 0..K-1.
+        let y_idx: Vec<usize> = y
+            .iter()
+            .map(|&v| class_index(&classes, v).expect("label is in the class list"))
+            .collect();
 
-            for class in &classes {
-                let (initial, trees) = self.fit_binary(x, y, class, lr)?;
-                tree_sets.push(trees);
-                initial_values.push(initial);
-            }
-
-            Ok(FittedGradientBoostingClassifier {
-                classes,
-                tree_sets,
-                initial_values,
-                learning_rate: lr,
-                n_features,
-            })
+        // Initial raw prediction (sklearn's `init='prior'` / DummyClassifier):
+        // binary = log-odds of the positive class; multiclass = log priors,
+        // centred so they sum to zero (symmetric multinomial logit link).
+        let eps = F::epsilon();
+        let n_f = F::from_usize(n_samples).unwrap();
+        let mut counts = vec![0usize; n_classes];
+        for &k in &y_idx {
+            counts[k] += 1;
         }
-    }
-}
-
-impl GradientBoostingClassifier {
-    /// Fit a binary gradient boosting model where the positive class is
-    /// `positive_class`. Returns (initial_log_odds, fitted_trees).
-    fn fit_binary<F: Float>(
-        &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        positive_class: &F,
-        lr: F,
-    ) -> Result<(F, Vec<FittedDecisionTreeRegressor<F>>)> {
-        let n_samples = x.nrows();
-        let eps = F::from_f64(1e-15).unwrap();
-
-        // Convert labels to binary 0/1 for the positive class.
-        let binary_y: Array1<F> = y.mapv(|v| {
-            if (v - *positive_class).abs() < eps {
-                F::one()
-            } else {
-                F::zero()
-            }
-        });
-
-        // Initial prediction: log-odds of positive class frequency.
-        let p = binary_y.sum() / F::from_usize(n_samples).unwrap();
-        let p_clipped = clamp(p, eps, F::one() - eps);
-        let initial_log_odds = (p_clipped / (F::one() - p_clipped)).ln();
-
-        let mut log_odds = Array1::from_elem(n_samples, initial_log_odds);
+        let priors: Vec<F> = counts
+            .iter()
+            .map(|&c| clamp(F::from_usize(c).unwrap() / n_f, eps, F::one() - eps))
+            .collect();
+        let initial_values: Vec<F> = if n_classes == 2 {
+            vec![(priors[1] / (F::one() - priors[1])).ln()]
+        } else {
+            let logs: Vec<F> = priors.iter().map(|p| p.ln()).collect();
+            let mean = logs.iter().copied().fold(F::zero(), |a, b| a + b)
+                / F::from_usize(n_classes).unwrap();
+            logs.iter().map(|&l| l - mean).collect()
+        };
 
         let tree_params = DecisionTreeRegressor {
             max_depth: self.max_depth,
@@ -220,104 +205,131 @@ impl GradientBoostingClassifier {
             seed: 0,
         };
 
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        let mut trees = Vec::with_capacity(self.n_estimators);
-        let subsample_size = ((self.subsample * n_samples as f64).round() as usize).max(1);
+        // Leaf update factor: 1 for binary, (K-1)/K for multinomial (Friedman).
+        let factor = if n_classes == 2 {
+            F::one()
+        } else {
+            F::from_usize(n_classes - 1).unwrap() / F::from_usize(n_classes).unwrap()
+        };
 
-        // Pre-allocate reusable buffers outside the boosting loop.
-        let mut probs = Array1::<F>::zeros(n_samples);
-        let mut residuals = Array1::<F>::zeros(n_samples);
-        let mut indices: Vec<usize> = (0..n_samples).collect();
-
-        for _ in 0..self.n_estimators {
-            // Compute probabilities and residuals in-place.
-            for i in 0..n_samples {
-                probs[i] = sigmoid(log_odds[i]);
-                residuals[i] = binary_y[i] - probs[i];
-            }
-
-            // Fit tree to (subsampled) pseudo-residuals.
-            let fitted_tree: FittedDecisionTreeRegressor<F> = if subsample_size < n_samples {
-                indices.clear();
-                indices.extend(0..n_samples);
-                indices.shuffle(&mut rng);
-                indices.truncate(subsample_size);
-                indices.sort_unstable();
-
-                let x_sub = build_sub_rows(x, &indices);
-                let r_sub = Array1::from_vec(indices.iter().map(|&i| residuals[i]).collect());
-                tree_params.fit(&x_sub, &r_sub)?
-            } else {
-                tree_params.fit(x, &residuals)?
-            };
-
-            // Update log-odds on full training set.
-            let tree_preds = fitted_tree.predict(x)?;
-            log_odds += &(tree_preds * lr);
-
-            trees.push(fitted_tree);
+        let mut raw = Array2::<F>::zeros((n_samples, n_trees_per_round));
+        for (mut col, &init) in raw.columns_mut().into_iter().zip(&initial_values) {
+            col.fill(init);
         }
 
-        Ok((initial_log_odds, trees))
+        let mut rng = StdRng::seed_from_u64(self.seed);
+        // Same in-bag size as sklearn: max(1, int(subsample * n)).
+        let n_inbag = ((self.subsample * n_samples as f64) as usize).max(1);
+        let use_subsample = n_inbag < n_samples;
+
+        let mut tree_sets: Vec<Vec<FittedDecisionTreeRegressor<F>>> = (0..n_trees_per_round)
+            .map(|_| Vec::with_capacity(self.n_estimators))
+            .collect();
+        let mut probs = Array2::<F>::zeros((n_samples, n_trees_per_round));
+        let mut neg_grad = Array1::<F>::zeros(n_samples);
+        let mut in_bag: Vec<usize> = (0..n_samples).collect();
+
+        for _ in 0..self.n_estimators {
+            // Probabilities from the raw predictions at the start of the
+            // round (shared by all K trees of the round).
+            compute_probs(&raw, &mut probs);
+
+            // One in-bag sample per round, shared across classes.
+            if use_subsample {
+                in_bag.clear();
+                in_bag.extend(0..n_samples);
+                in_bag.shuffle(&mut rng);
+                in_bag.truncate(n_inbag);
+                in_bag.sort_unstable();
+            }
+            let x_sub = if use_subsample {
+                Some(select_rows(x, &in_bag))
+            } else {
+                None
+            };
+
+            for k in 0..n_trees_per_round {
+                // Class whose indicator is the target of this tree.
+                let target_class = if n_classes == 2 { 1 } else { k };
+                for i in 0..n_samples {
+                    let y_k = if y_idx[i] == target_class {
+                        F::one()
+                    } else {
+                        F::zero()
+                    };
+                    neg_grad[i] = y_k - probs[[i, k]];
+                }
+
+                let mut tree: FittedDecisionTreeRegressor<F> = match &x_sub {
+                    Some(xs) => {
+                        let r_sub = Array1::from_iter(in_bag.iter().map(|&i| neg_grad[i]));
+                        tree_params.fit(xs, &r_sub)?
+                    }
+                    None => tree_params.fit(x, &neg_grad)?,
+                };
+
+                // Newton step per leaf over the in-bag samples:
+                //   factor * sum(y - p) / sum(p (1 - p)).
+                let leaves = tree.apply(x)?;
+                let n_leaves = tree.n_leaves();
+                let mut num = vec![F::zero(); n_leaves];
+                let mut den = vec![F::zero(); n_leaves];
+                for &i in &in_bag {
+                    let p = probs[[i, k]];
+                    num[leaves[i]] += neg_grad[i];
+                    den[leaves[i]] += p * (F::one() - p);
+                }
+                let values: Vec<F> = num
+                    .iter()
+                    .zip(den.iter())
+                    .map(|(&nu, &de)| factor * safe_divide(nu, de))
+                    .collect();
+                tree.set_leaf_values(&values)?;
+
+                // Update raw predictions on all samples (in- and out-of-bag).
+                for i in 0..n_samples {
+                    raw[[i, k]] += lr * values[leaves[i]];
+                }
+                tree_sets[k].push(tree);
+            }
+        }
+
+        Ok(FittedGradientBoostingClassifier {
+            classes,
+            tree_sets,
+            initial_values,
+            learning_rate: lr,
+            n_features,
+        })
     }
 }
 
 impl<F: Float> Predict<F> for FittedGradientBoostingClassifier<F> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-
-        let n_samples = x.nrows();
-
-        if self.classes.len() == 2 {
-            // Binary: single set of trees.
-            let log_odds = self.predict_log_odds(x, 0)?;
-            let half = F::from_f64(0.5).unwrap();
-
-            let predictions: Vec<F> = log_odds
+        let raw = self.raw_predictions(x)?;
+        let preds = if self.classes.len() == 2 {
+            raw.column(0)
                 .iter()
-                .map(|&lo| {
-                    if sigmoid(lo) >= half {
+                .map(|&r| {
+                    if r >= F::zero() {
                         self.classes[1]
                     } else {
                         self.classes[0]
                     }
                 })
-                .collect();
-
-            Ok(Array1::from_vec(predictions))
+                .collect()
         } else {
-            // Multi-class: predict class with highest log-odds (OVR).
-            let mut all_log_odds = Vec::with_capacity(self.classes.len());
-            for k in 0..self.classes.len() {
-                all_log_odds.push(self.predict_log_odds(x, k)?);
-            }
-
-            let mut predictions = Vec::with_capacity(n_samples);
-            for sample_idx in 0..n_samples {
-                let mut best_class = 0;
-                let mut best_val = all_log_odds[0][sample_idx];
-                for (k, log_odds_k) in all_log_odds.iter().enumerate().skip(1) {
-                    if log_odds_k[sample_idx] > best_val {
-                        best_val = log_odds_k[sample_idx];
-                        best_class = k;
-                    }
-                }
-                predictions.push(self.classes[best_class]);
-            }
-
-            Ok(Array1::from_vec(predictions))
-        }
+            raw.rows()
+                .into_iter()
+                .map(|row| self.classes[argmax_first(row.iter().copied())])
+                .collect()
+        };
+        Ok(preds)
     }
 }
 
 impl<F: Float> FittedGradientBoostingClassifier<F> {
-    /// Number of estimators per class set.
+    /// Number of boosting rounds.
     pub fn n_estimators(&self) -> usize {
         self.tree_sets.first().map_or(0, |ts| ts.len())
     }
@@ -327,69 +339,38 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
         &self.classes
     }
 
+    /// Raw ensemble scores (sklearn's `decision_function`).
+    ///
+    /// Shape `(n_samples, 1)` for binary classification (log-odds of the
+    /// second class) and `(n_samples, n_classes)` for multiclass.
+    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.raw_predictions(x)
+    }
+
     /// Predict class probabilities for each sample.
     ///
     /// For binary classification, returns shape `(n_samples, 2)` with columns
-    /// `[P(class_0), P(class_1)]`. For multi-class, returns `(n_samples, n_classes)`
-    /// using softmax over the OVR log-odds.
+    /// `[P(class_0), P(class_1)]` (sigmoid of the log-odds). For multiclass,
+    /// returns `(n_samples, n_classes)` via softmax of the raw scores.
     pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-
-        let n_samples = x.nrows();
-        let n_classes = self.classes.len();
-
-        if n_classes == 2 {
-            // Binary: sigmoid of log-odds
-            let log_odds = self.predict_log_odds(x, 0)?;
+        let raw = self.raw_predictions(x)?;
+        let n_samples = raw.nrows();
+        if self.classes.len() == 2 {
             let mut proba = Array2::<F>::zeros((n_samples, 2));
             for i in 0..n_samples {
-                let p1 = sigmoid(log_odds[i]);
+                let p1 = sigmoid(raw[[i, 0]]);
                 proba[[i, 0]] = F::one() - p1;
                 proba[[i, 1]] = p1;
             }
             Ok(proba)
         } else {
-            // Multi-class: softmax over OVR log-odds
-            let mut all_log_odds = Vec::with_capacity(n_classes);
-            for k in 0..n_classes {
-                all_log_odds.push(self.predict_log_odds(x, k)?);
-            }
-
-            let mut proba = Array2::<F>::zeros((n_samples, n_classes));
-            for i in 0..n_samples {
-                // Find max for numerical stability
-                let mut max_lo = all_log_odds[0][i];
-                for k in 1..n_classes {
-                    if all_log_odds[k][i] > max_lo {
-                        max_lo = all_log_odds[k][i];
-                    }
-                }
-                // Compute exp(lo - max) and sum
-                let mut sum = F::zero();
-                for k in 0..n_classes {
-                    let e = (all_log_odds[k][i] - max_lo).exp();
-                    proba[[i, k]] = e;
-                    sum += e;
-                }
-                // Normalize
-                for k in 0..n_classes {
-                    proba[[i, k]] /= sum;
-                }
-            }
+            let mut proba = Array2::<F>::zeros(raw.raw_dim());
+            compute_probs(&raw, &mut proba);
             Ok(proba)
         }
     }
 
-    /// Feature importances averaged across all tree sets, normalized to sum to 1.
-    ///
-    /// Each tree's importances are accumulated and weighted by the number of
-    /// boosting rounds.
+    /// Feature importances averaged across all trees, normalized to sum to 1.
     pub fn feature_importances(&self) -> Array1<F> {
         let mut importances = vec![F::zero(); self.n_features];
         let mut total_trees = 0usize;
@@ -420,23 +401,64 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
         }
     }
 
-    /// Compute raw log-odds for the k-th tree set.
-    fn predict_log_odds(&self, x: &Array2<F>, k: usize) -> Result<Array1<F>> {
-        let n_samples = x.nrows();
-        let mut log_odds = Array1::from_elem(n_samples, self.initial_values[k]);
-
-        for tree in &self.tree_sets[k] {
-            let tree_preds = tree.predict(x)?;
-            log_odds += &(tree_preds * self.learning_rate);
+    /// Raw scores: one column per tree set.
+    fn raw_predictions(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
         }
-
-        Ok(log_odds)
+        let n_samples = x.nrows();
+        let mut raw = Array2::<F>::zeros((n_samples, self.tree_sets.len()));
+        for (k, trees) in self.tree_sets.iter().enumerate() {
+            let mut col = raw.column_mut(k);
+            col.fill(self.initial_values[k]);
+            for tree in trees {
+                let tree_preds = tree.predict(x)?;
+                col.scaled_add(self.learning_rate, &tree_preds);
+            }
+        }
+        Ok(raw)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Probabilities from raw scores: sigmoid for a single column (binary),
+/// softmax across columns otherwise.
+fn compute_probs<F: Float>(raw: &Array2<F>, probs: &mut Array2<F>) {
+    let n_cols = raw.ncols();
+    for (r, mut p) in raw.rows().into_iter().zip(probs.rows_mut()) {
+        if n_cols == 1 {
+            p[0] = sigmoid(r[0]);
+        } else {
+            let max = r.iter().copied().fold(F::neg_infinity(), F::max);
+            let mut sum = F::zero();
+            for (pk, &rk) in p.iter_mut().zip(r.iter()) {
+                *pk = (rk - max).exp();
+                sum += *pk;
+            }
+            p.mapv_inplace(|v| v / sum);
+        }
+    }
+}
+
+/// `num / den`, or 0 when the division is undefined (sklearn's `_safe_divide`).
+fn safe_divide<F: Float>(num: F, den: F) -> F {
+    if den == F::zero() {
+        return F::zero();
+    }
+    let v = num / den;
+    if v.is_finite() {
+        v
+    } else {
+        F::zero()
+    }
+}
 
 /// Sigmoid function: 1 / (1 + exp(-x)).
 fn sigmoid<F: Float>(x: F) -> F {
@@ -453,26 +475,139 @@ fn clamp<F: Float>(x: F, lo: F, hi: F) -> F {
         x
     }
 }
-
-/// Return sorted unique values from an array.
-fn unique_sorted<F: Float>(arr: &Array1<F>) -> Vec<F> {
-    let eps = F::from_f64(1e-9).unwrap();
-    let mut vals: Vec<F> = arr.to_vec();
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    vals.dedup_by(|a, b| (*a - *b).abs() < eps);
-    vals
-}
-
-/// Build a sub-matrix selecting specific rows from `x`.
-fn build_sub_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
-    x.select(ndarray::Axis(0), row_indices)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    /// Data generated with numpy (seed 0); expected values from
+    /// `sklearn.ensemble.GradientBoostingClassifier(n_estimators=10,
+    /// learning_rate=0.3, max_depth=2, random_state=0)` (sklearn 1.8.0).
+    fn sklearn_data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let x = array![
+            [0.195, 0.861],
+            [0.411, 0.18],
+            [-0.305, 0.584],
+            [-0.25, 1.567],
+            [1.855, -0.466],
+            [1.167, 0.116],
+            [0.272, 1.702],
+            [-1.716, -1.651],
+            [-1.919, 1.33],
+            [1.113, 1.48],
+            [1.914, 1.197],
+            [-0.154, 1.122],
+            [-1.527, 0.56],
+            [-1.427, 1.779],
+            [0.087, -0.341],
+            [-0.942, 1.097],
+            [-0.175, 0.274],
+            [-1.925, 0.471],
+            [0.448, 0.468],
+            [1.775, 0.727],
+            [-0.562, -0.252],
+            [0.791, -1.759],
+            [0.667, 0.683],
+            [-1.158, -1.484]
+        ];
+        let yb = array![
+            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0
+        ];
+        let ym = array![
+            1.0, 1.0, 0.0, 1.0, 2.0, 2.0, 1.0, 0.0, 0.0, 2.0, 2.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 1.0, 2.0, 1.0, 2.0, 2.0, 0.0
+        ];
+        (x, yb, ym)
+    }
+
+    fn sklearn_params() -> GradientBoostingClassifier {
+        GradientBoostingClassifier::new()
+            .with_n_estimators(10)
+            .with_learning_rate(0.3)
+            .with_max_depth(Some(2))
+    }
+
+    #[test]
+    fn test_binary_matches_sklearn_newton_leaves() {
+        let (x, yb, _) = sklearn_data();
+        let fitted: FittedGradientBoostingClassifier<f64> = sklearn_params().fit(&x, &yb).unwrap();
+        let dec = fitted.decision_function(&x).unwrap();
+        let expected_dec = [-0.745538118363, -1.399793583139, -2.921933153658];
+        for (i, e) in expected_dec.iter().enumerate() {
+            assert_abs_diff_eq!(dec[[i, 0]], *e, epsilon = 1e-9);
+        }
+        let proba = fitted.predict_proba(&x).unwrap();
+        let expected_p1 = [
+            0.321794298769,
+            0.197848868723,
+            0.051079918131,
+            0.872466485398,
+            0.896776002215,
+            0.896776002215,
+        ];
+        for (i, e) in expected_p1.iter().enumerate() {
+            assert_abs_diff_eq!(proba[[i, 1]], *e, epsilon = 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_multiclass_matches_sklearn_multinomial() {
+        let (x, _, ym) = sklearn_data();
+        let fitted: FittedGradientBoostingClassifier<f64> = sklearn_params().fit(&x, &ym).unwrap();
+        let dec = fitted.decision_function(&x).unwrap();
+        let expected_dec = [
+            [-1.870807292507, 1.843153671841, -2.367592091472],
+            [-1.870807292507, 2.157190310048, -2.371135515195],
+            [1.810505864826, 0.192775578674, -2.357844717096],
+        ];
+        for (i, row) in expected_dec.iter().enumerate() {
+            for (k, e) in row.iter().enumerate() {
+                assert_abs_diff_eq!(dec[[i, k]], *e, epsilon = 1e-9);
+            }
+        }
+        let proba = fitted.predict_proba(&x).unwrap();
+        let expected = [
+            [0.023460723282, 0.962263803941, 0.014275472777],
+            [0.017314608499, 0.972186996962, 0.010498394539],
+            [0.823841205888, 0.163407570736, 0.012751223377],
+            [0.023460723282, 0.962263803941, 0.014275472777],
+            [0.009381725877, 0.010909220565, 0.979709053558],
+            [0.009215989995, 0.024077754438, 0.966706255567],
+        ];
+        for (i, row) in expected.iter().enumerate() {
+            for (k, e) in row.iter().enumerate() {
+                assert_abs_diff_eq!(proba[[i, k]], *e, epsilon = 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiclass_subsample_shared_across_classes() {
+        // Regression: every class used to reseed the RNG, so each class saw
+        // an identical subsample *and* the classes were fit independently
+        // (OvR). Now one in-bag sample per round is shared by the K trees and
+        // the probabilities are a proper multinomial model.
+        let (x, _, ym) = sklearn_data();
+        let fitted: FittedGradientBoostingClassifier<f64> = sklearn_params()
+            .with_subsample(0.7)
+            .with_seed(3)
+            .fit(&x, &ym)
+            .unwrap();
+        assert_eq!(fitted.n_estimators(), 10);
+        let proba = fitted.predict_proba(&x).unwrap();
+        for row in proba.rows() {
+            assert_abs_diff_eq!(row.sum(), 1.0, epsilon = 1e-12);
+        }
+        // Deterministic for a given seed.
+        let again: FittedGradientBoostingClassifier<f64> = sklearn_params()
+            .with_subsample(0.7)
+            .with_seed(3)
+            .fit(&x, &ym)
+            .unwrap();
+        assert_eq!(proba, again.predict_proba(&x).unwrap());
+    }
 
     #[test]
     fn test_basic_binary_classification() {
