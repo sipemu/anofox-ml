@@ -118,7 +118,9 @@ dependencies = [
  "anofox-ml-core",
  "approx",
  "faer",
+ "libm",
  "ndarray",
+ "rand 0.8.6",
  "serde",
 ]
 
@@ -139,7 +141,9 @@ name = "anofox-ml-linear"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-regression",
  "approx",
+ "faer",
  "ndarray",
  "num-traits",
  "rand 0.8.6",
@@ -213,6 +217,7 @@ name = "anofox-ml-preprocessing"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-regression",
  "approx",
  "faer",
  "ndarray",
@@ -273,6 +278,7 @@ dependencies = [
  "proptest",
  "rand 0.8.6",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

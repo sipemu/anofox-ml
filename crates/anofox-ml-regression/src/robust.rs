@@ -1,74 +1,37 @@
 //! Robust regression: TheilSen and RANSAC.
 //!
-//! Mirrors `sklearn.linear_model.{TheilSenRegressor, RANSACRegressor}`.
+//! Mirrors `sklearn.linear_model.{TheilSenRegressor, RANSACRegressor}`,
+//! delegating to `anofox_regression::solvers::{TheilSenRegressor,
+//! RansacRegressor}` and converting at the ndarray boundary.
+//!
+//! - Theil-Sen enumerates every subset when `C(n, n_subsamples) <=
+//!   max_subpopulation` (deterministic, as sklearn) and samples otherwise;
+//!   the estimate is the spatial median of the subset least-squares solutions
+//!   (also for one feature, as sklearn — the classical median-of-pairwise-
+//!   slopes estimator is available via `with_pairwise_slopes(true)`).
+//! - RANSAC uses the MAD of `y` as default threshold, `<=` inlier test,
+//!   Fischler–Bolles dynamic trial bound (`stop_probability`), and an OLS refit
+//!   on the consensus set.
+//!
+//! Random subsets come from upstream's seeded generator, so sampled (not
+//! enumerated) fits are reproducible per seed but not bit-identical to
+//! NumPy's.
 
+use crate::convert::{check_xy, coef_from_col, linear_predict, ndarray_to_col, ndarray_to_mat};
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
+use anofox_regression::solvers::{
+    FittedRegressor as _, RansacRegressor as InnerRansac, Regressor as _,
+    TheilSenRegressor as InnerTheilSen,
+};
 use ndarray::{Array1, Array2};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
 
-use faer::linalg::solvers::Solve;
-use faer::{Mat, Side};
-
-fn solve_psd(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f64>> {
-    let n = a.nrows();
-    let am = Mat::from_fn(n, n, |i, j| a[[i, j]]);
-    let llt = faer::linalg::solvers::Llt::new(am.as_ref(), Side::Lower)
-        .map_err(|e| RustMlError::InvalidParameter(format!("LLT failed: {e:?}")))?;
-    let bm = Mat::from_fn(n, 1, |i, _| b[i]);
-    let s = llt.solve(&bm);
-    Ok(Array1::from_vec((0..n).map(|i| s[(i, 0)]).collect()))
-}
-
-fn ols_on_subset(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
-    idx: &[usize],
-    fit_intercept: bool,
-) -> Result<(Array1<f64>, f64)> {
-    let d = x.ncols();
-    let n = idx.len();
-    if n < if fit_intercept { d + 1 } else { d } {
+fn check_finite(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+    if x.iter().chain(y.iter()).any(|v| !v.is_finite()) {
         return Err(RustMlError::InvalidParameter(
-            "subset too small for OLS".into(),
+            "X and y must not contain NaN or infinite values".into(),
         ));
     }
-
-    // Optional intercept: append 1-column.
-    let ext = if fit_intercept { d + 1 } else { d };
-    let mut xs = Array2::<f64>::zeros((n, ext));
-    let mut ys = Array1::<f64>::zeros(n);
-    for (k, &i) in idx.iter().enumerate() {
-        for j in 0..d {
-            xs[[k, j]] = x[[i, j]];
-        }
-        if fit_intercept {
-            xs[[k, d]] = 1.0;
-        }
-        ys[k] = y[i];
-    }
-    let mut g = Array2::<f64>::zeros((ext, ext));
-    let mut z = Array1::<f64>::zeros(ext);
-    for i in 0..ext {
-        for j in 0..ext {
-            let mut s = 0.0;
-            for k in 0..n {
-                s += xs[[k, i]] * xs[[k, j]];
-            }
-            g[[i, j]] = s;
-        }
-        g[[i, i]] += 1e-10;
-        let mut s = 0.0;
-        for k in 0..n {
-            s += xs[[k, i]] * ys[k];
-        }
-        z[i] = s;
-    }
-    let beta = solve_psd(&g, &z)?;
-    let coef = beta.slice(ndarray::s![..d]).to_owned();
-    let intercept = if fit_intercept { beta[d] } else { 0.0 };
-    Ok((coef, intercept))
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -77,10 +40,16 @@ fn ols_on_subset(
 
 #[derive(Debug, Clone)]
 pub struct RansacRegressor {
+    /// Subset size; default `n_features + fit_intercept`.
     pub min_samples: Option<usize>,
+    /// Inlier threshold on `|y − ŷ|`; default MAD(y).
     pub residual_threshold: Option<f64>,
     pub max_trials: usize,
+    /// Stop as soon as a consensus set has at least this many inliers.
     pub stop_n_inliers: usize,
+    /// Stop once an outlier-free subset has been drawn with this
+    /// probability (sklearn `stop_probability`, default 0.99).
+    pub stop_probability: f64,
     pub seed: u64,
     pub fit_intercept: bool,
 }
@@ -92,6 +61,7 @@ impl RansacRegressor {
             residual_threshold: None,
             max_trials: 100,
             stop_n_inliers: usize::MAX,
+            stop_probability: 0.99,
             seed: 0,
             fit_intercept: true,
         }
@@ -108,8 +78,20 @@ impl RansacRegressor {
         self.max_trials = n;
         self
     }
+    pub fn with_stop_n_inliers(mut self, n: usize) -> Self {
+        self.stop_n_inliers = n;
+        self
+    }
+    pub fn with_stop_probability(mut self, p: f64) -> Self {
+        self.stop_probability = p;
+        self
+    }
     pub fn with_seed(mut self, s: u64) -> Self {
         self.seed = s;
+        self
+    }
+    pub fn with_fit_intercept(mut self, fit_intercept: bool) -> Self {
+        self.fit_intercept = fit_intercept;
         self
     }
 }
@@ -133,95 +115,49 @@ impl Fit<f64> for RansacRegressor {
     type Fitted = FittedRansacRegressor;
 
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        let n = x.nrows();
-        let d = x.ncols();
-        if n < d + 1 {
-            return Err(RustMlError::InvalidParameter("too few samples".into()));
-        }
+        check_xy(x, y)?;
+        check_finite(x, y)?;
+        let (n, d) = x.dim();
         let min_samples = self
             .min_samples
-            .unwrap_or(if self.fit_intercept { d + 1 } else { d });
-
-        // sklearn's default residual threshold = MAD(y).
-        let threshold = self.residual_threshold.unwrap_or_else(|| {
-            let mut ys: Vec<f64> = y.iter().copied().collect();
-            ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let median = ys[ys.len() / 2];
-            let mut abs_dev: Vec<f64> = ys.iter().map(|v| (v - median).abs()).collect();
-            abs_dev.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            abs_dev[abs_dev.len() / 2]
-        });
-
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        let mut best_score = -1isize;
-        let mut best_coef = Array1::<f64>::zeros(d);
-        let mut best_intercept = 0.0;
-        let mut best_inliers = vec![false; n];
-        let mut indices: Vec<usize> = (0..n).collect();
-        let mut n_trials = 0;
-
-        for trial in 0..self.max_trials {
-            n_trials = trial + 1;
-            // Random subsample.
-            indices.shuffle(&mut rng);
-            let subset: Vec<usize> = indices[..min_samples].to_vec();
-
-            let (coef, intercept) = match ols_on_subset(x, y, &subset, self.fit_intercept) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Count inliers.
-            let mut inliers = vec![false; n];
-            let mut score = 0isize;
-            for i in 0..n {
-                let mut p = 0.0;
-                for j in 0..d {
-                    p += x[[i, j]] * coef[j];
-                }
-                p += intercept;
-                if (y[i] - p).abs() < threshold {
-                    inliers[i] = true;
-                    score += 1;
-                }
-            }
-            if score > best_score {
-                best_score = score;
-                best_coef = coef;
-                best_intercept = intercept;
-                best_inliers = inliers;
-            }
-            if (score as usize) >= self.stop_n_inliers {
-                break;
-            }
+            .unwrap_or(d + usize::from(self.fit_intercept));
+        if min_samples == 0 || min_samples > n {
+            return Err(RustMlError::InvalidParameter(format!(
+                "min_samples must be in 1..={n}, got {min_samples}"
+            )));
         }
-
-        // Refit on all inliers.
-        let inlier_idx: Vec<usize> = best_inliers
-            .iter()
-            .enumerate()
-            .filter(|(_, &b)| b)
-            .map(|(i, _)| i)
-            .collect();
-        if !inlier_idx.is_empty() {
-            if let Ok((c, b)) = ols_on_subset(x, y, &inlier_idx, self.fit_intercept) {
-                best_coef = c;
-                best_intercept = b;
-            }
+        if !(self.stop_probability > 0.0 && self.stop_probability <= 1.0) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "stop_probability must be in (0, 1], got {}",
+                self.stop_probability
+            )));
         }
-
+        let mut b = InnerRansac::builder()
+            .with_intercept(self.fit_intercept)
+            .min_samples(min_samples)
+            .max_trials(self.max_trials)
+            .stop_probability(self.stop_probability)
+            .random_state(self.seed);
+        if let Some(t) = self.residual_threshold {
+            b = b.residual_threshold(t);
+        }
+        if self.stop_n_inliers != usize::MAX {
+            b = b.stop_n_inliers(self.stop_n_inliers);
+        }
+        let fitted = b
+            .build()
+            .fit(&ndarray_to_mat(x), &ndarray_to_col(y))
+            .map_err(|e| {
+                RustMlError::InvalidParameter(format!(
+                    "RANSAC could not find a valid consensus set: {e}"
+                ))
+            })?;
+        let res = fitted.result();
         Ok(FittedRansacRegressor {
-            coef: best_coef,
-            intercept: best_intercept,
-            inlier_mask: best_inliers,
-            n_trials,
+            coef: coef_from_col(&res.coefficients),
+            intercept: res.intercept.unwrap_or(0.0),
+            inlier_mask: fitted.inlier_mask().to_vec(),
+            n_trials: fitted.n_trials(),
             n_features: d,
         })
     }
@@ -229,29 +165,28 @@ impl Fit<f64> for RansacRegressor {
 
 impl Predict<f64> for FittedRansacRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-        Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
+        linear_predict(x, &self.coef, self.intercept)
     }
 }
 
 // ---------------------------------------------------------------------------
-// TheilSenRegressor (random sub-sampling spatial median)
+// TheilSenRegressor (spatial median of subset least-squares fits)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct TheilSenRegressor {
     pub max_subpopulation: usize,
+    /// Subset size. Only the minimal size `n_features + fit_intercept`
+    /// (sklearn's default) is supported.
     pub n_subsamples: Option<usize>,
     pub max_iter: usize,
     pub tol: f64,
     pub seed: u64,
     pub fit_intercept: bool,
+    /// With one feature and an intercept, use the classical Theil-Sen
+    /// estimator (median of pairwise slopes, Sen 1968) instead of sklearn's
+    /// spatial median of `(intercept, slope)` pairs.
+    pub pairwise_slopes: bool,
 }
 
 impl TheilSenRegressor {
@@ -263,6 +198,7 @@ impl TheilSenRegressor {
             tol: 1e-3,
             seed: 0,
             fit_intercept: true,
+            pairwise_slopes: false,
         }
     }
     pub fn with_max_subpopulation(mut self, m: usize) -> Self {
@@ -271,6 +207,22 @@ impl TheilSenRegressor {
     }
     pub fn with_seed(mut self, s: u64) -> Self {
         self.seed = s;
+        self
+    }
+    pub fn with_fit_intercept(mut self, fit_intercept: bool) -> Self {
+        self.fit_intercept = fit_intercept;
+        self
+    }
+    pub fn with_max_iter(mut self, max_iter: usize) -> Self {
+        self.max_iter = max_iter;
+        self
+    }
+    pub fn with_tol(mut self, tol: f64) -> Self {
+        self.tol = tol;
+        self
+    }
+    pub fn with_pairwise_slopes(mut self, enabled: bool) -> Self {
+        self.pairwise_slopes = enabled;
         self
     }
 }
@@ -288,129 +240,43 @@ pub struct FittedTheilSenRegressor {
     n_features: usize,
 }
 
-/// Spatial median (geometric median) by Weiszfeld iterations.
-fn spatial_median(points: &Array2<f64>, max_iter: usize, tol: f64) -> Array1<f64> {
-    let d = points.ncols();
-    let n = points.nrows();
-    // Initial guess: column means.
-    let mut m = Array1::<f64>::zeros(d);
-    for j in 0..d {
-        let s: f64 = points.column(j).sum();
-        m[j] = s / n as f64;
-    }
-    for _ in 0..max_iter {
-        let mut num = Array1::<f64>::zeros(d);
-        let mut den = 0.0;
-        for i in 0..n {
-            let mut dist = 0.0;
-            for j in 0..d {
-                let v = points[[i, j]] - m[j];
-                dist += v * v;
-            }
-            let dist = dist.sqrt().max(1e-12);
-            let w = 1.0 / dist;
-            for j in 0..d {
-                num[j] += w * points[[i, j]];
-            }
-            den += w;
-        }
-        let mut m_new = Array1::<f64>::zeros(d);
-        for j in 0..d {
-            m_new[j] = num[j] / den;
-        }
-        // Convergence.
-        let shift: f64 = (0..d)
-            .map(|j| (m_new[j] - m[j]).powi(2))
-            .sum::<f64>()
-            .sqrt();
-        m = m_new;
-        if shift < tol {
-            break;
-        }
-    }
-    m
-}
-
 impl Fit<f64> for TheilSenRegressor {
     type Fitted = FittedTheilSenRegressor;
 
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {}",
-                x.nrows(),
-                y.len()
-            )));
+        check_xy(x, y)?;
+        check_finite(x, y)?;
+        let (n, d) = x.dim();
+        let k = d + usize::from(self.fit_intercept);
+        if let Some(m) = self.n_subsamples {
+            if m != k {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "n_subsamples must equal n_features + fit_intercept = {k} (got {m}); \
+                     larger subsets are not supported"
+                )));
+            }
         }
-        let n = x.nrows();
-        let d = x.ncols();
-        let k = self
-            .n_subsamples
-            .unwrap_or(if self.fit_intercept { d + 1 } else { d });
         if n < k {
             return Err(RustMlError::InvalidParameter(format!(
-                "n_subsamples={} > n={}",
-                k, n
+                "n_subsamples={k} > n={n}"
             )));
         }
-
-        // Enumerate subsamples up to max_subpopulation.
-        let mut subsets: Vec<Vec<usize>> = Vec::new();
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        // Sample with replacement of sets but dedup approximately by hashing.
-        use std::collections::HashSet;
-        let mut seen = HashSet::<Vec<usize>>::new();
-        let cap = self.max_subpopulation.min(1_000_000);
-        for _ in 0..cap {
-            let mut s: Vec<usize> = (0..k).map(|_| rng.gen_range(0..n)).collect();
-            s.sort();
-            s.dedup();
-            if s.len() < k {
-                continue;
-            }
-            if seen.insert(s.clone()) {
-                subsets.push(s);
-            }
-            if subsets.len() >= cap {
-                break;
-            }
-        }
-
-        // Fit OLS on each subset, collect coefficient vectors (β, b) in ℝ^{d+1}.
-        let ext = if self.fit_intercept { d + 1 } else { d };
-        let mut coefs = Array2::<f64>::zeros((subsets.len(), ext));
-        let mut valid = 0usize;
-        for s in &subsets {
-            if let Ok((c, b)) = ols_on_subset(x, y, s, self.fit_intercept) {
-                for j in 0..d {
-                    coefs[[valid, j]] = c[j];
-                }
-                if self.fit_intercept {
-                    coefs[[valid, d]] = b;
-                }
-                valid += 1;
-            }
-        }
-        if valid == 0 {
-            return Err(RustMlError::InvalidParameter(
-                "TheilSen could not fit any subset".into(),
-            ));
-        }
-        // Trim to valid rows.
-        let mut coefs_trim = Array2::<f64>::zeros((valid, ext));
-        for i in 0..valid {
-            for j in 0..ext {
-                coefs_trim[[i, j]] = coefs[[i, j]];
-            }
-        }
-
-        let m = spatial_median(&coefs_trim, self.max_iter, self.tol);
-        let coef = m.slice(ndarray::s![..d]).to_owned();
-        let intercept = if self.fit_intercept { m[d] } else { 0.0 };
-
+        let fitted = InnerTheilSen::builder()
+            .with_intercept(self.fit_intercept)
+            .max_subpopulation(self.max_subpopulation)
+            .max_iter(self.max_iter)
+            .tolerance(self.tol)
+            .random_state(self.seed)
+            .univariate_pairwise(self.pairwise_slopes)
+            .build()
+            .fit(&ndarray_to_mat(x), &ndarray_to_col(y))
+            .map_err(|e| {
+                RustMlError::InvalidParameter(format!("TheilSen could not fit any subset: {e}"))
+            })?;
+        let res = fitted.result();
         Ok(FittedTheilSenRegressor {
-            coef,
-            intercept,
+            coef: coef_from_col(&res.coefficients),
+            intercept: res.intercept.unwrap_or(0.0),
             n_features: d,
         })
     }
@@ -418,24 +284,18 @@ impl Fit<f64> for TheilSenRegressor {
 
 impl Predict<f64> for FittedTheilSenRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-        Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
+        linear_predict(x, &self.coef, self.intercept)
     }
 }
+
+impl anofox_ml_core::RegressorScore<f64> for FittedRansacRegressor {}
+impl anofox_ml_core::RegressorScore<f64> for FittedTheilSenRegressor {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
 
-    #[test]
-    fn test_ransac_ignores_outliers() {
+    fn line_with_outliers() -> (Array2<f64>, Array1<f64>) {
         let mut x = Vec::new();
         let mut y = Vec::new();
         // 30 inliers on y = 2x + 1.
@@ -448,8 +308,42 @@ mod tests {
             x.push(k as f64);
             y.push(100.0);
         }
-        let x = Array2::from_shape_vec((x.len(), 1), x).unwrap();
-        let y = Array1::from_vec(y);
+        (
+            Array2::from_shape_vec((x.len(), 1), x).unwrap(),
+            Array1::from_vec(y),
+        )
+    }
+
+    /// 12×2 design with two gross outliers (`data.make(12, 2)` in the
+    /// sklearn reference script).
+    fn ts_data() -> (Array2<f64>, Array1<f64>) {
+        let x = vec![
+            -2.0, -0.75, -0.75, -2.0, 1.0, 1.5, -1.0, 1.25, -1.0, -1.25, -0.5, 1.0, 0.5, -0.5, 2.0,
+            -1.5, -0.25, -2.0, -0.5, -0.5, -0.25, 1.5, 0.5, -0.25,
+        ];
+        let y = vec![
+            -1.4,
+            4.775,
+            0.09999999999999998,
+            12.3,
+            2.0,
+            -2.05,
+            2.15,
+            -3.9000000000000004,
+            5.525,
+            1.85,
+            -2.075,
+            2.25,
+        ];
+        (
+            Array2::from_shape_vec((12, 2), x).unwrap(),
+            Array1::from_vec(y),
+        )
+    }
+
+    #[test]
+    fn test_ransac_ignores_outliers() {
+        let (x, y) = line_with_outliers();
         let fitted = RansacRegressor::new()
             .with_min_samples(2)
             .with_residual_threshold(0.5)
@@ -457,34 +351,112 @@ mod tests {
             .with_seed(1)
             .fit(&x, &y)
             .unwrap();
-        assert!((fitted.coef[0] - 2.0).abs() < 0.1);
-        assert!((fitted.intercept - 1.0).abs() < 0.5);
-        let _ = array![1.0_f64];
+        assert!((fitted.coef[0] - 2.0).abs() < 1e-9);
+        assert!((fitted.intercept - 1.0).abs() < 1e-9);
+        assert_eq!(fitted.inlier_mask.iter().filter(|&&b| b).count(), 30);
+    }
+
+    #[test]
+    fn test_ransac_default_threshold_matches_sklearn() {
+        // sklearn RANSACRegressor(random_state=0): coef 2, intercept 1, 17 inliers.
+        let x = Array2::from_shape_fn((20, 1), |(i, _)| i as f64);
+        let mut y = x.column(0).mapv(|v| 2.0 * v + 1.0);
+        y[2] += 30.0;
+        y[5] -= 25.0;
+        y[11] += 40.0;
+        let f = RansacRegressor::new().fit(&x, &y).unwrap();
+        assert!((f.coef[0] - 2.0).abs() < 1e-9);
+        assert!((f.intercept - 1.0).abs() < 1e-9);
+        assert_eq!(f.inlier_mask.iter().filter(|&&b| b).count(), 17);
+    }
+
+    #[test]
+    fn test_ransac_constant_y_all_inliers() {
+        // MAD = 0 for constant y; sklearn's `<=` test keeps every row.
+        let x = Array2::from_shape_fn((20, 1), |(i, _)| i as f64);
+        let y = Array1::from_elem(20, 3.0);
+        let f = RansacRegressor::new().fit(&x, &y).unwrap();
+        assert!(f.coef[0].abs() < 1e-12);
+        assert!((f.intercept - 3.0).abs() < 1e-12);
+        assert!(f.inlier_mask.iter().all(|&b| b));
+    }
+
+    #[test]
+    fn test_ransac_rejects_bad_input_without_panicking() {
+        let (x, y) = line_with_outliers();
+        // min_samples larger than n used to panic on the slice.
+        assert!(RansacRegressor::new()
+            .with_min_samples(1000)
+            .fit(&x, &y)
+            .is_err());
+        let mut y_nan = y.clone();
+        y_nan[3] = f64::NAN;
+        assert!(RansacRegressor::new().fit(&x, &y_nan).is_err());
+    }
+
+    #[test]
+    fn test_theil_sen_matches_sklearn_enumerated() {
+        // C(12, 3) = 220 <= max_subpopulation → all subsets, deterministic.
+        // sklearn TheilSenRegressor(random_state=0).
+        let (x, y) = ts_data();
+        let f = TheilSenRegressor::new().fit(&x, &y).unwrap();
+        assert!(
+            (f.coef[0] - 0.844130614456644).abs() < 1e-3,
+            "{}",
+            f.coef[0]
+        );
+        assert!(
+            (f.coef[1] - -1.7264133144872977).abs() < 1e-3,
+            "{}",
+            f.coef[1]
+        );
+        assert!((f.intercept - 1.2278163535707047).abs() < 1e-3);
+
+        let f = TheilSenRegressor::new()
+            .with_fit_intercept(false)
+            .fit(&x, &y)
+            .unwrap();
+        assert!((f.coef[0] - 0.5903998713958836).abs() < 1e-3);
+        assert!((f.coef[1] - -1.8172298044483608).abs() < 1e-3);
+        assert_eq!(f.intercept, 0.0);
+    }
+
+    #[test]
+    fn test_theil_sen_one_feature_is_spatial_median_like_sklearn() {
+        // Distinct x values: with tied x, sklearn keeps the minimum-norm
+        // lstsq solution of the degenerate pairs while upstream skips them.
+        let (_, y) = ts_data();
+        let x1 = Array2::from_shape_fn((12, 1), |(i, _)| (i * 7 % 12) as f64 / 3.0);
+        let f = TheilSenRegressor::new().fit(&x1, &y).unwrap();
+        assert!(
+            (f.coef[0] - 2.255912988310535).abs() < 1e-3,
+            "{}",
+            f.coef[0]
+        );
+        assert!((f.intercept - -1.3758373967663822).abs() < 1e-3);
     }
 
     #[test]
     fn test_theil_sen_robust_slope() {
-        let mut x = Vec::new();
-        let mut y = Vec::new();
-        for i in 0..30 {
-            x.push(i as f64);
-            y.push(2.0 * (i as f64) + 1.0);
-        }
-        for k in 0..5 {
-            x.push(k as f64);
-            y.push(100.0);
-        }
-        let x = Array2::from_shape_vec((x.len(), 1), x).unwrap();
-        let y = Array1::from_vec(y);
+        let (x, y) = line_with_outliers();
         let fitted = TheilSenRegressor::new()
             .with_max_subpopulation(500)
             .with_seed(0)
             .fit(&x, &y)
             .unwrap();
-        // With outliers, slope should still be near 2 (TheilSen robust).
         assert!((fitted.coef[0] - 2.0).abs() < 0.5);
+        let pairwise = TheilSenRegressor::new()
+            .with_pairwise_slopes(true)
+            .fit(&x, &y)
+            .unwrap();
+        assert!((pairwise.coef[0] - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_theil_sen_rejects_unsupported_n_subsamples() {
+        let (x, y) = ts_data();
+        let mut ts = TheilSenRegressor::new();
+        ts.n_subsamples = Some(5);
+        assert!(ts.fit(&x, &y).is_err());
     }
 }
-
-impl anofox_ml_core::RegressorScore<f64> for FittedRansacRegressor {}
-impl anofox_ml_core::RegressorScore<f64> for FittedTheilSenRegressor {}
