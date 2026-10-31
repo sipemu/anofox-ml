@@ -295,6 +295,21 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     instead of `sigmas`, and `with_reg` means sklearn's `reg_param`
     (default 0).
 
+- **NMF / KernelPCA (#55):**
+  - NMF has sklearn's coordinate-descent solver (default) and
+    multiplicative updates for the Frobenius, Kullback-Leibler and
+    Itakura-Saito losses, plus `alpha_W` / `alpha_H` / `l1_ratio`
+    regularisation.
+  - The NMF convergence check no longer forms WH.
+  - `w` (the `fit_transform` result) is stored, and `transform` is
+    deterministic and implements `Transform`.
+  - NNDSVD zeroes entries below 1e-6, as sklearn does.
+  - The CD and KL-MU results match sklearn 1.8.
+  - KernelPCA builds the kernel with one GEMM, clips non-positive
+    eigenvalues, projects zero-eigenvalue components to 0, adds
+    `remove_zero_eig`, uses sklearn's sign convention, and matches sklearn
+    to 1e-9.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by

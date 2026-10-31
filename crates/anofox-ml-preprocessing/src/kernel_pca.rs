@@ -22,30 +22,13 @@ pub enum KpcaKernel {
     },
 }
 
-impl KpcaKernel {
-    fn compute(&self, a: &[f64], b: &[f64]) -> f64 {
-        match self {
-            KpcaKernel::Linear => a.iter().zip(b.iter()).map(|(x, y)| x * y).sum(),
-            KpcaKernel::Rbf { gamma } => {
-                let sd: f64 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum();
-                (-gamma * sd).exp()
-            }
-            KpcaKernel::Polynomial {
-                degree,
-                coef0,
-                gamma,
-            } => {
-                let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                (gamma * dot + coef0).powi(*degree as i32)
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct KernelPca {
     pub n_components: usize,
     pub kernel: KpcaKernel,
+    /// Drop components with zero (or negative) eigenvalue (sklearn
+    /// `remove_zero_eig`). Default false.
+    pub remove_zero_eig: bool,
 }
 
 impl KernelPca {
@@ -53,7 +36,12 @@ impl KernelPca {
         Self {
             n_components,
             kernel,
+            remove_zero_eig: false,
         }
+    }
+    pub fn with_remove_zero_eig(mut self, remove: bool) -> Self {
+        self.remove_zero_eig = remove;
+        self
     }
 }
 
@@ -67,18 +55,27 @@ pub struct FittedKernelPca {
     pub kernel: KpcaKernel,
 }
 
+/// Kernel matrix via one GEMM: every kernel here is a function of `a·b`
+/// (and of `‖a‖²`, `‖b‖²` for RBF).
 fn build_kernel(x_a: &Array2<f64>, x_b: &Array2<f64>, k: &KpcaKernel) -> Array2<f64> {
-    let na = x_a.nrows();
-    let nb = x_b.nrows();
-    let mut out = Array2::<f64>::zeros((na, nb));
-    for i in 0..na {
-        let ai = x_a.row(i).to_owned();
-        for j in 0..nb {
-            let bj = x_b.row(j).to_owned();
-            out[[i, j]] = k.compute(ai.as_slice().unwrap(), bj.as_slice().unwrap());
+    let g = x_a.dot(&x_b.t());
+    match k {
+        KpcaKernel::Linear => g,
+        KpcaKernel::Polynomial {
+            degree,
+            coef0,
+            gamma,
+        } => g.mapv(|v| (gamma * v + coef0).powi(*degree as i32)),
+        KpcaKernel::Rbf { gamma } => {
+            let na: Array1<f64> = x_a.rows().into_iter().map(|r| r.dot(&r)).collect();
+            let nb: Array1<f64> = x_b.rows().into_iter().map(|r| r.dot(&r)).collect();
+            let mut out = g;
+            for ((i, j), v) in out.indexed_iter_mut() {
+                *v = (-gamma * (na[i] + nb[j] - 2.0 * *v).max(0.0)).exp();
+            }
+            out
         }
     }
-    out
 }
 
 impl FitUnsupervised<f64> for KernelPca {
@@ -115,17 +112,41 @@ impl FitUnsupervised<f64> for KernelPca {
         let s = eig.S(); // ascending
         let v = eig.U();
 
-        // sklearn returns in descending order — slice from the end.
-        let mut alphas = Array2::<f64>::zeros((n, k_target));
-        let mut eigenvalues = Array1::<f64>::zeros(k_target);
-        for c in 0..k_target {
-            let src = n - 1 - c; // descending
-            let val = s.column_vector()[src];
-            eigenvalues[c] = val;
-            // Normalise eigenvector so that the kPCA scores are
-            // α / √λ * √λ = α (sklearn convention: scaled by √λ).
+        // sklearn: eigenvalues in descending order, tiny negatives clipped
+        // to 0 (`_check_psd_eigenvalues`), eigenvector signs fixed so that
+        // the largest-|·| entry of every column is positive (`svd_flip`).
+        let scale = s.column_vector()[n - 1].abs().max(1.0);
+        let mut cols: Vec<(f64, usize)> = (0..k_target)
+            .map(|c| {
+                let src = n - 1 - c;
+                let val = s.column_vector()[src];
+                (
+                    if val < 1e-10 * scale {
+                        0.0f64.max(val.max(0.0))
+                    } else {
+                        val
+                    },
+                    src,
+                )
+            })
+            .collect();
+        if self.remove_zero_eig {
+            cols.retain(|&(v, _)| v > 0.0);
+        }
+        let kk = cols.len();
+        let mut alphas = Array2::<f64>::zeros((n, kk));
+        let mut eigenvalues = Array1::<f64>::zeros(kk);
+        for (c, &(val, src)) in cols.iter().enumerate() {
+            eigenvalues[c] = if val < 1e-10 * scale { 0.0 } else { val };
+            let mut best = 0;
+            for i in 1..n {
+                if v[(i, src)].abs() > v[(best, src)].abs() {
+                    best = i;
+                }
+            }
+            let sign = if v[(best, src)] < 0.0 { -1.0 } else { 1.0 };
             for i in 0..n {
-                alphas[[i, c]] = v[(i, src)];
+                alphas[[i, c]] = sign * v[(i, src)];
             }
         }
 
@@ -169,18 +190,11 @@ impl Transform<f64> for FittedKernelPca {
         // unit-norm; sklearn's `lambdas_` are λ; coordinates are α * √λ where
         // each column of α corresponds to a unit eigenvector. So the
         // transformed coord for sample i, comp c is sum_j K_new[i,j] α[j,c] / √λ_c.
-        let mut out = Array2::<f64>::zeros((n_new, self.alphas.ncols()));
-        for c in 0..self.alphas.ncols() {
-            let lam = self.eigenvalues[c];
-            let sqrt_lam = lam.abs().sqrt().max(1e-12);
-            for i in 0..n_new {
-                let mut s = 0.0;
-                for j in 0..n_train {
-                    s += k_new[[i, j]] * self.alphas[[j, c]];
-                }
-                out[[i, c]] = s / sqrt_lam;
-            }
-        }
+        // Zero-eigenvalue components project to 0 (sklearn).
+        let inv_sqrt = self
+            .eigenvalues
+            .mapv(|l| if l > 0.0 { 1.0 / l.sqrt() } else { 0.0 });
+        let out = k_new.dot(&self.alphas) * &inv_sqrt;
         Ok(out)
     }
 }
@@ -263,5 +277,51 @@ mod tests {
         for v in back.iter() {
             assert!(v.is_finite());
         }
+    }
+
+    #[test]
+    fn test_rbf_transform_matches_sklearn() {
+        let xv = [
+            1.624, -0.612, -0.528, -1.073, 0.865, -2.302, 1.745, -0.761, 0.319, -0.249, 1.462,
+            -2.06, -0.322, -0.384, 1.134, -1.1, -0.172, -0.878, 0.042, 0.583, -1.101, 1.145, 0.902,
+            0.502, 0.901, -0.684, -0.123, -0.936, -0.268, 0.53,
+        ];
+        let x = Array2::from_shape_vec((10, 3), xv.to_vec()).unwrap();
+        // sklearn 1.8 KernelPCA(2, kernel='rbf', gamma=0.4)
+        let f = KernelPca::new(2, KpcaKernel::Rbf { gamma: 0.4 })
+            .fit(&x)
+            .unwrap();
+        let t = f
+            .transform(&x.slice(ndarray::s![..3, ..]).to_owned())
+            .unwrap();
+        let sk = [
+            [0.6244826994353455, -0.2987886641553929],
+            [-0.5996187251420725, -0.3894362414355089],
+            [0.6440933959886704, -0.24267860872085467],
+        ];
+        for i in 0..3 {
+            for c in 0..2 {
+                assert!(
+                    (t[[i, c]] - sk[i][c]).abs() < 1e-9,
+                    "[{i},{c}] {}",
+                    t[[i, c]]
+                );
+            }
+        }
+        assert!((f.eigenvalues[0] - 2.197718892514534).abs() < 1e-9);
+        assert!((f.eigenvalues[1] - 1.6941472173838554).abs() < 1e-9);
+        // Constant data: all eigenvalues 0 -> removed / projected to 0.
+        let c = Array2::from_elem((4, 2), 1.0);
+        assert_eq!(
+            KernelPca::new(2, KpcaKernel::Linear)
+                .with_remove_zero_eig(true)
+                .fit(&c)
+                .unwrap()
+                .eigenvalues
+                .len(),
+            0
+        );
+        let z = KernelPca::new(2, KpcaKernel::Linear).fit(&c).unwrap();
+        assert!(z.transform(&c).unwrap().iter().all(|v| *v == 0.0));
     }
 }
