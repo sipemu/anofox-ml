@@ -1,14 +1,12 @@
 //! Ridge (L2-regularized) regression wrapper.
 
-use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
+use crate::convert::{ndarray_to_col, ndarray_to_mat};
 use crate::summary::{
     interval_from, summary_from_result, IntervalKind, PredictionInterval, RegressionSummary,
 };
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use anofox_regression::solvers::{FittedRidge, RidgeRegressor as InnerRidge};
 use anofox_regression::{FittedRegressor as _, Regressor as _};
-use faer::linalg::solvers::Solve;
-use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
 
 /// Ridge regression estimator with L2 regularization.
@@ -73,15 +71,17 @@ pub struct FittedRidgeRegressor {
     inner: FittedRidge,
     n_features: usize,
     inference: bool,
+    coef: Array1<f64>,
+    intercept: Option<f64>,
 }
 
 impl FittedRidgeRegressor {
     pub fn coefficients(&self) -> Array1<f64> {
-        col_to_ndarray(self.inner.coefficients())
+        self.coef.clone()
     }
 
     pub fn intercept(&self) -> Option<f64> {
-        self.inner.intercept()
+        self.intercept
     }
 
     pub fn r_squared(&self) -> f64 {
@@ -90,6 +90,9 @@ impl FittedRidgeRegressor {
 
     /// Coefficient table (requires `with_inference(true)`).
     pub fn summary(&self) -> Result<RegressionSummary> {
+        if !self.inference {
+            return Err(crate::summary::not_computed());
+        }
         summary_from_result(self.inner.result())
     }
 
@@ -150,138 +153,69 @@ impl Fit<f64> for RidgeRegressor {
             .fit(&x_mat, &y_col)
             .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
 
+        let (coef, intercept) = crate::convert::predict_params(fitted.result());
         Ok(FittedRidgeRegressor {
             inner: fitted,
             n_features: x.ncols(),
             inference: self.inference,
+            coef,
+            intercept: self.with_intercept.then_some(intercept),
         })
     }
 }
 
-/// Weighted Ridge result: closed-form `(XᵀWX + λI) β = XᵀWy` with optional
-/// intercept absorbed as an extra constant column. Lives outside the anofox
-/// wrapper because anofox does not currently support `sample_weight`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FittedWeightedRidgeRegressor {
-    pub coef: Array1<f64>,
-    pub intercept: f64,
-    n_features: usize,
-}
-
-impl Predict<f64> for FittedWeightedRidgeRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-        Ok(x.dot(&self.coef).mapv(|v| v + self.intercept))
-    }
-}
-
 impl FitWeighted<f64> for RidgeRegressor {
-    type Fitted = FittedWeightedRidgeRegressor;
+    type Fitted = FittedRidgeRegressor;
 
+    /// Minimises `Σ wᵢ (yᵢ − xᵢβ − β₀)² + λ‖β‖²` (sklearn's `sample_weight`).
+    ///
+    /// As in sklearn, X and y are centred by their weighted means and each
+    /// row is scaled by `√wᵢ`; the upstream ridge solver then fits the
+    /// rescaled problem without intercept, and `β₀ = ȳ_w − x̄_wᵀβ`.
+    /// `r_squared` is the weighted R². Inference is not available for a
+    /// weighted fit (`summary` / `predict_interval` return an error).
+    /// `None` is identical to [`Fit::fit`].
     fn fit_weighted(
         &self,
         x: &Array2<f64>,
         y: &Array1<f64>,
         sample_weight: Option<&Array1<f64>>,
     ) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
+        let Some(w) = sample_weight else {
+            return self.fit(x, y);
+        };
+        crate::convert::check_xy(x, y)?;
         if self.lambda < 0.0 {
             return Err(RustMlError::InvalidParameter(
                 "lambda must be non-negative".into(),
             ));
         }
-        if let Some(w) = sample_weight {
-            if w.len() != y.len() {
-                return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight len {} != y len {}",
-                    w.len(),
-                    y.len()
-                )));
-            }
-            for &wi in w.iter() {
-                if !wi.is_finite() || wi < 0.0 {
-                    return Err(RustMlError::InvalidParameter(
-                        "sample_weight must be non-negative finite".into(),
-                    ));
-                }
-            }
-        }
+        let w = crate::convert::resolve_sample_weight(Some(w), y.len())?;
+        let sqrt_w = w.mapv(f64::sqrt);
 
-        let n = x.nrows();
-        let d = x.ncols();
-        let ext = if self.with_intercept { d + 1 } else { d };
-
-        // Build design matrix with optional intercept column at the end.
-        let xb = |i: usize, j: usize| -> f64 {
-            if j < d {
-                x[[i, j]]
-            } else {
-                1.0
-            }
-        };
-        let w = |i: usize| -> f64 { sample_weight.map(|s| s[i]).unwrap_or(1.0) };
-
-        // XᵀWX (ext × ext).
-        let mut xtwx = Array2::<f64>::zeros((ext, ext));
-        for a in 0..ext {
-            for b in 0..ext {
-                let mut s = 0.0;
-                for i in 0..n {
-                    s += xb(i, a) * w(i) * xb(i, b);
-                }
-                xtwx[[a, b]] = s;
-            }
-        }
-        // Add λ I (skip intercept column — sklearn convention).
-        for a in 0..d {
-            xtwx[[a, a]] += self.lambda;
-        }
-        // Always add tiny ridge for numerical safety on otherwise-singular X.
-        for a in 0..ext {
-            xtwx[[a, a]] += 1e-12;
-        }
-        let mut xtwy = Array1::<f64>::zeros(ext);
-        for a in 0..ext {
-            let mut s = 0.0;
-            for i in 0..n {
-                s += xb(i, a) * w(i) * y[i];
-            }
-            xtwy[a] = s;
-        }
-        // Cholesky solve.
-        let m = Mat::from_fn(ext, ext, |i, j| xtwx[[i, j]]);
-        let llt = faer::linalg::solvers::Llt::new(m.as_ref(), Side::Lower)
-            .map_err(|e| RustMlError::InvalidParameter(format!("Cholesky failed: {e:?}")))?;
-        let rhs = Mat::from_fn(ext, 1, |i, _| xtwy[i]);
-        let sol = llt.solve(&rhs);
-        let mut beta = Array1::<f64>::zeros(d);
-        for j in 0..d {
-            beta[j] = sol[(j, 0)];
-        }
-        let intercept = if self.with_intercept {
-            sol[(d, 0)]
+        let (x_mean, y_mean) = if self.with_intercept {
+            let wsum = w.sum();
+            (w.dot(x) / wsum, w.dot(y) / wsum)
         } else {
-            0.0
+            (Array1::zeros(x.ncols()), 0.0)
         };
-        Ok(FittedWeightedRidgeRegressor {
-            coef: beta,
+        let xs = (x - &x_mean) * &sqrt_w.view().insert_axis(ndarray::Axis(1));
+        let ys = (y - y_mean) * &sqrt_w;
+
+        let fitted = InnerRidge::builder()
+            .with_intercept(false)
+            .lambda(self.lambda)
+            .build()
+            .fit(&ndarray_to_mat(&xs), &ndarray_to_col(&ys))
+            .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
+        let (coef, _) = crate::convert::predict_params(fitted.result());
+        let intercept = self.with_intercept.then(|| y_mean - x_mean.dot(&coef));
+        Ok(FittedRidgeRegressor {
+            inner: fitted,
+            n_features: x.ncols(),
+            inference: false,
+            coef,
             intercept,
-            n_features: d,
         })
     }
 }
@@ -296,9 +230,7 @@ impl Predict<f64> for FittedRidgeRegressor {
             )));
         }
 
-        let x_mat = ndarray_to_mat(x);
-        let preds = self.inner.predict(&x_mat);
-        Ok(col_to_ndarray(&preds))
+        crate::convert::linear_predict(x, &self.coef, self.intercept.unwrap_or(0.0))
     }
 }
 
@@ -393,8 +325,50 @@ mod tests {
         let weighted = rr.fit_weighted(&x, &y, Some(&w)).unwrap();
         // Both should recover slope ~ 2 and intercept ~ 1.
         assert!((unw.coefficients()[0] - 2.0).abs() < 0.05);
-        assert!((weighted.coef[0] - 2.0).abs() < 0.05);
-        assert!((weighted.intercept - 1.0).abs() < 0.1);
+        assert_abs_diff_eq!(
+            weighted.coefficients()[0],
+            unw.coefficients()[0],
+            epsilon = 1e-10
+        );
+        assert_abs_diff_eq!(
+            weighted.intercept().unwrap(),
+            unw.intercept().unwrap(),
+            epsilon = 1e-10
+        );
+        assert!(weighted.summary().is_err());
+    }
+
+    #[test]
+    fn test_ridge_weights_match_sklearn() {
+        // sklearn 1.8: Ridge(alpha=0.7).fit(X, y, sample_weight=w)
+        let x = array![
+            [0.5, 1.2],
+            [1.0, -0.3],
+            [1.5, 2.2],
+            [2.0, 0.1],
+            [2.5, 1.7],
+            [3.0, -1.0],
+            [3.5, 0.4]
+        ];
+        let y = array![1.3, 2.1, 4.0, 3.2, 5.6, 3.9, 6.1];
+        let w = array![1.0, 2.0, 0.5, 3.0, 1.0, 0.0, 2.5];
+        let f = RidgeRegressor::new()
+            .with_lambda(0.7)
+            .fit_weighted(&x, &y, Some(&w))
+            .unwrap();
+        let (c, b) = (f.coefficients(), f.intercept().unwrap());
+        assert_abs_diff_eq!(c[0], 1.505_442_95, epsilon = 1e-8);
+        assert_abs_diff_eq!(c[1], 0.494_618_58, epsilon = 1e-8);
+        assert_abs_diff_eq!(b, 0.476_371_221_034_365_36, epsilon = 1e-8);
+        // Normal equations of the weighted, centred problem must hold.
+        let wsum = w.sum();
+        let xm = w.dot(&x) / wsum;
+        let ym = w.dot(&y) / wsum;
+        assert_abs_diff_eq!(b, ym - xm.dot(&c), epsilon = 1e-12);
+        let xc = &x - &xm;
+        let r = &y - ym - xc.dot(&c);
+        let grad = xc.t().dot(&(&r * &w)) - &c * 0.7;
+        assert!(grad.iter().all(|g| g.abs() < 1e-9), "grad = {grad}");
     }
 
     #[test]
@@ -416,4 +390,3 @@ mod tests {
 }
 
 impl anofox_ml_core::RegressorScore<f64> for FittedRidgeRegressor {}
-impl anofox_ml_core::RegressorScore<f64> for FittedWeightedRidgeRegressor {}

@@ -327,6 +327,23 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     repeat.
   - Row and column selection use ndarray's `select`.
 
+- **Regression conversions and small solvers (#32):**
+  - ndarray → faer conversion copies standard-layout arrays through a
+    strided view instead of bounds-checked indexing; OLS/WLS, Ridge,
+    ElasticNet and Quantile predict in ndarray from cached coefficients
+    (aliased / `NaN` coefficients count as 0, as upstream).
+  - Weighted Ridge delegates to the upstream solver (weighted centring and
+    `√w` row scaling, as sklearn does) and matches sklearn 1.8.
+    **Breaking:** `FitWeighted` returns `FittedRidgeRegressor`;
+    `FittedWeightedRidgeRegressor` is removed.
+  - OMP grows the Cholesky factor of the active Gram matrix by one row per
+    step (sklearn's `_cholesky_omp`), stops on linear dependence and
+    matches sklearn 1.8. **Breaking:** the default is `max(⌊0.1·d⌋, 1)`
+    coefficients, `tol` overrides `n_nonzero_coefs`, and
+    `n_nonzero_coefs > d` is an error.
+  - New `SvmKernel::matrix` / `SvmKernel::gram` build kernel matrices from
+    one GEMM; KernelRidge and SVC prediction use them.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by

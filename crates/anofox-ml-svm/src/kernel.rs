@@ -296,13 +296,84 @@ pub(crate) fn kernel_matrix<F: Float>(
     if kernel.is_precomputed() {
         return a.to_owned();
     }
-    let mut k = Array2::<F>::zeros((a.nrows(), b.nrows()));
-    for (i, ai) in a.rows().into_iter().enumerate() {
-        for (j, bj) in b.rows().into_iter().enumerate() {
-            k[[i, j]] = kernel.compute(&ai, &bj);
-        }
+    kernel.matrix(a, b)
+}
+
+impl SvmKernel {
+    /// Kernel matrix `K[i, j] = k(a_i, b_j)` built from one GEMM `A Bᵀ`
+    /// (RBF via `‖a‖² + ‖b‖² − 2 a·b`, clamped at 0, as sklearn does).
+    ///
+    /// # Panics
+    ///
+    /// Same conditions as [`compute`](Self::compute).
+    pub fn matrix<F: Float>(&self, a: &Array2<F>, b: &Array2<F>) -> Array2<F> {
+        self.matrix_impl(a, b, false)
     }
-    k
+
+    /// Symmetric Gram matrix `k(X, X)`. The RBF diagonal is exactly 1.
+    ///
+    /// # Panics
+    ///
+    /// Same conditions as [`compute`](Self::compute).
+    pub fn gram<F: Float>(&self, x: &Array2<F>) -> Array2<F> {
+        self.matrix_impl(x, x, true)
+    }
+
+    fn matrix_impl<F: Float>(&self, a: &Array2<F>, b: &Array2<F>, same: bool) -> Array2<F> {
+        let g = |gamma: &Gamma| -> F {
+            let v = match gamma {
+                Gamma::Value(v) => *v,
+                Gamma::Auto => 1.0 / a.ncols().max(1) as f64,
+                Gamma::Scale => panic!(
+                    "SvmKernel::matrix called with unresolved gamma='scale'; \
+                     call SvmKernel::resolve(&x_train) first"
+                ),
+            };
+            F::from_f64(v).unwrap()
+        };
+        if self.is_precomputed() {
+            panic!(
+                "SvmKernel::matrix is undefined for the precomputed kernel; \
+                 pass the Gram matrix as X instead"
+            );
+        }
+        let mut k = a.dot(&b.t());
+        match self {
+            SvmKernel::Linear | SvmKernel::Precomputed => {}
+            SvmKernel::Rbf { gamma } => {
+                let gamma = g(gamma);
+                let na: Vec<F> = a.rows().into_iter().map(|r| r.dot(&r)).collect();
+                let nb: Vec<F> = if same {
+                    na.clone()
+                } else {
+                    b.rows().into_iter().map(|r| r.dot(&r)).collect()
+                };
+                let two = F::from_f64(2.0).unwrap();
+                for ((i, j), v) in k.indexed_iter_mut() {
+                    let d = if same && i == j {
+                        F::zero()
+                    } else {
+                        (na[i] + nb[j] - two * *v).max(F::zero())
+                    };
+                    *v = (-gamma * d).exp();
+                }
+            }
+            SvmKernel::Polynomial {
+                degree,
+                gamma,
+                coef0,
+            } => {
+                let (gamma, coef0) = (g(gamma), F::from_f64(*coef0).unwrap());
+                let degree = i32::try_from(*degree).unwrap_or(i32::MAX);
+                k.mapv_inplace(|v| (gamma * v + coef0).powi(degree));
+            }
+            SvmKernel::Sigmoid { gamma, coef0 } => {
+                let (gamma, coef0) = (g(gamma), F::from_f64(*coef0).unwrap());
+                k.mapv_inplace(|v| (gamma * v + coef0).tanh());
+            }
+        }
+        k
+    }
 }
 
 #[cfg(test)]
@@ -310,6 +381,33 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_matrix_matches_pointwise() {
+        let a = array![[0.3, -1.2, 2.0], [1.5, 0.1, -0.7], [0.0, 0.4, 0.9]];
+        let b = array![[1.0, 1.0, -1.0], [0.2, -0.3, 0.5]];
+        for kernel in [
+            SvmKernel::Linear,
+            SvmKernel::rbf(0.4),
+            SvmKernel::Rbf { gamma: Gamma::Auto },
+            SvmKernel::poly(3, 0.5, 1.0),
+            SvmKernel::sigmoid(0.2, -0.1),
+        ] {
+            let k = kernel.matrix(&a, &b);
+            let g = kernel.gram(&a);
+            for i in 0..3 {
+                for j in 0..2 {
+                    let e: f64 = kernel.compute(&a.row(i), &b.row(j));
+                    assert_abs_diff_eq!(k[[i, j]], e, epsilon = 1e-12);
+                }
+                for j in 0..3 {
+                    let e: f64 = kernel.compute(&a.row(i), &a.row(j));
+                    assert_abs_diff_eq!(g[[i, j]], e, epsilon = 1e-12);
+                    assert_eq!(g[[i, j]], g[[j, i]]);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_linear_kernel() {
