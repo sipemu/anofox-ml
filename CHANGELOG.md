@@ -135,6 +135,112 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   - **Breaking:** binary classifiers train a single model
     (`weights().len() == 1`).
 
+### sklearn parity (review P1)
+
+Each item below is checked against hardcoded scikit-learn 1.8 reference values.
+**Breaking** marks API or default changes.
+
+- **anofox-regression 0.7 (#27):**
+  - The dependency is bumped from 0.5 to 0.7.
+  - TheilSen, RANSAC, BayesianRidge/ARD (now with `predict_std`), LARS /
+    LassoLars / LassoLarsIC, PassiveAggressiveRegressor (now with `PartialFit`)
+    and PLSRegression (now with `transform` and scores) delegate to it.
+  - LassoLarsIC evaluates sklearn's criterion along a single path.
+  - RANSAC no longer panics when `min_samples > n` or on NaN.
+  - Upstream deviations from sklearn are tracked in #72 (no local
+    workarounds): the LassoLars drop rule and `predict_std` centring.
+- **Regularisation CV (#28):** LassoCV/ElasticNetCV use warm-started
+  coordinate-descent paths on sklearn's alpha scale with the default 100-alpha
+  grid. They select by pooled MSE over seeded or explicit folds and expose
+  `alphas()`, `mse_path()` and `alpha_1se()`. RidgeCV defaults to exact
+  leave-one-out from one SVD. **Breaking:** the alpha scale and the folds changed.
+- **GLMs (#29):**
+  - Poisson/Tweedie/Gamma/Binomial `alpha` now has sklearn's scaling
+    (upstream `lambda = alpha · Σw`).
+  - Offset/exposure support and opt-in inference via `with_inference(true)`
+    → `summary()` (SE, z/t, p, CI).
+  - `predict_interval` for OLS/WLS/Ridge.
+  - Binomial `sample_weight` and probit/cloglog links.
+  - Blocked on anofox-regression (#72): sklearn's default `alpha = 1.0`
+    (upstream penalised IRLS does not converge; the default stays 0) and
+    `sample_weight` for Poisson/Tweedie/Gamma.
+- **LogisticRegressor (#30):**
+  - Binary and one-vs-rest multiclass with `C`, `class_weight` and
+    `sample_weight`, delegated to upstream's logit GLM.
+  - Implements the core classifier traits.
+  - **Breaking:** `predict_proba` is `(n, K)` and the default is `C = 1.0`.
+  - Blocked on anofox-regression (#72): the multinomial loss and L1 /
+    elastic-net penalties (both return an error).
+- **Metrics (#35):**
+  - `Average::Binary { pos_label }`, per-class scores, and `ClassificationOptions`
+    (`labels`, `sample_weight`, `zero_division`).
+  - Multiclass `roc_auc_score_multiclass` (OvR/OvO) and `log_loss_multiclass`.
+  - Labels are encoded once with exact comparison.
+  - With constant `y`, `r2_score` gives 1.0 for a perfect fit and 0.0 otherwise.
+- **Halving search (#36):** per-round (stratified) k-fold CV, sklearn's schedule,
+  and NaN scores ranked last. Also returns per-iteration `n_resources` /
+  `n_candidates`.
+- **Boosting / stacking (#46):**
+  - GradientBoostingClassifier uses Newton leaf values and true multinomial deviance.
+  - AdaBoost SAMME uses sample weights; AdaBoost.R2 predicts the weighted median.
+  - StackingClassifier uses stratified shuffled folds and drops the binary column.
+- **HGB / LGBM (#47):**
+  - HGB handles NaN natively, with a learned split direction.
+  - `max_bins` must be ≤ 255 (**breaking:** HGB default is now 255).
+  - LGBM monotone constraints now hold globally.
+- **Feature selection (#53):**
+  - RFECV scores one elimination path per fold with a train/test scorer.
+  - SelectFromModel uses absolute importances and a mean/median threshold.
+  - k-NN mutual information (`mutual_info_regression` / `mutual_info_classif`).
+  - SelectKBest gains chi2, MI scorers and p-values.
+  - **Breaking:** the RFECV scorer signature changed and
+    `MutualInformationSelector` lost `n_bins`.
+- **Transformers (#54):**
+  - OneHotEncoder: real categories, `handle_unknown`, `drop`, `min_frequency` /
+    `max_categories`, `inverse_transform` and sparse output.
+  - OrdinalEncoder: `UseEncodedValue`.
+  - QuantileTransformer: two-sided interpolation and inverse.
+  - PowerTransformer: Brent-optimised λ and Box-Cox.
+  - KBinsDiscretizer: kmeans strategy and duplicate-edge removal.
+  - VarianceThreshold / StandardScaler: sklearn constant-feature handling.
+- **KMeans (#58):** `n_init`, `KMeansInit`, data-relative `tol`, and empty-cluster
+  relocation. One shared greedy k-means++ is used by MiniBatchKMeans, GMM and
+  BGMM. Assignment uses GEMM plus rayon.
+- **Gaussian mixtures (#59):**
+  - Tied/Spherical covariance types and k-means initialisation.
+  - The precision Cholesky is computed once per iteration.
+  - New `score_samples` / `bic` / `aic` / `converged`.
+  - BGMM `lower_bound` is now the real ELBO.
+  - A singular covariance is now an error.
+- **SVM (#64):**
+  - Multiclass SVC/NuSVC use one-vs-one, with `decision_function_shape` and
+    `break_ties`.
+  - `class_weight` and `probability = true` (Platt + pairwise coupling).
+  - Sigmoid and precomputed kernels.
+  - **Breaking:** `gamma` defaults to `Gamma::Scale`, and the polynomial kernel
+    takes `gamma`.
+- **Naive Bayes (#67):**
+  - **Breaking:** GaussianNB `var_smoothing` is relative to the largest feature
+    variance.
+  - GaussianNB gains `priors`.
+  - Multinomial/Bernoulli gain `partial_fit`, `sample_weight` and
+    `fit_prior`/`class_prior`.
+  - `predict_log_proba` is computed in log space.
+  - New ComplementNB and CategoricalNB.
+- **Gaussian processes (#68):**
+  - **Breaking:** `fit` optimises kernel hyperparameters (analytic LML gradients,
+    bounded L-BFGS-B in `anofox_ml_core::optim`).
+  - ARD kernels and per-parameter bounds.
+  - New `predict_cov` / `sample_y`.
+  - The White kernel matches sklearn.
+  - The GPC objective bug is fixed, and GPC uses erf-based probabilities.
+- **MLP (#69):**
+  - **Breaking:** sklearn L2 scaling, stopping rule, Glorot initialisation and a
+    single logistic output for binary problems.
+  - New lbfgs solver.
+  - SGD momentum/Nesterov with learning-rate schedules.
+  - Early stopping, `partial_fit` / warm start and multi-output regression.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by
