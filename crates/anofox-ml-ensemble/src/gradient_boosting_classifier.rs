@@ -1,11 +1,11 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
-use crate::forest_common::{argmax_first, class_index, select_rows, sorted_classes};
+use crate::forest_common::{argmax_first, class_index, sorted_classes};
 
 /// Gradient boosting classifier parameters (unfitted state).
 ///
@@ -127,6 +127,31 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
     type Fitted = FittedGradientBoostingClassifier<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for GradientBoostingClassifier {
+    type Fitted = FittedGradientBoostingClassifier<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl GradientBoostingClassifier {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedGradientBoostingClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -177,15 +202,19 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
         // Initial raw prediction (sklearn's `init='prior'` / DummyClassifier):
         // binary = log-odds of the positive class; multiclass = log priors,
         // centred so they sum to zero (symmetric multinomial logit link).
-        let eps = F::epsilon();
-        let n_f = F::from_usize(n_samples).unwrap();
-        let mut counts = vec![0usize; n_classes];
-        for &k in &y_idx {
-            counts[k] += 1;
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, n_samples)?;
         }
+        let weight = |i: usize| sample_weight.map_or(F::one(), |w| w[i]);
+        let eps = F::epsilon();
+        let mut counts = vec![F::zero(); n_classes];
+        for (i, &k) in y_idx.iter().enumerate() {
+            counts[k] += weight(i);
+        }
+        let n_f = counts.iter().fold(F::zero(), |a, &b| a + b);
         let priors: Vec<F> = counts
             .iter()
-            .map(|&c| clamp(F::from_usize(c).unwrap() / n_f, eps, F::one() - eps))
+            .map(|&c| clamp(c / n_f, eps, F::one() - eps))
             .collect();
         let initial_values: Vec<F> = if n_classes == 2 {
             vec![(priors[1] / (F::one() - priors[1])).ln()]
@@ -242,11 +271,6 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
                 in_bag.truncate(n_inbag);
                 in_bag.sort_unstable();
             }
-            let x_sub = if use_subsample {
-                Some(select_rows(x, &in_bag))
-            } else {
-                None
-            };
 
             for k in 0..n_trees_per_round {
                 // Class whose indicator is the target of this tree.
@@ -260,12 +284,16 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
                     neg_grad[i] = y_k - probs[[i, k]];
                 }
 
-                let mut tree: FittedDecisionTreeRegressor<F> = match &x_sub {
-                    Some(xs) => {
-                        let r_sub = Array1::from_iter(in_bag.iter().map(|&i| neg_grad[i]));
-                        tree_params.fit(xs, &r_sub)?
-                    }
-                    None => tree_params.fit(x, &neg_grad)?,
+                let mut tree: FittedDecisionTreeRegressor<F> = if use_subsample {
+                    crate::forest_common::fit_tree_on_rows(
+                        &tree_params,
+                        x,
+                        &neg_grad,
+                        &in_bag,
+                        sample_weight,
+                    )?
+                } else {
+                    tree_params.fit_weighted(x, &neg_grad, sample_weight)?
                 };
 
                 // Newton step per leaf over the in-bag samples:
@@ -276,8 +304,9 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
                 let mut den = vec![F::zero(); n_leaves];
                 for &i in &in_bag {
                     let p = probs[[i, k]];
-                    num[leaves[i]] += neg_grad[i];
-                    den[leaves[i]] += p * (F::one() - p);
+                    let w = weight(i);
+                    num[leaves[i]] += w * neg_grad[i];
+                    den[leaves[i]] += w * p * (F::one() - p);
                 }
                 let values: Vec<F> = num
                     .iter()

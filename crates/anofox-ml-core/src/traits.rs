@@ -16,6 +16,19 @@ pub trait Fit<F: Float> {
 pub trait FitUnsupervised<F: Float> {
     type Fitted;
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted>;
+
+    /// Pipeline hook: fit with the pipeline's target (if any), optionally
+    /// returning the transformed training data so it need not be
+    /// recomputed. The default ignores `y`, calls [`fit`](Self::fit) and
+    /// returns `None`. Composite transformers override it to forward `y` to
+    /// supervised branches and to transform in a single pass.
+    fn fit_with_target(
+        &self,
+        x: &Array2<F>,
+        _y: Option<&Array1<F>>,
+    ) -> Result<(Self::Fitted, Option<Array2<F>>)> {
+        Ok((self.fit(x)?, None))
+    }
 }
 
 /// Predict target values from input features.

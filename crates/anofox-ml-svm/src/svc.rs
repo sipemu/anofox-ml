@@ -10,14 +10,9 @@ use crate::kernel::{kernel_matrix, SvmKernel};
 use crate::solver::{self, KernelSource, QKind, QMatrix, SolverParams};
 
 /// Per-class weights for the SVC penalty: sample `i` gets the upper bound
-/// `C · w_{y_i}` (sklearn's `class_weight`).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ClassWeight {
-    /// `w_c = n_samples / (n_classes · n_c)`.
-    Balanced,
-    /// Explicit `(label, weight)` pairs; unlisted classes get weight 1.
-    Map(Vec<(f64, f64)>),
-}
+/// `C · w_{y_i}` (sklearn's `class_weight`). A `Manual` label that is not a
+/// class of `y` is an error, as in sklearn.
+pub use anofox_ml_core::ClassWeight;
 
 /// Shape of [`FittedSvc::decision_function`] for more than two classes
 /// (sklearn's `decision_function_shape`).
@@ -484,7 +479,7 @@ fn class_weights<F: Float>(
             let n = class_idx.len() as f64;
             Ok(counts.iter().map(|&c| n / (k as f64 * c as f64)).collect())
         }
-        Some(ClassWeight::Map(map)) => {
+        Some(ClassWeight::Manual(map)) => {
             let mut w = vec![1.0; k];
             for &(label, weight) in map {
                 if !(weight.is_finite() && weight >= 0.0) {
@@ -1700,7 +1695,7 @@ mod sklearn_parity {
         let base = Svc::new().with_kernel(SvmKernel::rbf(0.5)).with_c(2.0);
         let cw: FittedSvc<f64> = base
             .clone()
-            .with_class_weight(Some(ClassWeight::Map(vec![(0.0, 3.0), (2.0, 0.5)])))
+            .with_class_weight(Some(ClassWeight::Manual(vec![(0.0, 3.0), (2.0, 0.5)])))
             .fit(&x, &y)
             .unwrap();
         let sw = y.mapv(|v| match v as i64 {
@@ -1720,7 +1715,7 @@ mod sklearn_parity {
         assert_eq!(w, vec![4.0 / 6.0, 2.0]);
         // Unknown labels in the map are rejected.
         let r: Result<FittedSvc<f64>> = Svc::new()
-            .with_class_weight(Some(ClassWeight::Map(vec![(7.0, 2.0)])))
+            .with_class_weight(Some(ClassWeight::Manual(vec![(7.0, 2.0)])))
             .fit(&x, &y);
         assert!(r.is_err());
     }
@@ -1747,7 +1742,7 @@ mod sklearn_parity {
         let heavy: FittedSvc<f64> = Svc::new()
             .with_kernel(SvmKernel::Linear)
             .with_c(0.5)
-            .with_class_weight(Some(ClassWeight::Map(vec![(1.0, 10.0)])))
+            .with_class_weight(Some(ClassWeight::Manual(vec![(1.0, 10.0)])))
             .fit(&x, &y)
             .unwrap();
         assert!(

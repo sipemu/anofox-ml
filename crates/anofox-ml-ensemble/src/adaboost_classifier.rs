@@ -1,4 +1,4 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion};
 use ndarray::{Array1, Array2};
 
@@ -89,6 +89,31 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
     type Fitted = FittedAdaBoostClassifier<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for AdaBoostClassifier {
+    type Fitted = FittedAdaBoostClassifier<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl AdaBoostClassifier {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedAdaBoostClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -134,8 +159,17 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
             seed: self.seed,
         };
 
-        // Sample weights, kept normalized to sum to 1.
-        let mut weights = Array1::<f64>::from_elem(n_samples, 1.0 / n_samples as f64);
+        // Sample weights, kept normalized to sum to 1 (sklearn starts from
+        // the normalised `sample_weight`).
+        let mut weights = match sample_weight {
+            Some(w) => {
+                anofox_ml_core::check_sample_weight(w, n_samples)?;
+                let w = w.mapv(|v| v.to_f64().unwrap());
+                let total = w.sum();
+                w / total
+            }
+            None => Array1::<f64>::from_elem(n_samples, 1.0 / n_samples as f64),
+        };
 
         let mut estimators = Vec::with_capacity(self.n_estimators);
         let mut estimator_weights = Vec::with_capacity(self.n_estimators);

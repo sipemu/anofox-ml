@@ -451,6 +451,169 @@ impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
     }
 }
 
+/// Classification accumulator over per-class weight totals. With unit
+/// weights it performs exactly the arithmetic of the unweighted one.
+struct WeightedClassificationAccumulator<'w, F: Float> {
+    weights: &'w Array1<F>,
+    left: Vec<F>,
+    right: Vec<F>,
+    left_weight: F,
+    right_weight: F,
+    n_left: usize,
+    n_right: usize,
+    criterion: SplitCriterion,
+    class_map: HashMap<u64, usize>,
+}
+
+impl<'w, F: Float> WeightedClassificationAccumulator<'w, F> {
+    fn new(
+        y: &Array1<F>,
+        indices: &[usize],
+        weights: &'w Array1<F>,
+        criterion: SplitCriterion,
+    ) -> Self {
+        let class_map = build_class_map(y, indices);
+        let k = class_map.len();
+        let mut acc = Self {
+            weights,
+            left: vec![F::zero(); k],
+            right: vec![F::zero(); k],
+            left_weight: F::zero(),
+            right_weight: F::zero(),
+            n_left: 0,
+            n_right: 0,
+            criterion,
+            class_map,
+        };
+        acc.reset(y, indices);
+        acc
+    }
+}
+
+impl<F: Float> SplitAccumulator<F> for WeightedClassificationAccumulator<'_, F> {
+    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+        self.left.fill(F::zero());
+        self.right.fill(F::zero());
+        self.left_weight = F::zero();
+        self.right_weight = F::zero();
+        for &i in indices {
+            let w = self.weights[i];
+            self.right[self.class_map[&float_key(y[i])]] += w;
+            self.right_weight += w;
+        }
+        self.n_left = 0;
+        self.n_right = indices.len();
+    }
+
+    fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
+        let w = self.weights[idx];
+        let cls = self.class_map[&float_key(y[idx])];
+        self.left[cls] += w;
+        self.right[cls] -= w;
+        self.left_weight += w;
+        self.right_weight -= w;
+        self.n_left += 1;
+        self.n_right -= 1;
+    }
+
+    fn weighted_impurity(&self, _n: usize) -> F {
+        let total = self.left_weight + self.right_weight;
+        if total <= F::zero() {
+            return F::zero();
+        }
+        let li = impurity_from_weights(self.left.iter().copied(), self.left_weight, self.criterion);
+        let ri = impurity_from_weights(
+            self.right.iter().copied(),
+            self.right_weight,
+            self.criterion,
+        );
+        (self.left_weight / total) * li + (self.right_weight / total) * ri
+    }
+
+    fn n_left(&self) -> usize {
+        self.n_left
+    }
+
+    fn n_right(&self) -> usize {
+        self.n_right
+    }
+}
+
+/// Regression accumulator over weighted running sums `Σw`, `Σwy`, `Σwy²`.
+/// With unit weights it performs exactly the arithmetic of the unweighted
+/// one.
+struct WeightedRegressionAccumulator<'w, F: Float> {
+    weights: &'w Array1<F>,
+    left: [F; 3],
+    right: [F; 3],
+    n_left: usize,
+    n_right: usize,
+}
+
+impl<'w, F: Float> WeightedRegressionAccumulator<'w, F> {
+    fn new(y: &Array1<F>, indices: &[usize], weights: &'w Array1<F>) -> Self {
+        let mut acc = Self {
+            weights,
+            left: [F::zero(); 3],
+            right: [F::zero(); 3],
+            n_left: 0,
+            n_right: 0,
+        };
+        acc.reset(y, indices);
+        acc
+    }
+
+    fn mse(s: &[F; 3]) -> F {
+        if s[0] <= F::zero() {
+            return F::zero();
+        }
+        s[2] / s[0] - (s[1] / s[0]) * (s[1] / s[0])
+    }
+}
+
+impl<F: Float> SplitAccumulator<F> for WeightedRegressionAccumulator<'_, F> {
+    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+        self.left = [F::zero(); 3];
+        self.right = [F::zero(); 3];
+        for &i in indices {
+            let (w, v) = (self.weights[i], y[i]);
+            self.right[0] += w;
+            self.right[1] += w * v;
+            self.right[2] += w * v * v;
+        }
+        self.n_left = 0;
+        self.n_right = indices.len();
+    }
+
+    fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
+        let (w, v) = (self.weights[idx], y[idx]);
+        let d = [w, w * v, w * v * v];
+        for k in 0..3 {
+            self.left[k] += d[k];
+            self.right[k] -= d[k];
+        }
+        self.n_left += 1;
+        self.n_right -= 1;
+    }
+
+    fn weighted_impurity(&self, _n: usize) -> F {
+        let total = self.left[0] + self.right[0];
+        if total <= F::zero() {
+            return F::zero();
+        }
+        (self.left[0] / total) * Self::mse(&self.left)
+            + (self.right[0] / total) * Self::mse(&self.right)
+    }
+
+    fn n_left(&self) -> usize {
+        self.n_left
+    }
+
+    fn n_right(&self) -> usize {
+        self.n_right
+    }
+}
+
 /// Evaluate a candidate split point between `cur_val` and `next_val`.
 ///
 /// Returns `Some((threshold, improvement))` when the split passes the
@@ -820,12 +983,47 @@ pub fn find_random_split_with_features<F: Float>(
     feature_indices: &[usize],
     seed: u64,
 ) -> Option<BestSplit<F>> {
+    find_random_split_weighted(
+        x,
+        y,
+        indices,
+        criterion,
+        min_samples_leaf,
+        feature_indices,
+        seed,
+        None,
+    )
+}
+
+/// [`find_random_split_with_features`] with optional per-sample weights:
+/// impurities and child fractions are weighted; `min_samples_leaf` still
+/// counts samples, as in sklearn.
+#[allow(clippy::too_many_arguments)]
+pub fn find_random_split_weighted<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    indices: &[usize],
+    criterion: SplitCriterion,
+    min_samples_leaf: usize,
+    feature_indices: &[usize],
+    seed: u64,
+    weights: Option<&Array1<F>>,
+) -> Option<BestSplit<F>> {
     let n = indices.len();
     if n < 2 * min_samples_leaf {
         return None;
     }
 
-    let parent_impurity = compute_impurity(y, indices, criterion);
+    let impurity = |idx: &[usize]| match weights {
+        Some(w) => compute_weighted_impurity(y, idx, w, criterion),
+        None => compute_impurity(y, idx, criterion),
+    };
+    let mass = |idx: &[usize]| match weights {
+        Some(w) => idx.iter().fold(F::zero(), |a, &i| a + w[i]),
+        None => F::from_usize(idx.len()).unwrap(),
+    };
+    let parent_impurity = impurity(indices);
+    let parent_mass = mass(indices);
 
     let mut best: Option<CandidateSplit<F>> = None;
     let mut best_improvement = F::neg_infinity();
@@ -884,13 +1082,13 @@ pub fn find_random_split_with_features<F: Float>(
             .filter(|&i| x[[i, feature]] > threshold)
             .collect();
 
-        let left_imp = compute_impurity(y, &left_indices, criterion);
-        let right_imp = compute_impurity(y, &right_indices, criterion);
-
-        let n_f = F::from_usize(n).unwrap();
-        let nl_f = F::from_usize(n_left).unwrap();
-        let nr_f = F::from_usize(n_right).unwrap();
-        let weighted = (nl_f / n_f) * left_imp + (nr_f / n_f) * right_imp;
+        if parent_mass <= F::zero() {
+            continue;
+        }
+        let left_imp = impurity(&left_indices);
+        let right_imp = impurity(&right_indices);
+        let weighted = (mass(&left_indices) / parent_mass) * left_imp
+            + (mass(&right_indices) / parent_mass) * right_imp;
         let improvement = parent_impurity - weighted;
 
         try_update_best_split(
@@ -923,52 +1121,15 @@ pub fn find_random_split_with_features<F: Float>(
     })
 }
 
-/// Class weighting strategy for classifiers.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ClassWeight {
-    /// Weights inversely proportional to class frequencies: `n_samples / (n_classes * count_k)`.
-    Balanced,
-    /// Manual per-class weights. Keys are class labels (as f64), values are weights.
-    Manual(Vec<(f64, f64)>),
-}
+pub use anofox_ml_core::ClassWeight;
 
-/// Compute per-sample weights from a class weight strategy.
+/// Compute per-sample weights from a class weight strategy (sklearn's
+/// `compute_sample_weight`; labels are matched exactly).
 pub fn compute_sample_weights_from_class_weight<F: Float>(
     y: &Array1<F>,
     class_weight: &ClassWeight,
-) -> Array1<F> {
-    let n_samples = y.len();
-    match class_weight {
-        ClassWeight::Balanced => {
-            let counts = count_classes(y, &(0..n_samples).collect::<Vec<_>>());
-            let n_classes = counts.len();
-            let n_f = F::from_usize(n_samples).unwrap();
-            let nc_f = F::from_usize(n_classes).unwrap();
-            let mut weights = Array1::<F>::ones(n_samples);
-            for i in 0..n_samples {
-                for &(class_val, count) in &counts {
-                    if (y[i] - class_val).abs() < F::from_f64(1e-9).unwrap() {
-                        weights[i] = n_f / (nc_f * F::from_usize(count).unwrap());
-                        break;
-                    }
-                }
-            }
-            weights
-        }
-        ClassWeight::Manual(mapping) => {
-            let mut weights = Array1::<F>::ones(n_samples);
-            for i in 0..n_samples {
-                let yi = y[i].to_f64().unwrap();
-                for &(class_val, w) in mapping {
-                    if (yi - class_val).abs() < 1e-9 {
-                        weights[i] = F::from_f64(w).unwrap();
-                        break;
-                    }
-                }
-            }
-            weights
-        }
-    }
+) -> anofox_ml_core::Result<Array1<F>> {
+    anofox_ml_core::compute_sample_weight(class_weight, y)
 }
 
 /// Compute weighted impurity for a subset of samples.
@@ -1087,130 +1248,66 @@ pub fn find_best_split_weighted<F: Float>(
     }
 
     let parent_impurity = compute_weighted_impurity(y, indices, weights, criterion);
-
-    let mut best: Option<CandidateSplit<F>> = None;
-    let mut best_improvement = F::neg_infinity();
-    let mut sorted_pairs: Vec<(F, usize)> = Vec::with_capacity(n);
-
-    let total_weight: F = indices
-        .iter()
-        .map(|&i| weights[i])
-        .fold(F::zero(), |a, b| a + b);
-
-    let is_classification = !matches!(criterion, SplitCriterion::Mse);
-    let class_map = if is_classification {
-        build_class_map(y, indices)
-    } else {
-        HashMap::new()
-    };
-    let n_classes = class_map.len();
-    let mut left_class_weights: Vec<F> = vec![F::zero(); n_classes];
-    let mut right_class_weights: Vec<F> = vec![F::zero(); n_classes];
-
-    for &feature in feature_indices {
-        sort_feature_pairs(x, indices, feature, &mut sorted_pairs);
-
-        // Track left/right weight sums and weighted impurity incrementally.
-        // Per-class totals live in Vecs indexed by `class_map` so that the
-        // impurity summation order is deterministic.
-        let mut left_weight = F::zero();
-        let mut right_weight = total_weight;
-        left_class_weights.fill(F::zero());
-        right_class_weights.fill(F::zero());
-
-        // Initialize right with all samples
-        if is_classification {
-            for &i in indices {
-                right_class_weights[class_map[&float_key(y[i])]] += weights[i];
-            }
-        }
-
-        for pos in 0..n - 1 {
-            let (cur_val, cur_idx) = sorted_pairs[pos];
-            let w = weights[cur_idx];
-
-            // Move from right to left
-            left_weight += w;
-            right_weight -= w;
-            if is_classification {
-                let cls = class_map[&float_key(y[cur_idx])];
-                left_class_weights[cls] += w;
-                right_class_weights[cls] -= w;
-            }
-
-            let next_val = sorted_pairs[pos + 1].0;
-            if next_val.is_nan() || (next_val - cur_val).abs() < F::from_f64(1e-15).unwrap() {
-                continue;
-            }
-
-            // Check min_samples_leaf (count, not weight)
-            let n_left = pos + 1;
-            let n_right = n - n_left;
-            if n_left < min_samples_leaf || n_right < min_samples_leaf {
-                continue;
-            }
-
-            // Compute weighted impurity
-            let left_imp = match criterion {
-                SplitCriterion::Gini | SplitCriterion::Entropy => impurity_from_weights(
-                    left_class_weights.iter().copied(),
-                    left_weight,
-                    criterion,
-                ),
-                SplitCriterion::Mse => {
-                    // For MSE, we need running sums — use a simpler approach
-                    let left_indices: Vec<usize> =
-                        sorted_pairs[..=pos].iter().map(|&(_, i)| i).collect();
-                    compute_weighted_impurity(y, &left_indices, weights, criterion)
-                }
-            };
-
-            let right_imp = match criterion {
-                SplitCriterion::Gini | SplitCriterion::Entropy => impurity_from_weights(
-                    right_class_weights.iter().copied(),
-                    right_weight,
-                    criterion,
-                ),
-                SplitCriterion::Mse => {
-                    let right_indices: Vec<usize> =
-                        sorted_pairs[pos + 1..].iter().map(|&(_, i)| i).collect();
-                    compute_weighted_impurity(y, &right_indices, weights, criterion)
-                }
-            };
-
-            let weighted_imp =
-                (left_weight / total_weight) * left_imp + (right_weight / total_weight) * right_imp;
-            let improvement = parent_impurity - weighted_imp;
-            let threshold = (cur_val + next_val) / (F::one() + F::one());
-
-            try_update_best_split(
-                improvement,
-                &mut best_improvement,
-                &mut best,
-                feature,
-                threshold,
-            );
-        }
+    match criterion {
+        SplitCriterion::Mse => find_best_split_inner(
+            x,
+            y,
+            indices,
+            min_samples_leaf,
+            feature_indices,
+            n,
+            parent_impurity,
+            WeightedRegressionAccumulator::new(y, indices, weights),
+        ),
+        SplitCriterion::Gini | SplitCriterion::Entropy => find_best_split_inner(
+            x,
+            y,
+            indices,
+            min_samples_leaf,
+            feature_indices,
+            n,
+            parent_impurity,
+            WeightedClassificationAccumulator::new(y, indices, weights, criterion),
+        ),
     }
+}
 
-    best.map(|candidate| {
-        let mut left_indices = Vec::with_capacity(n);
-        let mut right_indices = Vec::with_capacity(n);
-        for &i in indices {
-            if x[[i, candidate.feature]] <= candidate.threshold {
-                left_indices.push(i);
-            } else {
-                right_indices.push(i);
+/// Leaf node for `indices`: the (weighted) leaf value and, for
+/// classification, the class distribution. Weighted class counts are stored
+/// scaled by 1000 and rounded (the leaf format holds integer counts).
+pub fn make_leaf<F: Float>(
+    y: &Array1<F>,
+    indices: &[usize],
+    criterion: SplitCriterion,
+    weights: Option<&Array1<F>>,
+) -> crate::node::TreeNode<F> {
+    let value = match weights {
+        Some(w) => weighted_leaf_value(y, indices, w, criterion),
+        None => leaf_value(y, indices, criterion),
+    };
+    let class_counts = match criterion {
+        SplitCriterion::Gini | SplitCriterion::Entropy => match weights {
+            Some(w) => {
+                // Store weighted counts as approximate integer counts for predict_proba compat
+                let wc = weighted_count_classes(y, indices, w);
+                Some(
+                    wc.into_iter()
+                        .map(|(class, weight)| {
+                            // Scale weight to integer-like count (multiply by 1000 for precision)
+                            (class, (weight.to_f64().unwrap() * 1000.0).round() as usize)
+                        })
+                        .collect(),
+                )
             }
-        }
-        BestSplit {
-            feature_index: candidate.feature,
-            threshold: candidate.threshold,
-            left_indices,
-            right_indices,
-            improvement: candidate.improvement,
-        }
-    })
+            None => Some(count_classes(y, indices)),
+        },
+        SplitCriterion::Mse => None,
+    };
+    crate::node::TreeNode::Leaf {
+        value,
+        n_samples: indices.len(),
+        class_counts,
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::split::cmp_nan_last;
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 use ndarray::{Array1, Array2};
@@ -113,6 +113,31 @@ impl<F: Float> Fit<F> for AdaBoostRegressor {
     type Fitted = FittedAdaBoostRegressor<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for AdaBoostRegressor {
+    type Fitted = FittedAdaBoostRegressor<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl AdaBoostRegressor {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedAdaBoostRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -150,7 +175,14 @@ impl<F: Float> Fit<F> for AdaBoostRegressor {
         let mut rng = StdRng::seed_from_u64(self.seed);
 
         // Initialize sample weights uniformly.
-        let mut weights: Vec<F> = vec![F::one() / F::from_usize(n_samples).unwrap(); n_samples];
+        let mut weights: Vec<F> = match sample_weight {
+            Some(w) => {
+                anofox_ml_core::check_sample_weight(w, n_samples)?;
+                let total = w.sum();
+                w.iter().map(|&v| v / total).collect()
+            }
+            None => vec![F::one() / F::from_usize(n_samples).unwrap(); n_samples],
+        };
 
         let mut estimators = Vec::with_capacity(self.n_estimators);
         let mut estimator_weights = Vec::with_capacity(self.n_estimators);

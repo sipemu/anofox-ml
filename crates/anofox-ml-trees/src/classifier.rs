@@ -1,13 +1,11 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 use crate::node::TreeNode;
 use crate::split::{
-    child_seed, cmp_nan_last, complement_features, compute_impurity,
-    compute_sample_weights_from_class_weight, compute_weighted_impurity, count_classes,
-    find_best_split_weighted, find_best_split_with_features, leaf_value, select_feature_subset,
-    weighted_count_classes, weighted_leaf_value, BestSplit, ClassWeight, MaxFeatures,
-    SplitCriterion,
+    child_seed, cmp_nan_last, complement_features, compute_impurity, compute_weighted_impurity,
+    find_best_split_weighted, find_best_split_with_features, make_leaf, select_feature_subset,
+    BestSplit, ClassWeight, MaxFeatures, SplitCriterion,
 };
 
 /// Decision tree classifier parameters (unfitted state).
@@ -111,7 +109,41 @@ pub struct FittedDecisionTreeClassifier<F: Float> {
 impl<F: Float> Fit<F> for DecisionTreeClassifier {
     type Fitted = FittedDecisionTreeClassifier<F>;
 
+    /// Fits with the configured `sample_weight` (if any).
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        let sw = self
+            .sample_weight
+            .as_ref()
+            .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
+        self.fit_impl(x, y, sw.as_ref())
+    }
+}
+
+impl<F: Float> FitWeighted<F> for DecisionTreeClassifier {
+    type Fitted = FittedDecisionTreeClassifier<F>;
+
+    /// `sample_weight` replaces the configured one; it is multiplied by the
+    /// `class_weight`, as in sklearn.
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        match sample_weight {
+            Some(sw) => self.fit_impl(x, y, Some(sw)),
+            None => Fit::fit(self, x, y),
+        }
+    }
+}
+
+impl DecisionTreeClassifier {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedDecisionTreeClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -123,37 +155,13 @@ impl<F: Float> Fit<F> for DecisionTreeClassifier {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
 
-        if let Some(sw) = &self.sample_weight {
-            if sw.len() != y.len() {
-                return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight has {} entries but y has {}",
-                    sw.len(),
-                    y.len()
-                )));
-            }
-        }
-
         let indices: Vec<usize> = (0..x.nrows()).collect();
         let n_features = x.ncols();
         let max_features_k = self.max_features.map(|mf| mf.resolve(n_features));
 
-        // Compute effective sample weights (merge class_weight and sample_weight)
-        let effective_weights: Option<Array1<F>> = {
-            let class_w = self
-                .class_weight
-                .as_ref()
-                .map(|cw| compute_sample_weights_from_class_weight(y, cw));
-            let sample_w = self
-                .sample_weight
-                .as_ref()
-                .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
-            match (class_w, sample_w) {
-                (Some(cw), Some(sw)) => Some(cw * sw),
-                (Some(cw), None) => Some(cw),
-                (None, Some(sw)) => Some(sw),
-                (None, None) => None,
-            }
-        };
+        // Effective sample weights: sample_weight × class_weight.
+        let effective_weights =
+            anofox_ml_core::effective_sample_weight(y, sample_weight, self.class_weight.as_ref())?;
 
         let params = TreeBuildParams {
             max_depth: self.max_depth,
@@ -391,41 +399,6 @@ fn build_tree<F: Float>(
             }
         }
         None => make_leaf(y, indices, params.criterion, weights),
-    }
-}
-
-fn make_leaf<F: Float>(
-    y: &Array1<F>,
-    indices: &[usize],
-    criterion: SplitCriterion,
-    weights: Option<&Array1<F>>,
-) -> TreeNode<F> {
-    let value = match weights {
-        Some(w) => weighted_leaf_value(y, indices, w, criterion),
-        None => leaf_value(y, indices, criterion),
-    };
-    let class_counts = match criterion {
-        SplitCriterion::Gini | SplitCriterion::Entropy => match weights {
-            Some(w) => {
-                // Store weighted counts as approximate integer counts for predict_proba compat
-                let wc = weighted_count_classes(y, indices, w);
-                Some(
-                    wc.into_iter()
-                        .map(|(class, weight)| {
-                            // Scale weight to integer-like count (multiply by 1000 for precision)
-                            (class, (weight.to_f64().unwrap() * 1000.0).round() as usize)
-                        })
-                        .collect(),
-                )
-            }
-            None => Some(count_classes(y, indices)),
-        },
-        SplitCriterion::Mse => None,
-    };
-    TreeNode::Leaf {
-        value,
-        n_samples: indices.len(),
-        class_counts,
     }
 }
 

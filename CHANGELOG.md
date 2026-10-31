@@ -344,6 +344,42 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - New `SvmKernel::matrix` / `SvmKernel::gram` build kernel matrices from
     one GEMM; KernelRidge and SVC prediction use them.
 
+- **Weights, class weights and pipelines (#37):**
+  - New shared `anofox_ml_core::ClassWeight` (`Balanced`, `Manual`) with
+    `compute_sample_weight`, `effective_sample_weight` and
+    `check_sample_weight`. Trees, SVC, logistic regression, LGBM and SGD use
+    it. **Breaking:** `svm::ClassWeight::Map` and
+    `regression::ClassWeight::Custom` are now `ClassWeight::Manual`;
+    `LgbmClassWeight` is an alias of the shared type.
+  - `FitWeighted` for decision trees, random forests, extra trees, gradient
+    boosting, AdaBoost, LGBM and SGD. Weighted gradient boosting, AdaBoost
+    and SGD match sklearn 1.8 exactly.
+  - Random-forest `class_weight` is computed on the full target, not on each
+    bootstrap draw (sklearn's `balanced`). **Breaking:** forest results with
+    `class_weight` change.
+  - Weighted tree splits use running weighted sums (O(n) per feature instead
+    of O(n²)); unit weights reproduce the unweighted tree exactly.
+  - SGD's `optimal` and `invscaling` learning-rate schedules now follow
+    sklearn (`t₀ = 1/(typw·α)`, `eta0 / t^power_t`). **Breaking:** results
+    with these schedules change. `SgdClassifier` gains `class_weight`.
+  - `Pipeline::fit` borrows the pipeline (refit per CV fold), and `Pipeline`
+    implements `Fit`; `FittedPipeline` implements `Predict`, `Transform` and
+    `PredictProba` (with the new `Pipeline::set_classifier`).
+  - The target reaches every pipeline step: `FitTransform::fit_transform`
+    takes `y: Option<&Array1<F>>`, and the new `Supervised(...)` adapter puts
+    `Fit`-based transformers (`SelectKBest`, `Rfe`, `Rfecv`,
+    `SequentialFeatureSelector`, which now implement `Fit` / `Transform`)
+    into a `Pipeline`, `FeatureUnion` or `ColumnTransformer`.
+    `FitUnsupervised` gains the provided hook `fit_with_target`.
+    **Breaking:** custom `FitTransform` impls take the extra argument.
+  - `ColumnTransformer` and `FeatureUnion` compute each branch's training
+    output once instead of fitting and transforming again.
+  - Unneeded `unsafe impl Send/Sync` removed from the pipeline types.
+  - New `cross_validate_weighted_with_splits` /
+    `cross_val_score_weighted_with_splits` pass the fold's weights to the fit
+    and to the scorer.
+  - Not done: view-based (`ArrayView2`) trait inputs.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by

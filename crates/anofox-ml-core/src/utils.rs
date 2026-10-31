@@ -1240,6 +1240,85 @@ pub fn cross_validate_with_splits<F: Float>(
     })
 }
 
+/// Scorer that also receives the test fold's sample weights:
+/// `(y_true, y_pred, sample_weight) -> score`.
+pub type WeightedScorerFn<'a, F> =
+    dyn Fn(&Array1<F>, &Array1<F>, Option<&Array1<F>>) -> Result<F> + 'a;
+
+/// [`cross_validate_with_splits`] with per-sample weights, as sklearn's
+/// `cross_validate(..., params={"sample_weight": w})` with weighted
+/// scoring: `fit_predict(X_train, y_train, w_train, X_test)` receives the
+/// training fold's weights and every scorer the test fold's weights.
+/// `sample_weight = None` passes `None` to both. Combine with the group
+/// splitters (e.g. [`group_k_fold`](crate::group_k_fold)) for grouped CV.
+pub fn cross_validate_weighted_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, Option<&Array1<F>>, &Array2<F>) -> Result<Array1<F>>,
+    scorers: &[&WeightedScorerFn<'_, F>],
+) -> Result<CrossValidateResult<F>> {
+    if scorers.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "need at least one scorer".into(),
+        ));
+    }
+    check_xy(x, y)?;
+    if let Some(w) = sample_weight {
+        crate::class_weight::check_sample_weight(w, y.len())?;
+    }
+    validate_splits(splits, x.nrows(), false)?;
+    let n_metrics = scorers.len();
+    let n_splits = splits.len();
+
+    let mut all_scores: Vec<Vec<F>> = vec![Vec::with_capacity(n_splits); n_metrics];
+    let mut fit_times = Vec::with_capacity(n_splits);
+    let mut score_times = Vec::with_capacity(n_splits);
+
+    for (train_indices, test_indices) in splits {
+        let x_train = select_rows(x, train_indices);
+        let y_train = select_elements(y, train_indices);
+        let x_test = select_rows(x, test_indices);
+        let y_test = select_elements(y, test_indices);
+        let w_train = sample_weight.map(|w| select_elements(w, train_indices));
+        let w_test = sample_weight.map(|w| select_elements(w, test_indices));
+
+        let fit_start = std::time::Instant::now();
+        let y_pred = fit_predict(&x_train, &y_train, w_train.as_ref(), &x_test)?;
+        fit_times.push(fit_start.elapsed().as_secs_f64());
+
+        let score_start = std::time::Instant::now();
+        for (m, scorer) in scorers.iter().enumerate() {
+            all_scores[m].push(scorer(&y_test, &y_pred, w_test.as_ref())?);
+        }
+        score_times.push(score_start.elapsed().as_secs_f64());
+    }
+
+    let mean_scores: Vec<F> = all_scores.iter().map(|s| mean_of(s)).collect();
+    Ok(CrossValidateResult {
+        scores: all_scores,
+        mean_scores,
+        fit_times,
+        score_times,
+    })
+}
+
+/// Single-metric [`cross_validate_weighted_with_splits`]: per-fold scores.
+pub fn cross_val_score_weighted_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, Option<&Array1<F>>, &Array2<F>) -> Result<Array1<F>>,
+    scorer: impl Fn(&Array1<F>, &Array1<F>, Option<&Array1<F>>) -> Result<F>,
+) -> Result<Vec<F>> {
+    let scorer: &WeightedScorerFn<'_, F> = &scorer;
+    let res =
+        cross_validate_weighted_with_splits(x, y, sample_weight, splits, fit_predict, &[scorer])?;
+    Ok(res.scores.into_iter().next().unwrap_or_default())
+}
+
 /// Generate a learning curve: scores as a function of training set size.
 ///
 /// For every CV fold (from [`default_cv_splits`]: stratified for class

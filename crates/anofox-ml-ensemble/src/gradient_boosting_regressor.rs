@@ -1,4 +1,4 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
@@ -110,6 +110,31 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
     type Fitted = FittedGradientBoostingRegressor<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for GradientBoostingRegressor {
+    type Fitted = FittedGradientBoostingRegressor<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl GradientBoostingRegressor {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedGradientBoostingRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -140,8 +165,15 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
         let n_features = x.ncols();
         let lr = F::from_f64(self.learning_rate).unwrap();
 
-        // Step 1: Initialize with mean of y.
-        let initial_prediction = y.sum() / F::from_usize(n_samples).unwrap();
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, n_samples)?;
+        }
+
+        // Step 1: Initialize with the (weighted) mean of y.
+        let initial_prediction = match sample_weight {
+            Some(w) => w.dot(y) / w.sum(),
+            None => y.sum() / F::from_usize(n_samples).unwrap(),
+        };
 
         // Current predictions for every training sample.
         let mut predictions = Array1::from_elem(n_samples, initial_prediction);
@@ -171,11 +203,15 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
                 indices.truncate(subsample_size);
                 indices.sort_unstable();
 
-                let x_sub = build_sub_rows(x, &indices);
-                let r_sub = Array1::from_vec(indices.iter().map(|&i| residuals[i]).collect());
-                tree_params.fit(&x_sub, &r_sub)?
+                crate::forest_common::fit_tree_on_rows(
+                    &tree_params,
+                    x,
+                    &residuals,
+                    &indices,
+                    sample_weight,
+                )?
             } else {
-                tree_params.fit(x, &residuals)?
+                tree_params.fit_weighted(x, &residuals, sample_weight)?
             };
 
             // Step 2d: Update predictions on the full training set.
@@ -252,19 +288,6 @@ impl<F: Float> FittedGradientBoostingRegressor<F> {
             Array1::zeros(self.n_features)
         }
     }
-}
-
-/// Build a sub-matrix selecting specific rows from `x`.
-fn build_sub_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
-    let n_rows = row_indices.len();
-    let n_cols = x.ncols();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for &ri in row_indices {
-        for c in 0..n_cols {
-            data.push(x[[ri, c]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
 }
 
 #[cfg(test)]

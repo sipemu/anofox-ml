@@ -1,4 +1,4 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{
     ClassWeight, DecisionTreeClassifier, FittedDecisionTreeClassifier, MaxFeatures, SplitCriterion,
 };
@@ -8,7 +8,8 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
 use crate::forest_common::{
-    argmax_first, class_index, resolve_max_features, select_rows, sorted_classes, tree_input,
+    argmax_first, class_index, fit_tree_on_rows, resolve_max_features, select_rows, sorted_classes,
+    tree_input,
 };
 
 /// Random forest classifier parameters (unfitted state).
@@ -138,6 +139,31 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
     type Fitted = FittedRandomForestClassifier<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for RandomForestClassifier {
+    type Fitted = FittedRandomForestClassifier<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl RandomForestClassifier {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedRandomForestClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -154,6 +180,10 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
             ));
         }
 
+        // sklearn: class weights come from the full y (not each bootstrap
+        // draw) and multiply the sample weights.
+        let effective_weight =
+            anofox_ml_core::effective_sample_weight(y, sample_weight, self.class_weight.as_ref())?;
         let n_samples = x.nrows();
         let n_features = x.ncols();
         resolve_max_features(self.max_features, n_features)?;
@@ -179,7 +209,7 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
             criterion: self.criterion,
             max_features: self.max_features,
             sample_weight: None,
-            class_weight: self.class_weight.clone(),
+            class_weight: None,
             seed: 0,
         };
 
@@ -210,12 +240,13 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
         let trees: Result<Vec<ForestTree<F>>> = sample_plans
             .into_par_iter()
             .map(|(row_indices, tree_seed)| {
-                let x_sub = select_rows(x, &row_indices);
-                let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
-                let fitted_tree: FittedDecisionTreeClassifier<F> = tree_params
-                    .clone()
-                    .with_seed(tree_seed)
-                    .fit(&x_sub, &y_sub)?;
+                let fitted_tree: FittedDecisionTreeClassifier<F> = fit_tree_on_rows(
+                    &tree_params.clone().with_seed(tree_seed),
+                    x,
+                    y,
+                    &row_indices,
+                    effective_weight.as_ref(),
+                )?;
                 Ok(ForestTree {
                     tree: fitted_tree,
                     feature_indices: (0..n_features).collect(),

@@ -7,7 +7,7 @@
 //! least-important features (by absolute importance) until
 //! `n_features_to_select` remain.
 
-use anofox_ml_core::{default_cv_splits, CvSplit, Result, RustMlError};
+use anofox_ml_core::{default_cv_splits, CvSplit, Fit, Result, RustMlError, Transform};
 use ndarray::{Array1, Array2};
 
 pub type ImportanceFn = dyn Fn(&Array2<f64>, &Array1<f64>) -> Result<Array1<f64>> + Send + Sync;
@@ -452,6 +452,60 @@ impl SequentialFeatureSelector {
             support[j] = true;
         }
         Ok(FittedSequentialFeatureSelector { support })
+    }
+}
+
+/// Check that `x` has one column per entry of a fitted feature mask.
+fn check_support(x: &Array2<f64>, support: &[bool]) -> Result<()> {
+    if x.ncols() != support.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "expected {} features, got {}",
+            support.len(),
+            x.ncols()
+        )));
+    }
+    Ok(())
+}
+
+impl Fit<f64> for Rfe {
+    type Fitted = FittedRfe;
+    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedRfe> {
+        Rfe::fit(self, x, y)
+    }
+}
+
+impl Transform<f64> for FittedRfe {
+    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        check_support(x, &self.support)?;
+        Ok(FittedRfe::transform(self, x))
+    }
+}
+
+impl Fit<f64> for Rfecv {
+    type Fitted = FittedRfecv;
+    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedRfecv> {
+        Rfecv::fit(self, x, y)
+    }
+}
+
+impl Transform<f64> for FittedRfecv {
+    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        check_support(x, &self.inner.support)?;
+        Ok(FittedRfecv::transform(self, x))
+    }
+}
+
+impl Fit<f64> for SequentialFeatureSelector {
+    type Fitted = FittedSequentialFeatureSelector;
+    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedSequentialFeatureSelector> {
+        SequentialFeatureSelector::fit(self, x, y)
+    }
+}
+
+impl Transform<f64> for FittedSequentialFeatureSelector {
+    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        check_support(x, &self.support)?;
+        Ok(FittedSequentialFeatureSelector::transform(self, x))
     }
 }
 

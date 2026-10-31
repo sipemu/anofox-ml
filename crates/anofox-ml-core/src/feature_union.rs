@@ -84,11 +84,20 @@ fn concat_columns<F: Float>(arrays: &[Array2<F>]) -> Result<Array2<F>> {
     })
 }
 
-/// Implement `FitUnsupervised` so the blanket `FitTransform` impl kicks in.
-impl<F: Float> FitUnsupervised<F> for FeatureUnion<F> {
+impl<F: Float + 'static> FitUnsupervised<F> for FeatureUnion<F> {
     type Fitted = FittedFeatureUnion<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        Ok(self.fit_with_target(x, None)?.0)
+    }
+
+    /// Forwards `y` to the branches (for [`Supervised`](crate::Supervised)
+    /// ones) and returns the training output computed during the fit.
+    fn fit_with_target(
+        &self,
+        x: &Array2<F>,
+        y: Option<&ndarray::Array1<F>>,
+    ) -> Result<(FittedFeatureUnion<F>, Option<Array2<F>>)> {
         if self.branches.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "FeatureUnion has no branches".into(),
@@ -96,14 +105,20 @@ impl<F: Float> FitUnsupervised<F> for FeatureUnion<F> {
         }
 
         let mut fitted_branches = Vec::with_capacity(self.branches.len());
+        let mut outputs = Vec::with_capacity(self.branches.len());
         for (name, transformer) in &self.branches {
-            let (fitted, _) = transformer.fit_transform(x)?;
+            let (fitted, out) = transformer.fit_transform(x, y)?;
             fitted_branches.push((name.clone(), fitted));
+            outputs.push(out);
         }
+        let out = concat_columns(&outputs)?;
 
-        Ok(FittedFeatureUnion {
-            branches: fitted_branches,
-        })
+        Ok((
+            FittedFeatureUnion {
+                branches: fitted_branches,
+            },
+            Some(out),
+        ))
     }
 }
 
@@ -133,6 +148,7 @@ mod tests {
         fn fit_transform(
             &self,
             x: &Array2<f64>,
+            _y: Option<&Array1<f64>>,
         ) -> Result<(Box<dyn TransformStep<f64>>, Array2<f64>)> {
             let transformed = x.mapv(|v| v * 2.0);
             Ok((Box::new(FittedDoubler), transformed))
@@ -156,6 +172,7 @@ mod tests {
         fn fit_transform(
             &self,
             x: &Array2<f64>,
+            _y: Option<&Array1<f64>>,
         ) -> Result<(Box<dyn TransformStep<f64>>, Array2<f64>)> {
             let transformed = x.mapv(|v| v * 3.0);
             Ok((Box::new(FittedTripler), transformed))
@@ -201,7 +218,7 @@ mod tests {
             .push("triple", Tripler);
 
         let x = array![[1.0, 2.0], [3.0, 4.0]];
-        let (fitted, transformed) = union.fit_transform(&x).unwrap();
+        let (fitted, transformed) = union.fit_transform(&x, None).unwrap();
 
         // 2 original cols x 2 branches = 4 cols
         assert_eq!(transformed.ncols(), 4);
@@ -228,7 +245,7 @@ mod tests {
             .push("triple", Tripler);
 
         let x = array![[1.0, 2.0], [3.0, 4.0]];
-        let (fitted_step, _) = union.fit_transform(&x).unwrap();
+        let (fitted_step, _) = union.fit_transform(&x, None).unwrap();
 
         let fitted_union = fitted_step
             .as_any()
@@ -247,7 +264,7 @@ mod tests {
         let union = FeatureUnion::new().push("a", Doubler).push("b", Tripler);
 
         let x = array![[1.0], [2.0]];
-        let (fitted_step, _) = union.fit_transform(&x).unwrap();
+        let (fitted_step, _) = union.fit_transform(&x, None).unwrap();
 
         let fitted_union = fitted_step
             .as_any()
@@ -280,6 +297,6 @@ mod tests {
     fn test_feature_union_empty_errors() {
         let union = FeatureUnion::<f64>::new();
         let x = array![[1.0], [2.0]];
-        assert!(union.fit_transform(&x).is_err());
+        assert!(union.fit_transform(&x, None).is_err());
     }
 }

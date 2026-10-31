@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+pub mod class_weight;
 pub mod column_transformer;
 pub mod error;
 pub mod feature_union;
@@ -47,6 +48,9 @@ pub mod traits;
 pub mod utils;
 pub mod validation;
 
+pub use class_weight::{
+    check_sample_weight, compute_sample_weight, effective_sample_weight, ClassWeight,
+};
 pub use column_transformer::{ColumnSelector, ColumnTransformer, Remainder};
 pub use error::{Result, RustMlError};
 pub use feature_union::{FeatureUnion, FittedFeatureUnion};
@@ -65,7 +69,7 @@ pub use multi_output::{
 };
 pub use optim::{minimize_lbfgsb, LbfgsbOptions, LbfgsbResult, LbfgsbStatus};
 pub use pipeline::{
-    FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep,
+    FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, Supervised, TransformStep,
 };
 pub use sparse::CsrMatrix;
 pub use splitters::{
@@ -82,14 +86,15 @@ pub use traits::{
 };
 pub use utils::{
     cross_val_predict, cross_val_predict_with_splits, cross_val_score, cross_val_score_stratified,
-    cross_val_score_with_splits, cross_val_score_with_splits_par, cross_validate,
+    cross_val_score_weighted_with_splits, cross_val_score_with_splits,
+    cross_val_score_with_splits_par, cross_validate, cross_validate_weighted_with_splits,
     cross_validate_with_splits, default_cv_splits, grid_search_cv, grid_search_cv_with_splits,
     grid_search_cv_with_splits_par, k_fold, learning_curve, learning_curve_with_splits,
     leave_one_out, leave_p_out, looks_like_class_labels, randomized_search_cv,
     randomized_search_cv_with_splits, repeated_k_fold, repeated_stratified_k_fold, shuffle_split,
     shuffled_k_fold, stratified_k_fold, stratified_shuffle_split, time_series_split,
     train_test_split, validation_curve, validation_curve_with_splits, CrossValidateResult, CvSplit,
-    GridSearchResult, LearningCurveResult, ScorerFn, ValidationCurveResult,
+    GridSearchResult, LearningCurveResult, ScorerFn, ValidationCurveResult, WeightedScorerFn,
 };
 pub use validation::{
     bootstrap_splits, bootstrap_splits_stratified, bootstrap_validate, nested_cross_validate,

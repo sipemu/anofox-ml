@@ -60,9 +60,6 @@ pub struct FittedFunctionTransformer<F: Float> {
     func: Arc<dyn Fn(&Array2<F>) -> Result<Array2<F>> + Send + Sync>,
 }
 
-unsafe impl<F: Float> Send for FittedFunctionTransformer<F> {}
-unsafe impl<F: Float> Sync for FittedFunctionTransformer<F> {}
-
 impl<F: Float> Transform<F> for FittedFunctionTransformer<F> {
     fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
         (self.func)(x)

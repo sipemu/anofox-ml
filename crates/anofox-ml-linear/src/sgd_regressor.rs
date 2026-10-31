@@ -9,7 +9,7 @@ use crate::sgd_common::{
     default_n_iter_no_change, default_t, default_validation_fraction, run_sgd, validation_split,
     LearningRate, Penalty, SgdConfig, SgdWeights, Stopping,
 };
-use anofox_ml_core::{Fit, Float, PartialFit, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, PartialFit, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -270,15 +270,23 @@ impl<F: Float> FittedSgdRegressor<F> {
 }
 
 /// R² of `(w, b)` on the rows `idx` (higher is better).
-fn r2_on(x: &Array2<f64>, y: &Array1<f64>, idx: &[usize], w: &Array1<f64>, b: f64) -> f64 {
-    let n = idx.len() as f64;
-    let mean = idx.iter().map(|&i| y[i]).sum::<f64>() / n;
+fn r2_on(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    sw: Option<&[f64]>,
+    idx: &[usize],
+    w: &Array1<f64>,
+    b: f64,
+) -> f64 {
+    let wt = |i: usize| sw.map_or(1.0, |s| s[i]);
+    let n: f64 = idx.iter().map(|&i| wt(i)).sum();
+    let mean = idx.iter().map(|&i| wt(i) * y[i]).sum::<f64>() / n;
     let mut ss_res = 0.0;
     let mut ss_tot = 0.0;
     for &i in idx {
         let pred = b + x.row(i).dot(w);
-        ss_res += (y[i] - pred).powi(2);
-        ss_tot += (y[i] - mean).powi(2);
+        ss_res += wt(i) * (y[i] - pred).powi(2);
+        ss_tot += wt(i) * (y[i] - mean).powi(2);
     }
     if ss_tot > 0.0 {
         1.0 - ss_res / ss_tot
@@ -292,10 +300,16 @@ impl SgdRegressor {
         &self,
         x: &Array2<f64>,
         y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
         state: Option<FittedSgdRegressor<f64>>,
         partial: bool,
     ) -> Result<FittedSgdRegressor<f64>> {
         self.validate(x, y)?;
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, y.len())?;
+        }
+        let sw_vec = sample_weight.map(|w| w.to_vec());
+        let sw = sw_vec.as_deref();
         let p = x.ncols();
         let (mut weights, t_start) = match state {
             Some(s) => {
@@ -325,6 +339,7 @@ impl SgdRegressor {
             run_sgd(
                 x,
                 &ys,
+                sw,
                 &mut idx,
                 &mut weights,
                 &cfg,
@@ -340,7 +355,7 @@ impl SgdRegressor {
             if self.early_stopping {
                 let (mut train_idx, val_idx) =
                     validation_split(x.nrows(), self.validation_fraction, None, &mut rng)?;
-                let score = |w: &Array1<f64>, b: f64| r2_on(x, y, &val_idx, w, b);
+                let score = |w: &Array1<f64>, b: f64| r2_on(x, y, sw, &val_idx, w, b);
                 let stopping = Stopping {
                     tol: self.tol,
                     n_iter_no_change: self.n_iter_no_change,
@@ -349,6 +364,7 @@ impl SgdRegressor {
                 run_sgd(
                     x,
                     &ys,
+                    sw,
                     &mut train_idx,
                     &mut weights,
                     &cfg,
@@ -369,6 +385,7 @@ impl SgdRegressor {
                 run_sgd(
                     x,
                     &ys,
+                    sw,
                     &mut idx,
                     &mut weights,
                     &cfg,
@@ -396,7 +413,22 @@ impl Fit<f64> for SgdRegressor {
     type Fitted = FittedSgdRegressor<f64>;
 
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
-        self.train(x, y, None, false)
+        self.train(x, y, None, None, false)
+    }
+}
+
+impl FitWeighted<f64> for SgdRegressor {
+    type Fitted = FittedSgdRegressor<f64>;
+
+    /// Each SGD update is scaled by the sample's weight (sklearn); the
+    /// early-stopping R² is weighted too.
+    fn fit_weighted(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
+    ) -> Result<Self::Fitted> {
+        self.train(x, y, sample_weight, None, false)
     }
 }
 
@@ -413,7 +445,7 @@ impl PartialFit<f64> for SgdRegressor {
         y: &Array1<f64>,
         _classes: Option<&[f64]>,
     ) -> Result<Self::Fitted> {
-        self.train(x, y, state, true)
+        self.train(x, y, None, state, true)
     }
 }
 

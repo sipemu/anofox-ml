@@ -5,8 +5,8 @@ use std::borrow::Cow;
 use anofox_ml_core::{Float, Result, RustMlError};
 use anofox_ml_trees::node::TreeNode;
 use anofox_ml_trees::split::{
-    child_seed, complement_features, compute_impurity, count_classes,
-    find_random_split_with_features, leaf_value, select_feature_subset, splitmix64, SplitCriterion,
+    child_seed, complement_features, compute_impurity, compute_weighted_impurity,
+    find_random_split_weighted, make_leaf, select_feature_subset, splitmix64, SplitCriterion,
 };
 use anofox_ml_trees::MaxFeatures;
 use ndarray::{Array1, Array2};
@@ -67,6 +67,35 @@ pub(crate) fn select_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Arr
 }
 
 /// Index of the first maximum (ties -> lowest index, like `numpy.argmax`).
+/// Fit one forest tree on the bootstrap rows, passing the matching slice of
+/// the forest-level sample weights. A bootstrap draw whose weights are all
+/// zero carries no information about the weighting and is fitted unweighted.
+pub(crate) fn fit_tree_on_rows<F, T, FT>(
+    tree: &T,
+    x: &Array2<F>,
+    y: &Array1<F>,
+    rows: &[usize],
+    sample_weight: Option<&Array1<F>>,
+) -> Result<FT>
+where
+    F: Float,
+    T: anofox_ml_core::Fit<F, Fitted = FT> + anofox_ml_core::FitWeighted<F, Fitted = FT>,
+{
+    let x_sub = select_rows(x, rows);
+    let y_sub = y.select(ndarray::Axis(0), rows);
+    match sample_weight {
+        Some(w) => {
+            let w_sub = w.select(ndarray::Axis(0), rows);
+            if w_sub.iter().fold(F::zero(), |a, &b| a + b) > F::zero() {
+                tree.fit_weighted(&x_sub, &y_sub, Some(&w_sub))
+            } else {
+                tree.fit(&x_sub, &y_sub)
+            }
+        }
+        None => tree.fit(&x_sub, &y_sub),
+    }
+}
+
 pub(crate) fn argmax_first<F: Float>(values: impl IntoIterator<Item = F>) -> usize {
     let mut best_i = 0;
     let mut best_v = F::neg_infinity();
@@ -82,7 +111,10 @@ pub(crate) fn argmax_first<F: Float>(values: impl IntoIterator<Item = F>) -> usi
 /// Sorted, de-duplicated class labels of `y`.
 pub(crate) fn sorted_classes<F: Float>(y: &Array1<F>) -> Vec<F> {
     let all: Vec<usize> = (0..y.len()).collect();
-    count_classes(y, &all).into_iter().map(|(c, _)| c).collect()
+    anofox_ml_trees::split::count_classes(y, &all)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
 }
 
 /// Position of `label` in the sorted class list (exact match).
@@ -115,21 +147,25 @@ pub(crate) fn build_extra_tree<F: Float>(
     depth: usize,
     params: &ExtraTreeParams,
     node_seed: u64,
+    weights: Option<&Array1<F>>,
 ) -> TreeNode<F> {
     let n_samples = indices.len();
-    let impurity = compute_impurity(y, indices, params.criterion);
+    let impurity = match weights {
+        Some(w) => compute_weighted_impurity(y, indices, w, params.criterion),
+        None => compute_impurity(y, indices, params.criterion),
+    };
 
     let should_stop = n_samples < params.min_samples_split
         || params.max_depth.is_some_and(|d| depth >= d)
         || impurity < F::from_f64(1e-15).unwrap();
 
     if should_stop {
-        return extra_leaf(y, indices, params.criterion);
+        return make_leaf(y, indices, params.criterion, weights);
     }
 
     let threshold_seed = splitmix64(node_seed ^ 0x5EED_7123_A5A5_0001);
     let find = |features: &[usize]| {
-        find_random_split_with_features(
+        find_random_split_weighted(
             x,
             y,
             indices,
@@ -137,6 +173,7 @@ pub(crate) fn build_extra_tree<F: Float>(
             params.min_samples_leaf,
             features,
             threshold_seed,
+            weights,
         )
     };
     let split = match params.max_features_k {
@@ -159,6 +196,7 @@ pub(crate) fn build_extra_tree<F: Float>(
                 depth + 1,
                 params,
                 child_seed(node_seed, 0),
+                weights,
             );
             let right = build_extra_tree(
                 x,
@@ -167,6 +205,7 @@ pub(crate) fn build_extra_tree<F: Float>(
                 depth + 1,
                 params,
                 child_seed(node_seed, 1),
+                weights,
             );
             TreeNode::Split {
                 feature_index: split.feature_index,
@@ -177,24 +216,7 @@ pub(crate) fn build_extra_tree<F: Float>(
                 impurity,
             }
         }
-        None => extra_leaf(y, indices, params.criterion),
-    }
-}
-
-fn extra_leaf<F: Float>(
-    y: &Array1<F>,
-    indices: &[usize],
-    criterion: SplitCriterion,
-) -> TreeNode<F> {
-    let value = leaf_value(y, indices, criterion);
-    let class_counts = match criterion {
-        SplitCriterion::Gini | SplitCriterion::Entropy => Some(count_classes(y, indices)),
-        SplitCriterion::Mse => None,
-    };
-    TreeNode::Leaf {
-        value,
-        n_samples: indices.len(),
-        class_counts,
+        None => make_leaf(y, indices, params.criterion, weights),
     }
 }
 

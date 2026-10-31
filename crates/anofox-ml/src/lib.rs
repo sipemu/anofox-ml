@@ -98,9 +98,9 @@ pub mod prelude {
         leave_p_out, purged_k_fold, randomized_search_cv, repeated_k_fold,
         repeated_stratified_k_fold, shuffle_split, stratified_group_k_fold, stratified_k_fold,
         stratified_shuffle_split, time_series_split, train_test_split, validation_curve,
-        ColumnSelector, ColumnTransformer, CrossValidateResult, FeatureUnion, Fit, FitUnsupervised,
-        FittedPipeline, Float, FunctionTransformer, GridSearchResult, InverseTransform, Pipeline,
-        Predict, Remainder, Transform,
+        ClassWeight, ColumnSelector, ColumnTransformer, CrossValidateResult, FeatureUnion, Fit,
+        FitUnsupervised, FitWeighted, FittedPipeline, Float, FunctionTransformer, GridSearchResult,
+        InverseTransform, Pipeline, Predict, PredictProba, Remainder, Supervised, Transform,
     };
 
     pub use anofox_ml_metrics::{
@@ -126,7 +126,7 @@ pub mod prelude {
     };
 
     pub use anofox_ml_trees::{
-        ClassWeight, DecisionTreeClassifier, DecisionTreeRegressor, MaxFeatures, SplitCriterion,
+        DecisionTreeClassifier, DecisionTreeRegressor, MaxFeatures, SplitCriterion,
     };
 
     pub use anofox_ml_ensemble::{

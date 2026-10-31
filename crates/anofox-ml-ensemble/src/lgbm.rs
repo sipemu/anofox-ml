@@ -14,7 +14,7 @@
 //!
 //! Not included: EFB, DART, distributed training.
 
-use anofox_ml_core::{Fit, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -1525,6 +1525,23 @@ impl Fit<f64> for LgbmRegressor {
     }
 }
 
+impl FitWeighted<f64> for LgbmRegressor {
+    type Fitted = FittedLgbmRegressor;
+
+    fn fit_weighted(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
+    ) -> Result<Self::Fitted> {
+        let opts = LgbmFitOptions {
+            sample_weight,
+            ..LgbmFitOptions::default()
+        };
+        self.fit_with_eval(x, y, &opts)
+    }
+}
+
 impl Predict<f64> for FittedLgbmRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
@@ -1554,14 +1571,9 @@ impl Predict<f64> for FittedLgbmRegressor {
 // LgbmClassifier
 // ============================================================
 
-/// Class weight strategy for LgbmClassifier.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum LgbmClassWeight {
-    /// Automatic balancing: weight_c = n_samples / (n_classes * class_count_c).
-    Balanced,
-    /// Manual per-class weights as (class_label, weight) pairs.
-    Manual(Vec<(f64, f64)>),
-}
+/// Class weight strategy for LgbmClassifier (the shared
+/// [`anofox_ml_core::ClassWeight`]).
+pub type LgbmClassWeight = anofox_ml_core::ClassWeight;
 
 /// LightGBM-style gradient boosting classifier.
 ///
@@ -1707,34 +1719,10 @@ impl LgbmClassifier {
     }
 
     /// Compute per-sample class weights from the class_weight strategy.
-    fn compute_class_weights(&self, y: &Array1<f64>, classes: &[f64]) -> Vec<f64> {
-        let n = y.len();
+    fn compute_class_weights(&self, y: &Array1<f64>) -> Result<Vec<f64>> {
         match &self.class_weight {
-            None => vec![1.0; n],
-            Some(LgbmClassWeight::Balanced) => {
-                let n_classes = classes.len() as f64;
-                let mut per_class: std::collections::HashMap<u64, f64> =
-                    std::collections::HashMap::new();
-                for &cls in classes {
-                    let count = y.iter().filter(|&&v| v == cls).count() as f64;
-                    let w = if count > 0.0 {
-                        n as f64 / (n_classes * count)
-                    } else {
-                        1.0
-                    };
-                    per_class.insert(cls.to_bits(), w);
-                }
-                y.iter()
-                    .map(|&v| *per_class.get(&v.to_bits()).unwrap_or(&1.0))
-                    .collect()
-            }
-            Some(LgbmClassWeight::Manual(pairs)) => {
-                let map: std::collections::HashMap<u64, f64> =
-                    pairs.iter().map(|&(c, w)| (c.to_bits(), w)).collect();
-                y.iter()
-                    .map(|&v| *map.get(&v.to_bits()).unwrap_or(&1.0))
-                    .collect()
-            }
+            None => Ok(vec![1.0; y.len()]),
+            Some(cw) => Ok(anofox_ml_core::compute_sample_weight(cw, y)?.to_vec()),
         }
     }
 }
@@ -1901,7 +1889,7 @@ impl LgbmClassifier {
         }
 
         // Combine class_weight + sample_weight into a single effective weight per row.
-        let class_weights = self.compute_class_weights(y, &classes);
+        let class_weights = self.compute_class_weights(y)?;
         let effective_weights: Vec<f64> = (0..n)
             .map(|i| class_weights[i] * opts.sample_weight.map_or(1.0, |sw| sw[i]))
             .collect();
@@ -2252,6 +2240,23 @@ impl Fit<f64> for LgbmClassifier {
 
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         self.fit_with_eval(x, y, &LgbmFitOptions::default())
+    }
+}
+
+impl FitWeighted<f64> for LgbmClassifier {
+    type Fitted = FittedLgbmClassifier;
+
+    fn fit_weighted(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
+    ) -> Result<Self::Fitted> {
+        let opts = LgbmFitOptions {
+            sample_weight,
+            ..LgbmFitOptions::default()
+        };
+        self.fit_with_eval(x, y, &opts)
     }
 }
 

@@ -55,16 +55,22 @@ pub fn penalty_gradient(w: f64, alpha: f64, penalty: Penalty, l1_ratio: f64) -> 
     }
 }
 
-/// Compute the learning rate at iteration t.
+/// Compute the learning rate at iteration `t` (1-based), as sklearn's
+/// `_plain_sgd`:
+/// - `Optimal`: `1 / (α (t₀ + t − 1))` with `t₀ = 1 / (typw · α)` and
+///   `typw = √(1 / √α)` (the initial rate is `typw` for every sklearn loss,
+///   whose gradient at `(y = 1, p = −typw)` is never above 1);
+/// - `InvScaling`: `eta0 / t^power_t`.
 #[inline]
 pub fn compute_lr(schedule: LearningRate, eta0: f64, alpha: f64, t: usize, power_t: f64) -> f64 {
     match schedule {
         LearningRate::Constant => eta0,
         LearningRate::Optimal => {
-            let t0 = 1.0 / (eta0 * alpha);
-            1.0 / (alpha * (t as f64 + t0))
+            let typw = (1.0 / alpha.sqrt()).sqrt();
+            let t0 = 1.0 / (typw * alpha);
+            1.0 / (alpha * (t0 + t as f64 - 1.0))
         }
-        LearningRate::InvScaling => eta0 / (t as f64 + 1.0).powf(power_t),
+        LearningRate::InvScaling => eta0 / (t as f64).powf(power_t),
     }
 }
 
@@ -213,6 +219,7 @@ pub(crate) struct SgdRun {
 pub(crate) fn run_sgd<L>(
     x: &Array2<f64>,
     y: &[f64],
+    sample_weight: Option<&[f64]>,
     indices: &mut [usize],
     weights: &mut SgdWeights,
     cfg: &SgdConfig,
@@ -269,6 +276,12 @@ where
                 let scale = (1.0 - (1.0 - l1_ratio) * eta * cfg.alpha).max(0.0);
                 weights.coef.mapv_inplace(|w| w * scale);
             }
+            // sklearn scales the update (not the reported loss) by the
+            // sample weight.
+            let dloss = match sample_weight {
+                Some(sw) => dloss * sw[i],
+                None => dloss,
+            };
             if dloss != 0.0 {
                 let update = -eta * dloss;
                 weights.coef.scaled_add(update, &row);
@@ -419,6 +432,7 @@ mod tests {
         run_sgd(
             &x,
             &y,
+            None,
             &mut idx,
             &mut w,
             &cfg,

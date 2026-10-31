@@ -1,4 +1,4 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 use crate::node::TreeNode;
@@ -92,7 +92,40 @@ pub struct FittedDecisionTreeRegressor<F: Float> {
 impl<F: Float> Fit<F> for DecisionTreeRegressor {
     type Fitted = FittedDecisionTreeRegressor<F>;
 
+    /// Fits with the configured `sample_weight` (if any).
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        let sw = self
+            .sample_weight
+            .as_ref()
+            .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
+        self.fit_impl(x, y, sw.as_ref())
+    }
+}
+
+impl<F: Float> FitWeighted<F> for DecisionTreeRegressor {
+    type Fitted = FittedDecisionTreeRegressor<F>;
+
+    /// `sample_weight` replaces the configured one.
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        match sample_weight {
+            Some(sw) => self.fit_impl(x, y, Some(sw)),
+            None => Fit::fit(self, x, y),
+        }
+    }
+}
+
+impl DecisionTreeRegressor {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedDecisionTreeRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -104,23 +137,14 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
 
-        if let Some(sw) = &self.sample_weight {
-            if sw.len() != y.len() {
-                return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight has {} entries but y has {}",
-                    sw.len(),
-                    y.len()
-                )));
-            }
+        if let Some(sw) = sample_weight {
+            anofox_ml_core::check_sample_weight(sw, y.len())?;
         }
 
         let indices: Vec<usize> = (0..x.nrows()).collect();
         let n_features = x.ncols();
         let max_features_k = self.max_features.map(|mf| mf.resolve(n_features));
-        let effective_weights: Option<Array1<F>> = self
-            .sample_weight
-            .as_ref()
-            .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
+        let effective_weights = sample_weight.cloned();
         let tree = build_tree(
             x,
             y,
@@ -349,6 +373,22 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn fit_weighted_integer_weights_equal_duplicated_rows() {
+        let x = array![[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]];
+        let y = array![1.0, 1.5, 3.0, 2.0, 7.0, 6.5];
+        let w = array![1.0, 3.0, 1.0, 2.0, 1.0, 1.0];
+        let idx: Vec<usize> = vec![0, 1, 1, 1, 2, 3, 3, 4, 5];
+        let xd = x.select(ndarray::Axis(0), &idx);
+        let yd = y.select(ndarray::Axis(0), &idx);
+        let tree = DecisionTreeRegressor::new().with_max_depth(Some(2));
+        let fw = tree.fit_weighted(&x, &y, Some(&w)).unwrap();
+        let fd = Fit::fit(&tree, &xd, &yd).unwrap();
+        let q = array![[0.2], [1.1], [2.6], [3.4], [4.9]];
+        assert_eq!(fw.predict(&q).unwrap(), fd.predict(&q).unwrap());
+        assert!(tree.fit_weighted(&x, &y, Some(&array![1.0])).is_err());
+    }
 
     #[test]
     fn test_simple_regression() {
