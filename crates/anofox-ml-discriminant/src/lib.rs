@@ -193,7 +193,7 @@ pub enum Shrinkage {
     Fixed(f64),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LinearDiscriminantAnalysis {
     pub solver: LdaSolver,
     pub shrinkage: Shrinkage,
@@ -568,7 +568,7 @@ impl PredictProba<f64> for FittedLinearDiscriminantAnalysis {
 // QuadraticDiscriminantAnalysis (QDA)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuadraticDiscriminantAnalysis {
     /// sklearn `reg_param`: squared singular values become
     /// `(1 − r) S² + r`. Default 0.

@@ -36,7 +36,7 @@ use crate::mixture::{
     log_prob_resp, precision_cholesky, MixtureInit,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BayesianGaussianMixture {
     pub n_components: usize,
     pub covariance_type: CovarianceType,

@@ -12,7 +12,7 @@ use ndarray::{Array1, Array2};
 use crate::kmeans::KMeans;
 
 /// How to build the n×n affinity matrix.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Affinity {
     /// `exp(-γ ||x_i - x_j||²)` with the given gamma.
     Rbf(f64),
@@ -20,7 +20,7 @@ pub enum Affinity {
     KNearest(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectralClustering {
     pub n_clusters: usize,
     pub affinity: Affinity,

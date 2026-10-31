@@ -38,7 +38,7 @@ fn check_finite(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
 // RANSACRegressor
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RansacRegressor {
     /// Subset size; default `n_features + fit_intercept`.
     pub min_samples: Option<usize>,
@@ -173,7 +173,7 @@ impl Predict<f64> for FittedRansacRegressor {
 // TheilSenRegressor (spatial median of subset least-squares fits)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TheilSenRegressor {
     pub max_subpopulation: usize,
     /// Subset size. Only the minimal size `n_features + fit_intercept`

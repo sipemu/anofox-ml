@@ -22,7 +22,7 @@ pub enum KpcaKernel {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KernelPca {
     pub n_components: usize,
     pub kernel: KpcaKernel,

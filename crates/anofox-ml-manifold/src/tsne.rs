@@ -27,13 +27,13 @@ use rand::{Rng, SeedableRng};
 /// Barnes-Hut requires `n_components == 2`. Higher-dimensional output
 /// always falls back to `Exact`. Below `n_components == 2` and `n ≥ 200`
 /// the BH path is faster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TSneMethod {
     Exact,
     BarnesHut,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TSne {
     pub n_components: usize,
     pub perplexity: f64,

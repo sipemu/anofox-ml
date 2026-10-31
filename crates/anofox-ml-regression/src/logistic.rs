@@ -74,7 +74,7 @@ pub use anofox_ml_core::ClassWeight;
 /// multinomial loss (#72). Use [`LogisticRegressor::with_no_penalty`] for
 /// the unpenalised maximum-likelihood fit (e.g. together with
 /// `with_inference(true)` for classical Wald tests / odds-ratio CIs).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogisticRegressor {
     c: f64,
     l1_ratio: f64,

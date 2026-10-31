@@ -26,7 +26,7 @@ use ndarray::{Array1, Array2};
 /// `Lars::new(k)` is sklearn's `Lars(n_nonzero_coefs=k)`;
 /// `Lars::lasso_lars(alpha)` is `LassoLars(alpha=alpha)`.
 /// `Lars::lasso(k)` runs the Lasso path until `k` features are active.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Lars {
     /// Stop once this many features are active (`usize::MAX` = no limit).
     pub n_nonzero_coefs: usize,
@@ -225,7 +225,7 @@ impl Predict<f64> for FittedLars {
 // LassoLarsIC — information criterion along one Lasso path.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum IcCriterion {
     Aic,
     Bic,
@@ -239,7 +239,7 @@ pub enum IcCriterion {
 /// number of non-zero coefficients. `σ²` is `noise_variance` if given,
 /// otherwise the OLS residual variance `RSS_ols / (n − p − fit_intercept)`
 /// (requires `n > p + fit_intercept`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LassoLarsIC {
     pub criterion: IcCriterion,
     /// Cap on the number of active features along the path.

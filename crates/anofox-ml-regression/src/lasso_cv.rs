@@ -16,7 +16,7 @@ use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 /// Lasso regression with cross-validated alpha selection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LassoCrossValidated {
     alphas: Option<Vec<f64>>,
     n_alphas: usize,

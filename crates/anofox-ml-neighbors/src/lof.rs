@@ -19,14 +19,14 @@ use crate::kdtree::KdTree;
 /// Algorithm used for k-NN lookup. `Auto` picks `KdTree` when `n_features ≤ 20`
 /// and falls back to brute force otherwise (KD-tree quickly degenerates as
 /// dimensionality grows past ~20).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LofAlgorithm {
     Auto,
     KdTree,
     BruteForce,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocalOutlierFactor {
     pub n_neighbors: usize,
     pub contamination: f64,
@@ -51,7 +51,7 @@ impl LocalOutlierFactor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedLocalOutlierFactor {
     /// Negative LOF per training point; higher = more normal (sklearn sign
     /// convention).

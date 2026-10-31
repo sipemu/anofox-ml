@@ -15,7 +15,7 @@ use faer::Side;
 use ndarray::{Array1, Array2, Axis};
 
 /// Kernel ridge regression estimator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KernelRidge {
     pub alpha: f64,
     pub kernel: SvmKernel,

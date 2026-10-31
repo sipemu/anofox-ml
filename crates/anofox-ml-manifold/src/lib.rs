@@ -25,7 +25,7 @@ use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClassicalMds {
     pub n_components: usize,
 }

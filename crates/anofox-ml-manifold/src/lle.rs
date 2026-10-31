@@ -16,7 +16,7 @@ use faer::linalg::solvers::{SelfAdjointEigen, Solve};
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocallyLinearEmbedding {
     pub n_components: usize,
     pub n_neighbors: usize,

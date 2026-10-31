@@ -111,7 +111,7 @@ jobs:
         run: git diff --exit-code crates/anofox-ml/tests/golden_data/
 
   python-bindings:
-    name: Python Bindings Build
+    name: Python Bindings
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,7 +120,10 @@ jobs:
         with:
           python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p anofox-ml-python --release
+      - run: pip install maturin pytest numpy scikit-learn joblib
+      - run: maturin build --release -m crates/anofox-ml-python/Cargo.toml -o dist
+      - run: pip install dist/*.whl
+      - run: pytest -q crates/anofox-ml-python/tests
 
   bench:
     name: Benchmarks (dry run)

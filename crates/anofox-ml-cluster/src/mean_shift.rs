@@ -8,7 +8,7 @@
 use anofox_ml_core::{FitUnsupervised, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MeanShift {
     pub bandwidth: f64,
     pub max_iter: usize,

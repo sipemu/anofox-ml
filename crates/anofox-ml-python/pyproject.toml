@@ -18,9 +18,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+dependencies = ["numpy>=1.21"]
+
 [project.urls]
 Repository = "https://github.com/sipemu/anofox-ml"
 Documentation = "https://docs.rs/anofox-ml"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "anofox_ml_python._native"

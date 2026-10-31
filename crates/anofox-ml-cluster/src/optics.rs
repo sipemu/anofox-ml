@@ -20,7 +20,7 @@
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Optics {
     pub min_samples: usize,
     pub eps: f64,

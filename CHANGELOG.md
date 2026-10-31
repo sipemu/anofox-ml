@@ -395,6 +395,33 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     default hyperparameters).
   - Pipelines with boxed steps remain non-persistable (documented).
 
+- **Python bindings (#40):**
+  - Rebuilt on one generic native class (`_native.Model`) backed by a Rust
+    registry of 95 estimators: linear and GLM regression, logistic,
+    SGD, passive-aggressive, trees, forests, extra trees, gradient boosting,
+    AdaBoost, bagging, HistGradientBoosting, LGBM, isolation forest, SVMs,
+    naive Bayes, k-NN, LOF, LDA/QDA, MLP, the scalers / imputers /
+    decompositions / selectors, clustering and manifold learners.
+  - A Python layer gives them sklearn's API: `get_params` / `set_params`,
+    `clone` / `GridSearchCV` / pipeline compatibility (`__sklearn_tags__`),
+    `fit` returning `self`, `random_state`, `predict_proba` /
+    `decision_function` / `score_samples` where available, `sample_weight`,
+    string labels, `NotFittedError`, pickling (joblib / multiprocessing)
+    through the versioned bincode envelope.
+  - Fitting and prediction release the GIL.
+  - More metrics, `train_test_split`, `KFold`, `cross_val_score`.
+  - CI builds the wheel and runs the Python test suite.
+  - **Breaking:** sklearn class names (`KNeighborsClassifier`, `SVC`, `PCA`,
+    `TSNE`, ...; the old names remain as aliases), `random_state` instead of
+    `seed`, and `fit` returns `self`. The old `save_json` / `load_json`
+    methods are replaced by pickling.
+  - `Lasso` / `ElasticNet` use anofox-regression's penalty scaling, which
+    does not yet match sklearn's `alpha` (#72).
+- **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
+  SVMs can be saved with `save_bincode` (they previously failed to load).
+- More configs derive `Serialize` / `Deserialize` (regression, clustering,
+  manifold, LDA/QDA, isolation forest, LOF, decompositions).
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by

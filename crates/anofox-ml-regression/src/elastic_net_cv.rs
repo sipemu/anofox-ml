@@ -40,7 +40,7 @@ use ndarray::{Array1, Array2, Array3};
 // ---------------------------------------------------------------------------
 
 /// How to split the rows into folds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FoldSpec {
     pub n_folds: usize,
     pub fold_ids: Option<Vec<usize>>,
@@ -285,7 +285,7 @@ pub(crate) fn r_squared(x: &Array2<f64>, y: &Array1<f64>, coef: &Array1<f64>, b:
 
 /// Elastic Net regression with cross-validated `alpha` and `l1_ratio`
 /// (sklearn `ElasticNetCV`; see the module docs).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ElasticNetCrossValidated {
     alphas: Option<Vec<f64>>,
     l1_ratios: Vec<f64>,

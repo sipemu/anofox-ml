@@ -13,7 +13,7 @@ use ndarray::{Array1, Array2};
 /// - `alpha = 1.0` is pure Lasso (L1)
 /// - `alpha = 0.0` is pure Ridge (L2)
 /// - `0 < alpha < 1` is a mix of both
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ElasticNetRegressor {
     lambda: f64,
     alpha: f64,

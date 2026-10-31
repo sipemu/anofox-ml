@@ -13,7 +13,7 @@ use ndarray::Array2;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NmfInit {
     /// Sample W, H from uniform random.
     Random,
@@ -53,7 +53,7 @@ impl BetaLoss {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Nmf {
     pub n_components: usize,
     pub max_iter: usize,

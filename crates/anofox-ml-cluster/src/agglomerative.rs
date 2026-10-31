@@ -7,7 +7,7 @@
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Linkage {
     Single,
     Complete,
@@ -15,7 +15,7 @@ pub enum Linkage {
     Ward,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgglomerativeClustering {
     pub n_clusters: usize,
     pub linkage: Linkage,

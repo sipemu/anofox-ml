@@ -12,7 +12,7 @@ use ndarray::{Array1, Array2};
 /// Set `quantile = 0.5` for median regression. Unpenalised (sklearn's
 /// `QuantileRegressor(alpha=0)`); [`FitWeighted`] minimises
 /// `Σ wᵢ ρ_τ(yᵢ - xᵢᵀβ)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuantileRegressor {
     quantile: f64,
     with_intercept: bool,

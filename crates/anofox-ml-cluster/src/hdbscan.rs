@@ -36,7 +36,7 @@ pub enum ClusterSelectionMethod {
     Leaf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Hdbscan {
     /// Number of samples (including the point itself) in a neighbourhood
     /// for a point to be considered a core point. Values larger than

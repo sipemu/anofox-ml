@@ -12,7 +12,7 @@ use ndarray::{Array1, Array2};
 
 use crate::kmeans::KMeans;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Birch {
     pub threshold: f64,
     pub n_clusters: Option<usize>,

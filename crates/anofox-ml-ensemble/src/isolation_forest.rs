@@ -124,7 +124,7 @@ fn path_length(tree: &ITree, x: &Array1<f64>) -> f64 {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IsolationForest {
     pub n_estimators: usize,
     pub max_samples: usize,

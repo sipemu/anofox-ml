@@ -84,8 +84,25 @@ impl Gamma {
     }
 }
 
+/// Representation in non-self-describing formats (bincode), which cannot
+/// decode the number-or-string form.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum GammaBin {
+    Value(f64),
+    Scale,
+    Auto,
+}
+
 impl serde::Serialize for Gamma {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        if !s.is_human_readable() {
+            let bin = match self {
+                Gamma::Value(v) => GammaBin::Value(*v),
+                Gamma::Scale => GammaBin::Scale,
+                Gamma::Auto => GammaBin::Auto,
+            };
+            return serde::Serialize::serialize(&bin, s);
+        }
         match self {
             Gamma::Value(v) => s.serialize_f64(*v),
             Gamma::Scale => s.serialize_str("scale"),
@@ -96,13 +113,20 @@ impl serde::Serialize for Gamma {
 
 impl<'de> serde::Deserialize<'de> for Gamma {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        if !d.is_human_readable() {
+            return Ok(match <GammaBin as serde::Deserialize>::deserialize(d)? {
+                GammaBin::Value(v) => Gamma::Value(v),
+                GammaBin::Scale => Gamma::Scale,
+                GammaBin::Auto => Gamma::Auto,
+            });
+        }
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum Repr {
             Num(f64),
             Str(String),
         }
-        match Repr::deserialize(d)? {
+        match <Repr as serde::Deserialize>::deserialize(d)? {
             Repr::Num(v) => Ok(Gamma::Value(v)),
             Repr::Str(s) => match s.as_str() {
                 "scale" => Ok(Gamma::Scale),
@@ -381,6 +405,17 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn gamma_roundtrips_through_bincode_and_json() {
+        for g in [Gamma::Value(0.25), Gamma::Scale, Gamma::Auto] {
+            let k = SvmKernel::Rbf { gamma: g };
+            let bytes = bincode::serialize(&k).unwrap();
+            assert_eq!(bincode::deserialize::<SvmKernel>(&bytes).unwrap(), k);
+            let json = serde_json::to_string(&k).unwrap();
+            assert_eq!(serde_json::from_str::<SvmKernel>(&json).unwrap(), k);
+        }
+    }
 
     #[test]
     fn test_matrix_matches_pointwise() {

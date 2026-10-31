@@ -35,7 +35,7 @@ use ndarray::{Array1, Array2};
 /// let table = fitted.summary().unwrap();
 /// let pi = fitted.predict_interval(&x, IntervalKind::Prediction, 0.95).unwrap();
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OlsRegressor {
     with_intercept: bool,
     confidence_level: f64,

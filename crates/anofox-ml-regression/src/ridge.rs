@@ -12,7 +12,7 @@ use ndarray::{Array1, Array2};
 /// Ridge regression estimator with L2 regularization.
 ///
 /// Minimizes: `||y - Xβ||² + λ||β||²`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RidgeRegressor {
     lambda: f64,
     with_intercept: bool,

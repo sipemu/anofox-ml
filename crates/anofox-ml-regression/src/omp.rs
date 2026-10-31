@@ -13,7 +13,7 @@
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2, Axis};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrthogonalMatchingPursuit {
     /// Number of non-zero coefficients. Default `max(⌊0.1·d⌋, 1)`.
     /// Ignored when `tol` is set.
