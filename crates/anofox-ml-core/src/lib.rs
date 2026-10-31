@@ -36,6 +36,7 @@ pub mod float;
 pub mod function_transformer;
 pub mod halving;
 pub mod inspection;
+pub mod labels;
 pub mod multi_output;
 pub mod optim;
 pub mod persistence;
@@ -56,6 +57,7 @@ pub use halving::{
     HalvingResult, DEFAULT_HALVING_CV,
 };
 pub use inspection::{permutation_importance, PermutationImportance};
+pub use labels::{encode_labels, label_index, sorted_unique_labels};
 pub use multi_output::{
     ClassifierChain, FittedClassifierChain, FittedMultiOutputClassifier,
     FittedMultiOutputRegressor, FittedRegressorChain, MultiOutputClassifier, MultiOutputRegressor,

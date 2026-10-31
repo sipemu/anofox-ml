@@ -3,7 +3,9 @@ use ndarray::{Array1, Array2};
 use std::path::Path;
 use std::str::FromStr;
 
-/// Result of reading a CSV file: (features, optional target, optional headers).
+/// Result of reading a CSV file: (features, optional target, optional
+/// headers). The headers name the columns of the feature matrix (the target
+/// column's name is removed).
 pub type CsvReadResult<F> = Result<(Array2<F>, Option<Array1<F>>, Option<Vec<String>>), CsvError>;
 
 /// Options for reading CSV files.
@@ -53,7 +55,18 @@ impl CsvReadOptions {
     }
 }
 
-/// Parse a single CSV record into a vector of floats.
+/// Missing-value markers read as NaN (pandas' default `na_values` subset).
+const NA_VALUES: [&str; 9] = [
+    "", "NA", "N/A", "NaN", "nan", "NULL", "null", "None", "#N/A",
+];
+
+fn is_missing(field: &str) -> bool {
+    NA_VALUES.contains(&field)
+}
+
+/// Parse a single CSV record into a vector of floats. Empty fields and the
+/// usual missing-value markers (`NA`, `N/A`, `NaN`, `NULL`, `None`, `#N/A`)
+/// become NaN so that `SimpleImputer` can fill them.
 fn parse_record_to_floats<F: Float + FromStr>(
     record: &csv::StringRecord,
     row_idx: usize,
@@ -63,6 +76,9 @@ fn parse_record_to_floats<F: Float + FromStr>(
         .enumerate()
         .map(|(col_idx, field)| {
             let trimmed = field.trim();
+            if is_missing(trimmed) {
+                return Ok(F::nan());
+            }
             F::from_str(trimmed).map_err(|_| {
                 CsvError::Parse(format!(
                     "cannot parse '{}' as float at row {}, col {}",
@@ -174,6 +190,13 @@ fn assemble_result<F: Float>(
     match target_column {
         Some(target_col) => {
             let (x, y) = split_features_and_target(all_values, target_col, n_rows, n_cols)?;
+            // Headers describe the columns of X: drop the target's name.
+            let headers = headers.map(|mut h| {
+                if target_col < h.len() {
+                    h.remove(target_col);
+                }
+                h
+            });
             Ok((x, Some(y), headers))
         }
         None => {
@@ -248,6 +271,16 @@ impl std::fmt::Display for CsvError {
 }
 
 impl std::error::Error for CsvError {}
+
+impl From<CsvError> for anofox_ml_core::RustMlError {
+    fn from(e: CsvError) -> Self {
+        match e {
+            CsvError::Io(m) => anofox_ml_core::RustMlError::Io(m),
+            CsvError::Parse(m) => anofox_ml_core::RustMlError::InvalidParameter(m),
+            CsvError::Empty => anofox_ml_core::RustMlError::EmptyInput("CSV file is empty".into()),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -342,5 +375,22 @@ mod tests {
         let options = CsvReadOptions::new();
         let result: Result<(Array2<f64>, _, _), _> = read_csv(file.path(), &options);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_values_and_headers() {
+        let dir = std::env::temp_dir().join(format!("anofox_io_na_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("na.csv");
+        std::fs::write(&path, "a,b,y\n1.0,,0\nNA,2.5,1\n3.0,4.0,0\n").unwrap();
+        let (x, y, h) =
+            read_csv::<f64, _>(&path, &CsvReadOptions::new().with_target_column(2)).unwrap();
+        assert!(x[[0, 1]].is_nan() && x[[1, 0]].is_nan());
+        assert_eq!(x[[2, 1]], 4.0);
+        assert_eq!(y.unwrap().to_vec(), vec![0.0, 1.0, 0.0]);
+        assert_eq!(h.unwrap(), vec!["a".to_string(), "b".to_string()]);
+        let err: anofox_ml_core::RustMlError = CsvError::Empty.into();
+        assert!(matches!(err, anofox_ml_core::RustMlError::EmptyInput(_)));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

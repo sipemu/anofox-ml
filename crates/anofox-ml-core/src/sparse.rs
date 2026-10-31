@@ -26,13 +26,39 @@ pub struct CsrMatrix<F: Float> {
 }
 
 impl<F: Float> CsrMatrix<F> {
+    /// Checked [`CsrMatrix::from_triplets`]: errors on out-of-bounds entries.
+    pub fn try_from_triplets(
+        n_rows: usize,
+        n_cols: usize,
+        triplets: Vec<(usize, usize, F)>,
+    ) -> crate::Result<Self> {
+        if let Some(&(r, c, _)) = triplets
+            .iter()
+            .find(|(r, c, _)| *r >= n_rows || *c >= n_cols)
+        {
+            return Err(crate::RustMlError::ShapeMismatch(format!(
+                "triplet ({r}, {c}) out of bounds for a {n_rows}x{n_cols} matrix"
+            )));
+        }
+        Ok(Self::from_triplets(n_rows, n_cols, triplets))
+    }
+
     /// Build from a list of `(row, col, value)` triplets. Triplets do not
     /// need to be sorted; this constructor sorts within each row by column.
     /// Duplicate `(row, col)` entries are summed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a triplet lies outside `n_rows × n_cols`; use
+    /// [`CsrMatrix::try_from_triplets`] for a checked version.
     pub fn from_triplets(n_rows: usize, n_cols: usize, triplets: Vec<(usize, usize, F)>) -> Self {
         // Bucket per row.
         let mut buckets: Vec<Vec<(usize, F)>> = vec![Vec::new(); n_rows];
         for (r, c, v) in triplets {
+            assert!(
+                r < n_rows && c < n_cols,
+                "triplet ({r}, {c}) out of bounds for a {n_rows}x{n_cols} matrix"
+            );
             buckets[r].push((c, v));
         }
         // Sort + dedup-by-column within each row.

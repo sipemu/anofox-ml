@@ -310,6 +310,13 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     `remove_zero_eig`, uses sklearn's sign convention, and matches sklearn
     to 1e-9.
 
+- **Consistency (#41):**
+  - New `anofox_ml_core::labels` (`encode_labels`, exact total-order label
+    comparison, shared by metrics).
+  - CSV reader: empty and `NA` fields are read as NaN, returned headers
+    match the columns of X, and `CsvError` converts into `RustMlError`.
+  - `CsrMatrix::from_triplets` checks bounds; new `try_from_triplets`.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by
