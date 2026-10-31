@@ -1,7 +1,19 @@
 use anofox_ml_core::{Float, Result, RustMlError};
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 
-use crate::curves::binary_clf_curve;
+use crate::classification::Average;
+use crate::curves::{binary_clf_curve, binary_roc_auc};
+use crate::labels::{check_labels_finite, check_sample_weight, encode, sorted_unique};
+
+/// Multiclass ROC AUC strategy (sklearn `multi_class=`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiClass {
+    /// One-vs-rest: AUC of each class against all others.
+    Ovr,
+    /// One-vs-one (Hand & Till, 2001): mean over all class pairs of the
+    /// pairwise AUCs, each pair restricted to the samples of the two classes.
+    Ovo,
+}
 
 /// ROC AUC score via the trapezoidal rule over the ROC curve.
 ///
@@ -39,6 +51,264 @@ pub fn roc_auc_score<F: Float>(y_true: &Array1<F>, y_scores: &Array1<F>) -> Resu
     }
 
     Ok(auc)
+}
+
+/// Binary ROC AUC with optional `sample_weight` (sklearn
+/// `roc_auc_score(y_true, y_score, sample_weight=...)`).
+///
+/// `y_true` must contain exactly two distinct labels; the greater one is the
+/// positive class (sklearn's convention), so `{0, 1}`, `{-1, 1}` and `{1, 2}`
+/// all work. Ties are handled as in [`roc_auc_score`].
+pub fn roc_auc_score_with<F: Float>(
+    y_true: &Array1<F>,
+    y_score: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<F> {
+    check_lengths(y_true, y_score)?;
+    check_labels_finite(y_true, "y_true")?;
+    check_sample_weight(sample_weight, y_true.len())?;
+    let classes = sorted_unique(y_true.iter().copied())?;
+    if classes.len() != 2 {
+        return Err(RustMlError::InvalidParameter(format!(
+            "binary ROC AUC needs exactly 2 classes in y_true, found {}",
+            classes.len()
+        )));
+    }
+    let is_pos: Vec<bool> = y_true
+        .iter()
+        .map(|&t| encode(&classes, t) == Some(1))
+        .collect();
+    let scores = y_score.to_vec();
+    let w = sample_weight.map(|w| w.to_vec());
+    binary_roc_auc(&is_pos, &scores, w.as_deref())
+}
+
+/// Validate a multiclass ROC AUC problem; returns `(classes, encoded y_true)`.
+fn multiclass_setup<F: Float>(
+    y_true: &Array1<F>,
+    y_score: &Array2<F>,
+    labels: Option<&[F]>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<(Vec<F>, Vec<usize>)> {
+    let n = y_true.len();
+    if n == 0 {
+        return Err(RustMlError::EmptyInput("input arrays are empty".into()));
+    }
+    if y_score.nrows() != n {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "y_true length {} != y_score rows {}",
+            n,
+            y_score.nrows()
+        )));
+    }
+    check_labels_finite(y_true, "y_true")?;
+    check_sample_weight(sample_weight, n)?;
+    if y_score.iter().any(|v| v.is_nan()) {
+        return Err(RustMlError::InvalidParameter(
+            "y_score contains NaN values".into(),
+        ));
+    }
+    // sklearn: np.allclose(1, y_score.sum(axis=1)) (rtol=1e-5, atol=1e-8).
+    for row in y_score.rows() {
+        let s = row.iter().fold(0.0f64, |a, &v| a + v.to_f64().unwrap());
+        if (s - 1.0).abs() > 1e-8 + 1e-5 * s.abs() {
+            return Err(RustMlError::InvalidParameter(
+                "target scores need to be probabilities for multiclass ROC AUC, \
+                 i.e. they should sum up to 1.0 over classes"
+                    .into(),
+            ));
+        }
+    }
+    let classes = match labels {
+        Some(l) => {
+            let c = sorted_unique(l.iter().copied())?;
+            if c.len() != l.len() {
+                return Err(RustMlError::InvalidParameter(
+                    "parameter 'labels' must be unique".into(),
+                ));
+            }
+            if c.iter().zip(l.iter()).any(|(a, &b)| *a != b + F::zero()) {
+                return Err(RustMlError::InvalidParameter(
+                    "parameter 'labels' must be ordered".into(),
+                ));
+            }
+            c
+        }
+        None => sorted_unique(y_true.iter().copied())?,
+    };
+    if classes.len() != y_score.ncols() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "number of classes ({}) != number of columns in y_score ({})",
+            classes.len(),
+            y_score.ncols()
+        )));
+    }
+    if classes.len() < 2 {
+        return Err(RustMlError::InvalidParameter(
+            "multiclass ROC AUC needs at least 2 classes".into(),
+        ));
+    }
+    let mut codes = Vec::with_capacity(n);
+    for &t in y_true.iter() {
+        match encode(&classes, t) {
+            Some(c) => codes.push(c),
+            None => {
+                return Err(RustMlError::InvalidParameter(
+                    "y_true contains labels not in parameter 'labels'".into(),
+                ))
+            }
+        }
+    }
+    Ok((classes, codes))
+}
+
+/// One-vs-rest per-class ROC AUC (sklearn `roc_auc_score(multi_class='ovr',
+/// average=None)`): one AUC per column of `y_score`.
+pub fn roc_auc_score_ovr_per_class<F: Float>(
+    y_true: &Array1<F>,
+    y_score: &Array2<F>,
+    labels: Option<&[F]>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<Array1<F>> {
+    let (classes, codes) = multiclass_setup(y_true, y_score, labels, sample_weight)?;
+    ovr_per_class(&codes, classes.len(), y_score, sample_weight)
+}
+
+fn ovr_per_class<F: Float>(
+    codes: &[usize],
+    k: usize,
+    y_score: &Array2<F>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<Array1<F>> {
+    let w = sample_weight.map(|w| w.to_vec());
+    let mut out = Array1::<F>::zeros(k);
+    for c in 0..k {
+        let is_pos: Vec<bool> = codes.iter().map(|&code| code == c).collect();
+        let col = y_score.column(c).to_vec();
+        out[c] = binary_roc_auc(&is_pos, &col, w.as_deref())?;
+    }
+    Ok(out)
+}
+
+/// Multiclass ROC AUC from an `(n_samples, n_classes)` probability matrix
+/// (sklearn `roc_auc_score(y_true, y_proba, multi_class=..., average=...)`).
+///
+/// Columns of `y_score` correspond to the sorted labels (or to `labels`,
+/// which must then be sorted and unique); rows must sum to 1.
+///
+/// - [`MultiClass::Ovr`] supports [`Average::Macro`], [`Average::Weighted`]
+///   (by class prevalence, weighted by `sample_weight`) and [`Average::Micro`]
+///   (pooled one-hot indicator vs. scores).
+/// - [`MultiClass::Ovo`] (Hand & Till) supports [`Average::Macro`] and
+///   [`Average::Weighted`] (by pair prevalence); `sample_weight` is not
+///   supported, as in sklearn.
+pub fn roc_auc_score_multiclass<F: Float>(
+    y_true: &Array1<F>,
+    y_score: &Array2<F>,
+    multi_class: MultiClass,
+    average: Average,
+    labels: Option<&[F]>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<F> {
+    if matches!(average, Average::Binary { .. }) {
+        return Err(RustMlError::InvalidParameter(
+            "average must be Macro, Weighted or (ovr only) Micro for multiclass ROC AUC".into(),
+        ));
+    }
+    match multi_class {
+        MultiClass::Ovr => {
+            let (classes, codes) = multiclass_setup(y_true, y_score, labels, sample_weight)?;
+            let k = classes.len();
+            let wt = |i: usize| sample_weight.map_or(F::one(), |w| w[i]);
+            match average {
+                Average::Micro => {
+                    let n = codes.len();
+                    let mut is_pos = Vec::with_capacity(n * k);
+                    let mut scores = Vec::with_capacity(n * k);
+                    let mut weights = Vec::with_capacity(n * k);
+                    for (i, &code) in codes.iter().enumerate() {
+                        for c in 0..k {
+                            is_pos.push(code == c);
+                            scores.push(y_score[[i, c]]);
+                            weights.push(wt(i));
+                        }
+                    }
+                    binary_roc_auc(&is_pos, &scores, Some(&weights))
+                }
+                Average::Weighted => {
+                    let per_class = ovr_per_class(&codes, k, y_score, sample_weight)?;
+                    let mut support = vec![F::zero(); k];
+                    for (i, &code) in codes.iter().enumerate() {
+                        support[code] += wt(i);
+                    }
+                    let total = support.iter().fold(F::zero(), |a, &b| a + b);
+                    if total == F::zero() {
+                        return Err(RustMlError::InvalidParameter(
+                            "sum of sample_weight is zero".into(),
+                        ));
+                    }
+                    Ok(per_class
+                        .iter()
+                        .zip(support.iter())
+                        .fold(F::zero(), |a, (&v, &s)| a + v * s)
+                        / total)
+                }
+                _ => {
+                    let per_class = ovr_per_class(&codes, k, y_score, sample_weight)?;
+                    Ok(per_class.sum() / F::from_usize(k).unwrap())
+                }
+            }
+        }
+        MultiClass::Ovo => {
+            if sample_weight.is_some() {
+                return Err(RustMlError::InvalidParameter(
+                    "sample_weight is not supported for multiclass one-vs-one ROC AUC".into(),
+                ));
+            }
+            if average == Average::Micro {
+                return Err(RustMlError::InvalidParameter(
+                    "average=Micro is not supported for multi_class=Ovo".into(),
+                ));
+            }
+            let (_, codes) = multiclass_setup(y_true, y_score, labels, None)?;
+            ovo_score(&codes, y_score, average == Average::Weighted)
+        }
+    }
+}
+
+/// Hand & Till one-vs-one average over the class pairs present in `codes`.
+fn ovo_score<F: Float>(codes: &[usize], y_score: &Array2<F>, weighted: bool) -> Result<F> {
+    let n = codes.len();
+    let mut present: Vec<usize> = codes.to_vec();
+    present.sort_unstable();
+    present.dedup();
+    let two = F::from_f64(2.0).unwrap();
+    let mut num = F::zero();
+    let mut den = F::zero();
+    for (ai, &a) in present.iter().enumerate() {
+        for &b in &present[ai + 1..] {
+            let idx: Vec<usize> = (0..n).filter(|&i| codes[i] == a || codes[i] == b).collect();
+            let a_true: Vec<bool> = idx.iter().map(|&i| codes[i] == a).collect();
+            let b_true: Vec<bool> = a_true.iter().map(|&t| !t).collect();
+            let sa: Vec<F> = idx.iter().map(|&i| y_score[[i, a]]).collect();
+            let sb: Vec<F> = idx.iter().map(|&i| y_score[[i, b]]).collect();
+            let pair =
+                (binary_roc_auc(&a_true, &sa, None)? + binary_roc_auc(&b_true, &sb, None)?) / two;
+            let w = if weighted {
+                F::from_usize(idx.len()).unwrap() / F::from_usize(n).unwrap()
+            } else {
+                F::one()
+            };
+            num += w * pair;
+            den += w;
+        }
+    }
+    if den == F::zero() {
+        return Err(RustMlError::InvalidParameter(
+            "one-vs-one ROC AUC needs at least 2 classes in y_true".into(),
+        ));
+    }
+    Ok(num / den)
 }
 
 /// Average precision score (area under precision-recall curve).

@@ -31,19 +31,28 @@ pub mod classification_extra;
 pub mod clustering;
 pub mod clustering_extra;
 pub mod curves;
+mod labels;
 pub mod regression;
 pub mod regression_extended;
 pub mod regression_extra;
 
 pub use classification::{
-    accuracy_score, confusion_matrix, f1_score, f1_score_avg, precision, precision_score, recall,
-    recall_score, Average,
+    accuracy_score, accuracy_score_with, confusion_matrix, confusion_matrix_with, f1_per_class,
+    f1_score, f1_score_avg, f1_score_with, fbeta_score_with, precision, precision_per_class,
+    precision_recall_fscore_support, precision_recall_fscore_support_per_class, precision_score,
+    precision_score_with, recall, recall_per_class, recall_score, recall_score_with, Average,
+    ClassificationOptions, PerClassScores, ZeroDivision,
 };
-pub use classification_extended::{average_precision_score, matthews_corrcoef, roc_auc_score};
-pub use classification_extra::{balanced_accuracy_score, cohen_kappa_score, log_loss};
+pub use classification_extended::{
+    average_precision_score, matthews_corrcoef, roc_auc_score, roc_auc_score_multiclass,
+    roc_auc_score_ovr_per_class, roc_auc_score_with, MultiClass,
+};
+pub use classification_extra::{
+    balanced_accuracy_score, cohen_kappa_score, log_loss, log_loss_multiclass, log_loss_with,
+};
 pub use clustering::silhouette_score;
 pub use clustering_extra::{adjusted_rand_score, normalized_mutual_info_score};
-pub use curves::{brier_score_loss, precision_recall_curve, roc_curve};
+pub use curves::{brier_score_loss, brier_score_loss_with, precision_recall_curve, roc_curve};
 pub use regression::{mae, mse, r2_score};
 pub use regression_extended::{
     explained_variance_score, max_error, mean_absolute_percentage_error,

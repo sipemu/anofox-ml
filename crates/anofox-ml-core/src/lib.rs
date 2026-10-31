@@ -37,6 +37,7 @@ pub mod function_transformer;
 pub mod halving;
 pub mod inspection;
 pub mod multi_output;
+pub mod optim;
 pub mod persistence;
 pub mod pipeline;
 pub mod sparse;
@@ -48,13 +49,17 @@ pub use error::{Result, RustMlError};
 pub use feature_union::{FeatureUnion, FittedFeatureUnion};
 pub use float::Float;
 pub use function_transformer::FunctionTransformer;
-pub use halving::{halving_grid_search_cv, halving_random_search_cv, HalvingResult};
+pub use halving::{
+    halving_grid_search_cv, halving_grid_search_cv_with_splitter, halving_random_search_cv,
+    HalvingResult, DEFAULT_HALVING_CV,
+};
 pub use inspection::{permutation_importance, PermutationImportance};
 pub use multi_output::{
     ClassifierChain, FittedClassifierChain, FittedMultiOutputClassifier,
     FittedMultiOutputRegressor, FittedRegressorChain, MultiOutputClassifier, MultiOutputRegressor,
     RegressorChain,
 };
+pub use optim::{minimize_lbfgsb, LbfgsbOptions, LbfgsbResult, LbfgsbStatus};
 pub use pipeline::{
     FitPredict, FitTransform, FittedPipeline, Pipeline, PredictStep, TransformStep,
 };

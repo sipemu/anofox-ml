@@ -171,7 +171,7 @@ fn label_key<F: Float>(v: F) -> u64 {
 /// Classes are ordered by first appearance in `y` (like sklearn's
 /// `StratifiedKFold` encoding) and indices within a class are ascending, so
 /// the result is fully deterministic (no hash-map iteration order leaks out).
-fn group_by_class<F: Float>(y: &Array1<F>) -> Vec<Vec<usize>> {
+pub(crate) fn group_by_class<F: Float>(y: &Array1<F>) -> Vec<Vec<usize>> {
     let mut position: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, &v) in y.iter().enumerate() {

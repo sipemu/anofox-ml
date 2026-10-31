@@ -1,8 +1,18 @@
 use anofox_ml_core::{Float, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
+use crate::labels::{
+    canon, check_labels_finite, check_sample_weight, confusion_counts, encode, sorted_unique,
+    weight_at,
+};
+
 /// Averaging method for multi-class metrics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Mirrors sklearn's `average=` argument. `average=None` (per-class scores) is
+/// provided by the `*_per_class` functions and
+/// [`precision_recall_fscore_support_per_class`] instead of a variant, since
+/// it returns an array rather than a scalar.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Average {
     /// Unweighted mean of per-class metrics.
     Macro,
@@ -10,288 +20,527 @@ pub enum Average {
     Micro,
     /// Weighted mean by support (number of true instances per class).
     Weighted,
+    /// Report only the score of the class `pos_label` (sklearn's default
+    /// `average='binary'`). The union of `y_true` and `y_pred` must contain at
+    /// most two distinct labels, and `pos_label` must be one of them if there
+    /// are two.
+    Binary {
+        /// Label of the positive class (sklearn's default is `1`).
+        pos_label: f64,
+    },
 }
 
-/// Accuracy: fraction of correct predictions.
+impl Average {
+    /// `Average::Binary { pos_label: 1.0 }` — sklearn's default.
+    pub fn binary() -> Self {
+        Average::Binary { pos_label: 1.0 }
+    }
+}
+
+/// Value returned when a precision / recall / F-score has a zero denominator
+/// (sklearn's `zero_division=`). sklearn's default `"warn"` behaves like
+/// [`ZeroDivision::Zero`] (Rust has no warning channel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ZeroDivision {
+    /// Use 0 (sklearn `zero_division="warn"` / `0`).
+    #[default]
+    Zero,
+    /// Use 1.
+    One,
+    /// Use NaN; NaN classes are then ignored by macro / weighted averaging
+    /// (like sklearn's `zero_division=np.nan`).
+    NaN,
+}
+
+impl ZeroDivision {
+    fn value<F: Float>(self) -> F {
+        match self {
+            ZeroDivision::Zero => F::zero(),
+            ZeroDivision::One => F::one(),
+            ZeroDivision::NaN => F::nan(),
+        }
+    }
+}
+
+/// Optional sklearn-style arguments shared by the classification metrics:
+/// `labels=`, `sample_weight=` and `zero_division=`.
+///
+/// ```
+/// use anofox_ml_metrics::{f1_score_with, Average, ClassificationOptions, ZeroDivision};
+/// use ndarray::array;
+///
+/// let y_true = array![0.0, 1.0, 1.0, 2.0];
+/// let y_pred = array![0.0, 1.0, 2.0, 2.0];
+/// let w = array![1.0, 2.0, 1.0, 1.0];
+/// let opts = ClassificationOptions::new()
+///     .with_sample_weight(&w)
+///     .with_zero_division(ZeroDivision::One);
+/// let f1: f64 = f1_score_with(&y_true, &y_pred, Average::Macro, &opts).unwrap();
+/// assert!(f1 > 0.0);
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClassificationOptions<'a, F: Float> {
+    /// Labels to report / average over (sklearn `labels=`). For the
+    /// precision/recall/F family, samples whose label is not listed still count
+    /// as false positives / negatives of the listed classes; for
+    /// [`confusion_matrix_with`] they select (and order) the rows / columns.
+    pub labels: Option<&'a [F]>,
+    /// Per-sample weights (sklearn `sample_weight=`).
+    pub sample_weight: Option<&'a Array1<F>>,
+    /// Value for ill-defined scores (sklearn `zero_division=`).
+    pub zero_division: ZeroDivision,
+}
+
+impl<'a, F: Float> ClassificationOptions<'a, F> {
+    /// Defaults: all labels, unit weights, `zero_division = 0`.
+    pub fn new() -> Self {
+        Self {
+            labels: None,
+            sample_weight: None,
+            zero_division: ZeroDivision::Zero,
+        }
+    }
+
+    /// Restrict / order the labels.
+    pub fn with_labels(mut self, labels: &'a [F]) -> Self {
+        self.labels = Some(labels);
+        self
+    }
+
+    /// Per-sample weights.
+    pub fn with_sample_weight(mut self, sample_weight: &'a Array1<F>) -> Self {
+        self.sample_weight = Some(sample_weight);
+        self
+    }
+
+    /// Value for ill-defined (0/0) scores.
+    pub fn with_zero_division(mut self, zero_division: ZeroDivision) -> Self {
+        self.zero_division = zero_division;
+        self
+    }
+}
+
+/// Per-class precision, recall, F-beta and support (sklearn
+/// `precision_recall_fscore_support(average=None)`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerClassScores<F: Float> {
+    /// Class labels, in the order of the arrays below (sorted, or the order of
+    /// `ClassificationOptions::labels`).
+    pub labels: Vec<F>,
+    pub precision: Array1<F>,
+    pub recall: Array1<F>,
+    pub fscore: Array1<F>,
+    /// (Weighted) number of true samples per class.
+    pub support: Array1<F>,
+}
+
+/// Accuracy: fraction of correct predictions (exact label comparison).
 pub fn accuracy_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
-    check_lengths(y_true, y_pred)?;
-    let n = F::from_usize(y_true.len()).unwrap();
-    let correct = y_true
-        .iter()
-        .zip(y_pred.iter())
-        .filter(|(&t, &p)| (t - p).abs() < F::from_f64(1e-9).unwrap())
-        .count();
-    Ok(F::from_usize(correct).unwrap() / n)
+    accuracy_score_with(y_true, y_pred, None)
 }
 
-/// Confusion matrix for integer-encoded class labels.
+/// Accuracy with optional `sample_weight`: `sum(w * [y_true == y_pred]) / sum(w)`.
+pub fn accuracy_score_with<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<F> {
+    check_lengths(y_true, y_pred)?;
+    check_sample_weight(sample_weight, y_true.len())?;
+    let mut correct = F::zero();
+    let mut total = F::zero();
+    for (i, (&t, &p)) in y_true.iter().zip(y_pred.iter()).enumerate() {
+        let w = weight_at(sample_weight, i);
+        if canon(t) == canon(p) {
+            correct += w;
+        }
+        total += w;
+    }
+    if total == F::zero() {
+        return Err(RustMlError::InvalidParameter(
+            "sum of sample_weight is zero".into(),
+        ));
+    }
+    Ok(correct / total)
+}
+
+/// Confusion matrix over the sorted union of the labels in `y_true` and
+/// `y_pred`.
 ///
 /// Returns a (num_classes x num_classes) matrix where entry (i, j) is the count
 /// of samples with true label i and predicted label j.
 pub fn confusion_matrix<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<Array2<F>> {
+    confusion_matrix_with(y_true, y_pred, &ClassificationOptions::new())
+}
+
+/// Confusion matrix with sklearn's `labels=` and `sample_weight=`.
+///
+/// With `labels`, rows / columns follow the given order and samples whose
+/// true or predicted label is not listed are ignored; at least one listed
+/// label must occur in `y_true`. `zero_division` is ignored.
+pub fn confusion_matrix_with<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<Array2<F>> {
+    let (all, cm) = full_confusion(y_true, y_pred, opts)?;
+    let Some(labels) = opts.labels else {
+        return Ok(cm);
+    };
+    if labels.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "'labels' should contain at least one label".into(),
+        ));
+    }
+    let idx: Vec<usize> = labels.iter().map(|&l| encode(&all, l).unwrap()).collect();
+    if !y_true.iter().any(|&t| {
+        let t = canon(t);
+        labels.iter().any(|&l| canon(l) == t)
+    }) {
+        return Err(RustMlError::InvalidParameter(
+            "at least one label specified must be in y_true".into(),
+        ));
+    }
+    let k = idx.len();
+    let mut out = Array2::<F>::zeros((k, k));
+    for (a, &ia) in idx.iter().enumerate() {
+        for (b, &ib) in idx.iter().enumerate() {
+            out[[a, b]] = cm[[ia, ib]];
+        }
+    }
+    Ok(out)
+}
+
+/// Validates inputs and builds the confusion matrix over the sorted union of
+/// `y_true`, `y_pred` and `opts.labels`. Returns `(sorted_labels, cm)`.
+fn full_confusion<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<(Vec<F>, Array2<F>)> {
     check_lengths(y_true, y_pred)?;
-
-    let classes = unique_sorted(y_true, y_pred);
-    let n = classes.len();
-    let mut matrix = Array2::<F>::zeros((n, n));
-
-    for (&t, &p) in y_true.iter().zip(y_pred.iter()) {
-        let i = classes
+    check_labels_finite(y_true, "y_true")?;
+    check_labels_finite(y_pred, "y_pred")?;
+    check_sample_weight(opts.sample_weight, y_true.len())?;
+    let extra = opts.labels.unwrap_or(&[]);
+    let all = sorted_unique(
+        y_true
             .iter()
-            .position(|&c| (c - t).abs() < F::from_f64(1e-9).unwrap())
-            .unwrap();
-        let j = classes
-            .iter()
-            .position(|&c| (c - p).abs() < F::from_f64(1e-9).unwrap())
-            .unwrap();
-        matrix[[i, j]] += F::one();
-    }
-
-    Ok(matrix)
+            .chain(y_pred.iter())
+            .chain(extra.iter())
+            .copied(),
+    )?;
+    let cm = confusion_counts(y_true, y_pred, &all, opts.sample_weight);
+    Ok((all, cm))
 }
 
-/// Precision for each class (macro-style): `TP / (TP + FP)`.
+/// Sufficient statistics per selected label: `(labels, tp, pred_sum, true_sum)`.
+type Counts<F> = (Vec<F>, Vec<F>, Vec<F>, Vec<F>);
+
+/// Build the confusion matrix once and extract TP / predicted / true sums for
+/// the selected labels (sklearn's `multilabel_confusion_matrix` semantics).
+fn counts_for<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    labels: Option<&[F]>,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<Counts<F>> {
+    let o = ClassificationOptions {
+        labels,
+        sample_weight: opts.sample_weight,
+        zero_division: opts.zero_division,
+    };
+    let (all, cm) = full_confusion(y_true, y_pred, &o)?;
+    let selected: Vec<F> = match labels {
+        Some(l) => l.iter().map(|&v| canon(v)).collect(),
+        None => {
+            // Present labels only (all == present when no labels were given).
+            all.clone()
+        }
+    };
+    let c = all.len();
+    let mut tp = Vec::with_capacity(selected.len());
+    let mut pred = Vec::with_capacity(selected.len());
+    let mut truth = Vec::with_capacity(selected.len());
+    for &l in &selected {
+        let i = encode(&all, l).unwrap();
+        tp.push(cm[[i, i]]);
+        pred.push((0..c).fold(F::zero(), |acc, r| acc + cm[[r, i]]));
+        truth.push((0..c).fold(F::zero(), |acc, k| acc + cm[[i, k]]));
+    }
+    Ok((selected, tp, pred, truth))
+}
+
+fn prf_divide<F: Float>(num: F, den: F, zd: ZeroDivision) -> F {
+    if den == F::zero() {
+        zd.value()
+    } else {
+        num / den
+    }
+}
+
+/// `(precision, recall, fbeta)` from TP / predicted / true sums, as sklearn
+/// computes them: `F = (1 + b²) tp / (b² true + pred)`.
+fn prf_from_counts<F: Float>(tp: F, pred: F, truth: F, beta: F, zd: ZeroDivision) -> (F, F, F) {
+    let b2 = beta * beta;
+    let p = prf_divide(tp, pred, zd);
+    let r = prf_divide(tp, truth, zd);
+    let f = prf_divide((F::one() + b2) * tp, b2 * truth + pred, zd);
+    (p, r, f)
+}
+
+fn check_beta<F: Float>(beta: F) -> Result<()> {
+    if !beta.is_finite() || beta < F::zero() {
+        return Err(RustMlError::InvalidParameter(
+            "beta must be a finite non-negative number".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Per-class precision, recall, F-beta and support (sklearn
+/// `precision_recall_fscore_support(average=None)`), from a single confusion
+/// matrix. Honors `labels`, `sample_weight` and `zero_division`.
+pub fn precision_recall_fscore_support_per_class<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    beta: F,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<PerClassScores<F>> {
+    check_beta(beta)?;
+    let (labels, tp, pred, truth) = counts_for(y_true, y_pred, opts.labels, opts)?;
+    let k = labels.len();
+    let mut precision = Array1::<F>::zeros(k);
+    let mut recall = Array1::<F>::zeros(k);
+    let mut fscore = Array1::<F>::zeros(k);
+    for i in 0..k {
+        let (p, r, f) = prf_from_counts(tp[i], pred[i], truth[i], beta, opts.zero_division);
+        precision[i] = p;
+        recall[i] = r;
+        fscore[i] = f;
+    }
+    Ok(PerClassScores {
+        labels,
+        precision,
+        recall,
+        fscore,
+        support: Array1::from_vec(truth),
+    })
+}
+
+/// NaN-ignoring (weighted) mean, like sklearn's `_nanaverage`: all-NaN gives
+/// NaN; all-zero weights fall back to the unweighted mean.
+fn nan_average<F: Float>(values: &[F], weights: Option<&[F]>) -> F {
+    let mut num = F::zero();
+    let mut den = F::zero();
+    let mut plain = F::zero();
+    let mut count = 0usize;
+    for (i, &v) in values.iter().enumerate() {
+        if v.is_nan() {
+            continue;
+        }
+        let w = weights.map_or(F::one(), |w| w[i]);
+        num += w * v;
+        den += w;
+        plain += v;
+        count += 1;
+    }
+    if count == 0 {
+        F::nan()
+    } else if den == F::zero() {
+        plain / F::from_usize(count).unwrap()
+    } else {
+        num / den
+    }
+}
+
+/// Averaged precision, recall and F-beta (sklearn
+/// `precision_recall_fscore_support(average=...)`). Builds the confusion
+/// matrix once.
+pub fn precision_recall_fscore_support<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    beta: F,
+    average: Average,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<(F, F, F)> {
+    check_beta(beta)?;
+    let zd = opts.zero_division;
+    let pos_storage;
+    let labels = match average {
+        Average::Binary { pos_label } => {
+            check_lengths(y_true, y_pred)?;
+            let present = sorted_unique(y_true.iter().chain(y_pred.iter()).copied())?;
+            if present.len() > 2 {
+                return Err(RustMlError::InvalidParameter(
+                    "target is multiclass but average is Binary; choose Macro, Micro or Weighted"
+                        .into(),
+                ));
+            }
+            let pos = F::from_f64(pos_label).ok_or_else(|| {
+                RustMlError::InvalidParameter("pos_label not representable".into())
+            })?;
+            if pos.is_nan() {
+                return Err(RustMlError::InvalidParameter("pos_label is NaN".into()));
+            }
+            if present.len() == 2 && encode(&present, pos).is_none() {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "pos_label={} is not a valid label; it should be one of {:?}",
+                    pos_label, present
+                )));
+            }
+            pos_storage = [pos];
+            Some(&pos_storage[..])
+        }
+        _ => opts.labels,
+    };
+    let (_, tp, pred, truth) = counts_for(y_true, y_pred, labels, opts)?;
+
+    if average == Average::Micro {
+        let sum = |v: &[F]| v.iter().fold(F::zero(), |a, &b| a + b);
+        return Ok(prf_from_counts(sum(&tp), sum(&pred), sum(&truth), beta, zd));
+    }
+
+    let k = tp.len();
+    let mut ps = Vec::with_capacity(k);
+    let mut rs = Vec::with_capacity(k);
+    let mut fs = Vec::with_capacity(k);
+    for i in 0..k {
+        let (p, r, f) = prf_from_counts(tp[i], pred[i], truth[i], beta, zd);
+        ps.push(p);
+        rs.push(r);
+        fs.push(f);
+    }
+    let weights = match average {
+        Average::Weighted => Some(&truth[..]),
+        _ => None,
+    };
+    Ok((
+        nan_average(&ps, weights),
+        nan_average(&rs, weights),
+        nan_average(&fs, weights),
+    ))
+}
+
+/// Precision for each class: `TP / (TP + FP)` (0 when undefined).
 ///
-/// Returns per-class precision values.
+/// Returns per-class precision values over the sorted labels.
 pub fn precision<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<Array1<F>> {
-    let cm = confusion_matrix(y_true, y_pred)?;
-    let n = cm.nrows();
-    let mut result = Array1::<F>::zeros(n);
-
-    for i in 0..n {
-        let tp = cm[[i, i]];
-        let col_sum = (0..n).map(|r| cm[[r, i]]).fold(F::zero(), |a, b| a + b);
-        result[i] = if col_sum > F::zero() {
-            tp / col_sum
-        } else {
-            F::zero()
-        };
-    }
-
-    Ok(result)
+    precision_per_class(y_true, y_pred, &ClassificationOptions::new())
 }
 
-/// Recall for each class (macro-style): `TP / (TP + FN)`.
+/// Recall for each class: `TP / (TP + FN)` (0 when undefined).
 ///
-/// Returns per-class recall values.
+/// Returns per-class recall values over the sorted labels.
 pub fn recall<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<Array1<F>> {
-    let cm = confusion_matrix(y_true, y_pred)?;
-    let n = cm.nrows();
-    let mut result = Array1::<F>::zeros(n);
-
-    for i in 0..n {
-        let tp = cm[[i, i]];
-        let row_sum = (0..n).map(|c| cm[[i, c]]).fold(F::zero(), |a, b| a + b);
-        result[i] = if row_sum > F::zero() {
-            tp / row_sum
-        } else {
-            F::zero()
-        };
-    }
-
-    Ok(result)
+    recall_per_class(y_true, y_pred, &ClassificationOptions::new())
 }
 
 /// F1 score for each class: `2 * precision * recall / (precision + recall)`.
 ///
-/// Returns per-class F1 values.
+/// Returns per-class F1 values over the sorted labels.
 pub fn f1_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<Array1<F>> {
-    let prec = precision(y_true, y_pred)?;
-    let rec = recall(y_true, y_pred)?;
-    let two = F::from_f64(2.0).unwrap();
+    f1_per_class(y_true, y_pred, &ClassificationOptions::new())
+}
 
-    let mut result = Array1::<F>::zeros(prec.len());
-    for i in 0..prec.len() {
-        let denom = prec[i] + rec[i];
-        result[i] = if denom > F::zero() {
-            two * prec[i] * rec[i] / denom
-        } else {
-            F::zero()
-        };
-    }
+/// Per-class precision with options (sklearn `precision_score(average=None)`).
+pub fn precision_per_class<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<Array1<F>> {
+    Ok(precision_recall_fscore_support_per_class(y_true, y_pred, F::one(), opts)?.precision)
+}
 
-    Ok(result)
+/// Per-class recall with options (sklearn `recall_score(average=None)`).
+pub fn recall_per_class<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<Array1<F>> {
+    Ok(precision_recall_fscore_support_per_class(y_true, y_pred, F::one(), opts)?.recall)
+}
+
+/// Per-class F1 with options (sklearn `f1_score(average=None)`).
+pub fn f1_per_class<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<Array1<F>> {
+    Ok(precision_recall_fscore_support_per_class(y_true, y_pred, F::one(), opts)?.fscore)
 }
 
 /// Precision score with averaging.
 ///
-/// Returns a single scalar precision value computed using the given averaging
-/// strategy:
 /// - **Macro**: unweighted mean of per-class precision values.
 /// - **Micro**: global precision computed from total TP and FP across all classes.
-/// - **Weighted**: weighted mean of per-class precision, weighted by support
-///   (number of true instances per class).
+/// - **Weighted**: weighted mean of per-class precision, weighted by support.
+/// - **Binary**: precision of `pos_label`.
 pub fn precision_score<F: Float>(
     y_true: &Array1<F>,
     y_pred: &Array1<F>,
     average: Average,
 ) -> Result<F> {
-    let cm = confusion_matrix(y_true, y_pred)?;
-    let n = cm.nrows();
-
-    match average {
-        Average::Macro => {
-            let per_class = precision(y_true, y_pred)?;
-            let sum: F = per_class.iter().copied().sum();
-            Ok(sum / F::from_usize(n).unwrap())
-        }
-        Average::Micro => {
-            let (tp_total, fp_total, _fn_total) = global_tp_fp_fn(&cm);
-            let denom = tp_total + fp_total;
-            if denom > F::zero() {
-                Ok(tp_total / denom)
-            } else {
-                Ok(F::zero())
-            }
-        }
-        Average::Weighted => {
-            let per_class = precision(y_true, y_pred)?;
-            let supports = class_supports(&cm);
-            weighted_average(&per_class, &supports)
-        }
-    }
+    precision_score_with(y_true, y_pred, average, &ClassificationOptions::new())
 }
 
-/// Recall score with averaging.
-///
-/// Returns a single scalar recall value computed using the given averaging
-/// strategy:
-/// - **Macro**: unweighted mean of per-class recall values.
-/// - **Micro**: global recall computed from total TP and FN across all classes.
-/// - **Weighted**: weighted mean of per-class recall, weighted by support
-///   (number of true instances per class).
+/// Recall score with averaging (see [`precision_score`] for the strategies).
 pub fn recall_score<F: Float>(
     y_true: &Array1<F>,
     y_pred: &Array1<F>,
     average: Average,
 ) -> Result<F> {
-    let cm = confusion_matrix(y_true, y_pred)?;
-    let n = cm.nrows();
-
-    match average {
-        Average::Macro => {
-            let per_class = recall(y_true, y_pred)?;
-            let sum: F = per_class.iter().copied().sum();
-            Ok(sum / F::from_usize(n).unwrap())
-        }
-        Average::Micro => {
-            let (tp_total, _fp_total, fn_total) = global_tp_fp_fn(&cm);
-            let denom = tp_total + fn_total;
-            if denom > F::zero() {
-                Ok(tp_total / denom)
-            } else {
-                Ok(F::zero())
-            }
-        }
-        Average::Weighted => {
-            let per_class = recall(y_true, y_pred)?;
-            let supports = class_supports(&cm);
-            weighted_average(&per_class, &supports)
-        }
-    }
+    recall_score_with(y_true, y_pred, average, &ClassificationOptions::new())
 }
 
-/// F1 score with averaging.
-///
-/// Returns a single scalar F1 value computed using the given averaging
-/// strategy:
-/// - **Macro**: unweighted mean of per-class F1 values.
-/// - **Micro**: global F1 computed from total TP, FP, FN across all classes.
-/// - **Weighted**: weighted mean of per-class F1 values, weighted by support
-///   (number of true instances per class).
+/// F1 score with averaging (see [`precision_score`] for the strategies).
 pub fn f1_score_avg<F: Float>(
     y_true: &Array1<F>,
     y_pred: &Array1<F>,
     average: Average,
 ) -> Result<F> {
-    let cm = confusion_matrix(y_true, y_pred)?;
-    let n = cm.nrows();
-    let two = F::from_f64(2.0).unwrap();
-
-    match average {
-        Average::Macro => {
-            let per_class = f1_score(y_true, y_pred)?;
-            let sum: F = per_class.iter().copied().sum();
-            Ok(sum / F::from_usize(n).unwrap())
-        }
-        Average::Micro => {
-            let (tp_total, fp_total, fn_total) = global_tp_fp_fn(&cm);
-            let p_denom = tp_total + fp_total;
-            let r_denom = tp_total + fn_total;
-            let micro_p = if p_denom > F::zero() {
-                tp_total / p_denom
-            } else {
-                F::zero()
-            };
-            let micro_r = if r_denom > F::zero() {
-                tp_total / r_denom
-            } else {
-                F::zero()
-            };
-            let f1_denom = micro_p + micro_r;
-            if f1_denom > F::zero() {
-                Ok(two * micro_p * micro_r / f1_denom)
-            } else {
-                Ok(F::zero())
-            }
-        }
-        Average::Weighted => {
-            let per_class = f1_score(y_true, y_pred)?;
-            let supports = class_supports(&cm);
-            weighted_average(&per_class, &supports)
-        }
-    }
+    f1_score_with(y_true, y_pred, average, &ClassificationOptions::new())
 }
 
-/// Compute global TP, FP, FN summed across all classes.
-fn global_tp_fp_fn<F: Float>(cm: &Array2<F>) -> (F, F, F) {
-    let n = cm.nrows();
-    let mut tp_total = F::zero();
-    let mut fp_total = F::zero();
-    let mut fn_total = F::zero();
-
-    for i in 0..n {
-        let tp = cm[[i, i]];
-        let col_sum: F = (0..n).map(|r| cm[[r, i]]).fold(F::zero(), |a, b| a + b);
-        let row_sum: F = (0..n).map(|c| cm[[i, c]]).fold(F::zero(), |a, b| a + b);
-        tp_total += tp;
-        fp_total += col_sum - tp;
-        fn_total += row_sum - tp;
-    }
-
-    (tp_total, fp_total, fn_total)
+/// Precision with averaging, `labels`, `sample_weight` and `zero_division`.
+pub fn precision_score_with<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    average: Average,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<F> {
+    Ok(precision_recall_fscore_support(y_true, y_pred, F::one(), average, opts)?.0)
 }
 
-/// Compute support (number of true instances) for each class from confusion matrix.
-fn class_supports<F: Float>(cm: &Array2<F>) -> Array1<F> {
-    let n = cm.nrows();
-    let mut supports = Array1::<F>::zeros(n);
-    for i in 0..n {
-        supports[i] = (0..n).map(|c| cm[[i, c]]).fold(F::zero(), |a, b| a + b);
-    }
-    supports
+/// Recall with averaging, `labels`, `sample_weight` and `zero_division`.
+pub fn recall_score_with<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    average: Average,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<F> {
+    Ok(precision_recall_fscore_support(y_true, y_pred, F::one(), average, opts)?.1)
 }
 
-/// Weighted average of per-class values given supports.
-fn weighted_average<F: Float>(values: &Array1<F>, supports: &Array1<F>) -> Result<F> {
-    let total_support: F = supports.iter().copied().sum();
-    if total_support > F::zero() {
-        let weighted_sum: F = values
-            .iter()
-            .zip(supports.iter())
-            .map(|(&v, &s)| v * s)
-            .sum();
-        Ok(weighted_sum / total_support)
-    } else {
-        Ok(F::zero())
-    }
+/// F1 with averaging, `labels`, `sample_weight` and `zero_division`.
+pub fn f1_score_with<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    average: Average,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<F> {
+    Ok(precision_recall_fscore_support(y_true, y_pred, F::one(), average, opts)?.2)
 }
 
-fn unique_sorted<F: Float>(a: &Array1<F>, b: &Array1<F>) -> Vec<F> {
-    let mut vals: Vec<F> = a.iter().chain(b.iter()).copied().collect();
-    vals.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    vals.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-9).unwrap());
-    vals
+/// F-beta score with averaging and options (sklearn `fbeta_score`).
+pub fn fbeta_score_with<F: Float>(
+    y_true: &Array1<F>,
+    y_pred: &Array1<F>,
+    beta: F,
+    average: Average,
+    opts: &ClassificationOptions<'_, F>,
+) -> Result<F> {
+    Ok(precision_recall_fscore_support(y_true, y_pred, beta, average, opts)?.2)
 }
 
 fn check_lengths<F: Float>(a: &Array1<F>, b: &Array1<F>) -> Result<()> {

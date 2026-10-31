@@ -1,5 +1,8 @@
 use anofox_ml_core::{Float, Result, RustMlError};
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
+
+use crate::classification::confusion_matrix;
+use crate::labels::{check_labels_finite, check_sample_weight, encode, sorted_unique, weight_at};
 
 /// Binary cross-entropy (log loss).
 ///
@@ -35,44 +38,144 @@ pub fn log_loss<F: Float>(y_true: &Array1<F>, y_prob: &Array1<F>) -> Result<F> {
     Ok(-sum / n)
 }
 
+/// Binary log loss with sklearn semantics and optional `sample_weight`.
+///
+/// `y_true` holds class labels (exactly compared; at most two distinct values,
+/// the greater one being the positive class) and `y_prob` the predicted
+/// probability of the positive class. Probabilities are clipped to
+/// `[eps, 1 - eps]` with `eps` the machine epsilon of `F` (sklearn >= 1.5).
+/// Equivalent to [`log_loss_multiclass`] on the `(n, 2)` matrix
+/// `[1 - p, p]`.
+pub fn log_loss_with<F: Float>(
+    y_true: &Array1<F>,
+    y_prob: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<F> {
+    check_lengths(y_true, y_prob)?;
+    let n = y_prob.len();
+    let mut m = Array2::<F>::zeros((n, 2));
+    for (i, &p) in y_prob.iter().enumerate() {
+        m[[i, 0]] = F::one() - p;
+        m[[i, 1]] = p;
+    }
+    // Validate the original probabilities (not 1 - p) against [0, 1].
+    check_prob_range(y_prob.iter().copied())?;
+    log_loss_multiclass(y_true, &m, None, sample_weight)
+}
+
+fn check_prob_range<F: Float>(mut it: impl Iterator<Item = F>) -> Result<()> {
+    if it.any(|p| p.is_nan() || p < F::zero() || p > F::one()) {
+        return Err(RustMlError::InvalidParameter(
+            "y_prob values must lie in [0, 1] (and not be NaN)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Multiclass log loss (cross-entropy) on an `(n_samples, n_classes)`
+/// probability matrix (sklearn `log_loss(y_true, y_proba, labels=...,
+/// sample_weight=...)`).
+///
+/// Columns of `y_prob` correspond to the sorted class labels: those of
+/// `labels` if given (which must cover every value of `y_true`), otherwise
+/// the distinct values of `y_true`. At least two classes are required; a
+/// single-column `y_prob` is interpreted as the probability of the positive
+/// (second) class. Probabilities are clipped to `[eps, 1 - eps]`
+/// (machine epsilon) and are **not** renormalised (sklearn only warns when
+/// rows do not sum to one).
+pub fn log_loss_multiclass<F: Float>(
+    y_true: &Array1<F>,
+    y_prob: &Array2<F>,
+    labels: Option<&[F]>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<F> {
+    let n = y_true.len();
+    if n == 0 {
+        return Err(RustMlError::EmptyInput("input arrays are empty".into()));
+    }
+    if y_prob.nrows() != n {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "y_true length {} != y_prob rows {}",
+            n,
+            y_prob.nrows()
+        )));
+    }
+    check_labels_finite(y_true, "y_true")?;
+    check_sample_weight(sample_weight, n)?;
+    check_prob_range(y_prob.iter().copied())?;
+
+    let classes = match labels {
+        Some(l) => sorted_unique(l.iter().copied())?,
+        None => sorted_unique(y_true.iter().copied())?,
+    };
+    if classes.len() < 2 {
+        return Err(RustMlError::InvalidParameter(format!(
+            "y_true contains only one label ({:?}); provide the true labels explicitly \
+             through `labels`",
+            classes
+        )));
+    }
+    let single_col = y_prob.ncols() == 1;
+    if !(single_col && classes.len() == 2) && y_prob.ncols() != classes.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "y_true and y_prob contain different number of classes: {} vs {}",
+            classes.len(),
+            y_prob.ncols()
+        )));
+    }
+
+    let eps = F::epsilon();
+    let one = F::one();
+    let mut num = F::zero();
+    let mut den = F::zero();
+    for (i, &t) in y_true.iter().enumerate() {
+        let c = encode(&classes, t).ok_or_else(|| {
+            RustMlError::InvalidParameter(format!("y_true label {} not in labels", t))
+        })?;
+        let p = if single_col {
+            let p1 = y_prob[[i, 0]];
+            if c == 1 {
+                p1
+            } else {
+                one - p1
+            }
+        } else {
+            y_prob[[i, c]]
+        };
+        let p = p.max(eps).min(one - eps);
+        let w = weight_at(sample_weight, i);
+        num += -w * p.ln();
+        den += w;
+    }
+    if den == F::zero() {
+        return Err(RustMlError::InvalidParameter(
+            "sum of sample_weight is zero".into(),
+        ));
+    }
+    Ok(num / den)
+}
+
 /// Balanced accuracy score.
 ///
 /// Computes the macro-averaged recall across all classes. This is equivalent to
 /// standard accuracy for balanced datasets, but accounts for class imbalance by
 /// giving equal weight to each class regardless of its support.
 ///
-/// For each class `c`, the per-class recall is `TP_c / (TP_c + FN_c)`. The
-/// balanced accuracy is the unweighted mean of these per-class recall values.
+/// For each class `c` present in `y_true`, the per-class recall is
+/// `TP_c / (TP_c + FN_c)`. The balanced accuracy is the unweighted mean of
+/// these per-class recall values. Labels are compared exactly.
 pub fn balanced_accuracy_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
-    check_lengths(y_true, y_pred)?;
-
-    let classes = unique_sorted(y_true);
-    let n_classes = classes.len();
-    let eps = F::from_f64(1e-9).unwrap();
-
+    let cm = confusion_matrix(y_true, y_pred)?;
+    let k = cm.nrows();
     let mut recall_sum = F::zero();
-
-    for &c in &classes {
-        let mut tp = F::zero();
-        let mut fn_ = F::zero();
-
-        for (&t, &p) in y_true.iter().zip(y_pred.iter()) {
-            if (t - c).abs() < eps {
-                // This sample belongs to class c
-                if (p - c).abs() < eps {
-                    tp += F::one();
-                } else {
-                    fn_ += F::one();
-                }
-            }
-        }
-
-        let support = tp + fn_;
+    let mut n_classes = 0usize;
+    for i in 0..k {
+        let support = cm.row(i).sum();
         if support > F::zero() {
-            recall_sum += tp / support;
+            recall_sum += cm[[i, i]] / support;
+            n_classes += 1;
         }
     }
-
     Ok(recall_sum / F::from_usize(n_classes).unwrap())
 }
 
@@ -85,42 +188,23 @@ pub fn balanced_accuracy_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>)
 /// Returns 1 for perfect agreement, 0 for agreement equal to chance, and
 /// negative values for agreement worse than chance.
 pub fn cohen_kappa_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
-    check_lengths(y_true, y_pred)?;
-
-    let n = y_true.len();
-    let n_f = F::from_usize(n).unwrap();
-    let eps = F::from_f64(1e-9).unwrap();
-
-    let classes = unique_sorted_pair(y_true, y_pred);
-    let n_classes = classes.len();
-
-    // Build confusion matrix
-    let mut cm = vec![vec![F::zero(); n_classes]; n_classes];
-    for (&t, &p) in y_true.iter().zip(y_pred.iter()) {
-        let i = classes.iter().position(|&c| (c - t).abs() < eps).unwrap();
-        let j = classes.iter().position(|&c| (c - p).abs() < eps).unwrap();
-        cm[i][j] += F::one();
-    }
+    let cm = confusion_matrix(y_true, y_pred)?;
+    let n_classes = cm.nrows();
+    let n_f = F::from_usize(y_true.len()).unwrap();
 
     // Observed agreement: sum of diagonal / n
     let mut p_o = F::zero();
     for i in 0..n_classes {
-        p_o += cm[i][i];
+        p_o += cm[[i, i]];
     }
-    p_o = p_o / n_f;
+    p_o /= n_f;
 
     // Expected agreement: sum over classes of (row_sum_i * col_sum_i) / n^2
     let mut p_e = F::zero();
     for i in 0..n_classes {
-        let row_sum: F = (0..n_classes)
-            .map(|j| cm[i][j])
-            .fold(F::zero(), |a, b| a + b);
-        let col_sum: F = (0..n_classes)
-            .map(|j| cm[j][i])
-            .fold(F::zero(), |a, b| a + b);
-        p_e += row_sum * col_sum;
+        p_e += cm.row(i).sum() * cm.column(i).sum();
     }
-    p_e = p_e / (n_f * n_f);
+    p_e /= n_f * n_f;
 
     let denom = F::one() - p_e;
     if denom.abs() < F::from_f64(1e-15).unwrap() {
@@ -129,20 +213,6 @@ pub fn cohen_kappa_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Re
     }
 
     Ok((p_o - p_e) / denom)
-}
-
-fn unique_sorted<F: Float>(a: &Array1<F>) -> Vec<F> {
-    let mut vals: Vec<F> = a.iter().copied().collect();
-    vals.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    vals.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-9).unwrap());
-    vals
-}
-
-fn unique_sorted_pair<F: Float>(a: &Array1<F>, b: &Array1<F>) -> Vec<F> {
-    let mut vals: Vec<F> = a.iter().chain(b.iter()).copied().collect();
-    vals.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    vals.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-9).unwrap());
-    vals
 }
 
 fn check_lengths<F: Float>(a: &Array1<F>, b: &Array1<F>) -> Result<()> {
