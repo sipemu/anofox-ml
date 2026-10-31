@@ -2,13 +2,18 @@
 //!
 //! Supports hinge (linear SVM), log_loss (logistic regression), and
 //! modified_huber loss functions, trained with stochastic gradient descent.
-//! Multi-class uses a one-vs-rest strategy.
+//! Binary problems train a single model (positive class = `classes[1]`);
+//! multi-class problems use one-vs-rest. Stopping, `partial_fit`,
+//! truncated-gradient L1 and averaging (ASGD) follow scikit-learn's
+//! `SGDClassifier` semantics.
 
-use crate::sgd_common::{compute_lr, penalty_gradient, LearningRate, Penalty};
-use anofox_ml_core::{Fit, Float, PartialFit, Predict, Result, RustMlError};
+use crate::sgd_common::{
+    default_n_iter_no_change, default_t, default_validation_fraction, run_sgd, sigmoid, softplus,
+    validation_split, LearningRate, Penalty, SgdConfig, SgdRun, SgdWeights, Stopping,
+};
+use anofox_ml_core::{Fit, Float, PartialFit, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
 /// Loss function for SGD classifier.
@@ -30,10 +35,53 @@ impl Default for ClassifierLoss {
     }
 }
 
+impl ClassifierLoss {
+    /// `(loss, dloss/dz)` for decision value `z` and label `y ∈ {-1, +1}`.
+    #[inline]
+    pub(crate) fn eval(self, z: f64, y: f64) -> (f64, f64) {
+        let margin = y * z;
+        match self {
+            ClassifierLoss::Hinge => {
+                if margin < 1.0 {
+                    (1.0 - margin, -y)
+                } else {
+                    (0.0, 0.0)
+                }
+            }
+            // ln(1 + exp(-m)) and its derivative -y·σ(-m), both overflow-free.
+            ClassifierLoss::Log => (softplus(-margin), -y * sigmoid(-margin)),
+            ClassifierLoss::ModifiedHuber => {
+                if margin >= 1.0 {
+                    (0.0, 0.0)
+                } else if margin >= -1.0 {
+                    ((1.0 - margin).powi(2), -2.0 * y * (1.0 - margin))
+                } else {
+                    (-4.0 * margin, -4.0 * y)
+                }
+            }
+            ClassifierLoss::Perceptron => {
+                if margin <= 0.0 {
+                    (-margin, -y)
+                } else {
+                    (0.0, 0.0)
+                }
+            }
+        }
+    }
+}
+
 /// Stochastic Gradient Descent classifier.
 ///
 /// Linear classifier trained via SGD, supporting multiple loss functions.
-/// For multi-class problems, uses one-vs-rest decomposition.
+/// Binary problems train one model; for more than two classes one-vs-rest
+/// decomposition is used.
+///
+/// Stopping (sklearn semantics): an epoch whose average training loss is
+/// `> best_loss - tol` increments a no-improvement counter, any other epoch
+/// resets it; training stops once the counter reaches `n_iter_no_change`.
+/// With `early_stopping = true` a stratified `validation_fraction` of the
+/// data is held out and its accuracy is used instead. `tol = None` disables
+/// the criterion.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SgdClassifier {
     pub loss: ClassifierLoss,
@@ -41,7 +89,21 @@ pub struct SgdClassifier {
     pub alpha: f64,
     pub l1_ratio: f64,
     pub max_iter: usize,
-    pub tol: f64,
+    /// Stopping tolerance; `None` disables the stopping criterion.
+    pub tol: Option<f64>,
+    /// Number of epochs without improvement before stopping (default 5).
+    #[serde(default = "default_n_iter_no_change")]
+    pub n_iter_no_change: usize,
+    /// Hold out `validation_fraction` of the data and stop on its accuracy.
+    #[serde(default)]
+    pub early_stopping: bool,
+    /// Fraction of the training data used for early stopping (default 0.1).
+    #[serde(default = "default_validation_fraction")]
+    pub validation_fraction: f64,
+    /// Averaged SGD: 0 = off, `k >= 1` = average the iterates once `k`
+    /// samples have been seen (sklearn `average=True` is `1`).
+    #[serde(default)]
+    pub average: usize,
     pub eta0: f64,
     pub power_t: f64,
     pub learning_rate: LearningRate,
@@ -57,7 +119,11 @@ impl SgdClassifier {
             alpha: 0.0001,
             l1_ratio: 0.15,
             max_iter: 1000,
-            tol: 1e-3,
+            tol: Some(1e-3),
+            n_iter_no_change: 5,
+            early_stopping: false,
+            validation_fraction: 0.1,
+            average: 0,
             eta0: 0.01,
             power_t: 0.5,
             learning_rate: LearningRate::Optimal,
@@ -86,8 +152,26 @@ impl SgdClassifier {
         self.max_iter = max_iter;
         self
     }
-    pub fn with_tol(mut self, tol: f64) -> Self {
-        self.tol = tol;
+    /// Set the stopping tolerance: `with_tol(1e-3)` or `with_tol(None)`
+    /// (run all `max_iter` epochs).
+    pub fn with_tol(mut self, tol: impl Into<Option<f64>>) -> Self {
+        self.tol = tol.into();
+        self
+    }
+    pub fn with_n_iter_no_change(mut self, n: usize) -> Self {
+        self.n_iter_no_change = n;
+        self
+    }
+    pub fn with_early_stopping(mut self, early_stopping: bool) -> Self {
+        self.early_stopping = early_stopping;
+        self
+    }
+    pub fn with_validation_fraction(mut self, fraction: f64) -> Self {
+        self.validation_fraction = fraction;
+        self
+    }
+    pub fn with_average(mut self, average: usize) -> Self {
+        self.average = average;
         self
     }
     pub fn with_eta0(mut self, eta0: f64) -> Self {
@@ -110,214 +194,20 @@ impl SgdClassifier {
         self.seed = seed;
         self
     }
-}
 
-impl Default for SgdClassifier {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// A fitted SGD linear classifier.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
-pub struct FittedSgdClassifier<F: Float> {
-    /// One weight vector per class (OvR). Shape: (n_classes, n_features).
-    weights: Vec<Array1<F>>,
-    /// One bias per class.
-    biases: Vec<F>,
-    /// Sorted unique class labels.
-    classes: Vec<F>,
-    n_features: usize,
-}
-
-impl<F: Float> FittedSgdClassifier<F> {
-    /// Return the unique class labels.
-    pub fn classes(&self) -> &[F] {
-        &self.classes
-    }
-
-    /// Return weight vectors (one per class in OvR).
-    pub fn weights(&self) -> &[Array1<F>] {
-        &self.weights
-    }
-
-    /// Return biases (one per class in OvR).
-    pub fn biases(&self) -> &[F] {
-        &self.biases
-    }
-
-    /// Compute raw decision function values for each class.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-        let n = x.nrows();
-        let k = self.classes.len();
-        let mut scores = Array2::zeros((n, k));
-        for (c, (w, &b)) in self.weights.iter().zip(self.biases.iter()).enumerate() {
-            for i in 0..n {
-                let mut s = b;
-                for j in 0..self.n_features {
-                    s = s + x[[i, j]] * w[j];
-                }
-                scores[[i, c]] = s;
-            }
-        }
-        Ok(scores)
-    }
-}
-
-/// Train a single binary OvR classifier via SGD.
-/// Returns (weights, bias).
-fn train_binary_sgd(
-    x: &Array2<f64>,
-    y_binary: &[f64], // +1 or -1
-    loss: ClassifierLoss,
-    penalty: Penalty,
-    alpha: f64,
-    l1_ratio: f64,
-    max_iter: usize,
-    tol: f64,
-    eta0: f64,
-    power_t: f64,
-    learning_rate: LearningRate,
-    shuffle: bool,
-    seed: u64,
-) -> (Array1<f64>, f64) {
-    train_binary_sgd_resume(
-        x,
-        y_binary,
-        None,
-        loss,
-        penalty,
-        alpha,
-        l1_ratio,
-        max_iter,
-        tol,
-        eta0,
-        power_t,
-        learning_rate,
-        shuffle,
-        seed,
-    )
-}
-
-/// Same as `train_binary_sgd` but starts from the given (weights, bias) if
-/// provided. Powers `partial_fit`: each call resumes from the previous
-/// state instead of zero-initialising.
-fn train_binary_sgd_resume(
-    x: &Array2<f64>,
-    y_binary: &[f64],
-    initial: Option<(Array1<f64>, f64)>,
-    loss: ClassifierLoss,
-    penalty: Penalty,
-    alpha: f64,
-    l1_ratio: f64,
-    max_iter: usize,
-    tol: f64,
-    eta0: f64,
-    power_t: f64,
-    learning_rate: LearningRate,
-    shuffle: bool,
-    seed: u64,
-) -> (Array1<f64>, f64) {
-    let n = x.nrows();
-    let p = x.ncols();
-    let (mut w, mut b) = initial.unwrap_or_else(|| (Array1::zeros(p), 0.0));
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut indices: Vec<usize> = (0..n).collect();
-    let mut t: usize = 1;
-
-    for _epoch in 0..max_iter {
-        if shuffle {
-            indices.shuffle(&mut rng);
-        }
-
-        let mut total_loss = 0.0;
-
-        for &i in &indices {
-            let eta = compute_lr(learning_rate, eta0, alpha, t, power_t);
-            t += 1;
-
-            // Compute decision: z = w · x_i + b
-            let mut z = b;
-            for j in 0..p {
-                z += w[j] * x[[i, j]];
-            }
-            let yi = y_binary[i];
-            let margin = yi * z;
-
-            // Compute loss gradient w.r.t. z
-            let dloss = match loss {
-                ClassifierLoss::Hinge => {
-                    if margin < 1.0 {
-                        total_loss += (1.0 - margin).max(0.0);
-                        -yi
-                    } else {
-                        0.0
-                    }
-                }
-                ClassifierLoss::Log => {
-                    let sig = 1.0 / (1.0 + (-z).exp());
-                    let label01 = (yi + 1.0) / 2.0; // convert {-1,1} to {0,1}
-                    total_loss += -(label01 * sig.ln() + (1.0 - label01) * (1.0 - sig).ln());
-                    sig - label01
-                }
-                ClassifierLoss::ModifiedHuber => {
-                    if margin >= 1.0 {
-                        0.0
-                    } else if margin >= -1.0 {
-                        total_loss += (1.0 - margin).powi(2);
-                        -2.0 * yi * (1.0 - margin)
-                    } else {
-                        total_loss += -4.0 * margin;
-                        -4.0 * yi
-                    }
-                }
-                ClassifierLoss::Perceptron => {
-                    if margin <= 0.0 {
-                        total_loss += -margin;
-                        -yi
-                    } else {
-                        0.0
-                    }
-                }
-            };
-
-            // Update weights: w -= eta * (dloss * x_i + penalty_grad)
-            if dloss != 0.0 {
-                for j in 0..p {
-                    w[j] -= eta
-                        * (dloss * x[[i, j]] + penalty_gradient(w[j], alpha, penalty, l1_ratio));
-                }
-                b -= eta * dloss;
-            } else {
-                // Still apply regularization
-                for j in 0..p {
-                    w[j] -= eta * penalty_gradient(w[j], alpha, penalty, l1_ratio);
-                }
-            }
-        }
-
-        // Check convergence
-        let avg_loss = total_loss / n as f64;
-        if avg_loss < tol {
-            break;
+    fn config(&self) -> SgdConfig {
+        SgdConfig {
+            penalty: self.penalty,
+            alpha: self.alpha,
+            l1_ratio: self.l1_ratio,
+            eta0: self.eta0,
+            power_t: self.power_t,
+            learning_rate: self.learning_rate,
+            average: self.average,
         }
     }
 
-    (w, b)
-}
-
-impl Fit<f64> for SgdClassifier {
-    type Fitted = FittedSgdClassifier<f64>;
-
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn validate(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -333,61 +223,319 @@ impl Fit<f64> for SgdClassifier {
                 "alpha must be non-negative".into(),
             ));
         }
-
-        // Collect unique classes
-        let mut classes: Vec<f64> = y.iter().copied().collect();
-        classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        classes.dedup();
-
-        if classes.len() < 2 {
+        if self.n_iter_no_change == 0 {
             return Err(RustMlError::InvalidParameter(
-                "need at least 2 classes".into(),
+                "n_iter_no_change must be >= 1".into(),
             ));
         }
+        Ok(())
+    }
+}
 
-        let n_features = x.ncols();
+impl Default for SgdClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-        // One-vs-rest: train one binary classifier per class
-        let mut weights = Vec::with_capacity(classes.len());
-        let mut biases = Vec::with_capacity(classes.len());
+/// A fitted SGD linear classifier.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
+pub struct FittedSgdClassifier<F: Float> {
+    /// Effective weight vectors: one for a binary problem (positive class
+    /// `classes[1]`), one per class (OvR) otherwise. Averaged when
+    /// `average > 0`.
+    weights: Vec<Array1<F>>,
+    /// Effective biases, aligned with `weights`.
+    biases: Vec<F>,
+    /// Sorted unique class labels.
+    classes: Vec<F>,
+    n_features: usize,
+    /// Full optimiser state per model (plain + averaged iterate), used to
+    /// resume in `partial_fit`.
+    #[serde(default)]
+    models: Vec<SgdWeights>,
+    /// Loss used for training (decides `predict_proba` support).
+    #[serde(default)]
+    loss: ClassifierLoss,
+    /// Epochs run by the last `fit` / `partial_fit` call (max over OvR models).
+    #[serde(default)]
+    n_iter_: usize,
+    /// Learning-rate step counter (next `t`); persists across `partial_fit`.
+    #[serde(default = "default_t")]
+    t_: usize,
+}
 
-        for (c_idx, &cls) in classes.iter().enumerate() {
-            let y_binary: Vec<f64> = y
-                .iter()
-                .map(|&v| if v == cls { 1.0 } else { -1.0 })
-                .collect();
+impl<F: Float> FittedSgdClassifier<F> {
+    /// Return the unique class labels.
+    pub fn classes(&self) -> &[F] {
+        &self.classes
+    }
 
-            let (w, b) = train_binary_sgd(
-                x,
-                &y_binary,
-                self.loss,
-                self.penalty,
-                self.alpha,
-                self.l1_ratio,
-                self.max_iter,
-                self.tol,
-                self.eta0,
-                self.power_t,
-                self.learning_rate,
-                self.shuffle,
-                self.seed.wrapping_add(c_idx as u64),
-            );
-            weights.push(w);
-            biases.push(b);
+    /// Return weight vectors: a single vector for binary problems (scores
+    /// the positive class `classes[1]`), one per class (OvR) otherwise.
+    pub fn weights(&self) -> &[Array1<F>] {
+        &self.weights
+    }
+
+    /// Return biases, aligned with [`weights`](Self::weights).
+    pub fn biases(&self) -> &[F] {
+        &self.biases
+    }
+
+    /// Number of epochs run by the last `fit` / `partial_fit` call
+    /// (sklearn `n_iter_`; the maximum over OvR sub-problems).
+    pub fn n_iter(&self) -> usize {
+        self.n_iter_
+    }
+
+    /// Learning-rate step counter: `1 + number of SGD updates performed`
+    /// per model (sklearn `t_`).
+    pub fn t(&self) -> usize {
+        self.t_
+    }
+
+    /// Compute raw decision function values.
+    ///
+    /// Shape `(n_samples, 1)` for binary problems (positive = `classes[1]`,
+    /// like sklearn's 1-D output) and `(n_samples, n_classes)` otherwise.
+    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
         }
+        let n = x.nrows();
+        let k = self.weights.len();
+        let mut scores = Array2::zeros((n, k));
+        for (c, (w, &b)) in self.weights.iter().zip(self.biases.iter()).enumerate() {
+            for i in 0..n {
+                let mut s = b;
+                for j in 0..self.n_features {
+                    s = s + x[[i, j]] * w[j];
+                }
+                scores[[i, c]] = s;
+            }
+        }
+        Ok(scores)
+    }
+}
+
+fn sorted_unique(y: &[f64]) -> Vec<f64> {
+    let mut v = y.to_vec();
+    v.sort_by(|a, b| a.total_cmp(b));
+    v.dedup();
+    v
+}
+
+/// The ±1 target of each sub-problem: binary → one problem with
+/// `classes[1]` positive, otherwise one OvR problem per class.
+fn binary_targets(y: &Array1<f64>, classes: &[f64]) -> Vec<Vec<f64>> {
+    let positives: Vec<f64> = if classes.len() == 2 {
+        vec![classes[1]]
+    } else {
+        classes.to_vec()
+    };
+    positives
+        .iter()
+        .map(|&cls| {
+            y.iter()
+                .map(|&v| if v == cls { 1.0 } else { -1.0 })
+                .collect()
+        })
+        .collect()
+}
+
+impl SgdClassifier {
+    fn train(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        classes: Vec<f64>,
+        state: Option<FittedSgdClassifier<f64>>,
+        partial: bool,
+    ) -> Result<FittedSgdClassifier<f64>> {
+        let p = x.ncols();
+        let targets = binary_targets(y, &classes);
+        let n_models = targets.len();
+
+        let (mut models, t_start) = match state {
+            Some(s) => {
+                if s.n_features != p {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "previous fit had {} features, batch has {}",
+                        s.n_features, p
+                    )));
+                }
+                let models = if s.models.len() == n_models {
+                    s.models
+                } else if s.weights.len() == n_models {
+                    // State deserialised from an older version: no optimiser
+                    // state, resume from the stored weights.
+                    s.weights
+                        .into_iter()
+                        .zip(s.biases)
+                        .map(|(w, b)| SgdWeights::new(w, b))
+                        .collect()
+                } else {
+                    return Err(RustMlError::InvalidParameter(format!(
+                        "state has {} models but {} classes need {}",
+                        s.weights.len(),
+                        classes.len(),
+                        n_models
+                    )));
+                };
+                (models, s.t_)
+            }
+            None => (vec![SgdWeights::zeros(p); n_models], 1),
+        };
+
+        let cfg = self.config();
+        let loss = self.loss;
+        let loss_fn = |z: f64, yi: f64| loss.eval(z, yi);
+
+        // Early stopping: one stratified split shared by all sub-problems.
+        let split = if !partial && self.early_stopping {
+            let ys = y.to_vec();
+            let mut rng = StdRng::seed_from_u64(self.seed);
+            Some(validation_split(
+                x.nrows(),
+                self.validation_fraction,
+                Some(&ys),
+                &mut rng,
+            )?)
+        } else {
+            None
+        };
+
+        let mut n_iter = 0;
+        let mut t_end = t_start;
+        for (c_idx, (model, yb)) in models.iter_mut().zip(targets.iter()).enumerate() {
+            let run: SgdRun = if partial {
+                let seed = self
+                    .seed
+                    .wrapping_add(c_idx as u64)
+                    .wrapping_add(t_start as u64);
+                let mut rng = StdRng::seed_from_u64(seed);
+                let mut idx: Vec<usize> = (0..x.nrows()).collect();
+                run_sgd(
+                    x,
+                    yb,
+                    &mut idx,
+                    model,
+                    &cfg,
+                    loss_fn,
+                    1,
+                    &Stopping::never(),
+                    self.shuffle,
+                    &mut rng,
+                    t_start,
+                )
+            } else {
+                let mut rng = StdRng::seed_from_u64(self.seed.wrapping_add(c_idx as u64));
+                match &split {
+                    Some((train_idx, val_idx)) => {
+                        let score = |w: &Array1<f64>, b: f64| {
+                            let correct = val_idx
+                                .iter()
+                                .filter(|&&i| {
+                                    let z = b + x.row(i).dot(w);
+                                    (z > 0.0) == (yb[i] > 0.0)
+                                })
+                                .count();
+                            correct as f64 / val_idx.len() as f64
+                        };
+                        let stopping = Stopping {
+                            tol: self.tol,
+                            n_iter_no_change: self.n_iter_no_change,
+                            validation: Some(&score),
+                        };
+                        let mut idx = train_idx.clone();
+                        run_sgd(
+                            x,
+                            yb,
+                            &mut idx,
+                            model,
+                            &cfg,
+                            loss_fn,
+                            self.max_iter,
+                            &stopping,
+                            self.shuffle,
+                            &mut rng,
+                            t_start,
+                        )
+                    }
+                    None => {
+                        let stopping = Stopping {
+                            tol: self.tol,
+                            n_iter_no_change: self.n_iter_no_change,
+                            validation: None,
+                        };
+                        let mut idx: Vec<usize> = (0..x.nrows()).collect();
+                        run_sgd(
+                            x,
+                            yb,
+                            &mut idx,
+                            model,
+                            &cfg,
+                            loss_fn,
+                            self.max_iter,
+                            &stopping,
+                            self.shuffle,
+                            &mut rng,
+                            t_start,
+                        )
+                    }
+                }
+            };
+            n_iter = n_iter.max(run.n_iter);
+            t_end = t_end.max(run.t);
+        }
+
+        let (weights, biases) = models
+            .iter()
+            .map(|m| {
+                let (w, b) = m.effective();
+                (w.clone(), b)
+            })
+            .unzip();
 
         Ok(FittedSgdClassifier {
             weights,
             biases,
             classes,
-            n_features,
+            n_features: p,
+            models,
+            loss: self.loss,
+            n_iter_: n_iter,
+            t_: t_end,
         })
+    }
+}
+
+impl Fit<f64> for SgdClassifier {
+    type Fitted = FittedSgdClassifier<f64>;
+
+    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+        self.validate(x, y)?;
+        let classes = sorted_unique(&y.to_vec());
+        if classes.len() < 2 {
+            return Err(RustMlError::InvalidParameter(
+                "need at least 2 classes".into(),
+            ));
+        }
+        self.train(x, y, classes, None, false)
     }
 }
 
 impl PartialFit<f64> for SgdClassifier {
     type Fitted = FittedSgdClassifier<f64>;
 
+    /// Run exactly one SGD epoch over the batch, resuming from `state`
+    /// (weights, averaged weights and the learning-rate counter `t_`), as
+    /// sklearn's `partial_fit`. `tol` / `early_stopping` do not apply.
     fn partial_fit(
         &self,
         state: Option<Self::Fitted>,
@@ -395,27 +543,16 @@ impl PartialFit<f64> for SgdClassifier {
         y: &Array1<f64>,
         classes: Option<&[f64]>,
     ) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
+        self.validate(x, y)?;
 
         // Establish the class set: from state, or from `classes` on first call,
         // or by deriving from the batch (must have ≥ 2 unique labels then).
         let class_list: Vec<f64> = if let Some(s) = &state {
             s.classes.clone()
         } else if let Some(c) = classes {
-            c.to_vec()
+            sorted_unique(c)
         } else {
-            let mut v: Vec<f64> = y.iter().copied().collect();
-            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            v.dedup();
+            let v = sorted_unique(&y.to_vec());
             if v.len() < 2 {
                 return Err(RustMlError::InvalidParameter(
                     "first partial_fit needs classes= or batch with ≥ 2 unique labels".into(),
@@ -423,60 +560,18 @@ impl PartialFit<f64> for SgdClassifier {
             }
             v
         };
-
-        let n_features = x.ncols();
-
-        // Initial weights/biases per class — from existing state or zeros.
-        let (existing_weights, existing_biases): (Vec<Array1<f64>>, Vec<f64>) =
-            if let Some(s) = state {
-                if s.n_features != n_features {
-                    return Err(RustMlError::ShapeMismatch(format!(
-                        "previous fit had {} features, batch has {}",
-                        s.n_features, n_features
-                    )));
-                }
-                (s.weights, s.biases)
-            } else {
-                (
-                    vec![Array1::<f64>::zeros(n_features); class_list.len()],
-                    vec![0.0; class_list.len()],
-                )
-            };
-
-        // Run one resume-pass per class.
-        let mut weights = Vec::with_capacity(class_list.len());
-        let mut biases = Vec::with_capacity(class_list.len());
-        for (c_idx, &cls) in class_list.iter().enumerate() {
-            let y_binary: Vec<f64> = y
-                .iter()
-                .map(|&v| if v == cls { 1.0 } else { -1.0 })
-                .collect();
-            let (w, b) = train_binary_sgd_resume(
-                x,
-                &y_binary,
-                Some((existing_weights[c_idx].clone(), existing_biases[c_idx])),
-                self.loss,
-                self.penalty,
-                self.alpha,
-                self.l1_ratio,
-                self.max_iter,
-                self.tol,
-                self.eta0,
-                self.power_t,
-                self.learning_rate,
-                self.shuffle,
-                self.seed.wrapping_add(c_idx as u64),
-            );
-            weights.push(w);
-            biases.push(b);
+        if class_list.len() < 2 {
+            return Err(RustMlError::InvalidParameter(
+                "need at least 2 classes".into(),
+            ));
+        }
+        if let Some(bad) = y.iter().find(|v| !class_list.contains(v)) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "label {bad} is not in classes {class_list:?}"
+            )));
         }
 
-        Ok(FittedSgdClassifier {
-            weights,
-            biases,
-            classes: class_list,
-            n_features,
-        })
+        self.train(x, y, class_list, state, true)
     }
 }
 
@@ -485,6 +580,17 @@ impl Predict<f64> for FittedSgdClassifier<f64> {
         let scores = self.decision_function(x)?;
         let n = x.nrows();
         let mut preds = Array1::zeros(n);
+
+        if self.weights.len() == 1 {
+            for i in 0..n {
+                preds[i] = if scores[[i, 0]] > 0.0 {
+                    self.classes[1]
+                } else {
+                    self.classes[0]
+                };
+            }
+            return Ok(preds);
+        }
 
         for i in 0..n {
             let mut best_c = 0;
@@ -498,6 +604,54 @@ impl Predict<f64> for FittedSgdClassifier<f64> {
             preds[i] = self.classes[best_c];
         }
         Ok(preds)
+    }
+}
+
+impl PredictProba<f64> for FittedSgdClassifier<f64> {
+    /// Class probabilities, columns ordered as [`classes`](Self::classes).
+    ///
+    /// Only for `ClassifierLoss::Log` (sigmoid of the decision value) and
+    /// `ClassifierLoss::ModifiedHuber` (`(clip(s, -1, 1) + 1) / 2`), as in
+    /// sklearn. Multi-class OvR scores are normalised to sum to one
+    /// (uniform when all OvR probabilities are zero).
+    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        let link: fn(f64) -> f64 = match self.loss {
+            ClassifierLoss::Log => sigmoid,
+            ClassifierLoss::ModifiedHuber => |s: f64| (s.clamp(-1.0, 1.0) + 1.0) / 2.0,
+            other => {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "predict_proba is only available for Log and ModifiedHuber loss, not {other:?}"
+                )))
+            }
+        };
+        let scores = self.decision_function(x)?;
+        let n = x.nrows();
+        let k = self.classes.len();
+        let mut proba = Array2::zeros((n, k));
+        if self.weights.len() == 1 {
+            for i in 0..n {
+                let p1 = link(scores[[i, 0]]);
+                proba[[i, 0]] = 1.0 - p1;
+                proba[[i, 1]] = p1;
+            }
+            return Ok(proba);
+        }
+        for i in 0..n {
+            let mut sum = 0.0;
+            for c in 0..k {
+                let v = link(scores[[i, c]]);
+                proba[[i, c]] = v;
+                sum += v;
+            }
+            for c in 0..k {
+                proba[[i, c]] = if sum > 0.0 {
+                    proba[[i, c]] / sum
+                } else {
+                    1.0 / k as f64
+                };
+            }
+        }
+        Ok(proba)
     }
 }
 
@@ -520,6 +674,26 @@ mod tests {
     }
 
     #[test]
+    fn test_log_loss_stable_for_huge_margins() {
+        for &z in &[1e3, 1e6, 1e300, -1e3, -1e6, -1e300] {
+            for &y in &[1.0, -1.0] {
+                let (l, g) = ClassifierLoss::Log.eval(z, y);
+                assert!(l.is_finite() && l >= 0.0, "loss({z}, {y}) = {l}");
+                assert!(g.is_finite() && g.abs() <= 1.0, "grad({z}, {y}) = {g}");
+                if y * z > 0.0 {
+                    assert!(l < 1e-300 && g.abs() < 1e-300);
+                } else {
+                    assert!((l - (y * z).abs()).abs() <= 1e-9 * (y * z).abs());
+                    assert!((g.abs() - 1.0).abs() < 1e-15);
+                }
+            }
+        }
+        let (l0, g0) = ClassifierLoss::Log.eval(0.0, 1.0);
+        assert!((l0 - std::f64::consts::LN_2).abs() < 1e-15);
+        assert!((g0 + 0.5).abs() < 1e-15);
+    }
+
+    #[test]
     fn test_sgd_partial_fit_resumes_from_state() {
         // partial_fit on two halves should fit a classifier that achieves
         // training accuracy ≥ that of one-shot fit on a single half.
@@ -537,8 +711,14 @@ mod tests {
             .with_alpha(0.001);
         let classes = [0.0_f64, 1.0];
 
-        let s1 = PartialFit::partial_fit(&clf, None, &x1, &y1, Some(&classes)).unwrap();
-        let s2 = PartialFit::partial_fit(&clf, Some(s1), &x2, &y2, None).unwrap();
+        // partial_fit runs one epoch per call (sklearn semantics), so stream
+        // the two halves repeatedly.
+        let mut s2 = PartialFit::partial_fit(&clf, None, &x1, &y1, Some(&classes)).unwrap();
+        s2 = PartialFit::partial_fit(&clf, Some(s2), &x2, &y2, None).unwrap();
+        for _ in 0..200 {
+            s2 = PartialFit::partial_fit(&clf, Some(s2), &x1, &y1, None).unwrap();
+            s2 = PartialFit::partial_fit(&clf, Some(s2), &x2, &y2, None).unwrap();
+        }
 
         let preds = s2.predict(&x).unwrap();
         let correct: usize = preds.iter().zip(y.iter()).filter(|(&p, &t)| p == t).count();
@@ -642,7 +822,7 @@ mod tests {
 
         let scores = fitted.decision_function(&x).unwrap();
         assert_eq!(scores.nrows(), 12);
-        assert_eq!(scores.ncols(), 2);
+        assert_eq!(scores.ncols(), 1, "binary problems train a single model");
     }
 
     #[test]
