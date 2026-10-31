@@ -9,6 +9,14 @@
 //! `StratifiedGroupKFold`, `LeaveOneGroupOut`, `LeavePGroupsOut` and
 //! `GroupShuffleSplit`: samples sharing a group label never end up on both
 //! sides of a split.
+//!
+//! [`purged_k_fold`] and [`combinatorial_purged_cv`] implement López de
+//! Prado's designs for labels that span a time interval (*Advances in
+//! Financial Machine Learning*, ch. 7 and 12): training samples whose label
+//! interval overlaps a test block are purged, and an embargo drops the
+//! samples right after each test block. Use anofox-forecast's walk-forward
+//! cross-validation for forecasting models; these splitters are for ML
+//! models fitted on time-indexed features.
 
 use ndarray::Array1;
 use rand::seq::SliceRandom;
@@ -340,6 +348,232 @@ pub fn group_shuffle_split(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Purged k-fold / combinatorial purged CV
+// ---------------------------------------------------------------------------
+
+/// Validate label intervals: equal lengths, finite, `t_end >= t_start`, and
+/// `t_start` non-decreasing (samples in time order).
+fn check_intervals(t_start: &[f64], t_end: &[f64]) -> Result<()> {
+    if t_start.len() != t_end.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "t_start has {} elements but t_end has {}",
+            t_start.len(),
+            t_end.len()
+        )));
+    }
+    for i in 0..t_start.len() {
+        if !t_start[i].is_finite() || !t_end[i].is_finite() || t_end[i] < t_start[i] {
+            return Err(RustMlError::InvalidParameter(format!(
+                "label interval {i} must be finite with t_end >= t_start"
+            )));
+        }
+        if i > 0 && t_start[i] < t_start[i - 1] {
+            return Err(RustMlError::InvalidParameter(
+                "samples must be sorted by t_start".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Contiguous index ranges of `n` samples in `k` blocks (numpy
+/// `array_split`: the first `n % k` blocks get one extra sample).
+fn contiguous_blocks(n: usize, k: usize) -> Vec<(usize, usize)> {
+    let (base, extra) = (n / k, n % k);
+    let mut start = 0;
+    (0..k)
+        .map(|b| {
+            let end = start + base + usize::from(b < extra);
+            let r = (start, end);
+            start = end;
+            r
+        })
+        .collect()
+}
+
+/// Training mask for the test blocks `blocks` (index ranges, ascending and
+/// non-adjacent): a sample stays in training iff it is not a test sample,
+/// its label interval does not overlap any test block's span
+/// `[t_start[first], max t_end]`, and it is not among the `embargo` samples
+/// that follow a test block's span.
+fn purged_train_mask(
+    t_start: &[f64],
+    t_end: &[f64],
+    blocks: &[(usize, usize)],
+    embargo: usize,
+) -> Vec<bool> {
+    let n = t_start.len();
+    let mut train = vec![true; n];
+    for &(a, b) in blocks {
+        let t0 = t_start[a];
+        let t1 = t_end[a..b]
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        for i in 0..n {
+            if (a..b).contains(&i) || (t_start[i] <= t1 && t_end[i] >= t0) {
+                train[i] = false;
+            }
+        }
+        // Embargo: the first `embargo` samples starting after the span.
+        let first_after = t_start.partition_point(|&t| t <= t1);
+        for flag in train.iter_mut().skip(first_after).take(embargo) {
+            *flag = false;
+        }
+    }
+    train
+}
+
+/// Merge the selected (sorted) groups into maximal runs of adjacent groups.
+fn merge_adjacent(groups: &[usize], ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for &g in groups {
+        let (a, b) = ranges[g];
+        match out.last_mut() {
+            Some(last) if last.1 == a => last.1 = b,
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+fn split_from_masks(train: &[bool], blocks: &[(usize, usize)]) -> CvSplit {
+    let test: Vec<usize> = blocks.iter().flat_map(|&(a, b)| a..b).collect();
+    let train_idx = (0..train.len()).filter(|&i| train[i]).collect();
+    (train_idx, test)
+}
+
+/// Purged k-fold (López de Prado, AFML §7.4).
+///
+/// Samples must be in time order; sample `i`'s label covers
+/// `[t_start[i], t_end[i]]` (e.g. the observation time and the time its
+/// label is resolved). The samples are cut into `n_splits` contiguous test
+/// blocks; for each block, training samples whose label interval overlaps
+/// the block's span are **purged**, and the `embargo` samples that start
+/// right after the span are dropped as well. With point labels
+/// (`t_end == t_start`) and `embargo = 0` this is plain unshuffled k-fold.
+pub fn purged_k_fold(
+    t_start: &[f64],
+    t_end: &[f64],
+    n_splits: usize,
+    embargo: usize,
+) -> Result<Vec<CvSplit>> {
+    check_intervals(t_start, t_end)?;
+    let n = t_start.len();
+    if n_splits < 2 || n_splits > n {
+        return Err(RustMlError::InvalidParameter(format!(
+            "n_splits must be in [2, n_samples={n}], got {n_splits}"
+        )));
+    }
+    let blocks = contiguous_blocks(n, n_splits);
+    let mut out = Vec::with_capacity(n_splits);
+    for &blk in &blocks {
+        let train = purged_train_mask(t_start, t_end, &[blk], embargo);
+        let split = split_from_masks(&train, &[blk]);
+        if split.0.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "purging and embargo left an empty training set".into(),
+            ));
+        }
+        out.push(split);
+    }
+    Ok(out)
+}
+
+/// Splits of a combinatorial purged cross-validation and their assembly into
+/// backtest paths.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CombinatorialPurgedCv {
+    /// One split per combination of `n_test_groups` test groups
+    /// (lexicographic), purged and embargoed.
+    pub splits: Vec<CvSplit>,
+    /// Test groups of every split.
+    pub test_groups: Vec<Vec<usize>>,
+    /// Index range `[start, end)` of every group.
+    pub group_ranges: Vec<(usize, usize)>,
+    /// Backtest paths: `paths[j][g]` is the split whose prediction of group
+    /// `g` belongs to path `j`. There are `C(n_groups - 1, n_test_groups - 1)`
+    /// paths, each covering every group exactly once.
+    pub paths: Vec<Vec<usize>>,
+}
+
+/// Combinatorial purged cross-validation (López de Prado, AFML §12.4).
+///
+/// The (time-ordered) samples are cut into `n_groups` contiguous groups and
+/// every combination of `n_test_groups` of them is a test set; each
+/// contiguous run of test groups is purged and embargoed as in
+/// [`purged_k_fold`]. The `C(N, k)` out-of-sample predictions recombine into
+/// `C(N-1, k-1)` complete backtest paths ([`CombinatorialPurgedCv::paths`]),
+/// which gives a distribution of backtest performance instead of a single
+/// walk-forward path.
+pub fn combinatorial_purged_cv(
+    t_start: &[f64],
+    t_end: &[f64],
+    n_groups: usize,
+    n_test_groups: usize,
+    embargo: usize,
+) -> Result<CombinatorialPurgedCv> {
+    check_intervals(t_start, t_end)?;
+    let n = t_start.len();
+    if n_groups < 2 || n_groups > n {
+        return Err(RustMlError::InvalidParameter(format!(
+            "n_groups must be in [2, n_samples={n}], got {n_groups}"
+        )));
+    }
+    if n_test_groups == 0 || n_test_groups >= n_groups {
+        return Err(RustMlError::InvalidParameter(format!(
+            "n_test_groups must be in [1, n_groups - 1], got {n_test_groups}"
+        )));
+    }
+    let ranges = contiguous_blocks(n, n_groups);
+    let mut splits = Vec::new();
+    let mut test_groups = Vec::new();
+    let mut combo: Vec<usize> = (0..n_test_groups).collect();
+    loop {
+        let blocks = merge_adjacent(&combo, &ranges);
+        let train = purged_train_mask(t_start, t_end, &blocks, embargo);
+        let split = split_from_masks(&train, &blocks);
+        if split.0.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "purging and embargo left an empty training set".into(),
+            ));
+        }
+        splits.push(split);
+        test_groups.push(combo.clone());
+        let k = n_test_groups;
+        let mut i = k;
+        while i > 0 && combo[i - 1] == n_groups - k + i - 1 {
+            i -= 1;
+        }
+        if i == 0 {
+            break;
+        }
+        combo[i - 1] += 1;
+        for j in i..k {
+            combo[j] = combo[j - 1] + 1;
+        }
+    }
+    // Path j takes, for every group, the j-th split (in split order) that
+    // tests that group.
+    let mut per_group: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
+    for (s, tg) in test_groups.iter().enumerate() {
+        for &g in tg {
+            per_group[g].push(s);
+        }
+    }
+    let n_paths = per_group[0].len();
+    let paths = (0..n_paths)
+        .map(|j| (0..n_groups).map(|g| per_group[g][j]).collect())
+        .collect();
+    Ok(CombinatorialPurgedCv {
+        splits,
+        test_groups,
+        group_ranges: ranges,
+        paths,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +689,88 @@ mod tests {
         let partial = group_shuffle_split(&g, 1, 0.2, Some(0.5), 3).unwrap();
         assert!(partial[0].0.len() + partial[0].1.len() < g.len());
         assert!(group_shuffle_split(&g, 1, 0.9, Some(0.5), 3).is_err());
+    }
+
+    fn intervals(n: usize, horizon: f64) -> (Vec<f64>, Vec<f64>) {
+        let t0: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let t1: Vec<f64> = t0.iter().map(|t| t + horizon).collect();
+        (t0, t1)
+    }
+
+    fn assert_purged(t0: &[f64], t1: &[f64], split: &CvSplit) {
+        let (train, test) = split;
+        for &i in train {
+            for &j in test {
+                let overlap = t0[i] <= t1[j] && t1[i] >= t0[j];
+                assert!(!overlap, "train {i} overlaps test {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn purged_k_fold_point_labels_is_k_fold() {
+        let (t0, t1) = intervals(11, 0.0);
+        let s = purged_k_fold(&t0, &t1, 3, 0).unwrap();
+        assert_eq!(s, crate::utils::k_fold(11, 3).unwrap());
+    }
+
+    #[test]
+    fn purged_k_fold_purges_and_embargoes() {
+        // Labels resolve 2 steps later: [i, i + 2].
+        let (t0, t1) = intervals(20, 2.0);
+        let s = purged_k_fold(&t0, &t1, 4, 1).unwrap();
+        for split in &s {
+            assert_purged(&t0, &t1, split);
+        }
+        // Middle block 5..10 spans [5, 11]: samples 3, 4 (overlap before),
+        // 10, 11 (overlap after) are purged and 12 is embargoed.
+        let (train, test) = &s[1];
+        assert_eq!(test, &(5..10).collect::<Vec<_>>());
+        let expected: Vec<usize> = (0..3).chain(13..20).collect();
+        assert_eq!(train, &expected);
+    }
+
+    #[test]
+    fn combinatorial_purged_cv_counts_and_paths() {
+        let (t0, t1) = intervals(60, 1.0);
+        let cv = combinatorial_purged_cv(&t0, &t1, 6, 2, 2).unwrap();
+        assert_eq!(cv.splits.len(), 15); // C(6, 2)
+        assert_eq!(cv.paths.len(), 5); // C(5, 1) = 2/6 · 15
+        for split in &cv.splits {
+            assert_purged(&t0, &t1, split);
+        }
+        // Every path covers each group exactly once with a split that
+        // actually tests that group.
+        for path in &cv.paths {
+            assert_eq!(path.len(), 6);
+            for (g, &s) in path.iter().enumerate() {
+                assert!(cv.test_groups[s].contains(&g));
+            }
+        }
+        // Every (split, group) prediction is used by exactly one path.
+        let mut used = std::collections::HashSet::new();
+        for path in &cv.paths {
+            for (g, &s) in path.iter().enumerate() {
+                assert!(used.insert((s, g)));
+            }
+        }
+        assert_eq!(used.len(), 15 * 2);
+        // Adjacent test groups (0, 1) form one block: no train sample inside.
+        let (train, test) = &cv.splits[0];
+        assert_eq!(test, &(0..20).collect::<Vec<_>>());
+        assert_eq!(train[0], 23); // purged 20, embargo 21..23
+    }
+
+    #[test]
+    fn purged_splitters_validate_input() {
+        let (t0, t1) = intervals(10, 1.0);
+        assert!(purged_k_fold(&t0, &t1[..9], 2, 0).is_err());
+        let mut unsorted = t0.clone();
+        unsorted.swap(2, 3);
+        assert!(purged_k_fold(&unsorted, &t1, 2, 0).is_err());
+        assert!(combinatorial_purged_cv(&t0, &t1, 4, 4, 0).is_err());
+        // Labels spanning everything leave no training data.
+        let wide: Vec<f64> = vec![100.0; 10];
+        assert!(purged_k_fold(&t0, &wide, 2, 0).is_err());
     }
 }

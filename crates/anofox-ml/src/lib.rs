@@ -92,14 +92,15 @@ pub mod io {
 /// Convenient prelude importing the most commonly used items.
 pub mod prelude {
     pub use anofox_ml_core::{
-        cross_val_predict, cross_val_score, cross_val_score_stratified, cross_validate,
-        grid_search_cv, group_k_fold, group_k_fold_shuffled, group_shuffle_split, k_fold,
-        learning_curve, leave_one_group_out, leave_one_out, leave_p_groups_out, leave_p_out,
-        randomized_search_cv, repeated_k_fold, repeated_stratified_k_fold, shuffle_split,
-        stratified_group_k_fold, stratified_k_fold, stratified_shuffle_split, time_series_split,
-        train_test_split, validation_curve, ColumnSelector, ColumnTransformer, CrossValidateResult,
-        FeatureUnion, Fit, FitUnsupervised, FittedPipeline, Float, FunctionTransformer,
-        GridSearchResult, InverseTransform, Pipeline, Predict, Remainder, Transform,
+        combinatorial_purged_cv, cross_val_predict, cross_val_score, cross_val_score_stratified,
+        cross_validate, grid_search_cv, group_k_fold, group_k_fold_shuffled, group_shuffle_split,
+        k_fold, learning_curve, leave_one_group_out, leave_one_out, leave_p_groups_out,
+        leave_p_out, purged_k_fold, randomized_search_cv, repeated_k_fold,
+        repeated_stratified_k_fold, shuffle_split, stratified_group_k_fold, stratified_k_fold,
+        stratified_shuffle_split, time_series_split, train_test_split, validation_curve,
+        ColumnSelector, ColumnTransformer, CrossValidateResult, FeatureUnion, Fit, FitUnsupervised,
+        FittedPipeline, Float, FunctionTransformer, GridSearchResult, InverseTransform, Pipeline,
+        Predict, Remainder, Transform,
     };
 
     pub use anofox_ml_metrics::{
