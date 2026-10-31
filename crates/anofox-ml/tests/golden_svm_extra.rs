@@ -68,15 +68,17 @@ fn test_golden_linear_svr_predictions() {
         epsilon: 0.1,
         max_iter: 5000,
         tol: 1e-4,
+        ..Default::default()
     };
     let fitted: anofox_ml::svm::FittedLinearSvr<f64> = Fit::fit(&model, &x, &y).unwrap();
     let preds = fitted.predict(&x).unwrap();
 
-    // LinearSVR with SGD won't match sklearn's liblinear exactly,
-    // but predictions should be in the same ballpark (within 3.0)
+    // LinearSVR uses the same liblinear dual coordinate descent as sklearn;
+    // the remaining gap (~4e-3) comes from sklearn's own stopping tolerance
+    // when the golden data was generated (previous SGD solver: within 3.0).
     for (i, (p, e)) in preds.iter().zip(expected_preds.iter()).enumerate() {
         assert!(
-            (p - e).abs() < 3.0,
+            (p - e).abs() < 0.05,
             "prediction {} differs too much: anofox-ml={:.3}, sklearn={:.3}",
             i,
             p,

@@ -4,10 +4,33 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
+/// Loss function minimised by [`LinearSvc`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum LinearSvcLoss {
+    /// Standard (L1) hinge loss `max(0, 1 − y f(x))` (sklearn `loss='hinge'`).
+    Hinge,
+    /// Squared hinge loss `max(0, 1 − y f(x))²` (sklearn's default
+    /// `loss='squared_hinge'`).
+    #[default]
+    SquaredHinge,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_one() -> f64 {
+    1.0
+}
+
 /// Linear Support Vector Classifier parameters (unfitted state).
 ///
-/// Uses hinge loss with L2 regularization, solved via coordinate descent
-/// (similar to sklearn's LinearSVC with liblinear). Uses the type-state
+/// L2-regularised hinge or squared-hinge loss (see [`LinearSvcLoss`]),
+/// solved by the dual coordinate descent method of Hsieh et al. (2008) —
+/// the same algorithm as sklearn's `LinearSVC(dual=True)` / liblinear. The
+/// intercept is fitted as an extra constant feature of value
+/// `intercept_scaling` (and is therefore regularised, as in liblinear).
+/// Uses the type-state
 /// pattern: call [`Fit::fit`] to produce a [`FittedLinearSvc`] that can
 /// make predictions.
 ///
@@ -24,6 +47,16 @@ pub struct LinearSvc {
     pub tol: f64,
     /// Random seed for reproducibility.
     pub seed: u64,
+    /// Loss function. Default: [`LinearSvcLoss::SquaredHinge`] (as sklearn).
+    #[serde(default)]
+    pub loss: LinearSvcLoss,
+    /// Whether to fit an intercept (via an augmented constant feature).
+    #[serde(default = "default_true")]
+    pub fit_intercept: bool,
+    /// Value of the augmented constant feature used for the intercept.
+    /// Larger values reduce the effect of regularisation on the intercept.
+    #[serde(default = "default_one")]
+    pub intercept_scaling: f64,
 }
 
 impl LinearSvc {
@@ -34,7 +67,28 @@ impl LinearSvc {
             max_iter: 1000,
             tol: 1e-4,
             seed: 0,
+            loss: LinearSvcLoss::SquaredHinge,
+            fit_intercept: true,
+            intercept_scaling: 1.0,
         }
+    }
+
+    /// Set the loss function (hinge or squared hinge).
+    pub fn with_loss(mut self, loss: LinearSvcLoss) -> Self {
+        self.loss = loss;
+        self
+    }
+
+    /// Set whether an intercept is fitted.
+    pub fn with_fit_intercept(mut self, fit_intercept: bool) -> Self {
+        self.fit_intercept = fit_intercept;
+        self
+    }
+
+    /// Set the value of the augmented intercept feature.
+    pub fn with_intercept_scaling(mut self, intercept_scaling: f64) -> Self {
+        self.intercept_scaling = intercept_scaling;
+        self
     }
 
     /// Set the regularization parameter C.
@@ -73,6 +127,11 @@ impl LinearSvc {
         }
         if self.tol <= 0.0 {
             return Err(RustMlError::InvalidParameter("tol must be positive".into()));
+        }
+        if self.fit_intercept && self.intercept_scaling <= 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "intercept_scaling must be positive".into(),
+            ));
         }
         Ok(())
     }
@@ -208,134 +267,104 @@ fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
     labels
 }
 
-/// Clamp `val` to the interval `[zero, c]`.
-#[inline]
-fn clamp_alpha<F: Float>(val: F, zero: F, c: F) -> F {
-    if val < zero {
-        zero
-    } else if val > c {
-        c
-    } else {
-        val
-    }
-}
-
-/// Perform a single coordinate descent update for sample `i`.
+/// Train a single binary linear SVC with the dual coordinate descent method
+/// of Hsieh et al. (2008), as in liblinear (solvers 1 and 3).
 ///
-/// Returns `Some((new_alpha, delta))` when an update is possible,
-/// or `None` when the denominator is near-zero and the step must be
-/// skipped.
-#[inline]
-fn coordinate_descent_step<F: Float>(
-    old_alpha: F,
-    xi: ndarray::ArrayView1<'_, F>,
-    yi: F,
-    w: &Array1<F>,
-    bias: F,
-    sq_norm: F,
-    c: F,
-) -> Option<(F, F)> {
-    let one = F::one();
-    let zero = F::zero();
-
-    let denom = sq_norm + one / c;
-    if denom.abs() < F::from_f64(1e-15).unwrap() {
-        return None;
-    }
-
-    let prediction = xi.dot(w) + bias;
-    let new_alpha_unclamped = old_alpha + (one - yi * prediction) / denom;
-    let new_alpha = clamp_alpha(new_alpha_unclamped, zero, c);
-    let delta = new_alpha - old_alpha;
-
-    Some((new_alpha, delta))
-}
-
-/// Apply one coordinate descent update for sample `i`.
+/// Solves `min_α ½ αᵀ Q̄ α − eᵀα  s.t. 0 ≤ α_i ≤ U` with
+/// `Q̄ = Q + D`, `Q_ij = y_i y_j x̂_iᵀ x̂_j` and
 ///
-/// Computes the step, clamps alpha, and updates weight vector + bias
-/// in-place. Returns the absolute change in alpha (zero if the step
-/// was skipped).
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn apply_cd_update<F: Float>(
-    i: usize,
-    alpha: &mut [F],
-    w: &mut Array1<F>,
-    bias: &mut F,
-    x_row: ndarray::ArrayView1<'_, F>,
-    y_i: F,
-    sq_norm: F,
-    c: F,
-) -> F {
-    let Some((new_alpha, delta)) =
-        coordinate_descent_step(alpha[i], x_row, y_i, w, *bias, sq_norm, c)
-    else {
-        return F::zero();
-    };
-
-    let abs_delta = delta.abs();
-    if abs_delta > F::from_f64(1e-15).unwrap() {
-        alpha[i] = new_alpha;
-        let scaled = &x_row * (delta * y_i);
-        *w += &scaled.to_owned();
-        *bias += delta * y_i;
-    }
-
-    abs_delta
-}
-
-/// Train a single binary linear SVC using coordinate descent on
-/// the dual formulation of hinge loss + L2 regularization.
+/// - hinge (L1) loss: `D_ii = 0`, `U = C`;
+/// - squared hinge (L2) loss: `D_ii = 1/(2C)`, `U = ∞`.
+///
+/// The intercept is handled as an extra constant feature with value
+/// `intercept_scaling` (so it is regularised, exactly like liblinear /
+/// sklearn); its contribution `intercept_scaling²` is included in `Q_ii`.
+/// Iteration stops when the projected-gradient spread
+/// `max PG − min PG` over a full sweep falls below `tol`.
 ///
 /// Labels must be +1/-1 encoded.
+#[allow(clippy::too_many_arguments)]
 fn fit_binary_linear_svc<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
     c: F,
+    loss: LinearSvcLoss,
+    intercept_scaling: Option<F>,
     max_iter: usize,
     tol: F,
     seed: u64,
 ) -> BinaryLinearSvc<F> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
+    let zero = F::zero();
+    let one = F::one();
+    let two = one + one;
 
-    let mut alpha = vec![F::zero(); n_samples];
+    let (diag, upper) = match loss {
+        LinearSvcLoss::Hinge => (zero, c),
+        LinearSvcLoss::SquaredHinge => (one / (two * c), F::infinity()),
+    };
+    let s = intercept_scaling.unwrap_or(zero);
+
+    let mut alpha = vec![zero; n_samples];
     let mut w = Array1::<F>::zeros(n_features);
-    let mut bias = F::zero();
+    // Weight of the augmented constant feature; bias = w_b · s.
+    let mut w_b = zero;
 
-    let sq_norms: Vec<F> = x.rows().into_iter().map(|row| row.dot(&row)).collect();
+    let q_diag: Vec<F> = x
+        .rows()
+        .into_iter()
+        .map(|row| row.dot(&row) + s * s + diag)
+        .collect();
 
     let mut rng = StdRng::seed_from_u64(seed);
     let mut indices: Vec<usize> = (0..n_samples).collect();
+    let tiny = F::from_f64(1e-12).unwrap();
 
     for _ in 0..max_iter {
         indices.shuffle(&mut rng);
+        let mut pg_max = F::neg_infinity();
+        let mut pg_min = F::infinity();
 
-        let max_change = indices.iter().fold(F::zero(), |mc, &i| {
-            let change = apply_cd_update(
-                i,
-                &mut alpha,
-                &mut w,
-                &mut bias,
-                x.row(i),
-                y[i],
-                sq_norms[i],
-                c,
-            );
-            if change > mc {
-                change
-            } else {
-                mc
+        for &i in &indices {
+            let qii = q_diag[i];
+            if qii <= zero {
+                continue;
             }
-        });
+            let yi = y[i];
+            let xi = x.row(i);
+            let g = yi * (xi.dot(&w) + w_b * s) - one + diag * alpha[i];
 
-        if max_change < tol {
+            // Projected gradient for the box [0, U].
+            let pg = if alpha[i] <= zero {
+                g.min(zero)
+            } else if alpha[i] >= upper {
+                g.max(zero)
+            } else {
+                g
+            };
+            pg_max = pg_max.max(pg);
+            pg_min = pg_min.min(pg);
+
+            if pg.abs() > tiny {
+                let old = alpha[i];
+                let new = (old - g / qii).max(zero).min(upper);
+                alpha[i] = new;
+                let d = (new - old) * yi;
+                w.scaled_add(d, &xi);
+                w_b += d * s;
+            }
+        }
+
+        if pg_max - pg_min < tol {
             break;
         }
     }
 
-    BinaryLinearSvc { weights: w, bias }
+    BinaryLinearSvc {
+        weights: w,
+        bias: w_b * s,
+    }
 }
 
 impl<F: Float> Fit<F> for LinearSvc {
@@ -367,6 +396,11 @@ impl<F: Float> Fit<F> for LinearSvc {
         let c = F::from_f64(self.c).unwrap();
         let tol = F::from_f64(self.tol).unwrap();
         let eps = F::from_f64(1e-12).unwrap();
+        let intercept_scaling = if self.fit_intercept {
+            Some(F::from_f64(self.intercept_scaling).unwrap())
+        } else {
+            None
+        };
 
         if class_labels.len() == 2 {
             // Binary classification: encode as +1/-1 where
@@ -379,7 +413,16 @@ impl<F: Float> Fit<F> for LinearSvc {
                 }
             });
 
-            let clf = fit_binary_linear_svc(x, &y_binary, c, self.max_iter, tol, self.seed);
+            let clf = fit_binary_linear_svc(
+                x,
+                &y_binary,
+                c,
+                self.loss,
+                intercept_scaling,
+                self.max_iter,
+                tol,
+                self.seed,
+            );
             Ok(FittedLinearSvc {
                 class_labels,
                 classifiers: vec![clf],
@@ -403,6 +446,8 @@ impl<F: Float> Fit<F> for LinearSvc {
                     x,
                     &y_binary,
                     c,
+                    self.loss,
+                    intercept_scaling,
                     self.max_iter,
                     tol,
                     self.seed.wrapping_add(seed_offset),

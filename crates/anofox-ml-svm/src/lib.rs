@@ -4,9 +4,9 @@
 //!
 //! This crate provides two SVM classifiers:
 //!
-//! - [`LinearSvc`] -- Linear Support Vector Classifier using hinge loss + L2
-//!   regularization, solved via coordinate descent (similar to sklearn's
-//!   `LinearSVC` with liblinear).
+//! - [`LinearSvc`] -- Linear Support Vector Classifier with (squared) hinge
+//!   loss + L2 regularization, solved by liblinear's dual coordinate descent
+//!   (Hsieh et al., 2008), as sklearn's `LinearSVC(dual=True)`.
 //! - [`Svc`] -- Support Vector Classifier with kernel support (linear, RBF,
 //!   polynomial), solved via a simplified SMO algorithm.
 //!
@@ -42,12 +42,13 @@ mod linear_svr;
 mod nu_svc;
 mod nu_svr;
 mod one_class_svm;
+mod projection;
 mod svc;
 mod svr;
 
 pub use kernel::SvmKernel;
-pub use linear_svc::{FittedLinearSvc, LinearSvc};
-pub use linear_svr::{FittedLinearSvr, LinearSvr};
+pub use linear_svc::{FittedLinearSvc, LinearSvc, LinearSvcLoss};
+pub use linear_svr::{FittedLinearSvr, LinearSvr, LinearSvrLoss};
 pub use nu_svc::{FittedNuSvc, NuSvc};
 pub use nu_svr::{FittedNuSvr, NuSvr};
 pub use one_class_svm::{FittedOneClassSvm, OneClassSvm};
