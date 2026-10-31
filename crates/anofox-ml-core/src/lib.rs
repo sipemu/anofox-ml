@@ -87,4 +87,7 @@ pub use utils::{
     train_test_split, validation_curve, validation_curve_with_splits, CrossValidateResult, CvSplit,
     GridSearchResult, LearningCurveResult, ScorerFn, ValidationCurveResult,
 };
-pub use validation::{permutation_test_score, PermutationTestResult};
+pub use validation::{
+    bootstrap_splits, bootstrap_splits_stratified, bootstrap_validate, permutation_test_score,
+    BootstrapValidation, PermutationTestResult, MAX_NO_INFORMATION_PAIRS,
+};
