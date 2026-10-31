@@ -65,9 +65,13 @@ pub use traits::{
     Transform,
 };
 pub use utils::{
-    cross_val_predict, cross_val_score, cross_val_score_stratified, cross_validate, grid_search_cv,
-    group_k_fold, k_fold, learning_curve, leave_one_out, leave_p_out, randomized_search_cv,
-    repeated_k_fold, repeated_stratified_k_fold, shuffle_split, stratified_k_fold,
+    cross_val_predict, cross_val_predict_with_splits, cross_val_score, cross_val_score_stratified,
+    cross_val_score_with_splits, cross_validate, cross_validate_with_splits, default_cv_splits,
+    grid_search_cv, grid_search_cv_with_splits, group_k_fold, k_fold, learning_curve,
+    learning_curve_with_splits, leave_one_out, leave_p_out, looks_like_class_labels,
+    randomized_search_cv, randomized_search_cv_with_splits, repeated_k_fold,
+    repeated_stratified_k_fold, shuffle_split, shuffled_k_fold, stratified_k_fold,
     stratified_shuffle_split, time_series_split, train_test_split, validation_curve,
-    CrossValidateResult, GridSearchResult,
+    validation_curve_with_splits, CrossValidateResult, CvSplit, GridSearchResult,
+    LearningCurveResult, ScorerFn, ValidationCurveResult,
 };

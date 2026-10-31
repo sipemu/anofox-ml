@@ -1,6 +1,62 @@
 use anofox_ml_core::{Float, Result, RustMlError};
 use ndarray::Array1;
 
+/// Cumulative false/true positive counts at every distinct score threshold,
+/// mirroring sklearn's `_binary_clf_curve`.
+///
+/// Returns `(fps, tps, thresholds)` with `thresholds` strictly decreasing
+/// (one entry per distinct score) and `fps[i]` / `tps[i]` the number of
+/// negatives / positives with `score >= thresholds[i]`. Tied scores are
+/// grouped into a single threshold, so the result does not depend on the
+/// input order of tied samples.
+///
+/// `y_true` must already be validated as binary. Returns `InvalidParameter`
+/// if any score is NaN.
+pub(crate) fn binary_clf_curve<F: Float>(
+    y_true: &Array1<F>,
+    y_score: &Array1<F>,
+) -> Result<(Vec<F>, Vec<F>, Vec<F>)> {
+    if y_score.iter().any(|v| v.is_nan()) {
+        return Err(RustMlError::InvalidParameter(
+            "y_score contains NaN values".into(),
+        ));
+    }
+    let eps = F::from_f64(1e-9).unwrap();
+
+    // Sort indices by score descending. No NaNs remain, so the f64 total
+    // order agrees with the numeric order (f32 -> f64 is order preserving).
+    let mut indices: Vec<usize> = (0..y_true.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let (sa, sb) = (y_score[a].to_f64().unwrap(), y_score[b].to_f64().unwrap());
+        sb.total_cmp(&sa)
+    });
+
+    let mut fps = Vec::new();
+    let mut tps = Vec::new();
+    let mut thresholds = Vec::new();
+    let mut tp = F::zero();
+    let mut fp = F::zero();
+
+    let mut i = 0;
+    while i < indices.len() {
+        let current = y_score[indices[i]];
+        // `==` groups -0.0 with 0.0 and is exact otherwise (like sklearn).
+        while i < indices.len() && y_score[indices[i]] == current {
+            if (y_true[indices[i]] - F::one()).abs() < eps {
+                tp += F::one();
+            } else {
+                fp += F::one();
+            }
+            i += 1;
+        }
+        fps.push(fp);
+        tps.push(tp);
+        thresholds.push(current);
+    }
+
+    Ok((fps, tps, thresholds))
+}
+
 /// Compute the Receiver Operating Characteristic (ROC) curve.
 ///
 /// Returns `(fpr, tpr, thresholds)` where:
@@ -9,8 +65,8 @@ use ndarray::Array1;
 /// - `thresholds` is the array of decision thresholds (sorted descending).
 ///
 /// The curve starts at `(0, 0)` with the highest threshold and ends at
-/// `(1, 1)` with the lowest. `y_true` must contain binary labels (only 0
-/// and 1 values).
+/// `(1, 1)` with the lowest. Tied scores form a single threshold.
+/// `y_true` must contain binary labels (only 0 and 1 values).
 ///
 /// # Errors
 ///
@@ -19,6 +75,7 @@ use ndarray::Array1;
 /// - The inputs are empty.
 /// - `y_true` contains non-binary labels.
 /// - `y_true` contains only a single class.
+/// - `y_score` contains NaN.
 pub fn roc_curve<F: Float>(
     y_true: &Array1<F>,
     y_score: &Array1<F>,
@@ -26,56 +83,27 @@ pub fn roc_curve<F: Float>(
     check_lengths(y_true, y_score)?;
     check_binary(y_true)?;
 
-    let eps = F::from_f64(1e-9).unwrap();
+    let (fps, tps, thresholds) = binary_clf_curve(y_true, y_score)?;
+    let total_pos = *tps.last().unwrap();
+    let total_neg = *fps.last().unwrap();
 
-    let pos_count = y_true
-        .iter()
-        .filter(|&&v| (v - F::one()).abs() < eps)
-        .count();
-    let neg_count = y_true.len() - pos_count;
-
-    if pos_count == 0 || neg_count == 0 {
+    if total_pos == F::zero() || total_neg == F::zero() {
         return Err(RustMlError::InvalidParameter(
             "ROC curve requires both positive and negative samples".into(),
         ));
     }
 
-    let total_pos = F::from_usize(pos_count).unwrap();
-    let total_neg = F::from_usize(neg_count).unwrap();
+    let mut fpr_vec = Vec::with_capacity(fps.len() + 1);
+    let mut tpr_vec = Vec::with_capacity(tps.len() + 1);
+    let mut thresh_vec = Vec::with_capacity(thresholds.len() + 1);
+    fpr_vec.push(F::zero());
+    tpr_vec.push(F::zero());
+    thresh_vec.push(thresholds[0] + F::one()); // sentinel above max score
 
-    // Sort indices by score descending
-    let mut indices: Vec<usize> = (0..y_true.len()).collect();
-    indices.sort_by(|&a, &b| y_score[b].partial_cmp(&y_score[a]).unwrap());
-
-    // Walk through sorted scores and compute TPR/FPR at each distinct threshold
-    let mut fpr_vec = vec![F::zero()];
-    let mut tpr_vec = vec![F::zero()];
-    let mut thresh_vec = vec![y_score[indices[0]] + F::one()]; // sentinel above max score
-
-    let mut tp = F::zero();
-    let mut fp = F::zero();
-
-    let mut i = 0;
-    while i < indices.len() {
-        // Find end of group of tied scores
-        let current_score = y_score[indices[i]];
-        let mut j = i;
-        while j < indices.len()
-            && (y_score[indices[j]] - current_score).abs() < F::from_f64(1e-15).unwrap()
-        {
-            if (y_true[indices[j]] - F::one()).abs() < eps {
-                tp += F::one();
-            } else {
-                fp += F::one();
-            }
-            j += 1;
-        }
-
+    for ((&fp, &tp), &t) in fps.iter().zip(tps.iter()).zip(thresholds.iter()) {
         fpr_vec.push(fp / total_neg);
         tpr_vec.push(tp / total_pos);
-        thresh_vec.push(current_score);
-
-        i = j;
+        thresh_vec.push(t);
     }
 
     Ok((
@@ -85,16 +113,19 @@ pub fn roc_curve<F: Float>(
     ))
 }
 
-/// Compute the precision-recall curve.
+/// Compute the precision-recall curve (same conventions as
+/// `sklearn.metrics.precision_recall_curve`).
 ///
 /// Returns `(precision, recall, thresholds)` where:
-/// - `precision` is the array of precision values,
-/// - `recall` is the array of recall values,
-/// - `thresholds` is the array of decision thresholds (sorted descending).
+/// - `thresholds` holds the distinct scores in **increasing** order;
+/// - `precision[i]` / `recall[i]` are the precision and recall when
+///   predicting positive for `score >= thresholds[i]`;
+/// - `precision` and `recall` have `thresholds.len() + 1` entries: the last
+///   element is the sentinel `precision = 1, recall = 0`, which has no
+///   threshold.
 ///
-/// The curve starts with the precision and recall at the highest threshold
-/// and includes a final point with `precision = 1, recall = 0` as a
-/// sentinel. `y_true` must contain binary labels (only 0 and 1 values).
+/// Recall is therefore non-increasing along the arrays. Tied scores form a
+/// single threshold. `y_true` must contain binary labels (only 0 and 1 values).
 ///
 /// # Errors
 ///
@@ -103,6 +134,7 @@ pub fn roc_curve<F: Float>(
 /// - The inputs are empty.
 /// - `y_true` contains non-binary labels.
 /// - `y_true` contains no positive samples.
+/// - `y_score` contains NaN.
 pub fn precision_recall_curve<F: Float>(
     y_true: &Array1<F>,
     y_score: &Array1<F>,
@@ -110,65 +142,27 @@ pub fn precision_recall_curve<F: Float>(
     check_lengths(y_true, y_score)?;
     check_binary(y_true)?;
 
-    let eps = F::from_f64(1e-9).unwrap();
+    let (fps, tps, thresholds) = binary_clf_curve(y_true, y_score)?;
+    let total_pos = *tps.last().unwrap();
 
-    let pos_count = y_true
-        .iter()
-        .filter(|&&v| (v - F::one()).abs() < eps)
-        .count();
-
-    if pos_count == 0 {
+    if total_pos == F::zero() {
         return Err(RustMlError::InvalidParameter(
             "precision-recall curve requires at least one positive sample".into(),
         ));
     }
 
-    let total_pos = F::from_usize(pos_count).unwrap();
-
-    // Sort indices by score descending
-    let mut indices: Vec<usize> = (0..y_true.len()).collect();
-    indices.sort_by(|&a, &b| y_score[b].partial_cmp(&y_score[a]).unwrap());
-
-    let mut precision_vec = Vec::new();
-    let mut recall_vec = Vec::new();
-    let mut thresh_vec = Vec::new();
-
-    let mut tp = F::zero();
-    let mut fp = F::zero();
-
-    let mut i = 0;
-    while i < indices.len() {
-        // Process group of tied scores
-        let current_score = y_score[indices[i]];
-        let mut j = i;
-        while j < indices.len()
-            && (y_score[indices[j]] - current_score).abs() < F::from_f64(1e-15).unwrap()
-        {
-            if (y_true[indices[j]] - F::one()).abs() < eps {
-                tp += F::one();
-            } else {
-                fp += F::one();
-            }
-            j += 1;
-        }
-
-        let prec = tp / (tp + fp);
-        let rec = tp / total_pos;
-
-        precision_vec.push(prec);
-        recall_vec.push(rec);
-        thresh_vec.push(current_score);
-
-        i = j;
+    let m = thresholds.len();
+    let mut precision_vec = Vec::with_capacity(m + 1);
+    let mut recall_vec = Vec::with_capacity(m + 1);
+    // Walk from the lowest threshold (all samples predicted positive) up.
+    for i in (0..m).rev() {
+        precision_vec.push(tps[i] / (tps[i] + fps[i]));
+        recall_vec.push(tps[i] / total_pos);
     }
-
-    // Append sentinel: precision = 1, recall = 0 (no corresponding threshold)
     precision_vec.push(F::one());
     recall_vec.push(F::zero());
 
-    // Reverse so recall goes from 0 -> 1 (ascending recall, descending precision)
-    precision_vec.reverse();
-    recall_vec.reverse();
+    let thresh_vec: Vec<F> = thresholds.into_iter().rev().collect();
 
     Ok((
         Array1::from_vec(precision_vec),
@@ -361,23 +355,82 @@ mod tests {
     #[test]
     fn test_pr_curve_known_values() {
         // Sorted desc: (0.9,1), (0.8,0), (0.3,1), (0.2,0)
+        // sklearn: precision=[.5, 2/3, .5, 1, 1], recall=[1, 1, .5, .5, 0],
+        //          thresholds=[.2, .3, .8, .9]
         let y_true = array![1.0, 0.0, 1.0, 0.0];
         let y_score = array![0.9, 0.8, 0.3, 0.2];
         let (precision, recall, thresholds) = precision_recall_curve(&y_true, &y_score).unwrap();
 
-        // Sentinel at start (after reversal): precision=1, recall=0
-        assert_abs_diff_eq!(precision[0], 1.0, epsilon = 1e-10);
-        assert_abs_diff_eq!(recall[0], 0.0, epsilon = 1e-10);
-
-        // Thresholds should be in descending order
-        for i in 1..thresholds.len() {
-            assert!(thresholds[i - 1] >= thresholds[i]);
-        }
-
-        // precision and recall arrays should be longer than thresholds by 1
-        // (due to the sentinel)
+        let exp_p = [0.5, 2.0 / 3.0, 0.5, 1.0, 1.0];
+        let exp_r = [1.0, 1.0, 0.5, 0.5, 0.0];
+        let exp_t = [0.2, 0.3, 0.8, 0.9];
         assert_eq!(precision.len(), thresholds.len() + 1);
         assert_eq!(recall.len(), thresholds.len() + 1);
+        for i in 0..exp_p.len() {
+            assert_abs_diff_eq!(precision[i], exp_p[i], epsilon = 1e-12);
+            assert_abs_diff_eq!(recall[i], exp_r[i], epsilon = 1e-12);
+        }
+        for i in 0..exp_t.len() {
+            assert_abs_diff_eq!(thresholds[i], exp_t[i], epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_pr_curve_matches_sklearn_issue_34() {
+        // sklearn: p=[2/3, 1, 1, 1], r=[1, 1, .5, 0], thresholds=[.1, .5, .9]
+        let y_true = array![0.0, 1.0, 1.0];
+        let y_score = array![0.1, 0.5, 0.9];
+        let (p, r, t) = precision_recall_curve(&y_true, &y_score).unwrap();
+        let exp_p = [2.0 / 3.0, 1.0, 1.0, 1.0];
+        let exp_r = [1.0, 1.0, 0.5, 0.0];
+        let exp_t = [0.1, 0.5, 0.9];
+        assert_eq!(p.len(), 4);
+        assert_eq!(r.len(), 4);
+        assert_eq!(t.len(), 3);
+        for i in 0..4 {
+            assert_abs_diff_eq!(p[i], exp_p[i], epsilon = 1e-12);
+            assert_abs_diff_eq!(r[i], exp_r[i], epsilon = 1e-12);
+        }
+        for i in 0..3 {
+            assert_abs_diff_eq!(t[i], exp_t[i], epsilon = 1e-12);
+        }
+        // recall non-increasing, thresholds increasing
+        for i in 1..r.len() {
+            assert!(r[i] <= r[i - 1]);
+        }
+        for i in 1..t.len() {
+            assert!(t[i] > t[i - 1]);
+        }
+    }
+
+    #[test]
+    fn test_pr_curve_ties_grouped() {
+        // y=[0,1,0,1], s=[.3,.3,.7,.7] -> thresholds [.3, .7]
+        // at .7: tp=1, fp=1 -> p=.5, r=.5; at .3: p=.5, r=1
+        let y_true = array![0.0, 1.0, 0.0, 1.0];
+        let y_score = array![0.3, 0.3, 0.7, 0.7];
+        let (p, r, t) = precision_recall_curve(&y_true, &y_score).unwrap();
+        assert_eq!(t.to_vec(), vec![0.3, 0.7]);
+        assert_eq!(p.to_vec(), vec![0.5, 0.5, 1.0]);
+        assert_eq!(r.to_vec(), vec![1.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn test_roc_curve_ties_grouped() {
+        let y_true = array![1.0, 0.0];
+        let y_score = array![0.5, 0.5];
+        let (fpr, tpr, thr) = roc_curve(&y_true, &y_score).unwrap();
+        assert_eq!(fpr.to_vec(), vec![0.0, 1.0]);
+        assert_eq!(tpr.to_vec(), vec![0.0, 1.0]);
+        assert_eq!(thr.len(), 2);
+    }
+
+    #[test]
+    fn test_curves_nan_score_error() {
+        let y_true = array![0.0, 1.0, 1.0];
+        let y_score = array![0.1, f64::NAN, 0.9];
+        assert!(roc_curve(&y_true, &y_score).is_err());
+        assert!(precision_recall_curve(&y_true, &y_score).is_err());
     }
 
     #[test]
@@ -406,9 +459,11 @@ mod tests {
         let y_true: Array1<f32> = array![0.0f32, 0.0, 1.0, 1.0];
         let y_score: Array1<f32> = array![0.1f32, 0.2, 0.8, 0.9];
         let (precision, recall, _) = precision_recall_curve(&y_true, &y_score).unwrap();
-        // Sentinel: precision=1, recall=0
-        assert_abs_diff_eq!(precision[0], 1.0f32, epsilon = 1e-6);
-        assert_abs_diff_eq!(recall[0], 0.0f32, epsilon = 1e-6);
+        // Sentinel (last element): precision=1, recall=0
+        assert_abs_diff_eq!(*precision.last().unwrap(), 1.0f32, epsilon = 1e-6);
+        assert_abs_diff_eq!(*recall.last().unwrap(), 0.0f32, epsilon = 1e-6);
+        // First element: everything predicted positive -> recall 1
+        assert_abs_diff_eq!(recall[0], 1.0f32, epsilon = 1e-6);
     }
 
     // ---------------------------------------------------------------
