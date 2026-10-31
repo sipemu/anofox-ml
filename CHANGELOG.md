@@ -283,6 +283,18 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     iteration cap (default 10⁷), and there are new `shrinking` / `cache_size`
     fields.
 
+- **LDA / QDA (#66):**
+  - LDA: sklearn `solver` `Svd` (default; handles collinear features),
+    `Lsqr` and `Eigen`; `Shrinkage::{Fixed, Auto}` (Ledoit-Wolf on
+    standardised data); `priors`; sklearn `transform` semantics.
+  - QDA: per-class SVD with sklearn's `reg_param` (`(1 − r) S² + r`),
+    `priors`, and batched scoring (no per-sample factorisation).
+  - New `ledoit_wolf` and `oas` estimators. All match sklearn 1.8 to 1e-9.
+  - **Breaking:** the default solver is now `Svd`; LDA's `shrinkage` is a
+    `Shrinkage` enum; QDA's fitted model stores `rotations` / `scalings`
+    instead of `sigmas`, and `with_reg` means sklearn's `reg_param`
+    (default 0).
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by
