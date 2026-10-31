@@ -8,10 +8,12 @@
 //!   loss + L2 regularization, solved by liblinear's dual coordinate descent
 //!   (Hsieh et al., 2008), as sklearn's `LinearSVC(dual=True)`.
 //! - [`Svc`] -- Support Vector Classifier with kernel support (linear, RBF,
-//!   polynomial), solved via a simplified SMO algorithm.
+//!   polynomial, sigmoid, precomputed), solved via a simplified SMO
+//!   algorithm. Multi-class problems use one-vs-one (as libsvm / sklearn),
+//!   with optional class weights and Platt-scaled `predict_proba`.
 //!
-//! Both classifiers support binary and multi-class classification (via
-//! one-vs-rest strategy).
+//! `gamma` defaults to [`Gamma::Scale`] (`1 / (n_features · X.var())`), as in
+//! sklearn; it is resolved at fit time.
 //!
 //! ## Example
 //!
@@ -30,7 +32,7 @@
 //!
 //! // Kernel SVC with RBF
 //! let svc = Svc::new()
-//!     .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+//!     .with_kernel(SvmKernel::rbf(0.5))
 //!     .with_c(10.0);
 //! let model = svc.fit(&x, &y).unwrap();
 //! let preds = model.predict(&x).unwrap();
@@ -46,11 +48,11 @@ mod projection;
 mod svc;
 mod svr;
 
-pub use kernel::SvmKernel;
+pub use kernel::{Gamma, SvmKernel};
 pub use linear_svc::{FittedLinearSvc, LinearSvc, LinearSvcLoss};
 pub use linear_svr::{FittedLinearSvr, LinearSvr, LinearSvrLoss};
 pub use nu_svc::{FittedNuSvc, NuSvc};
 pub use nu_svr::{FittedNuSvr, NuSvr};
 pub use one_class_svm::{FittedOneClassSvm, OneClassSvm};
-pub use svc::{FittedSvc, Svc};
+pub use svc::{ClassWeight, DecisionFunctionShape, FittedSvc, Svc};
 pub use svr::{FittedSvr, Svr};

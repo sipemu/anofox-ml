@@ -1,12 +1,24 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{
+    Fit, FitWeighted, Float, PartialFit, Predict, PredictLogProba, PredictProba, Result,
+};
 use ndarray::{Array1, Array2, Axis};
+
+use crate::common::{
+    argmax_labels, check_alpha, check_n_features, class_log_prior, log_proba_from_jll,
+    proba_from_jll,
+};
+use crate::discrete::{accumulate, Counts};
+
+fn default_true() -> bool {
+    true
+}
 
 /// Bernoulli Naive Bayes classifier parameters (unfitted state).
 ///
 /// Designed for binary/boolean features.  Input is binarized at a configurable
 /// threshold before fitting and prediction: values strictly greater than the
 /// threshold become 1, otherwise 0.  Uses Laplace (additive) smoothing
-/// controlled by the `alpha` parameter.
+/// controlled by the `alpha` parameter. Mirrors sklearn's `BernoulliNB`.
 ///
 /// Uses the type-state pattern: call [`Fit::fit`] to produce a
 /// [`FittedBernoulliNB`] that can make predictions.
@@ -16,6 +28,16 @@ pub struct BernoulliNB {
     pub alpha: f64,
     /// Threshold for binarizing features (values > threshold become 1).
     pub binarize_threshold: f64,
+    /// If `false` and `alpha < 1e-10`, alpha is clamped to `1e-10` (sklearn's
+    /// `force_alpha`). Default `true`.
+    #[serde(default = "default_true")]
+    pub force_alpha: bool,
+    /// Whether to learn class priors from the data (`false`: uniform prior).
+    #[serde(default = "default_true")]
+    pub fit_prior: bool,
+    /// Fixed class prior probabilities (sorted class order).
+    #[serde(default)]
+    pub class_prior: Option<Vec<f64>>,
 }
 
 impl BernoulliNB {
@@ -25,6 +47,9 @@ impl BernoulliNB {
         Self {
             alpha: 1.0,
             binarize_threshold: 0.0,
+            force_alpha: true,
+            fit_prior: true,
+            class_prior: None,
         }
     }
 
@@ -39,6 +64,74 @@ impl BernoulliNB {
         self.binarize_threshold = threshold;
         self
     }
+
+    /// Set `force_alpha` (see field docs).
+    pub fn with_force_alpha(mut self, force_alpha: bool) -> Self {
+        self.force_alpha = force_alpha;
+        self
+    }
+
+    /// Set whether class priors are learned.
+    pub fn with_fit_prior(mut self, fit_prior: bool) -> Self {
+        self.fit_prior = fit_prior;
+        self
+    }
+
+    /// Fix the class priors.
+    pub fn with_class_prior(mut self, class_prior: Option<Vec<f64>>) -> Self {
+        self.class_prior = class_prior;
+        self
+    }
+
+    fn finish<F: Float>(&self, counts: Counts<F>, threshold: F) -> Result<FittedBernoulliNB<F>> {
+        let alpha = F::from_f64(check_alpha(self.alpha, self.force_alpha)?).unwrap();
+        let two = F::one() + F::one();
+        let log_class_prior = class_log_prior(
+            &counts.class_count,
+            self.fit_prior,
+            self.class_prior.as_deref(),
+        )?;
+        let mut log_feature_prob = counts.feature_count.mapv(|c| c + alpha);
+        for (mut row, &cc) in log_feature_prob
+            .rows_mut()
+            .into_iter()
+            .zip(counts.class_count.iter())
+        {
+            let log_den = (cc + alpha * two).ln();
+            row.mapv_inplace(|v| v.ln() - log_den);
+        }
+        // log(1 - p) computed as sklearn: np.log(1 - np.exp(feature_log_prob_)).
+        let log_feature_neg_prob = log_feature_prob.mapv(|v| (F::one() - v.exp()).ln());
+        Ok(FittedBernoulliNB {
+            class_labels: counts.classes,
+            log_class_prior: log_class_prior.to_vec(),
+            log_feature_prob,
+            log_feature_neg_prob,
+            binarize_threshold: threshold,
+            class_count: counts.class_count,
+            feature_count: counts.feature_count,
+        })
+    }
+
+    /// Incremental fit with optional per-sample weights (sklearn's
+    /// `partial_fit(X, y, classes, sample_weight)`).
+    pub fn partial_fit_weighted<F: Float>(
+        &self,
+        state: Option<FittedBernoulliNB<F>>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        classes: Option<&[F]>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedBernoulliNB<F>> {
+        check_alpha(self.alpha, self.force_alpha)?;
+        let threshold = F::from_f64(self.binarize_threshold).unwrap();
+        let x_bin = binarize(x, threshold);
+        let prev = state
+            .map(|s| Counts::from_parts(s.class_labels, s.class_count, s.feature_count))
+            .transpose()?;
+        let counts = accumulate(prev, &x_bin, y, classes, sample_weight)?;
+        self.finish(counts, threshold)
+    }
 }
 
 impl Default for BernoulliNB {
@@ -47,10 +140,14 @@ impl Default for BernoulliNB {
     }
 }
 
+fn binarize<F: Float>(x: &Array2<F>, threshold: F) -> Array2<F> {
+    x.mapv(|v| if v > threshold { F::one() } else { F::zero() })
+}
+
 /// Fitted Bernoulli Naive Bayes classifier.
 ///
-/// Stores log class priors, log feature probabilities, and the binarization
-/// threshold learned/configured during fitting.
+/// Stores log class priors, log feature probabilities, the binarization
+/// threshold, and the raw (weighted) counts needed for `partial_fit`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedBernoulliNB<F: Float> {
@@ -64,6 +161,12 @@ pub struct FittedBernoulliNB<F: Float> {
     log_feature_neg_prob: Array2<F>,
     /// Binarization threshold used during fitting.
     binarize_threshold: F,
+    /// Weighted number of samples per class.
+    #[serde(default)]
+    class_count: Array1<F>,
+    /// Weighted number of samples per class with each feature active.
+    #[serde(default)]
+    feature_count: Array2<F>,
 }
 
 impl<F: Float> FittedBernoulliNB<F> {
@@ -82,61 +185,46 @@ impl<F: Float> FittedBernoulliNB<F> {
         &self.log_feature_prob
     }
 
+    /// Weighted number of samples per class (sklearn's `class_count_`).
+    pub fn class_count(&self) -> &Array1<F> {
+        &self.class_count
+    }
+
+    /// Weighted active-feature counts per class (sklearn's `feature_count_`).
+    pub fn feature_count(&self) -> &Array2<F> {
+        &self.feature_count
+    }
+
+    /// Joint log-likelihood, shape `(n_samples, n_classes)`:
+    /// `X_bin · (log p − log(1−p))ᵀ + Σ_j log(1−p_j) + log_prior`.
+    pub fn joint_log_likelihood(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        check_n_features(x, self.log_feature_prob.ncols())?;
+        let x_bin = binarize(x, self.binarize_threshold);
+        let diff = &self.log_feature_prob - &self.log_feature_neg_prob;
+        let offset = self.log_feature_neg_prob.sum_axis(Axis(1))
+            + Array1::from(self.log_class_prior.clone());
+        Ok(x_bin.dot(&diff.t()) + &offset)
+    }
+
     /// Predict class probabilities for each sample in `x`.
     ///
     /// Returns an array of shape `(n_samples, n_classes)` where each row sums
     /// to 1.
     pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        if x.ncols() != self.log_feature_prob.ncols() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.log_feature_prob.ncols(),
-                x.ncols()
-            )));
-        }
+        Ok(proba_from_jll(self.joint_log_likelihood(x)?))
+    }
+}
 
-        let n_samples = x.nrows();
-        let n_classes = self.class_labels.len();
-        let one = F::one();
-        let threshold = self.binarize_threshold;
-        let mut proba = Array2::<F>::zeros((n_samples, n_classes));
+impl<F: Float> FitWeighted<F> for BernoulliNB {
+    type Fitted = FittedBernoulliNB<F>;
 
-        for (i, sample) in x.rows().into_iter().enumerate() {
-            let mut log_posteriors = Vec::with_capacity(n_classes);
-            for ci in 0..n_classes {
-                let mut log_post = self.log_class_prior[ci];
-                for j in 0..x.ncols() {
-                    let xj = if sample[j] > threshold {
-                        one
-                    } else {
-                        F::zero()
-                    };
-                    // log P(x_j | c) = x_j * log(p) + (1 - x_j) * log(1 - p)
-                    log_post = log_post
-                        + xj * self.log_feature_prob[[ci, j]]
-                        + (one - xj) * self.log_feature_neg_prob[[ci, j]];
-                }
-                log_posteriors.push(log_post);
-            }
-
-            // Log-sum-exp for numerical stability.
-            let max_log = log_posteriors
-                .iter()
-                .copied()
-                .fold(F::neg_infinity(), |a, b| if a > b { a } else { b });
-
-            let sum_exp: F = log_posteriors
-                .iter()
-                .map(|&lp| (lp - max_log).exp())
-                .fold(F::zero(), |a, b| a + b);
-            let log_norm = max_log + sum_exp.ln();
-
-            for ci in 0..n_classes {
-                proba[[i, ci]] = (log_posteriors[ci] - log_norm).exp();
-            }
-        }
-
-        Ok(proba)
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.partial_fit_weighted(None, x, y, None, sample_weight)
     }
 }
 
@@ -144,123 +232,49 @@ impl<F: Float> Fit<F> for BernoulliNB {
     type Fitted = FittedBernoulliNB<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        if x.is_empty() || y.is_empty() {
-            return Err(RustMlError::EmptyInput(
-                "training data must not be empty".into(),
-            ));
-        }
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
+        self.partial_fit_weighted(None, x, y, None, None)
+    }
+}
 
-        let alpha = F::from_f64(self.alpha).unwrap();
-        let threshold = F::from_f64(self.binarize_threshold).unwrap();
-        let one = F::one();
-        let two = F::from_f64(2.0).unwrap();
-        let n_samples = F::from_usize(x.nrows()).unwrap();
-        let n_features = x.ncols();
+impl<F: Float> PartialFit<F> for BernoulliNB {
+    type Fitted = FittedBernoulliNB<F>;
 
-        // Binarize input.
-        let x_bin = x.mapv(|v| if v > threshold { one } else { F::zero() });
-
-        // Extract unique class labels and sort them.
-        let mut class_labels: Vec<F> = y.to_vec();
-        class_labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        class_labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
-
-        let n_classes = class_labels.len();
-        let mut log_class_prior = Vec::with_capacity(n_classes);
-        let mut log_feature_prob = Array2::<F>::zeros((n_classes, n_features));
-        let mut log_feature_neg_prob = Array2::<F>::zeros((n_classes, n_features));
-
-        for (ci, &label) in class_labels.iter().enumerate() {
-            // Gather row indices belonging to this class.
-            let mask: Vec<usize> = y
-                .iter()
-                .enumerate()
-                .filter(|(_, &val)| (val - label).abs() < F::from_f64(1e-12).unwrap())
-                .map(|(i, _)| i)
-                .collect();
-
-            let count = F::from_usize(mask.len()).unwrap();
-            log_class_prior.push((count / n_samples).ln());
-
-            // Build sub-matrix for this class (already binarized).
-            let class_x = x_bin.select(Axis(0), &mask);
-
-            // Count how many samples in this class have feature j = 1.
-            let feature_counts = class_x.sum_axis(Axis(0));
-
-            // Smoothed probability: P(x_j=1|c) = (count_j + alpha) / (N_c + 2*alpha)
-            let denom = count + two * alpha;
-            for j in 0..n_features {
-                let p = (feature_counts[j] + alpha) / denom;
-                log_feature_prob[[ci, j]] = p.ln();
-                log_feature_neg_prob[[ci, j]] = (one - p).ln();
-            }
-        }
-
-        Ok(FittedBernoulliNB {
-            class_labels,
-            log_class_prior,
-            log_feature_prob,
-            log_feature_neg_prob,
-            binarize_threshold: threshold,
-        })
+    fn partial_fit(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        classes: Option<&[F]>,
+    ) -> Result<Self::Fitted> {
+        self.partial_fit_weighted(state, x, y, classes, None)
     }
 }
 
 impl<F: Float> Predict<F> for FittedBernoulliNB<F> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.log_feature_prob.ncols() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.log_feature_prob.ncols(),
-                x.ncols()
-            )));
-        }
-
-        let one = F::one();
-        let threshold = self.binarize_threshold;
-        let mut predictions = Array1::<F>::zeros(x.nrows());
-
-        for (i, sample) in x.rows().into_iter().enumerate() {
-            let mut best_class = self.class_labels[0];
-            let mut best_log_posterior = F::neg_infinity();
-
-            for (ci, &label) in self.class_labels.iter().enumerate() {
-                let mut log_posterior = self.log_class_prior[ci];
-                for j in 0..x.ncols() {
-                    let xj = if sample[j] > threshold {
-                        one
-                    } else {
-                        F::zero()
-                    };
-                    log_posterior = log_posterior
-                        + xj * self.log_feature_prob[[ci, j]]
-                        + (one - xj) * self.log_feature_neg_prob[[ci, j]];
-                }
-
-                if log_posterior > best_log_posterior {
-                    best_log_posterior = log_posterior;
-                    best_class = label;
-                }
-            }
-
-            predictions[i] = best_class;
-        }
-
-        Ok(predictions)
+        let jll = self.joint_log_likelihood(x)?;
+        Ok(argmax_labels(&jll, &self.class_labels))
     }
 }
+
+impl<F: Float> PredictProba<F> for FittedBernoulliNB<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Self::predict_proba(self, x)
+    }
+}
+
+impl<F: Float> PredictLogProba<F> for FittedBernoulliNB<F> {
+    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Ok(log_proba_from_jll(self.joint_log_likelihood(x)?))
+    }
+}
+
+impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedBernoulliNB<F> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anofox_ml_core::RustMlError;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
 
@@ -451,12 +465,98 @@ mod tests {
     }
 }
 
-impl<F: Float> PredictProba<F> for FittedBernoulliNB<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        Self::predict_proba(self, x)
+/// Reference values generated with scikit-learn 1.8.0.
+#[cfg(test)]
+mod sklearn_parity {
+    use super::*;
+    use crate::common::assert_close2;
+    use ndarray::array;
+
+    fn data() -> (Array2<f64>, Array1<f64>, Array1<f64>, Array2<f64>) {
+        let x = array![
+            [1.0, 0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0]
+        ];
+        let y = array![0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        let w = array![1.0, 2.0, 0.5, 1.0, 1.0, 3.0];
+        let t = array![
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 0.0]
+        ];
+        (x, y, w, t)
+    }
+
+    #[test]
+    fn sample_weight_and_alpha() {
+        let (x, y, w, t) = data();
+        let m: FittedBernoulliNB<f64> = BernoulliNB::new()
+            .with_alpha(0.7)
+            .fit_weighted(&x, &y, Some(&w))
+            .unwrap();
+        assert_close2(
+            &m.predict_proba(&t).unwrap(),
+            &[
+                &[0.9861878646810236, 0.01381213531897653],
+                &[0.026946248142374372, 0.9730537518576254],
+                &[0.9571401323881754, 0.04285986761182453],
+            ],
+            1e-12,
+            "proba",
+        );
+        assert_close2(
+            &PredictLogProba::predict_log_proba(&m, &t).unwrap(),
+            &[
+                &[-0.013908410397587279, -4.282207702298754],
+                &[-3.6139112068148203, -0.027315954891752092],
+                &[-0.043805469421067667, -3.149819377792981],
+            ],
+            1e-12,
+            "log_proba",
+        );
+    }
+
+    #[test]
+    fn partial_fit_mixed_weights() {
+        let (x, y, w, t) = data();
+        let nb = BernoulliNB::new();
+        let m = nb
+            .partial_fit(
+                None,
+                &x.slice(ndarray::s![..3, ..]).to_owned(),
+                &y.slice(ndarray::s![..3]).to_owned(),
+                Some(&[0.0, 1.0]),
+            )
+            .unwrap();
+        let m = nb
+            .partial_fit_weighted(
+                Some(m),
+                &x.slice(ndarray::s![3.., ..]).to_owned(),
+                &y.slice(ndarray::s![3..]).to_owned(),
+                None,
+                Some(&w.slice(ndarray::s![3..]).to_owned()),
+            )
+            .unwrap();
+        assert_close2(
+            &m.predict_proba(&t).unwrap(),
+            &[
+                &[0.9688638028007635, 0.031136197199236736],
+                &[0.03302000316309905, 0.966979996836901],
+                &[0.8806094457985988, 0.1193905542014011],
+            ],
+            1e-12,
+            "partial_fit proba",
+        );
+    }
+
+    #[test]
+    fn negative_alpha_rejected() {
+        let (x, y, _, _) = data();
+        let r: Result<FittedBernoulliNB<f64>> = BernoulliNB::new().with_alpha(-1.0).fit(&x, &y);
+        assert!(r.is_err());
     }
 }
-
-impl<F: Float> anofox_ml_core::PredictLogProba<F> for FittedBernoulliNB<F> {}
-
-impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedBernoulliNB<F> {}

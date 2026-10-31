@@ -5,6 +5,12 @@
 //! - [`GaussianNB`] — assumes features follow a normal distribution within each class.
 //! - [`MultinomialNB`] — for count-based or TF-IDF features (non-negative values).
 //! - [`BernoulliNB`] — for binary/boolean features, with automatic binarization.
+//! - [`ComplementNB`] — complement-class weights for imbalanced text data.
+//! - [`CategoricalNB`] — for integer-encoded categorical features.
+//!
+//! All models mirror scikit-learn: `predict_log_proba` is computed in log
+//! space as `jll − logsumexp(jll)`, every model supports `partial_fit` and
+//! per-sample weights, and labels outside the declared classes are an error.
 //!
 //! # Examples
 //!
@@ -34,9 +40,15 @@
 //! ```
 
 mod bernoulli_nb;
+mod categorical_nb;
+mod common;
+mod complement_nb;
+mod discrete;
 mod gaussian_nb;
 mod multinomial_nb;
 
 pub use bernoulli_nb::{BernoulliNB, FittedBernoulliNB};
+pub use categorical_nb::{CategoricalNB, FittedCategoricalNB, MinCategories};
+pub use complement_nb::{ComplementNB, FittedComplementNB};
 pub use gaussian_nb::{FittedGaussianNB, GaussianNB};
 pub use multinomial_nb::{FittedMultinomialNB, MultinomialNB};

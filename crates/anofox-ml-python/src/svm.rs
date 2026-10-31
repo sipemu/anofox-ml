@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 
 use anofox_ml_core::{Fit, Predict};
 
-use crate::helpers::{not_fitted, parse_kernel, py_err, to_array1, to_array2};
+use crate::helpers::{not_fitted, parse_kernel, py_err, to_array1, to_array2, PyGamma};
 
 // ---------------------------------------------------------------------------
 // LinearSvc
@@ -99,17 +99,19 @@ pub struct Svc {
 #[pymethods]
 impl Svc {
     #[new]
-    #[pyo3(signature = (c=1.0, kernel="rbf", gamma=1.0, degree=3, coef0=0.0, max_iter=1000, tol=1e-4, seed=0))]
+    #[pyo3(signature = (c=1.0, kernel="rbf", gamma=None, degree=3, coef0=0.0, max_iter=1000, tol=1e-4, seed=0))]
     fn new(
         c: f64,
         kernel: &str,
-        gamma: f64,
+        gamma: Option<PyGamma>,
         degree: usize,
         coef0: f64,
         max_iter: usize,
         tol: f64,
         seed: u64,
     ) -> PyResult<Self> {
+        // gamma=None means sklearn's default 'scale'.
+        let gamma = gamma.unwrap_or(PyGamma::Name("scale".into()));
         let k = parse_kernel(kernel, gamma, degree, coef0)?;
         Ok(Self {
             inner: anofox_ml_svm::Svc::new()
