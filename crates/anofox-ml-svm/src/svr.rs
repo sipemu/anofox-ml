@@ -5,7 +5,6 @@ use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 use crate::kernel::SvmKernel;
-use crate::projection::prox_l1_box_zero_sum;
 
 /// Epsilon-Support Vector Regressor (unfitted state).
 ///
@@ -22,10 +21,16 @@ pub struct Svr {
     pub epsilon: f64,
     /// Kernel function to use.
     pub kernel: SvmKernel,
-    /// Maximum number of solver (FISTA) iterations.
+    /// Maximum number of SMO iterations.
     pub max_iter: usize,
-    /// Tolerance for stopping criterion.
+    /// Tolerance of the stopping criterion (libsvm / sklearn default 1e-3).
     pub tol: f64,
+    /// Use libsvm's shrinking heuristic (default true).
+    #[serde(default = "crate::solver::default_true")]
+    pub shrinking: bool,
+    /// Kernel cache size in MB (default 200).
+    #[serde(default = "crate::solver::default_cache_size")]
+    pub cache_size: f64,
 }
 
 impl Svr {
@@ -34,8 +39,10 @@ impl Svr {
             c: 1.0,
             epsilon: 0.1,
             kernel: SvmKernel::default(),
-            max_iter: 1000,
-            tol: 1e-4,
+            max_iter: 10_000_000,
+            tol: 1e-3,
+            shrinking: true,
+            cache_size: 200.0,
         }
     }
 
@@ -61,6 +68,16 @@ impl Svr {
 
     pub fn with_tol(mut self, tol: f64) -> Self {
         self.tol = tol;
+        self
+    }
+
+    pub fn with_shrinking(mut self, shrinking: bool) -> Self {
+        self.shrinking = shrinking;
+        self
+    }
+
+    pub fn with_cache_size(mut self, cache_size: f64) -> Self {
+        self.cache_size = cache_size;
         self
     }
 
@@ -177,175 +194,6 @@ impl<F: Float> Predict<F> for FittedSvr<F> {
     }
 }
 
-/// Precompute the symmetric kernel matrix.
-fn precompute_kernel_matrix<F: Float>(x: &Array2<F>, kernel: &SvmKernel) -> Array2<F> {
-    let n = x.nrows();
-    let mut k = Array2::<F>::zeros((n, n));
-    for i in 0..n {
-        for j in i..n {
-            let val = kernel.compute(&x.row(i), &x.row(j));
-            k[[i, j]] = val;
-            k[[j, i]] = val;
-        }
-    }
-    k
-}
-
-/// FISTA (Fast Iterative Shrinkage-Thresholding) solver for epsilon-SVR.
-///
-/// Maximises the dual objective:
-///   W(w) = −½ Σ w_i w_j K(x_i,x_j) + Σ y_i w_i − ε Σ |w_i|
-///
-/// subject to  −C ≤ w_i ≤ C  and  Σ w_i = 0  (w = α − α*).
-///
-/// Uses accelerated proximal gradient descent with Nesterov momentum,
-/// which converges in O(1/k²) and handles rank-deficient kernel matrices
-/// (e.g. linear kernel on low-dim data) gracefully.
-fn fista_svr_dual<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
-    kernel: &SvmKernel,
-    c: F,
-    epsilon: F,
-    max_iter: usize,
-    tol: F,
-) -> (Vec<F>, F) {
-    let n = x.nrows();
-    let zero = F::zero();
-    let one = F::one();
-    let two = one + one;
-    let four = two + two;
-
-    let k_matrix = precompute_kernel_matrix(x, kernel);
-
-    // Lipschitz constant L = max row-sum of |K| (tighter than trace for PSD).
-    let mut lipschitz = zero;
-    for i in 0..n {
-        let mut row_sum = zero;
-        for j in 0..n {
-            row_sum += k_matrix[[i, j]].abs();
-        }
-        if row_sum > lipschitz {
-            lipschitz = row_sum;
-        }
-    }
-    if lipschitz < F::from_f64(1e-12).unwrap() {
-        lipschitz = one;
-    }
-    let step = one / lipschitz;
-    let eps_step = epsilon * step;
-
-    let mut w = vec![zero; n];
-    let mut w_prev = vec![zero; n];
-    let mut v = vec![zero; n]; // momentum point
-    let mut t_k = one;
-
-    for _iter in 0..max_iter {
-        // Compute K * v
-        let mut kv = vec![zero; n];
-        for i in 0..n {
-            let mut s = zero;
-            for j in 0..n {
-                s += k_matrix[[i, j]] * v[j];
-            }
-            kv[i] = s;
-        }
-
-        // Proximal gradient step:
-        //   w_new = prox_{step·ε‖·‖₁ + I_box + I_{Σw=0}}(v + step·(y − K v)).
-        // The ℓ1 term, the box [−C, C] and the bias constraint Σ w_i = 0 are
-        // handled jointly by an exact shift-and-clip prox (bisection on the
-        // multiplier τ of Σ w_i = 0), so every iterate is dual-feasible.
-        for i in 0..n {
-            w_prev[i] = w[i];
-            w[i] = v[i] + step * (y[i] - kv[i]);
-        }
-        prox_l1_box_zero_sum(&mut w, eps_step, c);
-
-        // Check convergence
-        let mut max_change = zero;
-        for i in 0..n {
-            let change = (w[i] - w_prev[i]).abs();
-            if change > max_change {
-                max_change = change;
-            }
-        }
-
-        if max_change < tol {
-            break;
-        }
-
-        // Nesterov momentum
-        let t_new = (one + (one + four * t_k * t_k).sqrt()) / two;
-        let momentum = (t_k - one) / t_new;
-        t_k = t_new;
-
-        for i in 0..n {
-            v[i] = w[i] + momentum * (w[i] - w_prev[i]);
-        }
-    }
-
-    // ---- compute g = K * w for bias calculation ----
-    let mut g = vec![zero; n];
-    for i in 0..n {
-        let mut s = zero;
-        for j in 0..n {
-            s += k_matrix[[i, j]] * w[j];
-        }
-        g[i] = s;
-    }
-
-    // ---- compute bias from free support vectors ----
-    // Free means 0 < |w_i| < C (not at boundary).
-    //   w_i > 0 (α_i active) ⇒ f(x_i) = y_i − ε ⇒ b = y_i − ε − g_i
-    //   w_i < 0 (α*_i active) ⇒ f(x_i) = y_i + ε ⇒ b = y_i + ε − g_i
-    let margin = F::from_f64(1e-6).unwrap();
-    let mut b_sum = zero;
-    let mut b_count = 0usize;
-
-    for i in 0..n {
-        if w[i] > margin && w[i] < c - margin {
-            b_sum += y[i] - epsilon - g[i];
-            b_count += 1;
-        } else if w[i] < -margin && w[i] > -(c - margin) {
-            b_sum += y[i] + epsilon - g[i];
-            b_count += 1;
-        }
-    }
-
-    let bias = if b_count > 0 {
-        b_sum / F::from_usize(b_count).unwrap()
-    } else {
-        // No free SVs: the KKT conditions only bracket b.
-        //   w_i = 0   ⇒ y_i − ε − g_i ≤ b ≤ y_i + ε − g_i
-        //   w_i = C   ⇒ b ≤ y_i − ε − g_i   (α_i at bound)
-        //   w_i = −C  ⇒ b ≥ y_i + ε − g_i   (α*_i at bound)
-        let mut b_lo = F::neg_infinity();
-        let mut b_hi = F::infinity();
-        for i in 0..n {
-            let lo_i = y[i] - epsilon - g[i];
-            let hi_i = y[i] + epsilon - g[i];
-            if w[i] >= c - margin {
-                b_hi = b_hi.min(lo_i);
-            } else if w[i] <= -(c - margin) {
-                b_lo = b_lo.max(hi_i);
-            } else {
-                b_lo = b_lo.max(lo_i);
-                b_hi = b_hi.min(hi_i);
-            }
-        }
-        let two = F::one() + F::one();
-        match (b_lo.is_finite(), b_hi.is_finite()) {
-            (true, true) => (b_lo + b_hi) / two,
-            (true, false) => b_lo,
-            (false, true) => b_hi,
-            (false, false) => zero,
-        }
-    };
-
-    (w, bias)
-}
-
 impl<F: Float> Fit<F> for Svr {
     type Fitted = FittedSvr<F>;
 
@@ -365,25 +213,30 @@ impl<F: Float> Fit<F> for Svr {
             )));
         }
 
-        let c = F::from_f64(self.c).unwrap();
-        let epsilon = F::from_f64(self.epsilon).unwrap();
         let kernel = self.kernel.resolve(x);
-        let tol = F::from_f64(self.tol).unwrap();
-
-        // Center targets for better convergence (standard SVM practice)
-        let n = F::from_usize(y.len()).unwrap();
-        let y_mean = y.iter().copied().fold(F::zero(), |a, b| a + b) / n;
-        let y_centered = y.mapv(|v| v - y_mean);
-
-        let (coefs, bias_centered) =
-            fista_svr_dual(x, &y_centered, &kernel, c, epsilon, self.max_iter, tol);
-        let bias = bias_centered + y_mean;
+        let x64: Array2<f64> = x.mapv(|v| v.to_f64().unwrap());
+        let y64: Vec<f64> = y.iter().map(|v| v.to_f64().unwrap()).collect();
+        let (coefs, bias) = crate::solver::solve_epsilon_svr(
+            crate::solver::KernelSource::Data {
+                x: &x64,
+                kernel: &kernel,
+            },
+            &y64,
+            self.c,
+            self.epsilon,
+            &crate::solver::SolverParams {
+                eps: self.tol,
+                shrinking: self.shrinking,
+                max_iter: Some(self.max_iter),
+                nu: false,
+            },
+            self.cache_size,
+        );
+        let coefs: Vec<F> = coefs.iter().map(|&v| F::from_f64(v).unwrap()).collect();
+        let bias = F::from_f64(bias).unwrap();
 
         // Extract support vectors (non-zero coefficients)
-        let sv_threshold = F::from_f64(1e-8).unwrap();
-        let sv_indices: Vec<usize> = (0..x.nrows())
-            .filter(|&i| coefs[i].abs() > sv_threshold)
-            .collect();
+        let sv_indices: Vec<usize> = (0..x.nrows()).filter(|&i| coefs[i] != F::zero()).collect();
 
         if sv_indices.is_empty() {
             // Fallback: use all training points
@@ -459,7 +312,23 @@ mod tests {
         let (x, y) = parity_data();
         let kernel = SvmKernel::rbf(0.5);
         for &(c, max_iter) in &[(1.0, 50usize), (1.0, 20_000), (0.05, 2_000)] {
-            let (w, _b) = fista_svr_dual(&x, &y, &kernel, c, 0.1, max_iter, 1e-12);
+            let x64 = x.clone();
+            let (w, _b) = crate::solver::solve_epsilon_svr(
+                crate::solver::KernelSource::Data {
+                    x: &x64,
+                    kernel: &kernel,
+                },
+                y.as_slice().unwrap(),
+                c,
+                0.1,
+                &crate::solver::SolverParams {
+                    eps: 1e-12,
+                    shrinking: true,
+                    max_iter: Some(max_iter),
+                    nu: false,
+                },
+                200.0,
+            );
             let sum: f64 = w.iter().sum();
             assert!(
                 sum.abs() < 1e-6,

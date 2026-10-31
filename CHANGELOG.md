@@ -270,6 +270,19 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     `stratified_k_fold_continuous` for continuous targets.
   - `nested_cross_validate`.
 
+### Review P2 / P3
+
+- **Kernel SVMs (#62, #64):** SVC, NuSVC, SVR, NuSVR and OneClassSVM share a
+  port of libsvm's SMO solver (second-order working-set selection, gradient
+  maintenance, shrinking, and an LRU kernel column cache bounded by
+  `cache_size` MB). The full Gram matrix is no longer built.
+  - NuSVC solves the ν dual directly instead of bisecting C.
+  - SVC/NuSVC decision values match sklearn exactly.
+  - A degenerate dual (e.g. ν too large) returns an error, as sklearn does.
+  - **Breaking:** defaults follow libsvm: `tol = 1e-3`, `max_iter` is an SMO
+    iteration cap (default 10⁷), and there are new `shrinking` / `cache_size`
+    fields.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by

@@ -14,7 +14,6 @@ use anofox_ml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 use crate::kernel::SvmKernel;
-use crate::projection::project_capped_simplex;
 
 /// One-Class SVM estimator (unfitted state).
 ///
@@ -31,10 +30,16 @@ pub struct OneClassSvm {
     pub nu: f64,
     /// Kernel function to use.
     pub kernel: SvmKernel,
-    /// Maximum number of solver iterations.
+    /// Maximum number of SMO iterations.
     pub max_iter: usize,
-    /// Tolerance for the stopping criterion.
+    /// Tolerance of the stopping criterion (libsvm / sklearn default 1e-3).
     pub tol: f64,
+    /// Use libsvm's shrinking heuristic (default true).
+    #[serde(default = "crate::solver::default_true")]
+    pub shrinking: bool,
+    /// Kernel cache size in MB (default 200).
+    #[serde(default = "crate::solver::default_cache_size")]
+    pub cache_size: f64,
 }
 
 impl OneClassSvm {
@@ -43,8 +48,10 @@ impl OneClassSvm {
         Self {
             nu: 0.5,
             kernel: SvmKernel::default(),
-            max_iter: 1000,
-            tol: 1e-4,
+            max_iter: 10_000_000,
+            tol: 1e-3,
+            shrinking: true,
+            cache_size: 200.0,
         }
     }
 
@@ -69,6 +76,18 @@ impl OneClassSvm {
     /// Set the tolerance for the stopping criterion.
     pub fn with_tol(mut self, tol: f64) -> Self {
         self.tol = tol;
+        self
+    }
+
+    /// Enable or disable the shrinking heuristic.
+    pub fn with_shrinking(mut self, shrinking: bool) -> Self {
+        self.shrinking = shrinking;
+        self
+    }
+
+    /// Set the kernel cache size in MB.
+    pub fn with_cache_size(mut self, cache_size: f64) -> Self {
+        self.cache_size = cache_size;
         self
     }
 
@@ -178,169 +197,6 @@ impl<F: Float> Predict<F> for FittedOneClassSvm<F> {
     }
 }
 
-/// Precompute the symmetric kernel matrix.
-fn precompute_kernel_matrix<F: Float>(x: &Array2<F>, kernel: &SvmKernel) -> Array2<F> {
-    let n = x.nrows();
-    let mut k = Array2::<F>::zeros((n, n));
-    for i in 0..n {
-        for j in i..n {
-            let val = kernel.compute(&x.row(i), &x.row(j));
-            k[[i, j]] = val;
-            k[[j, i]] = val;
-        }
-    }
-    k
-}
-
-/// FISTA solver for the One-Class SVM dual.
-///
-/// Minimises 0.5 alpha^T K alpha
-/// subject to  0 <= alpha_i <= 1/(nu*n),  sum(alpha_i) = 1.
-///
-/// Uses accelerated proximal gradient descent with Nesterov momentum,
-/// projecting exactly onto the constrained set (intersection of the box
-/// `[0, 1/(νn)]` and the hyperplane `Σα = 1`) at each step.
-fn solve_one_class_svm<F: Float>(
-    x: &Array2<F>,
-    kernel: &SvmKernel,
-    nu: F,
-    max_iter: usize,
-    tol: F,
-) -> (Vec<F>, F) {
-    let n = x.nrows();
-    let zero = F::zero();
-    let one = F::one();
-    let two = one + one;
-    let four = two + two;
-    let n_f = F::from_usize(n).unwrap();
-
-    let k_matrix = precompute_kernel_matrix(x, kernel);
-
-    // Upper bound on each alpha_i.
-    let alpha_upper = one / (nu * n_f);
-
-    // Lipschitz constant L = max row-sum of |K|.
-    let mut lipschitz = zero;
-    for i in 0..n {
-        let mut row_sum = zero;
-        for j in 0..n {
-            row_sum += k_matrix[[i, j]].abs();
-        }
-        if row_sum > lipschitz {
-            lipschitz = row_sum;
-        }
-    }
-    if lipschitz < F::from_f64(1e-12).unwrap() {
-        lipschitz = one;
-    }
-    let step = one / lipschitz;
-
-    // Initialise alpha uniformly on the simplex: alpha_i = 1/n.
-    let init_val = one / n_f;
-    // Clamp initial value to the box constraint.
-    let init_val = if init_val > alpha_upper {
-        alpha_upper
-    } else {
-        init_val
-    };
-    let mut alpha = vec![init_val; n];
-    // Re-project to ensure sum = 1 after clamping.
-    project_capped_simplex(&mut alpha, one, alpha_upper);
-
-    let mut alpha_prev = alpha.clone();
-    let mut v = alpha.clone(); // momentum point
-    let mut t_k = one;
-
-    for _iter in 0..max_iter {
-        // Compute gradient: grad_i = sum_j K_ij * v_j
-        let mut grad = vec![zero; n];
-        for i in 0..n {
-            let mut s = zero;
-            for j in 0..n {
-                s += k_matrix[[i, j]] * v[j];
-            }
-            grad[i] = s;
-        }
-
-        // Gradient step: z = v - step * grad
-        for i in 0..n {
-            alpha_prev[i] = alpha[i];
-            alpha[i] = v[i] - step * grad[i];
-        }
-
-        // Project onto simplex intersected with box [0, alpha_upper].
-        project_capped_simplex(&mut alpha, one, alpha_upper);
-
-        // Check convergence.
-        let mut max_change = zero;
-        for i in 0..n {
-            let change = (alpha[i] - alpha_prev[i]).abs();
-            if change > max_change {
-                max_change = change;
-            }
-        }
-
-        if max_change < tol {
-            break;
-        }
-
-        // Nesterov momentum.
-        let t_new = (one + (one + four * t_k * t_k).sqrt()) / two;
-        let momentum = (t_k - one) / t_new;
-        t_k = t_new;
-
-        for i in 0..n {
-            v[i] = alpha[i] + momentum * (alpha[i] - alpha_prev[i]);
-        }
-    }
-
-    // Compute rho from free support vectors (0 < alpha_i < alpha_upper).
-    let margin = F::from_f64(1e-8).unwrap();
-    let mut rho_sum = zero;
-    let mut rho_count = 0usize;
-
-    for i in 0..n {
-        if alpha[i] > margin && alpha[i] < alpha_upper - margin {
-            // For a free SV: rho = sum_j alpha_j K(x_j, x_i)
-            let mut score = zero;
-            for j in 0..n {
-                score += alpha[j] * k_matrix[[j, i]];
-            }
-            rho_sum += score;
-            rho_count += 1;
-        }
-    }
-
-    let rho = if rho_count > 0 {
-        rho_sum / F::from_usize(rho_count).unwrap()
-    } else {
-        // No free SVs: KKT only brackets rho.
-        //   α_i = 0      ⇒ score_i ≥ rho
-        //   α_i = upper  ⇒ score_i ≤ rho
-        let mut lo = F::neg_infinity();
-        let mut hi = F::infinity();
-        for i in 0..n {
-            let mut score = zero;
-            for j in 0..n {
-                score += alpha[j] * k_matrix[[j, i]];
-            }
-            if alpha[i] >= alpha_upper - margin {
-                lo = lo.max(score);
-            } else if alpha[i] <= margin {
-                hi = hi.min(score);
-            }
-        }
-        match (lo.is_finite(), hi.is_finite()) {
-            (true, true) => (lo + hi) / two,
-            (true, false) => lo,
-            (false, true) => hi,
-            (false, false) => zero,
-        }
-    };
-
-    (alpha, rho)
-}
-
 impl<F: Float> FitUnsupervised<F> for OneClassSvm {
     type Fitted = FittedOneClassSvm<F>;
 
@@ -353,17 +209,32 @@ impl<F: Float> FitUnsupervised<F> for OneClassSvm {
             ));
         }
 
-        let nu = F::from_f64(self.nu).unwrap();
-        let tol = F::from_f64(self.tol).unwrap();
         let kernel = self.kernel.resolve(x);
-
-        let (alphas, rho) = solve_one_class_svm(x, &kernel, nu, self.max_iter, tol);
-
-        // Extract support vectors (non-zero alphas).
-        let sv_threshold = F::from_f64(1e-8).unwrap();
-        let sv_indices: Vec<usize> = (0..x.nrows())
-            .filter(|&i| alphas[i] > sv_threshold)
+        let x64: Array2<f64> = x.mapv(|v| v.to_f64().unwrap());
+        let (alpha, rho) = crate::solver::solve_one_class(
+            crate::solver::KernelSource::Data {
+                x: &x64,
+                kernel: &kernel,
+            },
+            self.nu,
+            &crate::solver::SolverParams {
+                eps: self.tol,
+                shrinking: self.shrinking,
+                max_iter: Some(self.max_iter),
+                nu: false,
+            },
+            self.cache_size,
+        );
+        // libsvm's solution has Σα = ν l; this model reports the normalised
+        // dual (Σα = 1), i.e. decision values divided by ν l.
+        let scale = self.nu * x.nrows() as f64;
+        let alphas: Vec<F> = alpha
+            .iter()
+            .map(|&a| F::from_f64(a / scale).unwrap())
             .collect();
+        let rho = F::from_f64(rho / scale).unwrap();
+
+        let sv_indices: Vec<usize> = (0..x.nrows()).filter(|&i| alphas[i] > F::zero()).collect();
 
         if sv_indices.is_empty() {
             // Fallback: use all training points.
@@ -440,11 +311,24 @@ mod tests {
         let kernel = SvmKernel::rbf(0.5);
         let n = x.nrows() as f64;
         for &(nu, max_iter) in &[(0.3, 50usize), (0.3, 20_000), (0.9, 500), (0.05, 500)] {
-            let (alpha, _rho) = solve_one_class_svm(&x, &kernel, nu, max_iter, 1e-12);
-            let upper = 1.0 / (nu * n);
+            let (alpha, _rho) = crate::solver::solve_one_class(
+                crate::solver::KernelSource::Data {
+                    x: &x,
+                    kernel: &kernel,
+                },
+                nu,
+                &crate::solver::SolverParams {
+                    eps: 1e-12,
+                    shrinking: true,
+                    max_iter: Some(max_iter),
+                    nu: false,
+                },
+                200.0,
+            );
+            // libsvm scaling: 0 <= α <= 1, Σα = ν n (kept by every SMO step).
             let sum: f64 = alpha.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-9, "Σα = {sum} (nu={nu})");
-            assert!(alpha.iter().all(|&a| (-1e-15..=upper + 1e-15).contains(&a)));
+            assert!((sum - nu * n).abs() < 1e-9, "Σα = {sum} (nu={nu})");
+            assert!(alpha.iter().all(|&a| (0.0..=1.0).contains(&a)));
         }
     }
 

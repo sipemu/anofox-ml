@@ -6,7 +6,8 @@ use ndarray::{Array1, Array2, Axis};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::kernel::{gram_matrix, kernel_matrix, SvmKernel};
+use crate::kernel::{kernel_matrix, SvmKernel};
+use crate::solver::{self, KernelSource, QKind, QMatrix, SolverParams};
 
 /// Per-class weights for the SVC penalty: sample `i` gets the upper bound
 /// `C · w_{y_i}` (sklearn's `class_weight`).
@@ -39,7 +40,8 @@ fn default_shape() -> DecisionFunctionShape {
 /// Support Vector Classifier with kernel support (unfitted state).
 ///
 /// Every pair of classes is solved as a binary problem (one-vs-one, as
-/// libsvm / sklearn) with a simplified SMO algorithm, and predictions are
+/// libsvm / sklearn) with libsvm's SMO solver (second-order
+/// working-set selection, shrinking, kernel column cache), and predictions are
 /// made by majority vote. Uses the type-state pattern: call [`Fit::fit`] to
 /// produce a [`FittedSvc`] that can make predictions.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -48,10 +50,18 @@ pub struct Svc {
     pub c: f64,
     /// Kernel function to use (default: RBF with `gamma = 'scale'`).
     pub kernel: SvmKernel,
-    /// Maximum number of iterations for the SMO solver.
+    /// Maximum number of SMO iterations per binary sub-problem (libsvm
+    /// caps it at `max(10⁷, 100 l)` by default).
     pub max_iter: usize,
-    /// Tolerance for the stopping criterion.
+    /// Tolerance of the stopping criterion (maximal violating pair gap,
+    /// libsvm / sklearn default 1e-3).
     pub tol: f64,
+    /// Use libsvm's shrinking heuristic (default true).
+    #[serde(default = "crate::solver::default_true")]
+    pub shrinking: bool,
+    /// Kernel cache size in MB (default 200).
+    #[serde(default = "crate::solver::default_cache_size")]
+    pub cache_size: f64,
     /// Random seed (used for the internal cross-validation of
     /// `probability = true`).
     pub seed: u64,
@@ -77,8 +87,10 @@ impl Svc {
         Self {
             c: 1.0,
             kernel: SvmKernel::default(),
-            max_iter: 1000,
-            tol: 1e-4,
+            max_iter: 10_000_000,
+            tol: 1e-3,
+            shrinking: true,
+            cache_size: 200.0,
             seed: 0,
             class_weight: None,
             probability: false,
@@ -108,6 +120,18 @@ impl Svc {
     /// Set the tolerance for the stopping criterion.
     pub fn with_tol(mut self, tol: f64) -> Self {
         self.tol = tol;
+        self
+    }
+
+    /// Enable or disable the shrinking heuristic.
+    pub fn with_shrinking(mut self, shrinking: bool) -> Self {
+        self.shrinking = shrinking;
+        self
+    }
+
+    /// Set the kernel cache size in MB.
+    pub fn with_cache_size(mut self, cache_size: f64) -> Self {
+        self.cache_size = cache_size;
         self
     }
 
@@ -488,238 +512,96 @@ fn class_weights<F: Float>(
 // bounds C_i. (A full libsvm-style solver is tracked separately.)
 // ---------------------------------------------------------------------------
 
-/// Compute the decision value f(x_i) = sum(alpha_j * y_j * K(j, i)) + bias.
-fn compute_decision_value<F: Float>(
-    alpha: &[F],
-    y: &Array1<F>,
-    k_matrix: &Array2<F>,
-    bias: F,
-    sample_idx: usize,
-) -> F {
-    let n_samples = alpha.len();
-    let mut f = bias;
-    for j in 0..n_samples {
-        f += alpha[j] * y[j] * k_matrix[[j, sample_idx]];
-    }
-    f
+/// Training data of one binary sub-problem: feature rows (kernel evaluated
+/// on demand) or a precomputed Gram matrix.
+enum PairData {
+    Rows(Array2<f64>),
+    Gram(Array2<f64>),
 }
 
-/// Select the second alpha index j that maximises |E_i - E_j|.
-fn select_second_alpha<F: Float>(
-    i: usize,
-    e_i: F,
-    alpha: &[F],
-    y: &Array1<F>,
-    k_matrix: &Array2<F>,
-    bias: F,
-) -> usize {
-    let n_samples = alpha.len();
-    let mut best_j = if i == 0 { 1 } else { 0 };
-    let mut best_delta = F::zero();
-    for j in 0..n_samples {
-        if j == i {
-            continue;
-        }
-        let f_j = compute_decision_value(alpha, y, k_matrix, bias, j);
-        let e_j = f_j - y[j];
-        let delta = (e_i - e_j).abs();
-        if delta > best_delta {
-            best_delta = delta;
-            best_j = j;
+impl PairData {
+    fn subset(&self, idx: &[usize]) -> PairData {
+        match self {
+            PairData::Rows(x) => PairData::Rows(x.select(Axis(0), idx)),
+            PairData::Gram(k) => PairData::Gram(k.select(Axis(0), idx).select(Axis(1), idx)),
         }
     }
-    best_j
-}
 
-/// Bounds `[L, H]` for the new `alpha_j` with per-sample upper bounds.
-#[allow(clippy::too_many_arguments)]
-fn compute_alpha_bounds<F: Float>(
-    alpha_i: F,
-    alpha_j: F,
-    y_i: F,
-    y_j: F,
-    c_i: F,
-    c_j: F,
-) -> (F, F) {
-    let zero = F::zero();
-    let eps = F::from_f64(1e-12).unwrap();
-    let max = |a: F, b: F| if a > b { a } else { b };
-    let min = |a: F, b: F| if a < b { a } else { b };
-    if (y_i - y_j).abs() > eps {
-        // alpha_j - alpha_i is conserved.
-        let d = alpha_j - alpha_i;
-        (max(zero, d), min(c_j, c_i + d))
-    } else {
-        // alpha_i + alpha_j is conserved.
-        let s = alpha_i + alpha_j;
-        (max(zero, s - c_i), min(c_j, s))
+    fn source<'a>(&'a self, kernel: &'a SvmKernel) -> KernelSource<'a> {
+        match self {
+            PairData::Rows(x) => KernelSource::Data { x, kernel },
+            PairData::Gram(k) => KernelSource::Precomputed(k),
+        }
+    }
+
+    fn kernel_value(&self, kernel: &SvmKernel, i: usize, j: usize) -> f64 {
+        match self {
+            PairData::Rows(x) => kernel.compute(&x.row(i), &x.row(j)),
+            PairData::Gram(k) => k[[i, j]],
+        }
     }
 }
 
-/// Compute the updated bias after an alpha pair update.
-#[allow(clippy::too_many_arguments)]
-fn update_bias<F: Float>(
-    bias: F,
-    e_i: F,
-    e_j: F,
-    alpha_i: F,
-    old_ai: F,
-    alpha_j: F,
-    old_aj: F,
-    y_i: F,
-    y_j: F,
-    k_ii: F,
-    k_ij: F,
-    k_jj: F,
-    c_i: F,
-    c_j: F,
-) -> F {
-    let zero = F::zero();
-    let two = F::from_f64(2.0).unwrap();
-    let b1 = bias - e_i - y_i * (alpha_i - old_ai) * k_ii - y_j * (alpha_j - old_aj) * k_ij;
-    let b2 = bias - e_j - y_i * (alpha_i - old_ai) * k_ij - y_j * (alpha_j - old_aj) * k_jj;
-
-    if alpha_i > zero && alpha_i < c_i {
-        b1
-    } else if alpha_j > zero && alpha_j < c_j {
-        b2
-    } else {
-        (b1 + b2) / two
-    }
+/// Dual formulation of the binary sub-problems.
+#[derive(Clone, Copy)]
+pub(crate) enum Formulation {
+    /// C-SVC (per-sample upper bounds `C · w`).
+    C,
+    /// ν-SVC with the given ν (upper bounds 1, libsvm's `solve_nu_svc`).
+    Nu(f64),
 }
 
-/// Clamp `value` to the interval `[lo, hi]`.
-#[inline]
-fn clip_to_bounds<F: Float>(value: F, lo: F, hi: F) -> F {
-    if value > hi {
-        hi
-    } else if value < lo {
-        lo
-    } else {
-        value
-    }
+/// Solver settings shared by the sub-problems.
+struct SvcSolve<'a> {
+    kernel: &'a SvmKernel,
+    params: SolverParams,
+    cache_size: f64,
+    formulation: Formulation,
 }
 
-/// Mutable state for one pass of the simplified SMO algorithm.
-struct SmoState<'a, F: Float> {
-    alpha: &'a mut Vec<F>,
-    bias: &'a mut F,
-    y: &'a Array1<F>,
-    k_matrix: &'a Array2<F>,
-    c: &'a [F],
-    tol: F,
-}
-
-impl<F: Float> SmoState<'_, F> {
-    /// Attempt one SMO step for sample `i`. Returns `true` if alphas changed.
-    fn step(&mut self, i: usize) -> bool {
-        let zero = F::zero();
-        let two = F::from_f64(2.0).unwrap();
-        let near_zero = F::from_f64(1e-12).unwrap();
-        let alpha_tol = F::from_f64(1e-8).unwrap();
-
-        let f_i = compute_decision_value(self.alpha, self.y, self.k_matrix, *self.bias, i);
-        let e_i = f_i - self.y[i];
-
-        // Check KKT conditions (simplified)
-        let yi_ei = self.y[i] * e_i;
-        if !((yi_ei < -self.tol && self.alpha[i] < self.c[i])
-            || (yi_ei > self.tol && self.alpha[i] > zero))
-        {
-            return false;
+/// C-SVC dual of one binary sub-problem with ±1 labels `y` and per-sample
+/// upper bounds `c`. Returns `(alpha, bias)` with
+/// `f(x) = Σ α_i y_i K(x_i, x) + b`.
+fn train_binary(data: &PairData, y: &[f64], c: &[f64], solve: &SvcSolve) -> (Vec<f64>, f64) {
+    let l = y.len();
+    let mut q = QMatrix::new(
+        QKind::Classification,
+        data.source(solve.kernel),
+        y.to_vec(),
+        solve.cache_size,
+    );
+    match solve.formulation {
+        Formulation::C => {
+            let res = solver::solve(
+                &mut q,
+                vec![-1.0; l],
+                vec![0.0; l],
+                c.to_vec(),
+                &solve.params,
+            );
+            (res.alpha, -res.rho)
         }
-
-        let j = select_second_alpha(i, e_i, self.alpha, self.y, self.k_matrix, *self.bias);
-        let f_j = compute_decision_value(self.alpha, self.y, self.k_matrix, *self.bias, j);
-        let e_j = f_j - self.y[j];
-
-        let old_ai = self.alpha[i];
-        let old_aj = self.alpha[j];
-
-        let (l, h) = compute_alpha_bounds(
-            self.alpha[i],
-            self.alpha[j],
-            self.y[i],
-            self.y[j],
-            self.c[i],
-            self.c[j],
-        );
-        if (l - h).abs() < near_zero {
-            return false;
-        }
-
-        // Compute eta = 2*K(i,j) - K(i,i) - K(j,j)
-        let eta = two * self.k_matrix[[i, j]] - self.k_matrix[[i, i]] - self.k_matrix[[j, j]];
-        if eta >= zero {
-            return false;
-        }
-
-        // Update alpha_j, clipped to [L, H]
-        let new_aj = clip_to_bounds(old_aj - self.y[j] * (e_i - e_j) / eta, l, h);
-
-        if (new_aj - old_aj).abs() < alpha_tol {
-            return false;
-        }
-
-        self.alpha[j] = new_aj;
-        self.alpha[i] = old_ai + self.y[i] * self.y[j] * (old_aj - new_aj);
-
-        *self.bias = update_bias(
-            *self.bias,
-            e_i,
-            e_j,
-            self.alpha[i],
-            old_ai,
-            self.alpha[j],
-            old_aj,
-            self.y[i],
-            self.y[j],
-            self.k_matrix[[i, i]],
-            self.k_matrix[[i, j]],
-            self.k_matrix[[j, j]],
-            self.c[i],
-            self.c[j],
-        );
-
-        true
-    }
-}
-
-/// Train a binary SVC on the Gram matrix `k` with ±1 labels and per-sample
-/// upper bounds `c`. Returns `(alpha, bias)` with `f(x) = Σ α_i y_i K(x_i,x) + b`.
-fn smo_binary<F: Float>(
-    k: &Array2<F>,
-    y: &Array1<F>,
-    c: &[F],
-    max_iter: usize,
-    tol: F,
-) -> (Vec<F>, F) {
-    let n = y.len();
-    let mut alpha = vec![F::zero(); n];
-    let mut bias = F::zero();
-    if n < 2 {
-        return (alpha, bias);
-    }
-    let mut state = SmoState {
-        alpha: &mut alpha,
-        bias: &mut bias,
-        y,
-        k_matrix: k,
-        c,
-        tol,
-    };
-    for _iter in 0..max_iter {
-        let mut num_changed = 0usize;
-        for i in 0..n {
-            if state.step(i) {
-                num_changed += 1;
-            }
-        }
-        if num_changed == 0 {
-            break;
+        Formulation::Nu(nu) => {
+            // libsvm solve_nu_svc: feasible start with Σ_{y=±1} α = ν l / 2.
+            let (mut sum_pos, mut sum_neg) = (nu * l as f64 / 2.0, nu * l as f64 / 2.0);
+            let alpha0: Vec<f64> = y
+                .iter()
+                .map(|&yi| {
+                    let s = if yi > 0.0 { &mut sum_pos } else { &mut sum_neg };
+                    let a = s.min(1.0);
+                    *s -= a;
+                    a
+                })
+                .collect();
+            let params = SolverParams {
+                nu: true,
+                ..solve.params
+            };
+            let res = solver::solve(&mut q, vec![0.0; l], alpha0, vec![1.0; l], &params);
+            let r = res.r;
+            (res.alpha.iter().map(|a| a / r).collect(), -res.rho / r)
         }
     }
-    (alpha, bias)
 }
 
 // ---------------------------------------------------------------------------
@@ -857,12 +739,11 @@ fn multiclass_probability(r: &[Vec<f64>]) -> Vec<f64> {
 
 /// libsvm's `svm_binary_svc_probability`: 5-fold CV decision values on the
 /// pair sub-problem, then a Platt sigmoid fit.
-fn binary_svc_probability<F: Float>(
-    k: &Array2<F>,
-    y: &Array1<F>,
-    c: &[F],
-    max_iter: usize,
-    tol: F,
+fn binary_svc_probability(
+    data: &PairData,
+    y: &[f64],
+    c: &[f64],
+    solve: &SvcSolve,
     rng: &mut StdRng,
 ) -> (f64, f64) {
     let l = y.len();
@@ -882,7 +763,7 @@ fn binary_svc_probability<F: Float>(
             .copied()
             .collect();
         let test = &perm[begin..end];
-        let p_count = train.iter().filter(|&&t| y[t] > F::zero()).count();
+        let p_count = train.iter().filter(|&&t| y[t] > 0.0).count();
         let n_count = train.len() - p_count;
         if p_count == 0 && n_count == 0 {
             test.iter().for_each(|&t| dec[t] = 0.0);
@@ -891,32 +772,42 @@ fn binary_svc_probability<F: Float>(
         } else if p_count == 0 {
             test.iter().for_each(|&t| dec[t] = -1.0);
         } else {
-            let k_tr = k.select(Axis(0), &train).select(Axis(1), &train);
-            let y_tr = y.select(Axis(0), &train);
-            let c_tr: Vec<F> = train.iter().map(|&t| c[t]).collect();
-            let (alpha, b) = smo_binary(&k_tr, &y_tr, &c_tr, max_iter, tol);
+            let y_tr: Vec<f64> = train.iter().map(|&t| y[t]).collect();
+            let c_tr: Vec<f64> = train.iter().map(|&t| c[t]).collect();
+            let (alpha, b) = train_binary(&data.subset(&train), &y_tr, &c_tr, solve);
             for &t in test {
                 let mut f = b;
-                for (a_pos, &tr) in train.iter().enumerate() {
-                    if alpha[a_pos] > F::zero() {
-                        f += alpha[a_pos] * y_tr[a_pos] * k[[tr, t]];
+                for (pos, &tr) in train.iter().enumerate() {
+                    if alpha[pos] > 0.0 {
+                        f += alpha[pos] * y_tr[pos] * data.kernel_value(solve.kernel, tr, t);
                     }
                 }
-                dec[t] = f.to_f64().unwrap();
+                dec[t] = f;
             }
         }
     }
-    let labels: Vec<f64> = y.iter().map(|v| v.to_f64().unwrap()).collect();
-    sigmoid_train(&dec, &labels)
+    sigmoid_train(&dec, y)
 }
 
 impl Svc {
     /// Shared fit with optional sample weights (`C_i = C · w_{y_i} · sw_i`).
+    /// ν-SVC fit (used by [`crate::NuSvc`]): every class pair is solved as
+    /// libsvm's ν dual; `self.c` and class weights are ignored.
+    pub(crate) fn fit_nu<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        nu: f64,
+    ) -> Result<FittedSvc<F>> {
+        self.fit_impl(x, y, None, Formulation::Nu(nu))
+    }
+
     fn fit_impl<F: Float>(
         &self,
         x: &Array2<F>,
         y: &Array1<F>,
         sample_weight: Option<&Array1<F>>,
+        formulation: Formulation,
     ) -> Result<FittedSvc<F>> {
         self.validate()?;
 
@@ -981,14 +872,23 @@ impl Svc {
             .collect();
 
         let kernel = self.kernel.resolve(x);
-        let gram = gram_matrix(x, &kernel);
-        let tol = F::from_f64(self.tol).unwrap();
+        let x64: Array2<f64> = x.mapv(|v| v.to_f64().unwrap());
+        let solve = SvcSolve {
+            kernel: &kernel,
+            params: SolverParams {
+                eps: self.tol,
+                shrinking: self.shrinking,
+                max_iter: Some(self.max_iter),
+                nu: false,
+            },
+            cache_size: self.cache_size,
+            formulation,
+        };
         let by_class: Vec<Vec<usize>> = (0..k_classes)
             .map(|c| (0..y.len()).filter(|&i| class_idx[i] == c).collect())
             .collect();
 
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let sv_threshold = F::from_f64(1e-8).unwrap();
         let mut is_sv = vec![false; y.len()];
         // `coef` holds global training indices until the support set is known.
         let mut pairs: Vec<PairModel<F>> = Vec::new();
@@ -999,29 +899,36 @@ impl Svc {
                     .chain(by_class[j].iter())
                     .copied()
                     .collect();
-                let y_sub: Array1<F> = sub
+                let y_sub: Vec<f64> = sub
                     .iter()
-                    .map(|&s| {
-                        if class_idx[s] == i {
-                            F::one()
-                        } else {
-                            -F::one()
-                        }
-                    })
+                    .map(|&s| if class_idx[s] == i { 1.0 } else { -1.0 })
                     .collect();
-                let c_sub: Vec<F> = sub.iter().map(|&s| upper[s]).collect();
-                let k_sub = gram.select(Axis(0), &sub).select(Axis(1), &sub);
+                let c_sub: Vec<f64> = sub.iter().map(|&s| upper[s].to_f64().unwrap()).collect();
+                let data = if kernel.is_precomputed() {
+                    PairData::Gram(x64.select(Axis(0), &sub).select(Axis(1), &sub))
+                } else {
+                    PairData::Rows(x64.select(Axis(0), &sub))
+                };
                 let (prob_a, prob_b) = if self.probability {
-                    binary_svc_probability(&k_sub, &y_sub, &c_sub, self.max_iter, tol, &mut rng)
+                    binary_svc_probability(&data, &y_sub, &c_sub, &solve, &mut rng)
                 } else {
                     (0.0, 0.0)
                 };
-                let (alpha, bias) = smo_binary(&k_sub, &y_sub, &c_sub, self.max_iter, tol);
+                let (alpha, bias) = train_binary(&data, &y_sub, &c_sub, &solve);
+                if !bias.is_finite() || alpha.iter().any(|a| !a.is_finite()) {
+                    return Err(RustMlError::InvalidParameter(
+                        "the dual coefficients or intercept are not finite (degenerate \
+                         problem, e.g. nu too large); preprocess the data or change the \
+                         parameters"
+                            .into(),
+                    ));
+                }
+                let bias = F::from_f64(bias).unwrap();
                 let mut coef = Vec::new();
                 for (pos, &s) in sub.iter().enumerate() {
-                    if alpha[pos] > sv_threshold {
+                    if alpha[pos] > 0.0 {
                         is_sv[s] = true;
-                        coef.push((s, alpha[pos] * y_sub[pos]));
+                        coef.push((s, F::from_f64(alpha[pos] * y_sub[pos]).unwrap()));
                     }
                 }
                 pairs.push(PairModel {
@@ -1078,7 +985,7 @@ impl<F: Float> Fit<F> for Svc {
     type Fitted = FittedSvc<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        self.fit_impl(x, y, None)
+        self.fit_impl(x, y, None, Formulation::C)
     }
 }
 
@@ -1092,7 +999,7 @@ impl<F: Float> FitWeighted<F> for Svc {
         y: &Array1<F>,
         sample_weight: Option<&Array1<F>>,
     ) -> Result<Self::Fitted> {
-        self.fit_impl(x, y, sample_weight)
+        self.fit_impl(x, y, sample_weight, Formulation::C)
     }
 }
 
@@ -1380,8 +1287,10 @@ mod tests {
     fn test_default() {
         let svc = Svc::default();
         assert_eq!(svc.c, 1.0);
-        assert_eq!(svc.max_iter, 1000);
-        assert_eq!(svc.tol, 1e-4);
+        assert_eq!(svc.max_iter, 10_000_000);
+        assert_eq!(svc.tol, 1e-3);
+        assert!(svc.shrinking);
+        assert_eq!(svc.cache_size, 200.0);
         assert_eq!(svc.seed, 0);
         assert_eq!(
             svc.kernel,
@@ -1872,7 +1781,6 @@ mod sklearn_parity {
     /// working-set solver (issue #62); the simplified SMO only reaches an
     /// approximate optimum on overlapping classes.
     #[test]
-    #[ignore = "needs the exact SMO solver from issue #62"]
     fn exact_parity_with_sklearn_rbf_scale() {
         let (x, y, t) = data();
         let m: FittedSvc<f64> = Svc::new().with_tol(1e-8).fit(&x, &y).unwrap();

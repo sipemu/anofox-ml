@@ -44,7 +44,7 @@ mod linear_svr;
 mod nu_svc;
 mod nu_svr;
 mod one_class_svm;
-mod projection;
+mod solver;
 mod svc;
 mod svr;
 

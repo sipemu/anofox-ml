@@ -305,23 +305,6 @@ pub(crate) fn kernel_matrix<F: Float>(
     k
 }
 
-/// Symmetric training Gram matrix (or the precomputed matrix itself).
-pub(crate) fn gram_matrix<F: Float>(x: &Array2<F>, kernel: &SvmKernel) -> Array2<F> {
-    if kernel.is_precomputed() {
-        return x.to_owned();
-    }
-    let n = x.nrows();
-    let mut k = Array2::<F>::zeros((n, n));
-    for i in 0..n {
-        for j in i..n {
-            let v = kernel.compute(&x.row(i), &x.row(j));
-            k[[i, j]] = v;
-            k[[j, i]] = v;
-        }
-    }
-    k
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

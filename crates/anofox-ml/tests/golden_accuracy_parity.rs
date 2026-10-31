@@ -44,7 +44,6 @@ fn test_parity_nu_svr_linear() {
         .with_nu(0.5)
         .with_c(10.0)
         .with_kernel(SvmKernel::Linear)
-        .with_max_iter(5000)
         .fit(&x, &y)
         .unwrap();
 
@@ -131,7 +130,6 @@ fn test_parity_nu_svc_linear() {
     let fitted: anofox_ml::svm::FittedNuSvc<f64> = NuSvc::new()
         .with_nu(0.5)
         .with_kernel(SvmKernel::Linear)
-        .with_max_iter(5000)
         .fit(&x, &y)
         .unwrap();
 
