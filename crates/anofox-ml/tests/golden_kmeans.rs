@@ -18,6 +18,7 @@ fn test_golden_kmeans() {
             max_iter: 300,
             tol: 1e-4,
             seed: 42,
+            ..KMeans::new(n_clusters)
         };
         let fitted = FitUnsupervised::<f64>::fit(&km, &x_train).unwrap();
 

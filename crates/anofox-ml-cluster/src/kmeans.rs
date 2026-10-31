@@ -3,25 +3,59 @@ use anofox_ml_core::{
 };
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+#[cfg(test)]
+use rand::Rng;
+use rand::SeedableRng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use crate::util::squared_euclidean;
+use crate::util::{
+    assign_nearest, kmeans_plusplus, row_norms_sq, sample_without_replacement, sq_dist_rows,
+};
+
+/// Centroid initialisation strategy for [`KMeans`] (sklearn's `init`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum KMeansInit {
+    /// Greedy k-means++ (`2 + ⌊ln k⌋` candidates per step), sklearn's default.
+    #[default]
+    KMeansPlusPlus,
+    /// `k` distinct training rows drawn at random.
+    Random,
+    /// Fixed initial centroids (`n_clusters × n_features`). Implies a single
+    /// run (`n_init = 1`), as in sklearn.
+    Array(Array2<f64>),
+}
+
 /// Parameters for K-Means clustering (unfitted state).
 ///
-/// Groups data into `n_clusters` clusters using Lloyd's algorithm with k-means++
-/// initialization. The algorithm iteratively assigns points to the nearest centroid
-/// and recomputes centroids as cluster means until convergence or `max_iter`.
+/// Groups data into `n_clusters` clusters using Lloyd's algorithm. Mirrors
+/// `sklearn.cluster.KMeans(algorithm="lloyd")`:
+///
+/// - `n_init` independent runs (default `"auto"`: 1 for k-means++ or array
+///   initialisation, 10 for random initialisation); the run with the lowest
+///   inertia is kept;
+/// - convergence when the labels stop changing, or when the total squared
+///   centroid shift `Σ_k ‖c_k^new − c_k‖²` is `≤ tol · mean(var(X, axis=0))`;
+/// - clusters that become empty are relocated to the points farthest from
+///   their current centroid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KMeans {
     /// Number of clusters to form.
     pub n_clusters: usize,
-    /// Maximum number of Lloyd's iterations.
+    /// Maximum number of Lloyd's iterations per run.
     pub max_iter: usize,
-    /// Convergence tolerance: stop when max centroid shift is below this value.
+    /// Relative convergence tolerance (scaled by the mean feature variance).
     pub tol: f64,
     /// Random seed for reproducible centroid initialization.
     pub seed: u64,
+    /// Number of runs with different seeds; `None` = sklearn's `"auto"`.
+    #[serde(default)]
+    pub n_init: Option<usize>,
+    /// Centroid initialisation strategy.
+    #[serde(default)]
+    pub init: KMeansInit,
 }
 
 impl KMeans {
@@ -32,6 +66,8 @@ impl KMeans {
             max_iter: 300,
             tol: 1e-4,
             seed: 42,
+            n_init: None,
+            init: KMeansInit::KMeansPlusPlus,
         }
     }
 
@@ -41,7 +77,8 @@ impl KMeans {
         self
     }
 
-    /// Set the convergence tolerance.
+    /// Set the relative convergence tolerance (multiplied by the mean
+    /// per-feature variance of the training data, as in sklearn).
     pub fn with_tol(mut self, tol: f64) -> Self {
         self.tol = tol;
         self
@@ -51,6 +88,28 @@ impl KMeans {
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
+    }
+
+    /// Set the number of independent runs (best inertia is kept).
+    pub fn with_n_init(mut self, n_init: usize) -> Self {
+        self.n_init = Some(n_init.max(1));
+        self
+    }
+
+    /// Set the centroid initialisation strategy.
+    pub fn with_init(mut self, init: KMeansInit) -> Self {
+        self.init = init;
+        self
+    }
+
+    /// Effective number of runs (resolves sklearn's `n_init="auto"`).
+    pub fn effective_n_init(&self) -> usize {
+        match (&self.init, self.n_init) {
+            (KMeansInit::Array(_), _) => 1,
+            (_, Some(n)) => n.max(1),
+            (KMeansInit::KMeansPlusPlus, None) => 1,
+            (KMeansInit::Random, None) => 10,
+        }
     }
 }
 
@@ -86,164 +145,203 @@ impl<F: Float> FittedKMeans<F> {
         self.inertia
     }
 
-    /// Returns the number of iterations performed.
+    /// Returns the number of iterations performed by the best run.
     pub fn n_iter(&self) -> usize {
         self.n_iter
     }
 }
 
-/// Compute squared Euclidean distance between two slices using 4-accumulator
-/// chunked pattern for SIMD-friendly auto-vectorization.
-#[inline]
-fn squared_euclidean<F: Float>(a: &[F], b: &[F]) -> F {
-    let n = a.len();
-    let chunks = n / 4;
-    let remainder = n % 4;
-
-    let mut acc0 = F::zero();
-    let mut acc1 = F::zero();
-    let mut acc2 = F::zero();
-    let mut acc3 = F::zero();
-
-    let mut i = 0;
-    for _ in 0..chunks {
-        let d0 = a[i] - b[i];
-        let d1 = a[i + 1] - b[i + 1];
-        let d2 = a[i + 2] - b[i + 2];
-        let d3 = a[i + 3] - b[i + 3];
-        acc0 += d0 * d0;
-        acc1 += d1 * d1;
-        acc2 += d2 * d2;
-        acc3 += d3 * d3;
-        i += 4;
-    }
-
-    for j in 0..remainder {
-        let d = a[i + j] - b[i + j];
-        acc0 += d * d;
-    }
-
-    (acc0 + acc1) + (acc2 + acc3)
+/// Result of a single Lloyd run.
+struct LloydRun<F> {
+    centroids: Array2<F>,
+    labels: Vec<usize>,
+    inertia: F,
+    n_iter: usize,
 }
 
-/// Find the index of the nearest centroid for a given point.
-#[inline]
-fn nearest_centroid<F: Float>(point: &[F], centroids: &Array2<F>) -> (usize, F) {
-    let mut best_idx = 0;
-    let mut best_dist = F::infinity();
-    for (i, centroid) in centroids.rows().into_iter().enumerate() {
-        let dist = squared_euclidean(point, centroid.as_slice().unwrap());
-        if dist < best_dist {
-            best_dist = dist;
-            best_idx = i;
-        }
-    }
-    (best_idx, best_dist)
-}
-
-/// Update each point's minimum distance given a newly added centroid.
-fn update_min_distances<F: Float>(
+/// Weighted per-cluster coordinate sums and weight totals, in parallel over
+/// row blocks.
+fn cluster_sums<F: Float>(
     x: &Array2<F>,
-    min_dists: &mut Array1<F>,
-    centroid: ndarray::ArrayView1<F>,
-) {
-    let centroid_slice = centroid.as_slice().unwrap();
-    for i in 0..x.nrows() {
-        let dist = squared_euclidean(x.row(i).as_slice().unwrap(), centroid_slice);
-        if dist < min_dists[i] {
-            min_dists[i] = dist;
-        }
-    }
-}
-
-/// Sample a point index proportional to distance squared (roulette-wheel selection).
-fn weighted_random_choice<F: Float>(min_dists: &Array1<F>, rng: &mut StdRng) -> usize {
-    let total: F = min_dists.iter().copied().fold(F::zero(), |acc, v| acc + v);
-    let threshold = F::from_f64(rng.gen_range(0.0..1.0)).unwrap() * total;
-    let mut cumulative = F::zero();
-    let mut chosen = min_dists.len() - 1;
-    for i in 0..min_dists.len() {
-        cumulative += min_dists[i];
-        if cumulative >= threshold {
-            chosen = i;
-            break;
-        }
-    }
-    chosen
-}
-
-/// Initialize centroids using the k-means++ algorithm.
-///
-/// When `sample_weight` is provided, the first centroid is sampled with
-/// probability ∝ w_i, and subsequent centroids with probability ∝ w_i · D²(x_i).
-/// Equivalent to running k-means++ on the empirical weighted distribution.
-fn kmeans_plus_plus<F: Float>(
-    x: &Array2<F>,
-    n_clusters: usize,
-    rng: &mut StdRng,
+    labels: &[usize],
     sample_weight: Option<&Array1<F>>,
-) -> Array2<F> {
-    let n_samples = x.nrows();
-    let n_features = x.ncols();
-    let mut centroids = Array2::<F>::zeros((n_clusters, n_features));
-
-    // Pick first centroid: ∝ w_i if weighted, else uniform.
-    let first_idx = if let Some(w) = sample_weight {
-        let total: F = w.iter().copied().fold(F::zero(), |acc, v| acc + v);
-        if total == F::zero() {
-            rng.gen_range(0..n_samples)
-        } else {
-            let threshold = F::from_f64(rng.gen_range(0.0..1.0)).unwrap() * total;
-            let mut cum = F::zero();
-            let mut chosen = n_samples - 1;
-            for i in 0..n_samples {
-                cum += w[i];
-                if cum >= threshold {
-                    chosen = i;
-                    break;
+    k: usize,
+) -> (Array2<F>, Vec<F>) {
+    let n = x.nrows();
+    let d = x.ncols();
+    const BLOCK: usize = 1024;
+    (0..n.div_ceil(BLOCK))
+        .into_par_iter()
+        .map(|b| {
+            let mut sums = Array2::<F>::zeros((k, d));
+            let mut wsum = vec![F::zero(); k];
+            for i in b * BLOCK..((b + 1) * BLOCK).min(n) {
+                let w = sample_weight.map_or(F::one(), |sw| sw[i]);
+                if w == F::zero() {
+                    continue;
+                }
+                let c = labels[i];
+                wsum[c] += w;
+                let mut row = sums.row_mut(c);
+                for (s, &v) in row.iter_mut().zip(x.row(i).iter()) {
+                    *s += v * w;
                 }
             }
-            chosen
+            (sums, wsum)
+        })
+        .reduce(
+            || (Array2::<F>::zeros((k, d)), vec![F::zero(); k]),
+            |(mut sa, mut wa), (sb, wb)| {
+                sa += &sb;
+                for (a, b) in wa.iter_mut().zip(wb) {
+                    *a += b;
+                }
+                (sa, wa)
+            },
+        )
+}
+
+/// Relocate empty clusters (zero total weight) to the points farthest from
+/// their currently assigned centroid — sklearn's
+/// `_relocate_empty_clusters_dense`. Operates on the un-normalised sums.
+fn relocate_empty_clusters<F: Float>(
+    x: &Array2<F>,
+    labels: &[usize],
+    sample_weight: Option<&Array1<F>>,
+    centers_old: &Array2<F>,
+    sums: &mut Array2<F>,
+    wsum: &mut [F],
+) {
+    let empty: Vec<usize> = (0..wsum.len()).filter(|&c| wsum[c] == F::zero()).collect();
+    if empty.is_empty() {
+        return;
+    }
+    let n = x.nrows();
+    let dist: Vec<F> = (0..n)
+        .into_par_iter()
+        .with_min_len(256)
+        .map(|i| sq_dist_rows(x.row(i), centers_old.row(labels[i])))
+        .collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    // Descending distance; stable on index for determinism.
+    order.sort_by(|&a, &b| {
+        dist[b]
+            .partial_cmp(&dist[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (&new_c, &far) in empty.iter().zip(order.iter()) {
+        let w = sample_weight.map_or(F::one(), |sw| sw[far]);
+        let old_c = labels[far];
+        for j in 0..x.ncols() {
+            let v = x[[far, j]] * w;
+            sums[[old_c, j]] -= v;
+            sums[[new_c, j]] = v;
         }
-    } else {
-        rng.gen_range(0..n_samples)
-    };
-    centroids.row_mut(0).assign(&x.row(first_idx));
+        wsum[new_c] = w;
+        wsum[old_c] -= w;
+    }
+}
 
-    // Distance from each point to its nearest existing centroid.
-    let mut min_dists = Array1::<F>::from_elem(n_samples, F::infinity());
+/// One Lloyd run from the given initial centroids (sklearn's
+/// `_kmeans_single_lloyd`).
+fn lloyd<F: Float>(
+    x: &Array2<F>,
+    x_sq: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+    mut centers: Array2<F>,
+    max_iter: usize,
+    tol: F,
+) -> LloydRun<F> {
+    let n = x.nrows();
+    let k = centers.nrows();
+    let mut labels_old = vec![usize::MAX; n];
+    let mut labels = labels_old.clone();
+    let mut strict_convergence = false;
+    let mut n_iter = 0;
 
-    for k in 1..n_clusters {
-        update_min_distances(x, &mut min_dists, centroids.row(k - 1));
+    for it in 0..max_iter {
+        n_iter = it + 1;
+        labels = assign_nearest(x, x_sq, &centers).0;
+        let (mut sums, mut wsum) = cluster_sums(x, &labels, sample_weight, k);
+        relocate_empty_clusters(x, &labels, sample_weight, &centers, &mut sums, &mut wsum);
 
-        // Compute the sampling weights: w_i · D²(x_i) if weighted, else D²(x_i).
-        let mut sample_probs = min_dists.clone();
-        if let Some(w) = sample_weight {
-            for i in 0..n_samples {
-                sample_probs[i] = sample_probs[i] * w[i];
+        let mut new_centers = sums;
+        for (c, &wc) in wsum.iter().enumerate() {
+            if wc > F::zero() {
+                let inv = F::one() / wc;
+                new_centers.row_mut(c).mapv_inplace(|v| v * inv);
+            } else {
+                new_centers.row_mut(c).assign(&centers.row(c));
             }
         }
-        let total: F = sample_probs
-            .iter()
-            .copied()
-            .fold(F::zero(), |acc, v| acc + v);
-        if total == F::zero() {
-            let idx = rng.gen_range(0..n_samples);
-            centroids.row_mut(k).assign(&x.row(idx));
-            continue;
+        let mut shift_tot = F::zero();
+        for c in 0..k {
+            shift_tot += sq_dist_rows(centers.row(c), new_centers.row(c));
         }
-        let chosen = weighted_random_choice(&sample_probs, rng);
-        centroids.row_mut(k).assign(&x.row(chosen));
-    }
+        centers = new_centers;
 
-    centroids
+        if labels == labels_old {
+            strict_convergence = true;
+            break;
+        }
+        if shift_tot <= tol {
+            break;
+        }
+        labels_old.clone_from(&labels);
+    }
+    if !strict_convergence {
+        // Labels consistent with the final centroids.
+        labels = assign_nearest(x, x_sq, &centers).0;
+    }
+    let inertia = inertia(x, &labels, &centers, sample_weight);
+    LloydRun {
+        centroids: centers,
+        labels,
+        inertia,
+        n_iter,
+    }
+}
+
+/// Exact (weighted) inertia `Σ w_i ‖x_i − c_{z_i}‖²`.
+fn inertia<F: Float>(
+    x: &Array2<F>,
+    labels: &[usize],
+    centers: &Array2<F>,
+    sample_weight: Option<&Array1<F>>,
+) -> F {
+    (0..x.nrows())
+        .into_par_iter()
+        .with_min_len(256)
+        .map(|i| {
+            let w = sample_weight.map_or(F::one(), |sw| sw[i]);
+            sq_dist_rows(x.row(i), centers.row(labels[i])) * w
+        })
+        .reduce(F::zero, |a, b| a + b)
+}
+
+/// sklearn's `_tolerance`: `tol · mean(var(X, axis=0))` (unweighted, ddof 0).
+fn scaled_tolerance<F: Float>(x: &Array2<F>, tol: f64) -> F {
+    if tol == 0.0 {
+        return F::zero();
+    }
+    let n = F::from_usize(x.nrows()).unwrap();
+    let d = x.ncols();
+    let mut total = F::zero();
+    for j in 0..d {
+        let col = x.column(j);
+        let mean = col.iter().fold(F::zero(), |a, &v| a + v) / n;
+        let var = col
+            .iter()
+            .fold(F::zero(), |a, &v| a + (v - mean) * (v - mean))
+            / n;
+        total += var;
+    }
+    total / F::from_usize(d.max(1)).unwrap() * F::from_f64(tol).unwrap()
 }
 
 impl KMeans {
-    /// Shared Lloyd loop used by both unweighted and weighted fits. When
-    /// `sample_weight` is `None`, behaviour is bit-identical to the
-    /// unweighted code path (uniform weights).
-    fn fit_inner<F: Float + Send + Sync>(
+    /// Shared fit used by both unweighted and weighted fits.
+    fn fit_inner<F: Float>(
         &self,
         x: &Array2<F>,
         sample_weight: Option<&Array1<F>>,
@@ -283,91 +381,62 @@ impl KMeans {
                 }
             }
         }
+        if let KMeansInit::Array(c) = &self.init {
+            if c.dim() != (self.n_clusters, n_features) {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "init array has shape {:?}, expected ({}, {})",
+                    c.dim(),
+                    self.n_clusters,
+                    n_features
+                )));
+            }
+        }
 
+        let x_sq = row_norms_sq(x);
+        let tol = scaled_tolerance(x, self.tol);
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let mut centroids = kmeans_plus_plus(x, self.n_clusters, &mut rng, sample_weight);
-        let tol = F::from_f64(self.tol).unwrap();
-        let mut n_iter = 0;
+        let mut best: Option<LloydRun<F>> = None;
 
-        for iter in 0..self.max_iter {
-            n_iter = iter + 1;
-
-            // Assignment step: parallel.
-            let labels: Vec<usize> = (0..n_samples)
-                .into_par_iter()
-                .map(|i| {
-                    let (best_idx, _) = nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
-                    best_idx
-                })
-                .collect();
-
-            // Update step: weighted mean per cluster.
-            //
-            //   c_k = Σ_{i: z_i=k} w_i x_i  /  Σ_{i: z_i=k} w_i
-            //
-            // With uniform w_i = 1 this reduces to the usual mean.
-            let mut new_centroids = Array2::<F>::zeros((self.n_clusters, n_features));
-            let mut weight_sums = vec![F::zero(); self.n_clusters];
-
-            for i in 0..n_samples {
-                let cluster = labels[i];
-                let w = sample_weight.map(|sw| sw[i]).unwrap_or_else(F::one);
-                if w == F::zero() {
-                    continue;
+        for _ in 0..self.effective_n_init() {
+            let init = match &self.init {
+                KMeansInit::KMeansPlusPlus => {
+                    kmeans_plusplus(x, self.n_clusters, &mut rng, sample_weight).0
                 }
-                weight_sums[cluster] += w;
-                for j in 0..n_features {
-                    new_centroids[[cluster, j]] += x[[i, j]] * w;
-                }
-            }
-
-            for k in 0..self.n_clusters {
-                if weight_sums[k] > F::zero() {
-                    let denom = weight_sums[k];
-                    for j in 0..n_features {
-                        new_centroids[[k, j]] /= denom;
+                KMeansInit::Random => {
+                    let idx = sample_without_replacement(
+                        n_samples,
+                        self.n_clusters,
+                        &mut rng,
+                        sample_weight,
+                    );
+                    let mut c = Array2::<F>::zeros((self.n_clusters, n_features));
+                    for (r, &i) in idx.iter().enumerate() {
+                        c.row_mut(r).assign(&x.row(i));
                     }
-                } else {
-                    new_centroids.row_mut(k).assign(&centroids.row(k));
+                    c
                 }
-            }
-
-            let mut max_shift = F::zero();
-            for k in 0..self.n_clusters {
-                let shift = squared_euclidean(
-                    centroids.row(k).as_slice().unwrap(),
-                    new_centroids.row(k).as_slice().unwrap(),
-                );
-                if shift > max_shift {
-                    max_shift = shift;
-                }
-            }
-            centroids = new_centroids;
-            if max_shift < tol {
-                break;
+                KMeansInit::Array(c) => c.mapv(|v| F::from_f64(v).unwrap()),
+            };
+            let run = lloyd(x, &x_sq, sample_weight, init, self.max_iter, tol);
+            if best.as_ref().is_none_or(|b| run.inertia < b.inertia) {
+                best = Some(run);
             }
         }
-
-        // Final labels + weighted inertia.
-        let mut float_labels = Array1::<F>::zeros(n_samples);
-        let mut inertia = F::zero();
-        for i in 0..n_samples {
-            let (best_idx, dist) = nearest_centroid(x.row(i).as_slice().unwrap(), &centroids);
-            float_labels[i] = F::from_usize(best_idx).unwrap();
-            let w = sample_weight.map(|sw| sw[i]).unwrap_or_else(F::one);
-            inertia += dist * w;
-        }
-
+        let best = best.unwrap();
         Ok(FittedKMeans {
-            centroids,
-            labels: float_labels,
-            inertia,
-            n_iter,
+            centroids: best.centroids,
+            labels: best
+                .labels
+                .iter()
+                .map(|&l| F::from_usize(l).unwrap())
+                .collect(),
+            inertia: best.inertia,
+            n_iter: best.n_iter,
         })
     }
 }
 
-impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
+impl<F: Float> FitUnsupervised<F> for KMeans {
     type Fitted = FittedKMeans<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
@@ -375,7 +444,7 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for KMeans {
     }
 }
 
-impl<F: Float + Send + Sync> FitUnsupervisedWeighted<F> for KMeans {
+impl<F: Float> FitUnsupervisedWeighted<F> for KMeans {
     type Fitted = FittedKMeans<F>;
 
     fn fit_unsupervised_weighted(
@@ -396,16 +465,10 @@ impl<F: Float> Predict<F> for FittedKMeans<F> {
                 x.ncols()
             )));
         }
-
         let x_std = crate::standard_layout(x);
         let x: &Array2<F> = &x_std;
-        let n_samples = x.nrows();
-        let mut labels = Array1::<F>::zeros(n_samples);
-        for i in 0..n_samples {
-            let (best_idx, _) = nearest_centroid(x.row(i).as_slice().unwrap(), &self.centroids);
-            labels[i] = F::from_usize(best_idx).unwrap();
-        }
-        Ok(labels)
+        let (labels, _) = assign_nearest(x, &row_norms_sq(x), &self.centroids);
+        Ok(labels.iter().map(|&l| F::from_usize(l).unwrap()).collect())
     }
 }
 
@@ -491,6 +554,7 @@ mod tests {
             max_iter: 300,
             tol: 1e-4,
             seed: 42,
+            ..KMeans::new(3)
         };
         let fitted = FitUnsupervised::<f64>::fit(&kmeans, &x).unwrap();
 

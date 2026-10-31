@@ -12,8 +12,10 @@
 use anofox_ml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
+
+use crate::util::{assign_nearest, kmeans_plusplus, row_norms_sq, squared_euclidean};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiniBatchKMeans {
@@ -74,69 +76,19 @@ impl<F: Float> FittedMiniBatchKMeans<F> {
     }
 }
 
-fn sq_dist<F: Float>(a: &[F], b: &[F]) -> F {
-    let mut acc = F::zero();
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        let d = x - y;
-        acc = acc + d * d;
-    }
-    acc
-}
-
+/// Index of the nearest centroid (exact distances; used inside the
+/// sequential per-sample update where a GEMM would not pay off).
 fn nearest<F: Float>(point: &[F], centroids: &Array2<F>) -> usize {
     let mut best = 0;
     let mut best_d = F::infinity();
     for k in 0..centroids.nrows() {
-        let row = centroids.row(k);
-        let d = sq_dist(point, row.as_slice().unwrap());
+        let d = squared_euclidean(point, centroids.row(k).as_slice().unwrap());
         if d < best_d {
             best_d = d;
             best = k;
         }
     }
     best
-}
-
-fn weighted_choice<F: Float>(weights: &Array1<F>, rng: &mut StdRng) -> usize {
-    let total: F = weights.iter().copied().fold(F::zero(), |acc, v| acc + v);
-    let r = F::from_f64(rng.gen::<f64>()).unwrap() * total;
-    let mut cum = F::zero();
-    for (i, &w) in weights.iter().enumerate() {
-        cum = cum + w;
-        if cum >= r {
-            return i;
-        }
-    }
-    weights.len() - 1
-}
-
-fn init_centroids<F: Float>(x: &Array2<F>, k: usize, rng: &mut StdRng) -> Array2<F> {
-    let n = x.nrows();
-    let d = x.ncols();
-    let mut centroids = Array2::<F>::zeros((k, d));
-    let first = rng.gen_range(0..n);
-    centroids.row_mut(0).assign(&x.row(first));
-
-    let mut min_d = Array1::<F>::from_elem(n, F::infinity());
-    for ci in 1..k {
-        for i in 0..n {
-            let d2 = sq_dist(
-                x.row(i).as_slice().unwrap(),
-                centroids.row(ci - 1).as_slice().unwrap(),
-            );
-            if d2 < min_d[i] {
-                min_d[i] = d2;
-            }
-        }
-        let total: F = min_d.iter().copied().fold(F::zero(), |a, v| a + v);
-        if total == F::zero() {
-            centroids.row_mut(ci).assign(&x.row(rng.gen_range(0..n)));
-            continue;
-        }
-        let pick = weighted_choice(&min_d, rng);
-        centroids.row_mut(ci).assign(&x.row(pick));
-    }
-    centroids
 }
 
 impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
@@ -156,7 +108,7 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
         let batch_size = self.batch_size.min(n);
 
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let mut centroids = init_centroids(x, self.n_clusters, &mut rng);
+        let mut centroids = kmeans_plusplus(x, self.n_clusters, &mut rng, None).0;
         let mut counts = vec![0usize; self.n_clusters];
 
         let tol = F::from_f64(self.tol).unwrap();
@@ -182,7 +134,7 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
             let prev = centroids.clone();
 
             for &i in batch {
-                let row_slice = x.row(i).into_owned();
+                let row_slice = x.row(i);
                 let k = nearest(row_slice.as_slice().unwrap(), &centroids);
                 counts[k] += 1;
                 let lr = F::one() / F::from_usize(counts[k]).unwrap();
@@ -195,7 +147,7 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
             // Convergence check: max centroid shift.
             let mut max_shift = F::zero();
             for kk in 0..self.n_clusters {
-                let s = sq_dist(
+                let s = squared_euclidean(
                     prev.row(kk).as_slice().unwrap(),
                     centroids.row(kk).as_slice().unwrap(),
                 );
@@ -221,13 +173,10 @@ impl<F: Float> Predict<F> for FittedMiniBatchKMeans<F> {
                 x.ncols()
             )));
         }
-        let mut out = Array1::<F>::zeros(x.nrows());
-        for i in 0..x.nrows() {
-            let row = x.row(i).into_owned();
-            let k = nearest(row.as_slice().unwrap(), &self.centroids);
-            out[i] = F::from_usize(k).unwrap();
-        }
-        Ok(out)
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<F> = &x_std;
+        let (labels, _) = assign_nearest(x, &row_norms_sq(x), &self.centroids);
+        Ok(labels.iter().map(|&k| F::from_usize(k).unwrap()).collect())
     }
 }
 

@@ -1,33 +1,40 @@
 //! Bayesian Gaussian Mixture Model — variational inference.
 //!
 //! Implements `sklearn.mixture.BayesianGaussianMixture` with
-//! `weight_concentration_prior_type='dirichlet_distribution'` and
-//! `covariance_type='full'` or `'diag'`.
+//! `weight_concentration_prior_type='dirichlet_distribution'` for all four
+//! covariance types (`full`, `tied`, `diag`, `spherical`).
 //!
 //! Mathematical model (Bishop, PRML §10.2):
 //!
-//!   π ~ Dir(α_0 / K, …, α_0 / K)
+//!   π ~ Dir(α_0, …, α_0)
 //!   (μ_k, Λ_k) ~ NormalWishart(m_0, β_0, W_0, ν_0)
 //!   z_n | π ~ Cat(π)
 //!   x_n | z_n=k, μ_k, Λ_k ~ N(μ_k, Λ_k^{-1})
 //!
-//! Variational posterior factorises as q(Z) q(π) ∏_k q(μ_k, Λ_k), each
-//! kept in conjugate form. CAVI updates cycle E (responsibilities) and M
-//! (Dirichlet + Normal-Wishart parameter updates).
+//! The variational posterior factorises as q(Z) q(π) ∏_k q(μ_k, Λ_k), each
+//! kept in conjugate form. CAVI alternates the E-step (responsibilities) and
+//! the M-step (Dirichlet + Normal-Wishart updates), exactly as sklearn: the
+//! priors default to `α_0 = 1/K`, `β_0 = 1`, `m_0 = mean(X)`, `ν_0 = D` and
+//! `W_0⁻¹ = cov(X)` (ddof = 1; diagonal / mean variance for the diag /
+//! spherical types), and the stored `covariances` are `W_k⁻¹ / ν_k`.
 //!
-//! Convergence is judged on the change in mean evidence lower bound (the
-//! `lower_bound_` attribute in sklearn parlance). Effective component count
-//! is reported as the number of components whose posterior Dirichlet
-//! parameter αₖ exceeds a small threshold over α_0/K.
+//! Convergence is judged on the change of the evidence lower bound
+//! ([`FittedBayesianGaussianMixture::lower_bound`], sklearn's
+//! `_compute_lower_bound`: the ELBO up to an additive constant that does not
+//! depend on the variational parameters). The effective component count is
+//! the number of components whose posterior Dirichlet parameter αₖ exceeds
+//! `2·α_0`.
 
 use anofox_ml_core::{FitUnsupervised, Predict, PredictProba, Result, RustMlError};
-use faer::linalg::solvers::Solve;
-use faer::{Mat, Side};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 
 use crate::gmm::CovarianceType;
+use crate::mixture::{
+    estimate_gaussian_parameters, estimate_log_gaussian_prob, initial_resp, log_det_cholesky,
+    log_prob_resp, precision_cholesky, MixtureInit,
+};
 
 #[derive(Debug, Clone)]
 pub struct BayesianGaussianMixture {
@@ -38,13 +45,19 @@ pub struct BayesianGaussianMixture {
     pub reg_covar: f64,
     pub seed: u64,
     /// Dirichlet concentration prior on the mixing weights (α_0). Sklearn
-    /// default is 1/K; pass `None` and we fall back to that.
+    /// default is 1/K.
     pub weight_concentration_prior: f64,
     /// Mean precision prior (β_0). Sklearn default 1.0.
     pub mean_precision_prior: f64,
     /// Degrees-of-freedom prior (ν_0). Must satisfy ν_0 > D - 1; sklearn
     /// defaults to D.
     pub degrees_of_freedom_prior: Option<f64>,
+    /// Prior on the means (m_0); defaults to the data mean.
+    pub mean_prior: Option<Array1<f64>>,
+    /// Number of initialisations; the one with the highest lower bound wins.
+    pub n_init: usize,
+    /// How initial responsibilities are computed.
+    pub init_params: MixtureInit,
 }
 
 impl BayesianGaussianMixture {
@@ -59,6 +72,9 @@ impl BayesianGaussianMixture {
             weight_concentration_prior: 1.0 / n_components as f64,
             mean_precision_prior: 1.0,
             degrees_of_freedom_prior: None,
+            mean_prior: None,
+            n_init: 1,
+            init_params: MixtureInit::KMeans,
         }
     }
     pub fn with_concentration(mut self, c: f64) -> Self {
@@ -73,12 +89,20 @@ impl BayesianGaussianMixture {
         self.degrees_of_freedom_prior = Some(v);
         self
     }
+    pub fn with_mean_prior(mut self, m: Array1<f64>) -> Self {
+        self.mean_prior = Some(m);
+        self
+    }
     pub fn with_max_iter(mut self, m: usize) -> Self {
         self.max_iter = m;
         self
     }
     pub fn with_tol(mut self, t: f64) -> Self {
         self.tol = t;
+        self
+    }
+    pub fn with_reg_covar(mut self, r: f64) -> Self {
+        self.reg_covar = r;
         self
     }
     pub fn with_seed(mut self, s: u64) -> Self {
@@ -89,6 +113,14 @@ impl BayesianGaussianMixture {
         self.covariance_type = c;
         self
     }
+    pub fn with_n_init(mut self, n: usize) -> Self {
+        self.n_init = n.max(1);
+        self
+    }
+    pub fn with_init_params(mut self, init: MixtureInit) -> Self {
+        self.init_params = init;
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -97,19 +129,28 @@ pub struct FittedBayesianGaussianMixture {
     pub weights: Array1<f64>,
     /// Posterior means m_k.
     pub means: Array2<f64>,
-    /// Posterior covariance scale: W_k^{-1} / ν_k for full, diag(…) for diag.
+    /// `W_k⁻¹ / ν_k` (sklearn `covariances_`), in the layout of
+    /// the `mixture` module: `k` `d×d` (full), one `d×d` (tied), `k` `1×d`
+    /// (diag) or `k` `1×1` (spherical).
     pub covariances: Vec<Array2<f64>>,
     /// Posterior Dirichlet parameters (α_k = α_0 + N_k).
     pub weight_concentration: Array1<f64>,
-    /// Posterior degrees of freedom (ν_k).
+    /// Posterior degrees of freedom (ν_k); all equal for `Tied`.
     pub dof_posterior: Array1<f64>,
     /// Posterior mean precision (β_k).
     pub mean_precision_posterior: Array1<f64>,
-    /// ELBO at convergence.
+    /// Evidence lower bound (up to a constant) of the best run, sklearn's
+    /// `lower_bound_`.
     pub lower_bound: f64,
     pub n_iter: usize,
     pub effective_components: usize,
     pub covariance_type: CovarianceType,
+    /// Cholesky factors of `covariances⁻¹` (sklearn `precisions_cholesky_`).
+    #[serde(default)]
+    pub precisions_cholesky: Vec<Array2<f64>>,
+    /// Whether the best run reached `tol` before `max_iter`.
+    #[serde(default)]
+    pub converged: bool,
 }
 
 // ───── Special functions ───────────────────────────────────────────────────
@@ -132,10 +173,7 @@ fn digamma(mut x: f64) -> f64 {
     result
 }
 
-/// Log gamma ln Γ(x) for x > 0 (Lanczos g=7, n=9). Used by the BGMM test
-/// suite to verify the special-function block; the variational E/M-step
-/// uses only `digamma`.
-#[allow(dead_code)]
+/// Log gamma ln Γ(x) for x > 0 (Lanczos g=7, n=9), used by the ELBO.
 fn lgamma(x: f64) -> f64 {
     static G: f64 = 7.0;
     static COEF: [f64; 9] = [
@@ -163,70 +201,267 @@ fn lgamma(x: f64) -> f64 {
     0.5 * (2.0 * std::f64::consts::PI).ln() + (xm1 + 0.5) * t.ln() - t + a.ln()
 }
 
-// ───── Helpers ────────────────────────────────────────────────────────────
+// ───── Variational state ──────────────────────────────────────────────────
 
-fn pairwise_sq(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+/// Normal-Wishart prior hyper-parameters.
+struct Priors {
+    alpha0: f64,
+    beta0: f64,
+    nu0: f64,
+    m0: Array1<f64>,
+    /// `W_0⁻¹` in block layout (d×d, 1×d or 1×1).
+    cov_prior: Array2<f64>,
 }
 
-fn kmeans_pp_init(x: &Array2<f64>, k: usize, rng: &mut StdRng) -> Array2<f64> {
-    let n = x.nrows();
-    let d = x.ncols();
-    let mut centers = Array2::<f64>::zeros((k, d));
-    let first = rng.gen_range(0..n);
-    centers.row_mut(0).assign(&x.row(first));
-    let mut min_d = vec![f64::INFINITY; n];
-    for c in 1..k {
-        for i in 0..n {
-            let sd = pairwise_sq(
-                x.row(i).as_slice().unwrap(),
-                centers.row(c - 1).as_slice().unwrap(),
-            );
-            if sd < min_d[i] {
-                min_d[i] = sd;
+/// Variational posterior parameters.
+struct VbState {
+    wc: Array1<f64>,
+    beta: Array1<f64>,
+    means: Array2<f64>,
+    dof: Array1<f64>,
+    covariances: Vec<Array2<f64>>,
+    prec_chol: Vec<Array2<f64>>,
+}
+
+fn block<T: Copy>(v: &[T], ct: CovarianceType, c: usize) -> T {
+    if ct == CovarianceType::Tied {
+        v[0]
+    } else {
+        v[c]
+    }
+}
+
+impl VbState {
+    /// One "M-step" from sufficient statistics (sklearn `_estimate_weights`,
+    /// `_estimate_means`, `_estimate_precisions`).
+    fn update(
+        nk: &Array1<f64>,
+        xk: &Array2<f64>,
+        sk: &[Array2<f64>],
+        p: &Priors,
+        ct: CovarianceType,
+    ) -> Result<Self> {
+        let k = nk.len();
+        let d = xk.ncols();
+        let wc = nk + p.alpha0;
+        let beta = nk + p.beta0;
+        let mut means = Array2::<f64>::zeros((k, d));
+        for c in 0..k {
+            for j in 0..d {
+                means[[c, j]] = (p.beta0 * p.m0[j] + nk[c] * xk[[c, j]]) / beta[c];
             }
         }
-        let total: f64 = min_d.iter().sum();
-        if total == 0.0 {
-            centers.row_mut(c).assign(&x.row(rng.gen_range(0..n)));
-            continue;
+        let diff = |c: usize| &xk.row(c) - &p.m0;
+        let (dof, covariances) = match ct {
+            CovarianceType::Full => {
+                let dof = nk + p.nu0;
+                let covs = (0..k)
+                    .map(|c| {
+                        let df = diff(c);
+                        let s = nk[c] * p.beta0 / beta[c];
+                        let mut cov = &p.cov_prior + &(&sk[c] * nk[c]);
+                        for a in 0..d {
+                            for b in 0..d {
+                                cov[[a, b]] += s * df[a] * df[b];
+                            }
+                        }
+                        cov / dof[c]
+                    })
+                    .collect();
+                (dof, covs)
+            }
+            CovarianceType::Tied => {
+                let nbar = nk.sum() / k as f64;
+                let dof_t = p.nu0 + nbar;
+                let mut cov = &p.cov_prior + &(&sk[0] * nbar);
+                for c in 0..k {
+                    let df = diff(c);
+                    let s = p.beta0 / k as f64 * nk[c] / beta[c];
+                    for a in 0..d {
+                        for b in 0..d {
+                            cov[[a, b]] += s * df[a] * df[b];
+                        }
+                    }
+                }
+                (Array1::from_elem(k, dof_t), vec![cov / dof_t])
+            }
+            CovarianceType::Diag => {
+                let dof = nk + p.nu0;
+                let covs = (0..k)
+                    .map(|c| {
+                        let df = diff(c);
+                        let r = p.beta0 / beta[c];
+                        Array2::from_shape_fn((1, d), |(_, j)| {
+                            (p.cov_prior[[0, j]] + nk[c] * (sk[c][[0, j]] + r * df[j] * df[j]))
+                                / dof[c]
+                        })
+                    })
+                    .collect();
+                (dof, covs)
+            }
+            CovarianceType::Spherical => {
+                let dof = nk + p.nu0;
+                let covs = (0..k)
+                    .map(|c| {
+                        let df = diff(c);
+                        let r = p.beta0 / beta[c];
+                        let m2 = df.mapv(|v| v * v).mean().unwrap();
+                        Array2::from_elem(
+                            (1, 1),
+                            (p.cov_prior[[0, 0]] + nk[c] * (sk[c][[0, 0]] + r * m2)) / dof[c],
+                        )
+                    })
+                    .collect();
+                (dof, covs)
+            }
+        };
+        let prec_chol = precision_cholesky(&covariances, ct)?;
+        Ok(Self {
+            wc,
+            beta,
+            means,
+            dof,
+            covariances,
+            prec_chol,
+        })
+    }
+}
+
+/// `E_q[log π_k] + E_q[log N(x_i | μ_k, Λ_k⁻¹)]`, `n × k` (sklearn
+/// `_estimate_weighted_log_prob` of the Bayesian mixture).
+fn weighted_log_prob(
+    x: &Array2<f64>,
+    means: &Array2<f64>,
+    prec_chol: &[Array2<f64>],
+    dof: &Array1<f64>,
+    beta: &Array1<f64>,
+    wc: &Array1<f64>,
+    ct: CovarianceType,
+) -> Array2<f64> {
+    let d = x.ncols();
+    let df = d as f64;
+    let k = means.nrows();
+    let mut lp = estimate_log_gaussian_prob(x, means, prec_chol, ct);
+    let psi_sum = digamma(wc.sum());
+    for c in 0..k {
+        let log_lambda: f64 = df * std::f64::consts::LN_2
+            + (0..d)
+                .map(|i| digamma(0.5 * (dof[c] - i as f64)))
+                .sum::<f64>();
+        let shift = -0.5 * df * dof[c].ln()
+            + 0.5 * (log_lambda - df / beta[c])
+            + (digamma(wc[c]) - psi_sum);
+        lp.column_mut(c).mapv_inplace(|v| v + shift);
+    }
+    lp
+}
+
+/// sklearn `_compute_lower_bound` for the Dirichlet-distribution prior.
+fn lower_bound(log_resp: &Array2<f64>, s: &VbState, ct: CovarianceType, d: usize) -> f64 {
+    let df = d as f64;
+    let k = s.means.nrows();
+    let ld = log_det_cholesky(&s.prec_chol, ct, d);
+    let mut log_wishart = 0.0;
+    for c in 0..k {
+        let nu = s.dof[c];
+        let log_det = block(&ld, ct, c) - 0.5 * df * nu.ln();
+        let gl: f64 = (0..d).map(|i| lgamma(0.5 * (nu - i as f64))).sum();
+        log_wishart -= nu * log_det + nu * df * 0.5 * std::f64::consts::LN_2 + gl;
+    }
+    let log_norm_weight = lgamma(s.wc.sum()) - s.wc.iter().map(|&a| lgamma(a)).sum::<f64>();
+    let neg_entropy: f64 = log_resp
+        .iter()
+        .map(|&lr| {
+            let r = lr.exp();
+            if r > 0.0 {
+                r * lr
+            } else {
+                0.0
+            }
+        })
+        .sum();
+    -neg_entropy
+        - log_wishart
+        - log_norm_weight
+        - 0.5 * df * s.beta.iter().map(|b| b.ln()).sum::<f64>()
+}
+
+impl BayesianGaussianMixture {
+    fn priors(&self, x: &Array2<f64>) -> Result<Priors> {
+        let n = x.nrows();
+        let d = x.ncols();
+        let nu0 = self.degrees_of_freedom_prior.unwrap_or(d as f64);
+        if nu0 <= (d as f64) - 1.0 {
+            return Err(RustMlError::InvalidParameter(
+                "degrees_of_freedom_prior must exceed D - 1".into(),
+            ));
         }
-        let r = rng.gen::<f64>() * total;
-        let mut cum = 0.0;
-        let mut pick = n - 1;
-        for i in 0..n {
-            cum += min_d[i];
-            if cum >= r {
-                pick = i;
+        if self.weight_concentration_prior <= 0.0 || self.mean_precision_prior <= 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "weight_concentration_prior and mean_precision_prior must be > 0".into(),
+            ));
+        }
+        let mean = x.mean_axis(Axis(0)).unwrap();
+        let m0 = match &self.mean_prior {
+            Some(m) if m.len() != d => {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "mean_prior has length {}, expected {d}",
+                    m.len()
+                )))
+            }
+            Some(m) => m.clone(),
+            None => mean.clone(),
+        };
+        // Empirical covariance with ddof = 1 (numpy `np.cov(X.T)`).
+        let centred = x - &mean;
+        let emp = centred.t().dot(&centred) / (n as f64 - 1.0);
+        let cov_prior = match self.covariance_type {
+            CovarianceType::Full | CovarianceType::Tied => emp,
+            CovarianceType::Diag => Array2::from_shape_fn((1, d), |(_, j)| emp[[j, j]]),
+            CovarianceType::Spherical => {
+                Array2::from_elem((1, 1), (0..d).map(|j| emp[[j, j]]).sum::<f64>() / d as f64)
+            }
+        };
+        Ok(Priors {
+            alpha0: self.weight_concentration_prior,
+            beta0: self.mean_precision_prior,
+            nu0,
+            m0,
+            cov_prior,
+        })
+    }
+
+    fn single_fit(
+        &self,
+        x: &Array2<f64>,
+        p: &Priors,
+        rng: &mut StdRng,
+    ) -> Result<(VbState, f64, usize, bool)> {
+        let ct = self.covariance_type;
+        let d = x.ncols();
+        let resp = initial_resp(x, self.n_components, self.init_params, rng)?;
+        let (nk, xk, sk) = estimate_gaussian_parameters(x, &resp, self.reg_covar, ct);
+        let mut s = VbState::update(&nk, &xk, &sk, p, ct)?;
+
+        let mut lb = f64::NEG_INFINITY;
+        let mut n_iter = 0;
+        let mut converged = false;
+        for it in 1..=self.max_iter {
+            let prev = lb;
+            let wlp = weighted_log_prob(x, &s.means, &s.prec_chol, &s.dof, &s.beta, &s.wc, ct);
+            let (_, log_resp) = log_prob_resp(wlp);
+            let resp = log_resp.mapv(f64::exp);
+            let (nk, xk, sk) = estimate_gaussian_parameters(x, &resp, self.reg_covar, ct);
+            s = VbState::update(&nk, &xk, &sk, p, ct)?;
+            lb = lower_bound(&log_resp, &s, ct, d);
+            n_iter = it;
+            if (lb - prev).abs() < self.tol {
+                converged = true;
                 break;
             }
         }
-        centers.row_mut(c).assign(&x.row(pick));
+        Ok((s, lb, n_iter, converged))
     }
-    centers
-}
-
-fn logsumexp(v: &[f64]) -> f64 {
-    let m = v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if m == f64::NEG_INFINITY {
-        return m;
-    }
-    let s: f64 = v.iter().map(|x| (x - m).exp()).sum();
-    m + s.ln()
-}
-
-/// Compute log|A| and Cholesky factor L (lower) for SPD A, plus a solve
-/// closure. Returns None if A is not SPD.
-fn chol_logdet(a: &Array2<f64>) -> Option<(f64, faer::linalg::solvers::Llt<f64>)> {
-    let n = a.nrows();
-    let m = Mat::from_fn(n, n, |i, j| a[[i, j]]);
-    let llt = faer::linalg::solvers::Llt::new(m.as_ref(), Side::Lower).ok()?;
-    let l = llt.L();
-    let mut logdet = 0.0;
-    for i in 0..n {
-        logdet += l[(i, i)].abs().ln();
-    }
-    Some((2.0 * logdet, llt))
 }
 
 impl FitUnsupervised<f64> for BayesianGaussianMixture {
@@ -236,452 +471,119 @@ impl FitUnsupervised<f64> for BayesianGaussianMixture {
         let x_std = crate::standard_layout(x);
         let x: &Array2<f64> = &x_std;
         let n = x.nrows();
-        let d = x.ncols();
         let k = self.n_components;
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
         }
-        if k == 0 || k > n {
-            return Err(RustMlError::InvalidParameter("invalid n_components".into()));
-        }
-
-        // ─── Hyperparameter setup ──────────────────────────────────────
-        let alpha0 = self.weight_concentration_prior;
-        let beta0 = self.mean_precision_prior;
-        let nu0 = self.degrees_of_freedom_prior.unwrap_or(d as f64);
-        if nu0 <= (d as f64) - 1.0 {
+        if n < 2 {
             return Err(RustMlError::InvalidParameter(
-                "degrees_of_freedom_prior must exceed D - 1".into(),
+                "BayesianGaussianMixture needs at least 2 samples".into(),
             ));
         }
-
-        // Prior mean m_0 = data mean (sklearn default).
-        let mut m0 = Array1::<f64>::zeros(d);
-        for j in 0..d {
-            let mut s = 0.0;
-            for i in 0..n {
-                s += x[[i, j]];
-            }
-            m0[j] = s / n as f64;
+        if k == 0 || k > n {
+            return Err(RustMlError::InvalidParameter(format!(
+                "n_components ({k}) must be in 1..=n_samples ({n})"
+            )));
         }
-
-        // Prior W_0 chosen so that E[Λ] = ν_0 W_0 ≈ data precision; sklearn
-        // uses the empirical covariance as `covariance_prior_`. We use
-        // `cov(x) / ν_0` so the prior mean of Λ equals cov(x)^{-1} … wait,
-        // sklearn actually sets W_0 = inv(cov_prior); cov_prior defaults to
-        // diag of empirical covariance. We follow that.
-        let mut emp_cov_diag = Array1::<f64>::zeros(d);
-        for j in 0..d {
-            let mut s = 0.0;
-            for i in 0..n {
-                let dv = x[[i, j]] - m0[j];
-                s += dv * dv;
-            }
-            emp_cov_diag[j] = (s / n as f64).max(self.reg_covar);
+        if self.reg_covar < 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "reg_covar must be non-negative".into(),
+            ));
         }
-        // W_0 = diag(1/emp_cov_diag) for full covariance.
-        let w0_inv = match self.covariance_type {
-            CovarianceType::Full => {
-                let mut w = Array2::<f64>::zeros((d, d));
-                for j in 0..d {
-                    w[[j, j]] = emp_cov_diag[j];
-                }
-                w
-            }
-            CovarianceType::Diag => {
-                let mut w = Array2::<f64>::zeros((1, d));
-                for j in 0..d {
-                    w[[0, j]] = emp_cov_diag[j];
-                }
-                w
-            }
-        };
-
-        // ─── Variational parameter storage ─────────────────────────────
-        // q(π) = Dir(α_k);   q(μ_k, Λ_k) = NormalWishart(m_k, β_k, W_k, ν_k)
-        // We store W_k via its inverse W_k_inv (size d×d for full, 1×d for
-        // diag). This makes the Sherman-Morrison-like updates cleaner.
+        let p = self.priors(x)?;
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let mut m_post = kmeans_pp_init(x, k, &mut rng); // initial m_k
-        let mut beta_post = Array1::<f64>::from_elem(k, beta0);
-        let mut nu_post = Array1::<f64>::from_elem(k, nu0);
-        let mut alpha_post = Array1::<f64>::from_elem(k, alpha0);
-        let mut w_inv_post: Vec<Array2<f64>> = (0..k).map(|_| w0_inv.clone()).collect();
-
-        let mut log_resp = Array2::<f64>::zeros((n, k));
-        let mut prev_elbo = f64::NEG_INFINITY;
-        let mut n_iter = 0;
-        let mut elbo = f64::NEG_INFINITY;
-
-        for iter in 0..self.max_iter {
-            n_iter = iter + 1;
-
-            // ─── E-step: compute log responsibilities ──────────────────
-            // ln ρ_{nk} = E[ln π_k] + ½ E[ln|Λ_k|] - D/2 ln(2π)
-            //           - ½ E[(x_n - μ_k)^T Λ_k (x_n - μ_k)]
-            //
-            // For NW posterior:
-            //   E[ln π_k]    = ψ(α_k) - ψ(Σ α)
-            //   E[ln|Λ_k|]   = Σ_i ψ((ν_k+1-i)/2) + D ln 2 + ln|W_k|
-            //                = Σ_i ψ((ν_k+1-i)/2) + D ln 2 - ln|W_k_inv|
-            //   E[mahal]     = D/β_k + ν_k (x_n - m_k)^T W_k (x_n - m_k)
-
-            let sum_alpha: f64 = alpha_post.iter().sum();
-            let psi_sum = digamma(sum_alpha);
-            let e_log_pi: Vec<f64> = (0..k).map(|c| digamma(alpha_post[c]) - psi_sum).collect();
-
-            // Pre-compute, per component k, ½ E[ln|Λ_k|] and a Cholesky-like
-            // structure on W_k_inv to evaluate the quadratic form.
-            // For Full: cache LLT(W_k_inv); the quadratic form uses
-            //   (x-m_k)^T W_k (x-m_k) = ‖L_k^{-T} (x-m_k)‖² where W_k_inv = L L^T,
-            // so q = ‖L_k^{-1} (x-m_k)‖² — solve L_k y = (x-m_k) then ‖y‖².
-            //
-            // For Diag: W_k_inv stored as 1×d vector; quadratic is
-            //   Σ_j (x_j-m_kj)² / W_k_inv[j].
-
-            let mut half_e_log_det_lam = vec![0.0_f64; k];
-            // For full: cache Cholesky factors of W_k_inv (so we can solve
-            // L y = (x-m_k) per data point).
-            let mut llt_cache: Vec<Option<faer::linalg::solvers::Llt<f64>>> =
-                (0..k).map(|_| None).collect();
-
-            for c in 0..k {
-                match self.covariance_type {
-                    CovarianceType::Full => {
-                        // E[ln|Λ_k|] = Σ_i ψ((ν+1-i)/2) + D ln2 - ln|W_inv|
-                        let (logdet_winv, llt) = chol_logdet(&w_inv_post[c]).ok_or_else(|| {
-                            RustMlError::InvalidParameter("W_k_inv not SPD".into())
-                        })?;
-                        let mut psi_acc = 0.0;
-                        for i in 0..d {
-                            psi_acc += digamma((nu_post[c] + 1.0 - (i as f64 + 1.0)) / 2.0);
-                        }
-                        let e_log_det = psi_acc + (d as f64) * std::f64::consts::LN_2 - logdet_winv;
-                        half_e_log_det_lam[c] = 0.5 * e_log_det;
-                        llt_cache[c] = Some(llt);
-                    }
-                    CovarianceType::Diag => {
-                        // |W| = ∏_j 1/W_inv[j] ⇒ ln|W| = -Σ ln W_inv[j]
-                        // For diag the standard reduction yields the same per-
-                        // dim digamma series (treat each dimension as a 1-D
-                        // Wishart-Gamma).
-                        let mut psi_acc = 0.0;
-                        for i in 0..d {
-                            psi_acc += digamma((nu_post[c] + 1.0 - (i as f64 + 1.0)) / 2.0);
-                        }
-                        let mut ln_w = 0.0;
-                        for j in 0..d {
-                            ln_w -= w_inv_post[c][[0, j]].max(1e-300).ln();
-                        }
-                        let e_log_det = psi_acc + (d as f64) * std::f64::consts::LN_2 + ln_w;
-                        half_e_log_det_lam[c] = 0.5 * e_log_det;
-                    }
-                }
+        let mut best: Option<(VbState, f64, usize, bool)> = None;
+        for _ in 0..self.n_init.max(1) {
+            let run = self.single_fit(x, &p, &mut rng)?;
+            let better = match &best {
+                None => true,
+                Some(b) => run.1 > b.1 || b.1 == f64::NEG_INFINITY,
+            };
+            if better {
+                best = Some(run);
             }
-
-            // Compute log_rho and normalise to log_resp.
-            let log_2pi = (2.0 * std::f64::consts::PI).ln();
-            let mut data_log_lik = 0.0_f64;
-            for i in 0..n {
-                let xi = x.row(i);
-                let mut log_rho = vec![0.0_f64; k];
-                for c in 0..k {
-                    // Mahalanobis E[(x-m)^T W (x-m)] times ν, plus D/β.
-                    let mahal = match self.covariance_type {
-                        CovarianceType::Full => {
-                            // q = (x-m)^T W (x-m)  where W = W_inv^{-1}.
-                            // Solve W_inv y = diff  ⇒  y = W diff;  q = diff^T y.
-                            let llt = llt_cache[c].as_ref().unwrap();
-                            let diff = Mat::from_fn(d, 1, |j, _| xi[j] - m_post[[c, j]]);
-                            let y = llt.solve(&diff);
-                            let mut q = 0.0;
-                            for j in 0..d {
-                                q += diff[(j, 0)] * y[(j, 0)];
-                            }
-                            q
-                        }
-                        CovarianceType::Diag => {
-                            let mut q = 0.0;
-                            for j in 0..d {
-                                let dv = xi[j] - m_post[[c, j]];
-                                q += dv * dv / w_inv_post[c][[0, j]].max(1e-300);
-                            }
-                            q
-                        }
-                    };
-                    let e_mahal = (d as f64) / beta_post[c] + nu_post[c] * mahal;
-                    log_rho[c] = e_log_pi[c] + half_e_log_det_lam[c]
-                        - 0.5 * ((d as f64) * log_2pi + e_mahal);
-                }
-                let lse = logsumexp(&log_rho);
-                data_log_lik += lse;
-                for c in 0..k {
-                    log_resp[[i, c]] = log_rho[c] - lse;
-                }
-            }
-
-            // ─── M-step: update q(π) and q(μ, Λ) ───────────────────────
-            // N_k = Σ_n r_{nk};  x̄_k = (1/N_k) Σ r x_n
-            // S_k = (1/N_k) Σ r (x_n - x̄_k)(x_n - x̄_k)^T
-            // α_k = α_0 + N_k
-            // β_k = β_0 + N_k
-            // ν_k = ν_0 + N_k
-            // m_k = (β_0 m_0 + N_k x̄_k) / β_k
-            // W_k_inv = W_0_inv + N_k S_k
-            //           + (β_0 N_k)/(β_0 + N_k) (x̄_k - m_0)(x̄_k - m_0)^T
-
-            let nk: Vec<f64> = (0..k)
-                .map(|c| (0..n).map(|i| log_resp[[i, c]].exp()).sum::<f64>())
-                .collect();
-
-            for c in 0..k {
-                let nkc = nk[c];
-                alpha_post[c] = alpha0 + nkc;
-                beta_post[c] = beta0 + nkc;
-                nu_post[c] = nu0 + nkc;
-
-                if nkc < 1e-12 {
-                    // Component is empty — leave m_k at prior mean, scale
-                    // W_k_inv toward prior.
-                    for j in 0..d {
-                        m_post[[c, j]] = m0[j];
-                    }
-                    w_inv_post[c] = w0_inv.clone();
-                    continue;
-                }
-
-                // x̄_k
-                let mut xbar = Array1::<f64>::zeros(d);
-                for j in 0..d {
-                    let mut s = 0.0;
-                    for i in 0..n {
-                        s += log_resp[[i, c]].exp() * x[[i, j]];
-                    }
-                    xbar[j] = s / nkc;
-                }
-                // m_k
-                for j in 0..d {
-                    m_post[[c, j]] = (beta0 * m0[j] + nkc * xbar[j]) / beta_post[c];
-                }
-                // W_k_inv update.
-                let mix = beta0 * nkc / (beta0 + nkc);
-                match self.covariance_type {
-                    CovarianceType::Full => {
-                        let mut w_new = w0_inv.clone();
-                        for a in 0..d {
-                            for b in 0..d {
-                                let mut s = 0.0;
-                                for i in 0..n {
-                                    let r = log_resp[[i, c]].exp();
-                                    let da = x[[i, a]] - xbar[a];
-                                    let db = x[[i, b]] - xbar[b];
-                                    s += r * da * db;
-                                }
-                                w_new[[a, b]] += s + mix * (xbar[a] - m0[a]) * (xbar[b] - m0[b]);
-                            }
-                        }
-                        for j in 0..d {
-                            w_new[[j, j]] += self.reg_covar;
-                        }
-                        w_inv_post[c] = w_new;
-                    }
-                    CovarianceType::Diag => {
-                        let mut w_new = Array2::<f64>::zeros((1, d));
-                        for j in 0..d {
-                            let mut s = 0.0;
-                            for i in 0..n {
-                                let r = log_resp[[i, c]].exp();
-                                let dv = x[[i, j]] - xbar[j];
-                                s += r * dv * dv;
-                            }
-                            w_new[[0, j]] = w0_inv[[0, j]]
-                                + s
-                                + mix * (xbar[j] - m0[j]).powi(2)
-                                + self.reg_covar;
-                        }
-                        w_inv_post[c] = w_new;
-                    }
-                }
-            }
-
-            // ─── ELBO (approx, for convergence) ─────────────────────────
-            // We use the data log-likelihood term + KL[q(π) || p(π)] +
-            // Σ_k KL[q(μ,Λ) || p(μ,Λ)] subtraction. Exact ELBO is more
-            // involved; for convergence detection it suffices to track the
-            // change in `data_log_lik / n` similar to sklearn's
-            // `lower_bound_` proxy.
-            elbo = data_log_lik / n as f64;
-            if (elbo - prev_elbo).abs() < self.tol {
-                break;
-            }
-            prev_elbo = elbo;
         }
-
-        // ─── Output: posterior weights, covariances, effective count ──
-        let sum_alpha: f64 = alpha_post.iter().sum();
-        let weights: Array1<f64> = alpha_post.mapv(|a| a / sum_alpha);
-
-        // Posterior covariance for users = W_k_inv / (ν_k - D - 1) (mode of
-        // Inverse-Wishart). For ν_k ≤ D + 1 fall back to W_k_inv / ν_k.
-        let covariances: Vec<Array2<f64>> = (0..k)
-            .map(|c| {
-                let denom = if nu_post[c] > (d as f64) + 1.0 {
-                    nu_post[c] - (d as f64) - 1.0
-                } else {
-                    nu_post[c]
-                };
-                match self.covariance_type {
-                    CovarianceType::Full => {
-                        let mut s = Array2::<f64>::zeros((d, d));
-                        for a in 0..d {
-                            for b in 0..d {
-                                s[[a, b]] = w_inv_post[c][[a, b]] / denom;
-                            }
-                        }
-                        s
-                    }
-                    CovarianceType::Diag => {
-                        let mut s = Array2::<f64>::zeros((1, d));
-                        for j in 0..d {
-                            s[[0, j]] = w_inv_post[c][[0, j]] / denom;
-                        }
-                        s
-                    }
-                }
-            })
-            .collect();
-
-        // Effective components: αₖ > 2·α_0 (sklearn's heuristic equivalent
-        // is "weights above a threshold"; we use the Dirichlet posterior
-        // directly so this matches the formal "components with non-trivial
-        // posterior mass" criterion).
-        let eff = alpha_post.iter().filter(|&&a| a > 2.0 * alpha0).count();
-
+        let (s, lb, n_iter, converged) = best.unwrap();
+        let sum_alpha: f64 = s.wc.sum();
+        let weights = s.wc.mapv(|a| a / sum_alpha);
+        let eff = s.wc.iter().filter(|&&a| a > 2.0 * p.alpha0).count();
         Ok(FittedBayesianGaussianMixture {
             weights,
-            means: m_post,
-            covariances,
-            weight_concentration: alpha_post,
-            dof_posterior: nu_post,
-            mean_precision_posterior: beta_post,
-            lower_bound: elbo,
+            means: s.means,
+            covariances: s.covariances,
+            weight_concentration: s.wc,
+            dof_posterior: s.dof,
+            mean_precision_posterior: s.beta,
+            lower_bound: lb,
             n_iter,
             effective_components: eff,
             covariance_type: self.covariance_type,
+            precisions_cholesky: s.prec_chol,
+            converged,
         })
     }
 }
 
 // ───── Predict helpers ─────────────────────────────────────────────────────
 
-fn log_gauss_posterior(diff: &[f64], cov: &Array2<f64>, cov_type: CovarianceType) -> f64 {
-    let d = diff.len();
-    match cov_type {
-        CovarianceType::Diag => {
-            let mut q = 0.0;
-            let mut logdet = 0.0;
-            for j in 0..d {
-                let v = cov[[0, j]].max(1e-30);
-                q += diff[j] * diff[j] / v;
-                logdet += v.ln();
-            }
-            -0.5 * (q + logdet + d as f64 * (2.0 * std::f64::consts::PI).ln())
+impl FittedBayesianGaussianMixture {
+    fn weighted_log_prob_checked(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        let d = self.means.ncols();
+        if x.ncols() != d {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                d,
+                x.ncols()
+            )));
         }
-        CovarianceType::Full => {
-            let nd = d;
-            let m = Mat::from_fn(nd, nd, |i, j| cov[[i, j]]);
-            let llt = match faer::linalg::solvers::Llt::new(m.as_ref(), Side::Lower) {
-                Ok(l) => l,
-                Err(_) => return f64::NEG_INFINITY,
-            };
-            let lower = llt.L();
-            let mut logdet = 0.0;
-            for i in 0..nd {
-                logdet += lower[(i, i)].abs().ln();
-            }
-            let logdet = 2.0 * logdet;
-            let bm = Mat::from_fn(nd, 1, |i, _| diff[i]);
-            let sol = llt.solve(&bm);
-            let mut q = 0.0;
-            for i in 0..nd {
-                q += diff[i] * sol[(i, 0)];
-            }
-            -0.5 * (q + logdet + nd as f64 * (2.0 * std::f64::consts::PI).ln())
-        }
+        let x_std = crate::standard_layout(x);
+        let computed;
+        let pc = if self.precisions_cholesky.is_empty() {
+            computed = precision_cholesky(&self.covariances, self.covariance_type)?;
+            &computed
+        } else {
+            &self.precisions_cholesky
+        };
+        Ok(weighted_log_prob(
+            &x_std,
+            &self.means,
+            pc,
+            &self.dof_posterior,
+            &self.mean_precision_posterior,
+            &self.weight_concentration,
+            self.covariance_type,
+        ))
+    }
+
+    /// Whether the best run converged (sklearn `converged_`).
+    pub fn converged(&self) -> bool {
+        self.converged
     }
 }
 
 impl Predict<f64> for FittedBayesianGaussianMixture {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        let k = self.weights.len();
-        let d = self.means.ncols();
-        if x.ncols() != d {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                d,
-                x.ncols()
-            )));
-        }
-        let n = x.nrows();
-        let mut out = Array1::<f64>::zeros(n);
-        for i in 0..n {
-            let xi = x.row(i).to_owned();
-            let mut best = f64::NEG_INFINITY;
-            let mut best_c = 0;
-            for c in 0..k {
-                let mut diff = vec![0.0; d];
-                for j in 0..d {
-                    diff[j] = xi[j] - self.means[[c, j]];
+        let wlp = self.weighted_log_prob_checked(x)?;
+        Ok(wlp
+            .rows()
+            .into_iter()
+            .map(|r| {
+                let mut best = 0usize;
+                for c in 1..r.len() {
+                    if r[c] > r[best] {
+                        best = c;
+                    }
                 }
-                let s = self.weights[c].max(1e-300).ln()
-                    + log_gauss_posterior(&diff, &self.covariances[c], self.covariance_type);
-                if s > best {
-                    best = s;
-                    best_c = c;
-                }
-            }
-            out[i] = best_c as f64;
-        }
-        Ok(out)
+                best as f64
+            })
+            .collect())
     }
 }
 
 impl PredictProba<f64> for FittedBayesianGaussianMixture {
     fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
-        let k = self.weights.len();
-        let d = self.means.ncols();
-        if x.ncols() != d {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                d,
-                x.ncols()
-            )));
-        }
-        let n = x.nrows();
-        let mut p = Array2::<f64>::zeros((n, k));
-        for i in 0..n {
-            let xi = x.row(i).to_owned();
-            let mut logs = vec![0.0_f64; k];
-            for c in 0..k {
-                let mut diff = vec![0.0; d];
-                for j in 0..d {
-                    diff[j] = xi[j] - self.means[[c, j]];
-                }
-                logs[c] = self.weights[c].max(1e-300).ln()
-                    + log_gauss_posterior(&diff, &self.covariances[c], self.covariance_type);
-            }
-            let max_l = logs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let mut z = 0.0;
-            for c in 0..k {
-                let e = (logs[c] - max_l).exp();
-                p[[i, c]] = e;
-                z += e;
-            }
-            for c in 0..k {
-                p[[i, c]] /= z;
-            }
-        }
-        Ok(p)
+        let (_, log_resp) = log_prob_resp(self.weighted_log_prob_checked(x)?);
+        Ok(log_resp.mapv(f64::exp))
     }
 }
 
