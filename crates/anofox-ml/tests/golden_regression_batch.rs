@@ -161,9 +161,9 @@ fn test_golden_logistic_regression_matches_sklearn() {
         })
         .collect();
     for i in 0..x.nrows() {
-        // sklearn returns [p0, p1]; our predict_proba returns p1 (class 1 probability)
+        // predict_proba is (n, 2) with columns [p0, p1], as sklearn.
         assert_close(
-            proba[i],
+            proba[[i, 1]],
             expected_proba[i][1],
             0.05,
             &format!("logreg proba[{}]", i),

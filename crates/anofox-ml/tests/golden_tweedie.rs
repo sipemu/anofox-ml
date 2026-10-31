@@ -1,10 +1,8 @@
 //! Golden test for TweedieRegressor / GammaRegressor against sklearn 1.8.0.
 //!
-//! sklearn's `alpha` is per-sample-normalized (loss is (1/2n) * deviance +
-//! (alpha/2) * ||β||²) while anofox-regression's `lambda` is on the un-
-//! normalized loss. We scale anofox's lambda by `n` to match sklearn.
-//! IRLS convergence criteria still differ slightly, so we use a 1% relative
-//! tolerance on predictions.
+//! `with_alpha` uses sklearn's semantics (loss is (1/2n) * deviance +
+//! (alpha/2) * ||β||²), so the sklearn alpha is passed through unchanged
+//! (the golden file's `anofox_lambda = n * alpha` is the old raw-λ value).
 
 mod common;
 
@@ -41,16 +39,16 @@ fn test_golden_tweedie_power_1p5() {
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
     let power = case["power"].as_f64().unwrap();
-    let anofox_lambda = case["anofox_lambda"].as_f64().unwrap();
+    let alpha = case["sklearn_alpha"].as_f64().unwrap();
     let expected = json_to_array1(&case["predictions"]);
 
     let fitted = TweedieRegressor::new(power)
-        .with_alpha(anofox_lambda)
+        .with_alpha(alpha)
         .with_max_iter(500)
         .fit(&x, &y)
         .unwrap();
     let preds = fitted.predict(&x).unwrap();
-    assert_rel_close(&preds, &expected, 0.01, "tweedie 1.5 predictions");
+    assert_rel_close(&preds, &expected, 1e-3, "tweedie 1.5 predictions");
 }
 
 #[test]
@@ -60,13 +58,13 @@ fn test_golden_gamma() {
 
     let x = json_to_array2(&case["X"]);
     let y = json_to_array1(&case["y"]);
-    let anofox_lambda = case["anofox_lambda"].as_f64().unwrap();
+    let alpha = case["sklearn_alpha"].as_f64().unwrap();
     let expected = json_to_array1(&case["predictions"]);
 
     let fitted = anofox_ml_regression::GammaRegressor::new()
-        .with_alpha(anofox_lambda)
+        .with_alpha(alpha)
         .fit(&x, &y)
         .unwrap();
     let preds = fitted.predict(&x).unwrap();
-    assert_rel_close(&preds, &expected, 0.01, "gamma predictions");
+    assert_rel_close(&preds, &expected, 1e-3, "gamma predictions");
 }
