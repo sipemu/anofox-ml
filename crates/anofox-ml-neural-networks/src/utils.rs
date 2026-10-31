@@ -16,7 +16,8 @@ pub fn softmax<F: Float>(mut result: Array2<F>) -> Array2<F> {
 }
 
 /// Cross-entropy loss: -mean(sum(y_onehot * log(probs))).
-/// Clips probs for numerical stability.
+/// Clips probs for numerical stability. (Training uses the log-softmax of
+/// the logits instead, which needs no clipping.)
 pub fn cross_entropy_loss<F: Float>(probs: &Array2<F>, y_onehot: &Array2<F>) -> F {
     let eps = F::from_f64(1e-12).unwrap();
     let one = F::one();
@@ -71,14 +72,9 @@ pub fn shuffle_indices(indices: &mut [usize], rng: &mut impl rand::Rng) {
     }
 }
 
-/// Select rows from a 2D array by index.
+/// Select rows from a 2D array by index (works for any memory layout).
 pub fn select_rows<F: Float>(x: &Array2<F>, indices: &[usize]) -> Array2<F> {
-    let ncols = x.ncols();
-    let mut data = Vec::with_capacity(indices.len() * ncols);
-    for &i in indices {
-        data.extend_from_slice(x.row(i).as_slice().unwrap());
-    }
-    Array2::from_shape_vec((indices.len(), ncols), data).unwrap()
+    x.select(ndarray::Axis(0), indices)
 }
 
 /// Select elements from a 1D array by index.
