@@ -107,7 +107,7 @@ impl Fit<f64> for PassiveAggressiveClassifier {
 
         // Find the two classes.
         let mut classes: Vec<f64> = y.iter().copied().collect();
-        classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        classes.sort_by(anofox_ml_core::labels::label_cmp);
         classes.dedup();
         if classes.len() != 2 {
             return Err(RustMlError::InvalidParameter(format!(

@@ -231,7 +231,7 @@ pub fn normalized_mutual_info_score<F: Float>(
 
 fn unique_sorted<F: Float>(a: &Array1<F>) -> Vec<F> {
     let mut vals: Vec<F> = a.iter().copied().collect();
-    vals.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    vals.sort_by(anofox_ml_core::labels::label_cmp);
     vals.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-9).unwrap());
     vals
 }

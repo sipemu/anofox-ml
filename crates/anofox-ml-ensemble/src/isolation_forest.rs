@@ -234,7 +234,7 @@ impl FitUnsupervised<f64> for IsolationForest {
         // Calibrate threshold so contamination fraction is labelled outlier.
         let scores = fitted.score_samples(x);
         let mut sorted: Vec<f64> = scores.iter().copied().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(anofox_ml_core::labels::label_cmp);
         let q = (self.contamination * (n as f64 - 1.0)).round() as usize;
         let q = q.min(n - 1);
         fitted.threshold = sorted[q];

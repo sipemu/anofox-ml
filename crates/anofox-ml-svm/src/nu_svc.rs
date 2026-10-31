@@ -197,7 +197,7 @@ impl<F: Float> Predict<F> for FittedNuSvc<F> {
 /// Extract unique sorted class labels from y.
 fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
     let mut labels: Vec<F> = y.to_vec();
-    labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    labels.sort_by(anofox_ml_core::labels::label_cmp);
     labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
     labels
 }

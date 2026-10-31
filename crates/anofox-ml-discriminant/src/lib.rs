@@ -20,7 +20,7 @@ use ndarray::{Array1, Array2};
 /// Common helpers.
 fn class_indices(y: &Array1<f64>) -> (Vec<f64>, Vec<Vec<usize>>) {
     let mut classes: Vec<f64> = y.iter().copied().collect();
-    classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    classes.sort_by(anofox_ml_core::labels::label_cmp);
     classes.dedup();
     let groups: Vec<Vec<usize>> = classes
         .iter()
