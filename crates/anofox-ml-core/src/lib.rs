@@ -44,6 +44,7 @@ pub mod sparse;
 pub mod splitters;
 pub mod traits;
 pub mod utils;
+pub mod validation;
 
 pub use column_transformer::{ColumnSelector, ColumnTransformer, Remainder};
 pub use error::{Result, RustMlError};
@@ -86,3 +87,4 @@ pub use utils::{
     train_test_split, validation_curve, validation_curve_with_splits, CrossValidateResult, CvSplit,
     GridSearchResult, LearningCurveResult, ScorerFn, ValidationCurveResult,
 };
+pub use validation::{permutation_test_score, PermutationTestResult};
