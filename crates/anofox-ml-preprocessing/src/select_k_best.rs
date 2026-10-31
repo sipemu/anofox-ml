@@ -1,3 +1,5 @@
+use crate::mutual_information::{mutual_info_classif, mutual_info_regression, DiscreteFeatures};
+use crate::special::{chi2_sf, f_sf};
 use anofox_ml_core::{Float, Result, RustMlError, Transform};
 use ndarray::{Array1, Array2, Axis};
 use std::collections::HashMap;
@@ -22,6 +24,18 @@ pub enum ScoringFunction {
     /// feature has a stronger linear relationship with the target.
     /// Requires target values `y`.
     FRegression,
+
+    /// Chi-squared statistic between non-negative features (counts,
+    /// frequencies, one-hot indicators) and class labels (sklearn `chi2`).
+    Chi2,
+
+    /// k-NN mutual information with a discrete target (sklearn
+    /// `mutual_info_classif`, `n_neighbors = 3`, all features continuous).
+    MutualInfoClassif,
+
+    /// k-NN mutual information with a continuous target (sklearn
+    /// `mutual_info_regression`, `n_neighbors = 3`, all features continuous).
+    MutualInfoRegression,
 
     /// Feature variance (unsupervised).
     ///
@@ -108,10 +122,28 @@ impl SelectKBest {
             }
         }
 
-        let scores = match &self.scoring_fn {
-            ScoringFunction::FClassif => compute_f_classif(x, y)?,
-            ScoringFunction::FRegression => compute_f_regression(x, y)?,
-            ScoringFunction::Variance => compute_variance(x),
+        let (scores, pvalues) = match &self.scoring_fn {
+            ScoringFunction::FClassif => {
+                let (s, p) = compute_f_classif(x, y)?;
+                (s, Some(p))
+            }
+            ScoringFunction::FRegression => {
+                let (s, p) = compute_f_regression(x, y)?;
+                (s, Some(p))
+            }
+            ScoringFunction::Chi2 => {
+                let (s, p) = compute_chi2(x, y)?;
+                (s, Some(p))
+            }
+            ScoringFunction::MutualInfoClassif => (
+                mutual_info_classif(x, y, &DiscreteFeatures::Auto, 3, 0)?,
+                None,
+            ),
+            ScoringFunction::MutualInfoRegression => (
+                mutual_info_regression(x, y, &DiscreteFeatures::Auto, 3, 0)?,
+                None,
+            ),
+            ScoringFunction::Variance => (compute_variance(x), None),
         };
 
         // Select top-k features by score (descending).
@@ -129,6 +161,7 @@ impl SelectKBest {
 
         Ok(FittedSelectKBest {
             scores,
+            pvalues,
             selected_indices,
             n_features_in: n_features,
         })
@@ -142,6 +175,9 @@ impl SelectKBest {
 pub struct FittedSelectKBest<F: Float> {
     /// Per-feature score from the chosen scoring function.
     scores: Array1<F>,
+    /// Per-feature p-values (F-tests and chi²; `None` for MI / variance).
+    #[serde(default)]
+    pvalues: Option<Array1<F>>,
     /// Indices of the top-k features (sorted ascending for stable column ordering).
     selected_indices: Vec<usize>,
     /// Total number of input features (before selection).
@@ -152,6 +188,12 @@ impl<F: Float> FittedSelectKBest<F> {
     /// Per-feature scores computed during fitting.
     pub fn scores(&self) -> &Array1<F> {
         &self.scores
+    }
+
+    /// Per-feature p-values (sklearn `pvalues_`) for the F-tests and χ²;
+    /// `None` for mutual information and variance scoring.
+    pub fn pvalues(&self) -> Option<&Array1<F>> {
+        self.pvalues.as_ref()
     }
 
     /// Indices of the selected features, sorted in ascending order.
@@ -193,8 +235,13 @@ impl<F: Float> Transform<F> for FittedSelectKBest<F> {
 /// For each feature j:
 /// - Group samples by class label.
 /// - Compute between-class mean square (MSB) and within-class mean square (MSW).
-/// - F = MSB / MSW.
-fn compute_f_classif<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<Array1<F>> {
+/// - F = MSB / MSW, p = F-distribution survival function with
+///   `(n_classes - 1, n_samples - n_classes)` degrees of freedom.
+///
+/// Like sklearn, a feature with zero within-class variance but non-zero
+/// between-class variance gets `F = inf, p = 0`; a constant feature gets
+/// `F = 0, p = 1` (sklearn returns NaN there).
+fn compute_f_classif<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F>, Array1<F>)> {
     let (n_samples, n_features) = x.dim();
     let n_f = F::from_usize(n_samples).unwrap();
 
@@ -228,6 +275,9 @@ fn compute_f_classif<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<Array1<F>
     }
 
     let mut scores = Array1::<F>::zeros(n_features);
+    let mut pvalues = Array1::<F>::ones(n_features);
+    let dfb = (n_classes - 1) as f64;
+    let dfw = (n_samples - n_classes) as f64;
 
     for j in 0..n_features {
         let col = x.column(j);
@@ -268,27 +318,24 @@ fn compute_f_classif<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<Array1<F>
         if ssw < eps {
             // All within-class variance is zero: feature is perfectly
             // discriminative (or constant). Use a large F value.
-            scores[j] = if ssb > eps {
-                F::from_f64(1e12).unwrap()
-            } else {
-                F::zero()
-            };
+            scores[j] = if ssb > eps { F::infinity() } else { F::zero() };
         } else {
             let msb = ssb / df_between;
             let msw = ssw / df_within;
             scores[j] = msb / msw;
         }
+        pvalues[j] = F::from_f64(f_sf(scores[j].to_f64().unwrap(), dfb, dfw)).unwrap();
     }
 
-    Ok(scores)
+    Ok((scores, pvalues))
 }
 
 /// Compute univariate linear-regression F-statistic for each feature.
 ///
 /// For each feature j:
 ///   r = correlation(x[:,j], y)
-///   F = r^2 * (n - 2) / (1 - r^2)
-fn compute_f_regression<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<Array1<F>> {
+///   F = r^2 * (n - 2) / (1 - r^2),  p = F.sf(F, 1, n - 2)
+fn compute_f_regression<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F>, Array1<F>)> {
     let (n_samples, n_features) = x.dim();
 
     if n_samples < 3 {
@@ -309,6 +356,7 @@ fn compute_f_regression<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<Array1
     }
 
     let mut scores = Array1::<F>::zeros(n_features);
+    let dfw = (n_samples - 2) as f64;
 
     for j in 0..n_features {
         let col = x.column(j);
@@ -341,8 +389,58 @@ fn compute_f_regression<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<Array1
             scores[j] = r2 * n_minus_2 / denom;
         }
     }
+    let pvalues = scores.mapv(|f| F::from_f64(f_sf(f.to_f64().unwrap(), 1.0, dfw)).unwrap());
 
-    Ok(scores)
+    Ok((scores, pvalues))
+}
+
+/// sklearn `chi2`: for non-negative `X` and class labels `y`,
+/// `observed = Yᵀ X` (per class feature sums), `expected = class_prob ⊗
+/// feature_sum`, `χ² = Σ (obs - exp)² / exp` with `n_classes - 1` dof.
+fn compute_chi2<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F>, Array1<F>)> {
+    let (n_samples, n_features) = x.dim();
+    if x.iter().any(|&v| v < F::zero()) {
+        return Err(RustMlError::InvalidParameter(
+            "Input X must be non-negative for chi2".into(),
+        ));
+    }
+    let mut label_map: HashMap<u64, usize> = HashMap::new();
+    let mut class_idx = Vec::with_capacity(n_samples);
+    for &v in y.iter() {
+        let v = v.to_f64().unwrap();
+        let key = if v == 0.0 { 0.0_f64 } else { v }.to_bits();
+        let next = label_map.len();
+        class_idx.push(*label_map.entry(key).or_insert(next));
+    }
+    // sklearn's LabelBinarizer turns a single class into one column; with
+    // one class every statistic is 0 (expected == observed).
+    let n_classes = label_map.len().max(2);
+    let mut observed = vec![vec![0.0_f64; n_features]; n_classes];
+    let mut class_count = vec![0.0_f64; n_classes];
+    let mut feature_sum = vec![0.0_f64; n_features];
+    for (i, &c) in class_idx.iter().enumerate() {
+        class_count[c] += 1.0;
+        for j in 0..n_features {
+            let v = x[[i, j]].to_f64().unwrap();
+            observed[c][j] += v;
+            feature_sum[j] += v;
+        }
+    }
+    let n = n_samples as f64;
+    let dof = (n_classes - 1) as f64;
+    let mut scores = Array1::<F>::zeros(n_features);
+    let mut pvalues = Array1::<F>::zeros(n_features);
+    for j in 0..n_features {
+        let mut stat = 0.0;
+        for c in 0..n_classes {
+            let expected = class_count[c] / n * feature_sum[j];
+            let d = observed[c][j] - expected;
+            stat += d * d / expected; // 0/0 -> NaN like sklearn
+        }
+        scores[j] = F::from_f64(stat).unwrap();
+        pvalues[j] = F::from_f64(chi2_sf(stat, dof)).unwrap();
+    }
+    Ok((scores, pvalues))
 }
 
 /// Compute per-feature variance (unsupervised scoring).
@@ -366,6 +464,140 @@ fn compute_variance<F: Float>(x: &Array2<F>) -> Array1<F> {
 mod tests {
     use super::*;
     use ndarray::array;
+
+    fn sk_data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let x = array![
+            [1.0, 2.0, 0.0, 3.0],
+            [2.0, 1.0, 1.0, 0.0],
+            [3.0, 4.0, 0.0, 1.0],
+            [0.0, 2.0, 2.0, 5.0],
+            [5.0, 1.0, 0.0, 2.0],
+            [2.0, 3.0, 1.0, 1.0],
+            [4.0, 0.0, 3.0, 2.0],
+            [1.0, 1.0, 0.0, 0.0]
+        ];
+        let y = array![0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 0.0, 1.0];
+        let yr = array![1.2, 0.3, 2.8, -0.5, 4.1, 1.9, 3.3, 0.2];
+        (x, y, yr)
+    }
+
+    fn assert_vec(a: &Array1<f64>, b: &[f64], tol: f64) {
+        for (x, y) in a.iter().zip(b) {
+            assert!(
+                (x - y).abs() <= tol * y.abs().max(1.0),
+                "got {a:?}, expected {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scores_and_pvalues_match_sklearn() {
+        // sklearn 1.8 f_classif / chi2 / f_regression on the same data.
+        let (x, y, yr) = sk_data();
+        let f = SelectKBest::new(1, ScoringFunction::FClassif)
+            .fit(&x, &y)
+            .unwrap();
+        assert_vec(
+            f.scores(),
+            &[
+                1.024096385542168,
+                0.8173076923076918,
+                0.33244680851063807,
+                0.04347826086956553,
+            ],
+            1e-12,
+        );
+        assert_vec(
+            f.pvalues().unwrap(),
+            &[
+                0.42386794721672477,
+                0.4930439479293624,
+                0.7318896650420783,
+                0.9578112781492958,
+            ],
+            1e-9,
+        );
+        let f = SelectKBest::new(2, ScoringFunction::Chi2)
+            .fit(&x, &y)
+            .unwrap();
+        assert_vec(
+            f.scores(),
+            &[
+                2.5185185185185186,
+                1.619047619047619,
+                1.1904761904761905,
+                0.19047619047619047,
+            ],
+            1e-12,
+        );
+        assert_vec(
+            f.pvalues().unwrap(),
+            &[
+                0.283864218432727,
+                0.4450699538427625,
+                0.551431257080004,
+                0.909156442876713,
+            ],
+            1e-9,
+        );
+        assert_eq!(f.selected_indices(), &[0, 1]);
+        let f = SelectKBest::new(1, ScoringFunction::FRegression)
+            .fit(&x, &yr)
+            .unwrap();
+        assert_vec(
+            f.scores(),
+            &[
+                43.422639713293435,
+                0.003893002975984549,
+                0.01037474002364104,
+                0.11906528189910984,
+            ],
+            1e-10,
+        );
+        assert_vec(
+            f.pvalues().unwrap(),
+            &[
+                0.0005866287795907776,
+                0.9522757151649666,
+                0.9221893020094964,
+                0.7418250707222199,
+            ],
+            1e-8,
+        );
+        // Perfect separation -> F = inf, p = 0 (sklearn).
+        let xs: Array2<f64> = array![[0.0, 1.0], [0.0, 2.0], [1.0, 3.0], [1.0, 4.0]];
+        let ys = array![0.0, 0.0, 1.0, 1.0];
+        let f = SelectKBest::new(1, ScoringFunction::FClassif)
+            .fit(&xs, &ys)
+            .unwrap();
+        assert!(f.scores()[0].is_infinite());
+        assert_eq!(f.pvalues().unwrap()[0], 0.0);
+        assert_vec(f.pvalues().unwrap(), &[0.0, 0.10557280900008414], 1e-9);
+    }
+
+    #[test]
+    fn test_chi2_rejects_negative_input() {
+        let x = array![[1.0, -1.0], [0.0, 2.0]];
+        let y = array![0.0, 1.0];
+        assert!(SelectKBest::new(1, ScoringFunction::Chi2)
+            .fit(&x, &y)
+            .is_err());
+    }
+
+    #[test]
+    fn test_mutual_info_scorers() {
+        let (x, y, yr) = sk_data();
+        let f = SelectKBest::new(2, ScoringFunction::MutualInfoClassif)
+            .fit(&x, &y)
+            .unwrap();
+        assert!(f.pvalues().is_none());
+        assert_eq!(f.scores().len(), 4);
+        assert!(f.scores().iter().all(|&v| v >= 0.0));
+        let f = SelectKBest::new(1, ScoringFunction::MutualInfoRegression)
+            .fit(&x, &yr)
+            .unwrap();
+        assert!(f.scores().iter().all(|&v| v >= 0.0));
+    }
 
     #[test]
     fn test_f_classif_selects_discriminative_feature() {

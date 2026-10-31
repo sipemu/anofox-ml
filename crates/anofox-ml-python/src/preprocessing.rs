@@ -369,11 +369,12 @@ pub struct MutualInformationSelector {
 #[pymethods]
 impl MutualInformationSelector {
     #[new]
-    #[pyo3(signature = (n_features_to_select, n_bins=10))]
-    fn new(n_features_to_select: usize, n_bins: usize) -> Self {
+    #[pyo3(signature = (n_features_to_select, n_neighbors=3, random_state=0))]
+    fn new(n_features_to_select: usize, n_neighbors: usize, random_state: u64) -> Self {
         Self {
             inner: anofox_ml_preprocessing::MutualInformationSelector::new(n_features_to_select)
-                .with_n_bins(n_bins),
+                .with_n_neighbors(n_neighbors)
+                .with_random_state(random_state),
             fitted: None,
         }
     }

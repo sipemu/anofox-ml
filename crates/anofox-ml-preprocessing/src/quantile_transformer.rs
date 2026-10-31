@@ -1,6 +1,9 @@
 use crate::quantile::{percentile_sorted, sorted_non_nan};
-use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
+use crate::special::{norm_cdf, norm_ppf};
+use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 use ndarray::Array2;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 /// Output distribution for the quantile transformer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11,24 +14,44 @@ pub enum OutputDistribution {
     Normal,
 }
 
+fn default_subsample() -> Option<usize> {
+    Some(10_000)
+}
+
 /// Parameters for QuantileTransformer (unfitted state).
 ///
 /// Transforms features to follow a uniform or normal distribution by
 /// estimating the cumulative distribution function (CDF) via quantiles.
+/// Mirrors `sklearn.preprocessing.QuantileTransformer`, including the
+/// two-sided interpolation that averages the forward and reversed
+/// interpolation so repeated quantiles (discrete / zero-inflated data) map
+/// to the centre of their CDF plateau, and the `subsample` of rows used to
+/// estimate the quantiles. NaNs are ignored at fit time and passed through.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuantileTransformer {
     /// Number of quantiles to compute. Clamped to n_samples if larger.
     pub n_quantiles: usize,
     /// Target output distribution.
     pub output_distribution: OutputDistribution,
+    /// Maximum number of rows used to estimate the quantiles (rows are
+    /// drawn without replacement when `n_samples > subsample`). `None`
+    /// uses all rows. Default `Some(10_000)` like sklearn.
+    #[serde(default = "default_subsample")]
+    pub subsample: Option<usize>,
+    /// Seed for the row subsample.
+    #[serde(default)]
+    pub random_state: u64,
 }
 
 impl QuantileTransformer {
-    /// Create a new `QuantileTransformer` with defaults (1000 quantiles, uniform output).
+    /// Create a new `QuantileTransformer` with defaults (1000 quantiles,
+    /// uniform output, subsample 10 000).
     pub fn new() -> Self {
         Self {
             n_quantiles: 1000,
             output_distribution: OutputDistribution::Uniform,
+            subsample: default_subsample(),
+            random_state: 0,
         }
     }
 
@@ -41,6 +64,19 @@ impl QuantileTransformer {
     /// Set the output distribution.
     pub fn output_distribution(mut self, output_distribution: OutputDistribution) -> Self {
         self.output_distribution = output_distribution;
+        self
+    }
+
+    /// Set the maximum number of rows used to estimate quantiles
+    /// (`None` = all rows).
+    pub fn with_subsample(mut self, subsample: Option<usize>) -> Self {
+        self.subsample = subsample;
+        self
+    }
+
+    /// Set the seed for the row subsample.
+    pub fn with_random_state(mut self, seed: u64) -> Self {
+        self.random_state = seed;
         self
     }
 }
@@ -62,102 +98,43 @@ pub struct FittedQuantileTransformer<F: Float> {
     output_distribution: OutputDistribution,
 }
 
-/// Approximate the inverse of the standard normal CDF (probit function)
-/// using the rational approximation by Peter Acklam.
+/// sklearn's `BOUNDS_THRESHOLD`.
+const BOUNDS_THRESHOLD: f64 = 1e-7;
+
+/// Kept for backwards compatibility of the (private) test helper name; the
+/// accurate quantile function lives in `crate::special`.
+#[cfg(test)]
 fn inverse_normal_cdf(p: f64) -> f64 {
-    if p <= 0.0 {
-        return -8.0; // clamp
-    }
-    if p >= 1.0 {
-        return 8.0; // clamp
-    }
-
-    // Coefficients for the rational approximation
-    const A: [f64; 6] = [
-        -3.969683028665376e+01,
-        2.209460984245205e+02,
-        -2.759285104469687e+02,
-        1.383577518672690e+02,
-        -3.066479806614716e+01,
-        2.506628277459239e+00,
-    ];
-    const B: [f64; 5] = [
-        -5.447609879822406e+01,
-        1.615858368580409e+02,
-        -1.556989798598866e+02,
-        6.680131188771972e+01,
-        -1.328068155288572e+01,
-    ];
-    const C: [f64; 6] = [
-        -7.784894002430293e-03,
-        -3.223964580411365e-01,
-        -2.400758277161838e+00,
-        -2.549732539343734e+00,
-        4.374664141464968e+00,
-        2.938163982698783e+00,
-    ];
-    const D: [f64; 4] = [
-        7.784695709041462e-03,
-        3.224671290700398e-01,
-        2.445134137142996e+00,
-        3.754408661907416e+00,
-    ];
-
-    let p_low = 0.02425;
-    let p_high = 1.0 - p_low;
-
-    if p < p_low {
-        // Rational approximation for lower region
-        let q = (-2.0 * p.ln()).sqrt();
-        (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
-            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
-    } else if p <= p_high {
-        // Rational approximation for central region
-        let q = p - 0.5;
-        let r = q * q;
-        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q
-            / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
-    } else {
-        // Rational approximation for upper region
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
-        -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
-            / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
-    }
+    norm_ppf(p)
 }
 
-/// Linear interpolation: given sorted `xp` with corresponding `fp`,
-/// find the interpolated value at `x`.
+/// `np.interp(x, xp, fp)` for ascending (possibly repeated) `xp`.
+///
+/// Matches numpy exactly, including for ties: the interval is the last `j`
+/// with `xp[j] <= x`, so for a run of equal `xp` values the *last* `fp` of
+/// the run is returned.
 fn interp(x: f64, xp: &[f64], fp: &[f64]) -> f64 {
     debug_assert_eq!(xp.len(), fp.len());
     let n = xp.len();
     if n == 0 {
-        return 0.0;
+        return f64::NAN;
     }
-    if x <= xp[0] {
+    if x < xp[0] {
         return fp[0];
     }
-    if x >= xp[n - 1] {
+    if x > xp[n - 1] {
         return fp[n - 1];
     }
-
-    // Binary search for the interval
-    let mut lo = 0;
-    let mut hi = n - 1;
-    while lo + 1 < hi {
-        let mid = (lo + hi) / 2;
-        if xp[mid] <= x {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
+    // last j with xp[j] <= x
+    let j = xp.partition_point(|&v| v <= x).saturating_sub(1);
+    if j >= n - 1 {
+        return fp[n - 1];
     }
-
-    let dx = xp[hi] - xp[lo];
-    if dx.abs() < 1e-30 {
-        return fp[lo];
+    if x == xp[j] {
+        return fp[j];
     }
-    let t = (x - xp[lo]) / dx;
-    fp[lo] + t * (fp[hi] - fp[lo])
+    let slope = (fp[j + 1] - fp[j]) / (xp[j + 1] - xp[j]);
+    slope * (x - xp[j]) + fp[j]
 }
 
 impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
@@ -167,18 +144,49 @@ impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
+        if self.n_quantiles == 0 {
+            return Err(RustMlError::InvalidParameter(
+                "n_quantiles must be at least 1".into(),
+            ));
+        }
+        if let Some(sub) = self.subsample {
+            if sub == 0 {
+                return Err(RustMlError::InvalidParameter(
+                    "subsample must be at least 1".into(),
+                ));
+            }
+            if self.n_quantiles > sub {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "the number of quantiles cannot be greater than the number of samples \
+                     used: got {} quantiles and subsample = {}",
+                    self.n_quantiles, sub
+                )));
+            }
+        }
 
         let n_samples = x.nrows();
         let ncols = x.ncols();
-        let effective_n = self.n_quantiles.min(n_samples);
+        let effective_n = self.n_quantiles.min(n_samples).max(1);
 
-        // Compute reference positions in [0, 1]
+        // np.linspace(0, 1, n_quantiles_)
         let references: Vec<f64> = if effective_n == 1 {
-            vec![0.5]
+            vec![0.0]
         } else {
-            (0..effective_n)
-                .map(|i| i as f64 / (effective_n - 1) as f64)
-                .collect()
+            let step = 1.0 / (effective_n - 1) as f64;
+            let mut r: Vec<f64> = (0..effective_n).map(|i| i as f64 * step).collect();
+            r[effective_n - 1] = 1.0;
+            r
+        };
+
+        // Row subsample (without replacement), shared by all columns.
+        let rows: Option<Vec<usize>> = match self.subsample {
+            Some(sub) if sub < n_samples => {
+                let mut rng = StdRng::seed_from_u64(self.random_state);
+                let mut idx = rand::seq::index::sample(&mut rng, n_samples, sub).into_vec();
+                idx.sort_unstable();
+                Some(idx)
+            }
+            _ => None,
         };
 
         let mut quantiles = Vec::with_capacity(ncols);
@@ -186,9 +194,12 @@ impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
         for j in 0..ncols {
             // NaNs are ignored at fit time (sklearn uses `np.nanpercentile`)
             // and pass through `transform` unchanged.
-            let col = sorted_non_nan(x.column(j).iter().copied());
+            let column = x.column(j);
+            let col = match &rows {
+                Some(idx) => sorted_non_nan(idx.iter().map(|&i| column[i])),
+                None => sorted_non_nan(column.iter().copied()),
+            };
 
-            // Compute quantiles at the reference positions
             let q: Vec<F> = references
                 .iter()
                 .map(|&p| percentile_sorted(&col, p))
@@ -205,8 +216,8 @@ impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
     }
 }
 
-impl<F: Float> Transform<F> for FittedQuantileTransformer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+impl<F: Float> FittedQuantileTransformer<F> {
+    fn apply(&self, x: &Array2<F>, inverse: bool) -> Result<Array2<F>> {
         let expected_cols = self.quantiles.len();
         if x.ncols() != expected_cols {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -215,40 +226,89 @@ impl<F: Float> Transform<F> for FittedQuantileTransformer<F> {
                 x.ncols()
             )));
         }
-
         let mut result = Array2::<F>::zeros(x.raw_dim());
-
         for j in 0..x.ncols() {
-            let q = &self.quantiles[j];
-            // Build xp (quantile values as f64) and fp (references)
-            let xp: Vec<f64> = q.iter().map(|&v| v.to_f64().unwrap()).collect();
-            let fp = &self.references;
-
+            let q: Vec<f64> = self.quantiles[j]
+                .iter()
+                .map(|v| v.to_f64().unwrap())
+                .collect();
             for i in 0..x.nrows() {
                 let val = x[[i, j]].to_f64().unwrap();
-                // NaN passes through; an all-NaN training column has NaN
-                // quantiles and maps everything to NaN.
-                if val.is_nan() || xp.first().is_none_or(|v| v.is_nan()) {
-                    result[[i, j]] = F::nan();
-                    continue;
-                }
-                // Interpolate: map from data space to [0, 1]
-                let mut u = interp(val, &xp, fp);
-
-                // Clip to (epsilon, 1 - epsilon) to avoid infinities in normal transform
-                let eps = 1e-7;
-                u = u.max(eps).min(1.0 - eps);
-
-                let out = match self.output_distribution {
-                    OutputDistribution::Uniform => u,
-                    OutputDistribution::Normal => inverse_normal_cdf(u),
-                };
-
+                let out =
+                    transform_value(val, &q, &self.references, self.output_distribution, inverse);
                 result[[i, j]] = F::from_f64(out).unwrap();
             }
         }
-
         Ok(result)
+    }
+}
+
+/// Port of sklearn's `QuantileTransformer._transform_col` for a single
+/// value. Maps through one feature's quantile function (forward:
+/// data → uniform/normal; inverse: uniform/normal → data).
+fn transform_value(
+    value: f64,
+    quantiles: &[f64],
+    references: &[f64],
+    dist: OutputDistribution,
+    inverse: bool,
+) -> f64 {
+    // NaN passes through; an all-NaN training column has NaN quantiles and
+    // maps everything to NaN.
+    if value.is_nan() || quantiles.first().is_none_or(|v| v.is_nan()) {
+        return f64::NAN;
+    }
+    let n = quantiles.len();
+    let (lower_x, upper_x, lower_y, upper_y) = if inverse {
+        (0.0, 1.0, quantiles[0], quantiles[n - 1])
+    } else {
+        (quantiles[0], quantiles[n - 1], 0.0, 1.0)
+    };
+    let mut v = value;
+    if inverse && dist == OutputDistribution::Normal {
+        v = norm_cdf(v);
+    }
+    let (is_lower, is_upper) = match dist {
+        OutputDistribution::Normal => (
+            v - BOUNDS_THRESHOLD < lower_x,
+            v + BOUNDS_THRESHOLD > upper_x,
+        ),
+        OutputDistribution::Uniform => (v == lower_x, v == upper_x),
+    };
+    let mut out = if !inverse {
+        // Average of the forward and the reversed interpolation, so that a
+        // run of repeated quantiles maps to the middle of its plateau.
+        let rq: Vec<f64> = quantiles.iter().rev().map(|&t| -t).collect();
+        let rr: Vec<f64> = references.iter().rev().map(|&t| -t).collect();
+        0.5 * (interp(v, quantiles, references) - interp(-v, &rq, &rr))
+    } else {
+        interp(v, references, quantiles)
+    };
+    if is_upper {
+        out = upper_y;
+    }
+    if is_lower {
+        out = lower_y;
+    }
+    if !inverse && dist == OutputDistribution::Normal {
+        let clip_min = norm_ppf(BOUNDS_THRESHOLD - f64::EPSILON);
+        let clip_max = norm_ppf(1.0 - (BOUNDS_THRESHOLD - f64::EPSILON));
+        out = norm_ppf(out).clamp(clip_min, clip_max);
+    }
+    out
+}
+
+impl<F: Float> Transform<F> for FittedQuantileTransformer<F> {
+    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.apply(x, false)
+    }
+}
+
+impl<F: Float> InverseTransform<F> for FittedQuantileTransformer<F> {
+    /// Map uniform (or standard-normal) values back to the data scale by
+    /// interpolating the stored quantiles (sklearn `inverse_transform`).
+    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.apply(x, true)
     }
 }
 
@@ -289,6 +349,146 @@ mod tests {
         assert!(fitted.transform(&array![[1.0]]).unwrap()[[0, 0]].is_nan());
     }
 
+    fn zero_inflated() -> Array2<f64> {
+        array![
+            [0.0, 1.0],
+            [0.0, 2.0],
+            [0.0, 3.0],
+            [0.0, 4.0],
+            [1.0, 5.0],
+            [2.0, 6.0],
+            [0.0, 7.0],
+            [3.0, 8.0],
+            [0.0, 9.0],
+            [5.0, 10.0]
+        ]
+    }
+
+    fn assert_rows(actual: &Array2<f64>, expected: &[[f64; 2]], tol: f64) {
+        for (i, row) in expected.iter().enumerate() {
+            for (j, &e) in row.iter().enumerate() {
+                assert_abs_diff_eq!(actual[[i, j]], e, epsilon = tol);
+            }
+        }
+    }
+
+    #[test]
+    fn test_repeated_quantiles_match_sklearn() {
+        // sklearn 1.8: QuantileTransformer(n_quantiles=6).fit(X)
+        let x = zero_inflated();
+        let qt = QuantileTransformer::new().n_quantiles(6);
+        let fitted = FitUnsupervised::<f64>::fit(&qt, &x).unwrap();
+        assert_eq!(fitted.quantiles()[0][..3], [0.0, 0.0, 0.0]);
+        let t = fitted.transform(&x).unwrap();
+        let expected_col0 = [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.6666666666666667,
+            0.7777777777777778,
+            0.0,
+            0.8571428571428572,
+            0.0,
+            1.0,
+        ];
+        for (i, &e) in expected_col0.iter().enumerate() {
+            assert_abs_diff_eq!(t[[i, 0]], e, epsilon = 1e-12);
+            assert_abs_diff_eq!(t[[i, 1]], i as f64 / 9.0, epsilon = 1e-12);
+        }
+        // New points, including a value *inside* the plateau of repeated
+        // zero quantiles -> 0.5 * (forward + reversed) interpolation.
+        let xt = array![[-1.0, 0.5], [0.5, 2.5], [4.0, 11.0], [0.0, 1.0]];
+        let t = fitted.transform(&xt).unwrap();
+        assert_rows(
+            &t,
+            &[
+                [0.0, 0.0],
+                [0.6111111111111112, 0.16666666666666669],
+                [0.9285714285714286, 1.0],
+                [0.0, 0.0],
+            ],
+            1e-12,
+        );
+
+        let qn = QuantileTransformer::new()
+            .n_quantiles(6)
+            .output_distribution(OutputDistribution::Normal);
+        let fitted_n = FitUnsupervised::<f64>::fit(&qn, &x).unwrap();
+        let t = fitted_n.transform(&xt).unwrap();
+        assert_rows(
+            &t,
+            &[
+                [-5.199337582605575, -5.199337582605575],
+                [0.28221614706250825, -0.967421566101701],
+                [1.465233792685523, 5.19933758270342],
+                [-5.199337582605575, -5.199337582605575],
+            ],
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_inverse_transform_matches_sklearn() {
+        let x = zero_inflated();
+        let fitted =
+            FitUnsupervised::<f64>::fit(&QuantileTransformer::new().n_quantiles(6), &x).unwrap();
+        let u = array![[0.0, 0.0], [0.1, 0.35], [0.5, 0.9], [1.0, 1.0]];
+        let inv = fitted.inverse_transform(&u).unwrap();
+        assert_rows(
+            &inv,
+            &[
+                [0.0, 1.0],
+                [0.0, 4.1499999999999995],
+                [0.20000000000000004, 9.1],
+                [5.0, 10.0],
+            ],
+            1e-12,
+        );
+        let fitted_n = FitUnsupervised::<f64>::fit(
+            &QuantileTransformer::new()
+                .n_quantiles(6)
+                .output_distribution(OutputDistribution::Normal),
+            &x,
+        )
+        .unwrap();
+        let z = array![[-6.0, -0.3], [0.2, 1.1], [0.0, 6.0]];
+        let inv = fitted_n.inverse_transform(&z).unwrap();
+        assert_rows(
+            &inv,
+            &[
+                [0.0, 4.438797200299426],
+                [0.3585194188782061, 8.779005451482556],
+                [0.20000000000000004, 10.0],
+            ],
+            1e-9,
+        );
+    }
+
+    #[test]
+    fn test_subsample_limits_rows_used() {
+        // 2000 rows, subsample 500: quantiles come from 500 rows only, are
+        // deterministic for a fixed seed, and still approximate the CDF.
+        let n = 2000;
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let qt = QuantileTransformer::new()
+            .n_quantiles(100)
+            .with_subsample(Some(500))
+            .with_random_state(7);
+        let a = FitUnsupervised::<f64>::fit(&qt, &x).unwrap();
+        let b = FitUnsupervised::<f64>::fit(&qt, &x).unwrap();
+        assert_eq!(a.quantiles(), b.quantiles());
+        let full = FitUnsupervised::<f64>::fit(&qt.clone().with_subsample(None), &x).unwrap();
+        assert_ne!(a.quantiles(), full.quantiles());
+        let t = a.transform(&array![[1000.0]]).unwrap();
+        assert!((t[[0, 0]] - 0.5).abs() < 0.05);
+        // n_quantiles > subsample is rejected like sklearn.
+        let bad = QuantileTransformer::new()
+            .n_quantiles(100)
+            .with_subsample(Some(50));
+        assert!(FitUnsupervised::<f64>::fit(&bad, &x).is_err());
+    }
+
     #[test]
     fn test_uniform_output() {
         let x = array![
@@ -304,14 +504,13 @@ mod tests {
         let fitted = FitUnsupervised::<f64>::fit(&qt, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
-        // With 5 samples and 5 quantiles, the result should be approximately
-        // [0, 0.25, 0.5, 0.75, 1.0] clipped to (eps, 1-eps)
-        let eps = 1e-7;
-        assert_abs_diff_eq!(transformed[[0, 0]], eps, epsilon = 1e-6);
-        assert_abs_diff_eq!(transformed[[1, 0]], 0.25, epsilon = 1e-6);
-        assert_abs_diff_eq!(transformed[[2, 0]], 0.5, epsilon = 1e-6);
-        assert_abs_diff_eq!(transformed[[3, 0]], 0.75, epsilon = 1e-6);
-        assert_abs_diff_eq!(transformed[[4, 0]], 1.0 - eps, epsilon = 1e-6);
+        // With 5 samples and 5 quantiles the result is exactly
+        // [0, 0.25, 0.5, 0.75, 1.0] (sklearn does not clip uniform output).
+        assert_abs_diff_eq!(transformed[[0, 0]], 0.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(transformed[[1, 0]], 0.25, epsilon = 1e-12);
+        assert_abs_diff_eq!(transformed[[2, 0]], 0.5, epsilon = 1e-12);
+        assert_abs_diff_eq!(transformed[[3, 0]], 0.75, epsilon = 1e-12);
+        assert_abs_diff_eq!(transformed[[4, 0]], 1.0, epsilon = 1e-12);
     }
 
     #[test]
@@ -363,9 +562,9 @@ mod tests {
         let fitted = FitUnsupervised::<f64>::fit(&qt, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
-        // All values should be in (0, 1)
+        // All values should be in [0, 1]
         for &v in transformed.iter() {
-            assert!(v > 0.0 && v < 1.0, "value out of range: {}", v);
+            assert!((0.0..=1.0).contains(&v), "value out of range: {}", v);
         }
     }
 

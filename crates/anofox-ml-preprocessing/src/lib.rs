@@ -53,6 +53,7 @@ pub mod robust_scaler;
 pub mod select_from_model;
 pub mod select_k_best;
 pub mod simple_imputer;
+pub(crate) mod special;
 pub mod standard_scaler;
 pub mod truncated_svd;
 pub mod variance_threshold;
@@ -67,21 +68,28 @@ pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
 pub use label_encoder::{FittedLabelEncoder, LabelEncoder};
 pub use max_abs_scaler::{FittedMaxAbsScaler, MaxAbsScaler};
 pub use minmax_scaler::{FittedMinMaxScaler, MinMaxScaler};
-pub use mutual_information::{FittedMutualInformationSelector, MutualInformationSelector};
+pub use mutual_information::{
+    mutual_info_classif, mutual_info_regression, DiscreteFeatures, FittedMutualInformationSelector,
+    MiTarget, MutualInformationSelector,
+};
 pub use nmf::{FittedNmf, Nmf};
 pub use normalizer::{FittedNormalizer, NormType, Normalizer};
-pub use one_hot_encoder::{FittedOneHotEncoder, OneHotEncoder};
-pub use ordinal_encoder::{FittedOrdinalEncoder, OrdinalEncoder};
+pub use one_hot_encoder::{
+    Category, FittedOneHotEncoder, HandleUnknown, MinFrequency, OneHotDrop, OneHotEncoder,
+};
+pub use ordinal_encoder::{FittedOrdinalEncoder, OrdinalEncoder, OrdinalHandleUnknown};
 pub use pca::{FittedPca, Pca};
 pub use pls::{FittedPlsRegression, PlsRegression};
 pub use polynomial_features::{FittedPolynomialFeatures, PolynomialFeatures};
-pub use power_transformer::{FittedPowerTransformer, PowerTransformer};
+pub use power_transformer::{FittedPowerTransformer, PowerMethod, PowerTransformer};
 pub use quantile_transformer::{
     FittedQuantileTransformer, OutputDistribution, QuantileTransformer,
 };
-pub use rfe::{FittedRfe, FittedSequentialFeatureSelector, Rfe, SequentialFeatureSelector};
+pub use rfe::{
+    FittedRfe, FittedRfecv, FittedSequentialFeatureSelector, Rfe, Rfecv, SequentialFeatureSelector,
+};
 pub use robust_scaler::{FittedRobustScaler, RobustScaler};
-pub use select_from_model::{FittedSelectFromModel, SelectFromModel};
+pub use select_from_model::{FittedSelectFromModel, SelectFromModel, Threshold};
 pub use select_k_best::{FittedSelectKBest, SelectKBest};
 pub use simple_imputer::{FittedSimpleImputer, ImputeStrategy, SimpleImputer};
 pub use standard_scaler::{FittedStandardScaler, StandardScaler};
