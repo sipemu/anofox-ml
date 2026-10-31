@@ -115,6 +115,7 @@ impl<F: Float> Fit<F> for BaggingRegressor {
             min_samples_leaf: 1,
             max_features: None,
             sample_weight: None,
+            seed: 0,
         };
 
         // Pre-generate bootstrap row indices for determinism

@@ -55,28 +55,119 @@ impl MaxFeatures {
     }
 }
 
-/// Select a random subset of feature indices using xorshift64.
+/// SplitMix64 finalizer: a fast, high-quality 64-bit mixing function.
 ///
-/// Returns `k` distinct indices from `0..n_features` using a deterministic
-/// pseudo-random shuffle seeded by `seed`. Falls back to all features if
-/// `k >= n_features`.
+/// Used to derive independent pseudo-random streams (per tree, per node,
+/// per child) from a single seed without pulling `rand` into this crate.
+#[inline]
+pub fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Derive the RNG seed of a child node from its parent's seed.
+///
+/// `child_bit` is `0` for the left child and `1` for the right child. The
+/// parent seed is mixed *before* the child bit is combined, so that e.g. the
+/// left-right and right-left grandchildren get unrelated seeds (unlike simple
+/// `seed + 1` / `seed + 2` schemes), and nothing wraps or collides with depth.
+#[inline]
+pub fn child_seed(parent_seed: u64, child_bit: u64) -> u64 {
+    splitmix64(splitmix64(parent_seed) ^ child_bit)
+}
+
+/// Tiny deterministic PRNG (SplitMix64 stream).
+#[derive(Debug, Clone)]
+pub(crate) struct SplitMixRng {
+    state: u64,
+}
+
+impl SplitMixRng {
+    #[inline]
+    pub(crate) fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    #[inline]
+    pub(crate) fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform float in `[0, 1)` (53 random bits).
+    #[inline]
+    pub(crate) fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+}
+
+/// Select a random subset of feature indices.
+///
+/// Returns `k` distinct indices from `0..n_features` (sorted) using a
+/// deterministic partial Fisher-Yates shuffle seeded by `seed`. Falls back
+/// to all features if `k >= n_features`.
 pub fn select_feature_subset(n_features: usize, k: usize, seed: u64) -> Vec<usize> {
     if k >= n_features {
         return (0..n_features).collect();
     }
     let mut indices: Vec<usize> = (0..n_features).collect();
-    let mut state = seed.wrapping_add(0x9E3779B97F4A7C15);
+    let mut rng = SplitMixRng::new(seed);
     for i in 0..k {
-        // xorshift64
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let j = i + (state as usize) % (n_features - i);
+        let j = i + (rng.next_u64() % (n_features - i) as u64) as usize;
         indices.swap(i, j);
     }
     indices.truncate(k);
     indices.sort_unstable();
     indices
+}
+
+/// Features of `0..n_features` that are *not* in the sorted slice `subset`.
+pub fn complement_features(n_features: usize, subset: &[usize]) -> Vec<usize> {
+    (0..n_features)
+        .filter(|f| subset.binary_search(f).is_err())
+        .collect()
+}
+
+/// Total-order comparison for floats that never panics: NaN compares equal to
+/// NaN and greater than every non-NaN value.
+#[inline]
+pub fn cmp_nan_last<F: Float>(a: &F, b: &F) -> std::cmp::Ordering {
+    match a.partial_cmp(b) {
+        Some(o) => o,
+        None => a.is_nan().cmp(&b.is_nan()),
+    }
+}
+
+/// Deterministic majority vote: the most frequent value in `votes`; ties go
+/// to the *smallest* value (matching sklearn's `argmax` over sorted classes).
+///
+/// # Panics
+/// Panics if `votes` is empty.
+pub fn majority_vote<F: Float>(votes: &[F]) -> F {
+    let mut sorted: Vec<F> = votes.to_vec();
+    sorted.sort_by(cmp_nan_last);
+    let mut best = sorted[0];
+    let mut best_count = 0usize;
+    let mut i = 0;
+    while i < sorted.len() {
+        let v = sorted[i];
+        let mut j = i + 1;
+        while j < sorted.len() && float_key(sorted[j]) == float_key(v) {
+            j += 1;
+        }
+        // Strict `>` keeps the first (smallest) value on ties.
+        if j - i > best_count {
+            best_count = j - i;
+            best = v;
+        }
+        i = j;
+    }
+    best
 }
 
 /// Result of finding the best split at a node.
@@ -157,7 +248,7 @@ fn sort_feature_pairs<F: Float>(
 ) {
     sorted_pairs.clear();
     sorted_pairs.extend(indices.iter().map(|&i| (x[[i, feature]], i)));
-    sorted_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    sorted_pairs.sort_by(|a, b| cmp_nan_last(&a.0, &b.0));
 }
 
 /// Candidate best split (without index vectors) used during the search.
@@ -373,8 +464,10 @@ fn evaluate_candidate_split<F: Float, A: SplitAccumulator<F>>(
     next_val: F,
     parent_impurity: F,
 ) -> Option<(F, F)> {
-    // Only consider a split between distinct values.
-    if (next_val - cur_val).abs() < F::from_f64(1e-15).unwrap() {
+    // Only consider a split between distinct, non-NaN values. NaN sorts
+    // last, so NaN rows always go to the right child (no native missing-value
+    // support yet, see #47) instead of producing a NaN threshold.
+    if next_val.is_nan() || (next_val - cur_val).abs() < F::from_f64(1e-15).unwrap() {
         return None;
     }
 
@@ -557,6 +650,41 @@ fn impurity_from_counts<F: Float>(counts: &[usize], total: usize, criterion: Spl
     }
 }
 
+/// Gini or Entropy impurity from (weighted) per-class totals.
+#[inline]
+fn impurity_from_weights<F: Float, I: Iterator<Item = F>>(
+    class_weights: I,
+    total_weight: F,
+    criterion: SplitCriterion,
+) -> F {
+    if total_weight <= F::zero() {
+        return F::zero();
+    }
+    match criterion {
+        SplitCriterion::Gini => {
+            let sum_sq = class_weights
+                .filter(|&w| w > F::zero())
+                .map(|w| {
+                    let p = w / total_weight;
+                    p * p
+                })
+                .fold(F::zero(), |a, b| a + b);
+            F::one() - sum_sq
+        }
+        SplitCriterion::Entropy => {
+            let sum = class_weights
+                .filter(|&w| w > F::zero())
+                .map(|w| {
+                    let p = w / total_weight;
+                    p * p.ln()
+                })
+                .fold(F::zero(), |a, b| a + b);
+            -sum
+        }
+        SplitCriterion::Mse => unreachable!("MSE does not use class weights"),
+    }
+}
+
 /// Compute impurity for a subset of samples.
 #[inline]
 pub fn compute_impurity<F: Float>(
@@ -628,11 +756,14 @@ pub fn count_classes<F: Float>(y: &Array1<F>, indices: &[usize]) -> Vec<(F, usiz
         map.entry(bits).and_modify(|e| e.1 += 1).or_insert((val, 1));
     }
     let mut counts: Vec<(F, usize)> = map.into_values().collect();
-    counts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    counts.sort_by(|a, b| cmp_nan_last(&a.0, &b.0));
     counts
 }
 
 /// Compute the majority class (for classification) or mean (for regression).
+///
+/// Classification ties are broken in favour of the smallest class label
+/// (sklearn's `argmax` over sorted classes).
 #[inline]
 pub fn leaf_value<F: Float>(y: &Array1<F>, indices: &[usize], criterion: SplitCriterion) -> F {
     match criterion {
@@ -641,12 +772,15 @@ pub fn leaf_value<F: Float>(y: &Array1<F>, indices: &[usize], criterion: SplitCr
             indices.iter().map(|&i| y[i]).fold(F::zero(), |a, b| a + b) / n
         }
         SplitCriterion::Gini | SplitCriterion::Entropy => {
+            // `count_classes` is sorted ascending by label; keep the first max.
             let counts = count_classes(y, indices);
-            counts
-                .into_iter()
-                .max_by_key(|&(_, count)| count)
-                .unwrap()
-                .0
+            let mut best = counts[0];
+            for &c in &counts[1..] {
+                if c.1 > best.1 {
+                    best = c;
+                }
+            }
+            best.0
         }
     }
 }
@@ -663,7 +797,29 @@ pub fn find_random_split<F: Float>(
     min_samples_leaf: usize,
     seed: u64,
 ) -> Option<BestSplit<F>> {
-    let n_features = x.ncols();
+    let all_features: Vec<usize> = (0..x.ncols()).collect();
+    find_random_split_with_features(
+        x,
+        y,
+        indices,
+        criterion,
+        min_samples_leaf,
+        &all_features,
+        seed,
+    )
+}
+
+/// Like [`find_random_split`] but only considers the given feature indices
+/// (used for per-split feature subsampling, `max_features`).
+pub fn find_random_split_with_features<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    indices: &[usize],
+    criterion: SplitCriterion,
+    min_samples_leaf: usize,
+    feature_indices: &[usize],
+    seed: u64,
+) -> Option<BestSplit<F>> {
     let n = indices.len();
     if n < 2 * min_samples_leaf {
         return None;
@@ -674,14 +830,15 @@ pub fn find_random_split<F: Float>(
     let mut best: Option<CandidateSplit<F>> = None;
     let mut best_improvement = F::neg_infinity();
 
-    // Simple deterministic RNG (xorshift) to avoid depending on rand in this crate
-    let mut rng_state = seed.wrapping_add(0x9E3779B97F4A7C15);
+    // Simple deterministic RNG (SplitMix64) to avoid depending on rand in this crate
+    let mut rng = SplitMixRng::new(seed);
 
-    for feature in 0..n_features {
+    for &feature in feature_indices {
         // Find min and max of this feature across the indices
-        let mut min_val = x[[indices[0], feature]];
-        let mut max_val = min_val;
-        for &i in &indices[1..] {
+        // (NaN values are skipped; they end up in the right child.)
+        let mut min_val = F::infinity();
+        let mut max_val = F::neg_infinity();
+        for &i in indices {
             let v = x[[i, feature]];
             if v < min_val {
                 min_val = v;
@@ -691,15 +848,13 @@ pub fn find_random_split<F: Float>(
             }
         }
 
-        if (max_val - min_val).abs() < F::from_f64(1e-15).unwrap() {
+        // NaNs were skipped above, so the bounds are comparable here.
+        if max_val <= min_val || (max_val - min_val).abs() < F::from_f64(1e-15).unwrap() {
             continue;
         }
 
-        // Generate random threshold between min and max using xorshift64
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        let t = F::from_f64((rng_state as f64) / (u64::MAX as f64)).unwrap();
+        // Random threshold uniformly in [min, max)
+        let t = F::from_f64(rng.next_f64()).unwrap();
         let threshold = min_val + t * (max_val - min_val);
 
         // Partition and compute impurity
@@ -832,37 +987,14 @@ pub fn compute_weighted_impurity<F: Float>(
     }
 
     match criterion {
-        SplitCriterion::Gini => {
-            // Weighted Gini: 1 - sum(p_k^2) where p_k = weighted_count_k / total_weight
-            let mut class_weights: HashMap<u64, F> = HashMap::new();
-            for &i in indices {
-                let key = float_key(y[i]);
-                *class_weights.entry(key).or_insert(F::zero()) += weights[i];
-            }
-            let sum_sq: F = class_weights
-                .values()
-                .map(|&w| {
-                    let p = w / total_weight;
-                    p * p
-                })
-                .fold(F::zero(), |a, b| a + b);
-            F::one() - sum_sq
-        }
-        SplitCriterion::Entropy => {
-            let mut class_weights: HashMap<u64, F> = HashMap::new();
-            for &i in indices {
-                let key = float_key(y[i]);
-                *class_weights.entry(key).or_insert(F::zero()) += weights[i];
-            }
-            let sum: F = class_weights
-                .values()
-                .filter(|&&w| w > F::zero())
-                .map(|&w| {
-                    let p = w / total_weight;
-                    p * p.ln()
-                })
-                .fold(F::zero(), |a, b| a + b);
-            -sum
+        SplitCriterion::Gini | SplitCriterion::Entropy => {
+            // Sorted by class label -> deterministic summation order.
+            let class_weights = weighted_count_classes(y, indices, weights);
+            impurity_from_weights(
+                class_weights.iter().map(|&(_, w)| w),
+                total_weight,
+                criterion,
+            )
         }
         SplitCriterion::Mse => {
             // Weighted MSE: sum(w_i * (y_i - weighted_mean)^2) / total_weight
@@ -903,20 +1035,17 @@ pub fn weighted_leaf_value<F: Float>(
                 / total_weight
         }
         SplitCriterion::Gini | SplitCriterion::Entropy => {
-            // Weighted majority class
-            let mut class_weights: HashMap<u64, (F, F)> = HashMap::new();
-            for &i in indices {
-                let key = float_key(y[i]);
-                class_weights
-                    .entry(key)
-                    .and_modify(|e| e.1 += weights[i])
-                    .or_insert((y[i], weights[i]));
+            // Weighted majority class; `weighted_count_classes` is sorted by
+            // label, so keeping the first maximum breaks ties towards the
+            // smallest class label (sklearn behaviour).
+            let class_weights = weighted_count_classes(y, indices, weights);
+            let mut best = class_weights[0];
+            for &c in &class_weights[1..] {
+                if c.1 > best.1 {
+                    best = c;
+                }
             }
-            class_weights
-                .into_values()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                .unwrap()
-                .0
+            best.0
         }
     }
 }
@@ -936,7 +1065,7 @@ pub fn weighted_count_classes<F: Float>(
             .or_insert((val, weights[i]));
     }
     let mut counts: Vec<(F, F)> = map.into_values().collect();
-    counts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    counts.sort_by(|a, b| cmp_nan_last(&a.0, &b.0));
     counts
 }
 
@@ -968,34 +1097,49 @@ pub fn find_best_split_weighted<F: Float>(
         .map(|&i| weights[i])
         .fold(F::zero(), |a, b| a + b);
 
+    let is_classification = !matches!(criterion, SplitCriterion::Mse);
+    let class_map = if is_classification {
+        build_class_map(y, indices)
+    } else {
+        HashMap::new()
+    };
+    let n_classes = class_map.len();
+    let mut left_class_weights: Vec<F> = vec![F::zero(); n_classes];
+    let mut right_class_weights: Vec<F> = vec![F::zero(); n_classes];
+
     for &feature in feature_indices {
         sort_feature_pairs(x, indices, feature, &mut sorted_pairs);
 
-        // Track left/right weight sums and weighted impurity incrementally
+        // Track left/right weight sums and weighted impurity incrementally.
+        // Per-class totals live in Vecs indexed by `class_map` so that the
+        // impurity summation order is deterministic.
         let mut left_weight = F::zero();
         let mut right_weight = total_weight;
-        let mut left_class_weights: HashMap<u64, F> = HashMap::new();
-        let mut right_class_weights: HashMap<u64, F> = HashMap::new();
+        left_class_weights.fill(F::zero());
+        right_class_weights.fill(F::zero());
 
         // Initialize right with all samples
-        for &i in indices {
-            let key = float_key(y[i]);
-            *right_class_weights.entry(key).or_insert(F::zero()) += weights[i];
+        if is_classification {
+            for &i in indices {
+                right_class_weights[class_map[&float_key(y[i])]] += weights[i];
+            }
         }
 
         for pos in 0..n - 1 {
             let (cur_val, cur_idx) = sorted_pairs[pos];
             let w = weights[cur_idx];
-            let key = float_key(y[cur_idx]);
 
             // Move from right to left
             left_weight += w;
             right_weight -= w;
-            *left_class_weights.entry(key).or_insert(F::zero()) += w;
-            *right_class_weights.entry(key).or_insert(F::zero()) -= w;
+            if is_classification {
+                let cls = class_map[&float_key(y[cur_idx])];
+                left_class_weights[cls] += w;
+                right_class_weights[cls] -= w;
+            }
 
             let next_val = sorted_pairs[pos + 1].0;
-            if (next_val - cur_val).abs() < F::from_f64(1e-15).unwrap() {
+            if next_val.is_nan() || (next_val - cur_val).abs() < F::from_f64(1e-15).unwrap() {
                 continue;
             }
 
@@ -1008,28 +1152,11 @@ pub fn find_best_split_weighted<F: Float>(
 
             // Compute weighted impurity
             let left_imp = match criterion {
-                SplitCriterion::Gini => {
-                    let sum_sq: F = left_class_weights
-                        .values()
-                        .filter(|&&w| w > F::zero())
-                        .map(|&w| {
-                            let p = w / left_weight;
-                            p * p
-                        })
-                        .fold(F::zero(), |a, b| a + b);
-                    F::one() - sum_sq
-                }
-                SplitCriterion::Entropy => {
-                    let sum: F = left_class_weights
-                        .values()
-                        .filter(|&&w| w > F::zero())
-                        .map(|&w| {
-                            let p = w / left_weight;
-                            p * p.ln()
-                        })
-                        .fold(F::zero(), |a, b| a + b);
-                    -sum
-                }
+                SplitCriterion::Gini | SplitCriterion::Entropy => impurity_from_weights(
+                    left_class_weights.iter().copied(),
+                    left_weight,
+                    criterion,
+                ),
                 SplitCriterion::Mse => {
                     // For MSE, we need running sums — use a simpler approach
                     let left_indices: Vec<usize> =
@@ -1039,28 +1166,11 @@ pub fn find_best_split_weighted<F: Float>(
             };
 
             let right_imp = match criterion {
-                SplitCriterion::Gini => {
-                    let sum_sq: F = right_class_weights
-                        .values()
-                        .filter(|&&w| w > F::zero())
-                        .map(|&w| {
-                            let p = w / right_weight;
-                            p * p
-                        })
-                        .fold(F::zero(), |a, b| a + b);
-                    F::one() - sum_sq
-                }
-                SplitCriterion::Entropy => {
-                    let sum: F = right_class_weights
-                        .values()
-                        .filter(|&&w| w > F::zero())
-                        .map(|&w| {
-                            let p = w / right_weight;
-                            p * p.ln()
-                        })
-                        .fold(F::zero(), |a, b| a + b);
-                    -sum
-                }
+                SplitCriterion::Gini | SplitCriterion::Entropy => impurity_from_weights(
+                    right_class_weights.iter().copied(),
+                    right_weight,
+                    criterion,
+                ),
                 SplitCriterion::Mse => {
                     let right_indices: Vec<usize> =
                         sorted_pairs[pos + 1..].iter().map(|&(_, i)| i).collect();

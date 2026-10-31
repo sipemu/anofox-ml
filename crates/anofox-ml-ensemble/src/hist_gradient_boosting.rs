@@ -20,6 +20,20 @@ struct FeatureBins {
     edges: Vec<f64>,
 }
 
+/// Bin index of `v` given sorted `edges`.
+///
+/// NaN has no native support here yet (see issue #47): it is treated as larger
+/// than every finite value, i.e. it goes to the last bin, instead of
+/// panicking.
+#[inline]
+fn value_to_bin(v: f64, edges: &[f64]) -> u8 {
+    if v.is_nan() {
+        edges.len() as u8
+    } else {
+        edges.partition_point(|&e| e < v) as u8
+    }
+}
+
 /// Bin all features into u8 indices.
 fn compute_bins(x: &Array2<f64>, max_bins: usize) -> (Array2<u8>, Vec<FeatureBins>) {
     let n = x.nrows();
@@ -28,12 +42,19 @@ fn compute_bins(x: &Array2<f64>, max_bins: usize) -> (Array2<u8>, Vec<FeatureBin
     let mut all_bins = Vec::with_capacity(p);
 
     for j in 0..p {
-        let mut col: Vec<f64> = (0..n).map(|i| x[[i, j]]).collect();
-        col.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Edges are computed from the non-NaN values only; `total_cmp` keeps
+        // the sort panic-free.
+        let mut col: Vec<f64> = (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
+        col.sort_by(f64::total_cmp);
         col.dedup();
 
         // Compute quantile-based bin edges
         let n_edges = (col.len()).min(max_bins - 1);
+        if n_edges == 0 {
+            // All-NaN column: a single bin.
+            all_bins.push(FeatureBins { edges: Vec::new() });
+            continue;
+        }
         let mut edges = Vec::with_capacity(n_edges);
         for k in 1..=n_edges {
             let idx = (k * col.len() / (n_edges + 1)).min(col.len() - 1);
@@ -45,9 +66,7 @@ fn compute_bins(x: &Array2<f64>, max_bins: usize) -> (Array2<u8>, Vec<FeatureBin
 
         // Map values to bins
         for i in 0..n {
-            let v = x[[i, j]];
-            let bin = edges.partition_point(|&e| e < v) as u8;
-            binned[[i, j]] = bin;
+            binned[[i, j]] = value_to_bin(x[[i, j]], &edges);
         }
 
         all_bins.push(FeatureBins { edges });
@@ -60,7 +79,7 @@ fn compute_bins(x: &Array2<f64>, max_bins: usize) -> (Array2<u8>, Vec<FeatureBin
 fn bin_row(row: &[f64], all_bins: &[FeatureBins]) -> Vec<u8> {
     row.iter()
         .zip(all_bins.iter())
-        .map(|(&v, bins)| bins.edges.partition_point(|&e| e < v) as u8)
+        .map(|(&v, bins)| value_to_bin(v, &bins.edges))
         .collect()
 }
 
@@ -611,7 +630,7 @@ impl Fit<f64> for HistGradientBoostingClassifier {
 
         // Collect classes
         let mut classes: Vec<f64> = y.iter().copied().collect();
-        classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        classes.sort_by(f64::total_cmp);
         classes.dedup();
         let n_classes = classes.len();
 
@@ -957,5 +976,53 @@ mod tests {
 
         let x_bad = array![[1.0]];
         assert!(fitted.predict(&x_bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod nan_regression_tests {
+    use super::*;
+    use ndarray::array;
+
+    /// #42: binning used `partial_cmp().unwrap()` and panicked on NaN. NaN is
+    /// now binned as larger than every finite value (full missing-value
+    /// support is tracked separately in #47).
+    #[test]
+    fn binning_with_nan_does_not_panic() {
+        let x = array![
+            [1.0, f64::NAN],
+            [2.0, 0.5],
+            [f64::NAN, 0.7],
+            [4.0, f64::NAN]
+        ];
+        let (binned, bins) = compute_bins(&x, MAX_BINS);
+        assert!(bins[0].edges.iter().all(|e| e.is_finite()));
+        // NaN goes to the top bin, above every finite value of the column.
+        let top0 = bins[0].edges.len() as u8;
+        assert_eq!(binned[[2, 0]], top0);
+        assert_eq!(bin_row(&[f64::NAN, f64::NAN], &bins)[0], top0);
+
+        let all_nan = array![[f64::NAN], [f64::NAN]];
+        let (b, bins) = compute_bins(&all_nan, MAX_BINS);
+        assert!(bins[0].edges.is_empty());
+        assert_eq!(b[[0, 0]], 0);
+    }
+
+    #[test]
+    fn fit_predict_with_nan_does_not_panic() {
+        let x = array![
+            [1.0],
+            [2.0],
+            [f64::NAN],
+            [4.0],
+            [5.0],
+            [6.0],
+            [f64::NAN],
+            [8.0]
+        ];
+        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let fitted = HistGradientBoostingRegressor::new().fit(&x, &y).unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        assert!(preds.iter().all(|p| p.is_finite()));
     }
 }

@@ -41,6 +41,7 @@ fn test_golden_decision_tree_classifier() {
             max_features: None,
             sample_weight: None,
             class_weight: None,
+            seed: 0,
         };
 
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();
@@ -90,6 +91,7 @@ fn test_golden_decision_tree_regressor() {
             min_samples_leaf,
             max_features: None,
             sample_weight: None,
+            seed: 0,
         };
 
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();

@@ -5,7 +5,6 @@
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
-use std::collections::HashMap;
 
 /// A named estimator for the voting ensemble.
 struct NamedEstimator<F: Float> {
@@ -147,21 +146,13 @@ impl<F: Float> Predict<F> for FittedVotingClassifier<F> {
             .map(|(_, model)| model.predict_box(x))
             .collect::<Result<Vec<_>>>()?;
 
+        // Hard vote; ties go deterministically to the smallest class label.
         let mut result = Array1::zeros(n);
+        let mut votes: Vec<F> = Vec::with_capacity(all_preds.len());
         for i in 0..n {
-            let mut votes: HashMap<u64, (F, usize)> = HashMap::new();
-            for preds in &all_preds {
-                let key = preds[i].to_f64().unwrap().to_bits();
-                votes
-                    .entry(key)
-                    .and_modify(|e| e.1 += 1)
-                    .or_insert((preds[i], 1));
-            }
-            result[i] = votes
-                .into_values()
-                .max_by_key(|&(_, count)| count)
-                .unwrap()
-                .0;
+            votes.clear();
+            votes.extend(all_preds.iter().map(|preds| preds[i]));
+            result[i] = anofox_ml_trees::split::majority_vote(&votes);
         }
 
         Ok(result)

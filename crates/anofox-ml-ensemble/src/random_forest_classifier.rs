@@ -1,16 +1,22 @@
 use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{
-    ClassWeight, DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion,
+    ClassWeight, DecisionTreeClassifier, FittedDecisionTreeClassifier, MaxFeatures, SplitCriterion,
 };
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
+use crate::forest_common::{
+    argmax_first, class_index, resolve_max_features, select_rows, sorted_classes, tree_input,
+};
+
 /// Random forest classifier parameters (unfitted state).
 ///
 /// Trains an ensemble of decision tree classifiers, each on a bootstrap sample
-/// of the data with an optional random subset of features.
+/// of the data. At **every split** each tree considers a fresh random subset
+/// of `max_features` features (sklearn semantics); the default is
+/// `MaxFeatures::Sqrt`, like `sklearn.ensemble.RandomForestClassifier`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RandomForestClassifier {
     /// Number of trees in the forest.
@@ -21,8 +27,9 @@ pub struct RandomForestClassifier {
     pub min_samples_split: usize,
     /// Minimum samples required in a leaf node.
     pub min_samples_leaf: usize,
-    /// Number of features to consider per tree. If `None`, all features are used.
-    pub max_features: Option<usize>,
+    /// Number of features to consider at each split. `None` = all features
+    /// (plain bagged trees). Default: `Some(MaxFeatures::Sqrt)`.
+    pub max_features: Option<MaxFeatures>,
     /// Split criterion for each tree. Default: Gini.
     pub criterion: SplitCriterion,
     /// Whether to use bootstrap sampling. Default: true.
@@ -46,7 +53,7 @@ impl RandomForestClassifier {
             max_depth: None,
             min_samples_split: 2,
             min_samples_leaf: 1,
-            max_features: None,
+            max_features: Some(MaxFeatures::Sqrt),
             criterion: SplitCriterion::Gini,
             bootstrap: true,
             max_samples: None,
@@ -68,7 +75,8 @@ impl RandomForestClassifier {
         self.min_samples_leaf = min_samples_leaf;
         self
     }
-    pub fn with_max_features(mut self, max_features: Option<usize>) -> Self {
+    /// Number of features considered per split (`None` = all features).
+    pub fn with_max_features(mut self, max_features: Option<MaxFeatures>) -> Self {
         self.max_features = max_features;
         self
     }
@@ -104,14 +112,15 @@ impl Default for RandomForestClassifier {
     }
 }
 
-/// A single tree in the forest together with its selected feature indices.
+/// A single tree in the forest together with the feature indices it reads.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 struct ForestTree<F: Float> {
     tree: FittedDecisionTreeClassifier<F>,
-    /// Indices of the features this tree was trained on (relative to the
-    /// original feature matrix). When `max_features` is `None` this contains
-    /// `0..n_features`.
+    /// Indices of the input features this tree was trained on. Trees are
+    /// trained on all features (feature subsampling happens per split inside
+    /// the tree), so this is `0..n_features`; models serialized by older
+    /// versions may hold a per-tree subset.
     feature_indices: Vec<usize>,
 }
 
@@ -147,14 +156,7 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
 
         let n_samples = x.nrows();
         let n_features = x.ncols();
-
-        if let Some(k) = self.max_features {
-            if k == 0 || k > n_features {
-                return Err(RustMlError::InvalidParameter(format!(
-                    "max_features={k} is invalid for data with {n_features} features"
-                )));
-            }
-        }
+        resolve_max_features(self.max_features, n_features)?;
 
         let mut rng = StdRng::seed_from_u64(self.seed);
 
@@ -175,13 +177,15 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
             criterion: self.criterion,
-            max_features: None,
+            max_features: self.max_features,
             sample_weight: None,
             class_weight: self.class_weight.clone(),
+            seed: 0,
         };
 
-        // Pre-generate bootstrap/sample and feature indices for determinism
-        let sample_plans: Vec<(Vec<usize>, Vec<usize>)> = (0..self.n_estimators)
+        // Pre-generate bootstrap rows and per-tree seeds sequentially so the
+        // result does not depend on rayon's scheduling.
+        let sample_plans: Vec<(Vec<usize>, u64)> = (0..self.n_estimators)
             .map(|_| {
                 let row_indices: Vec<usize> = if self.bootstrap {
                     (0..draw_size)
@@ -190,8 +194,8 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
                 } else {
                     (0..n_samples).collect()
                 };
-                let feature_indices = select_features(n_features, self.max_features, &mut rng);
-                (row_indices, feature_indices)
+                let tree_seed: u64 = rng.gen();
+                (row_indices, tree_seed)
             })
             .collect();
 
@@ -205,79 +209,54 @@ impl<F: Float> Fit<F> for RandomForestClassifier {
         // Train trees in parallel
         let trees: Result<Vec<ForestTree<F>>> = sample_plans
             .into_par_iter()
-            .map(|(row_indices, feature_indices)| {
-                let x_sub = build_sub_matrix(x, &row_indices, &feature_indices);
+            .map(|(row_indices, tree_seed)| {
+                let x_sub = select_rows(x, &row_indices);
                 let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
-                let fitted_tree: FittedDecisionTreeClassifier<F> =
-                    tree_params.fit(&x_sub, &y_sub)?;
+                let fitted_tree: FittedDecisionTreeClassifier<F> = tree_params
+                    .clone()
+                    .with_seed(tree_seed)
+                    .fit(&x_sub, &y_sub)?;
                 Ok(ForestTree {
                     tree: fitted_tree,
-                    feature_indices,
+                    feature_indices: (0..n_features).collect(),
                 })
             })
             .collect();
         let trees = trees?;
 
-        // Compute OOB score if requested
-        let oob_score_value = if self.oob_score && self.bootstrap {
-            compute_oob_score_classification(&trees, x, y, n_samples, &all_row_indices)
-        } else {
-            None
-        };
-
-        Ok(FittedRandomForestClassifier {
+        let mut fitted = FittedRandomForestClassifier {
             trees,
             n_features,
-            oob_score_value,
-        })
+            oob_score_value: None,
+        };
+
+        // Compute OOB score if requested
+        if self.oob_score && self.bootstrap {
+            fitted.oob_score_value =
+                compute_oob_score_classification(&fitted, x, y, &all_row_indices)?;
+        }
+
+        Ok(fitted)
     }
 }
 
 impl<F: Float> Predict<F> for FittedRandomForestClassifier<F> {
+    /// Predict the class with the highest mean leaf probability across trees
+    /// (sklearn semantics). Ties go to the smallest class label.
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-
-        let n_samples = x.nrows();
-        let n_trees = self.trees.len();
-
-        // Collect all tree predictions in parallel
-        let all_preds: Result<Vec<Array1<F>>> = self
-            .trees
-            .par_iter()
-            .map(|forest_tree| {
-                let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
-                forest_tree.tree.predict(&sub_x)
-            })
-            .collect();
-        let all_preds = all_preds?;
-
-        // Aggregate votes per sample
-        let mut predictions = Vec::with_capacity(n_samples);
-        let mut votes = Vec::with_capacity(n_trees);
-        for i in 0..n_samples {
-            votes.clear();
-            for tree_pred in &all_preds {
-                votes.push(tree_pred[i]);
-            }
-            predictions.push(majority_vote(&votes));
-        }
-
-        Ok(Array1::from_vec(predictions))
+        let proba = self.predict_proba(x)?;
+        let classes = self.classes();
+        Ok(Array1::from_iter(
+            proba
+                .rows()
+                .into_iter()
+                .map(|row| classes[argmax_first(row.iter().copied())]),
+        ))
     }
 }
 
 impl<F: Float> FittedRandomForestClassifier<F> {
     /// Feature importances averaged across all trees and normalized to sum to 1.
-    ///
-    /// Each tree's importances are computed in its own (possibly reduced)
-    /// feature space, then mapped back to the original feature indices and
-    /// averaged.
     pub fn feature_importances(&self) -> Array1<F> {
         let mut importances = vec![F::zero(); self.n_features];
         let n_trees = F::from_usize(self.trees.len()).unwrap();
@@ -303,10 +282,32 @@ impl<F: Float> FittedRandomForestClassifier<F> {
         self.trees.len()
     }
 
+    /// Add `weight * tree_proba` of tree `t` into `acc` (columns = `classes`).
+    fn accumulate_tree_proba(
+        &self,
+        t: usize,
+        x: &Array2<F>,
+        classes: &[F],
+        weight: F,
+        acc: &mut Array2<F>,
+    ) -> Result<()> {
+        let forest_tree = &self.trees[t];
+        let sub_x = tree_input(x, &forest_tree.feature_indices);
+        let tree_proba = forest_tree.tree.predict_proba(&sub_x)?;
+        for (local_ci, tc) in forest_tree.tree.classes().into_iter().enumerate() {
+            if let Some(global_ci) = class_index(classes, tc) {
+                let mut col = acc.column_mut(global_ci);
+                col.scaled_add(weight, &tree_proba.column(local_ci));
+            }
+        }
+        Ok(())
+    }
+
     /// Predict class probabilities for each sample.
     ///
     /// Returns an `Array2<F>` of shape `(n_samples, n_classes)` where each row
     /// sums to 1.0. Probabilities are averaged across all trees in the forest.
+    /// Columns follow [`classes`](Self::classes) (sorted ascending).
     pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -316,47 +317,24 @@ impl<F: Float> FittedRandomForestClassifier<F> {
             )));
         }
 
-        // Collect probabilities from each tree in parallel
-        let all_proba: Result<Vec<Array2<F>>> = self
-            .trees
-            .par_iter()
-            .map(|forest_tree| {
-                let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
-                forest_tree.tree.predict_proba(&sub_x)
+        let classes = self.classes();
+        let n_samples = x.nrows();
+        let n_classes = classes.len();
+        let w = F::one() / F::from_usize(self.trees.len()).unwrap();
+
+        // Per-tree probabilities in parallel, reduced in tree order so the
+        // floating-point sum is deterministic.
+        let per_tree: Result<Vec<Array2<F>>> = (0..self.trees.len())
+            .into_par_iter()
+            .map(|t| {
+                let mut acc = Array2::<F>::zeros((n_samples, n_classes));
+                self.accumulate_tree_proba(t, x, &classes, w, &mut acc)?;
+                Ok(acc)
             })
             .collect();
-        let all_proba = all_proba?;
-
-        // Determine global class set (union of all trees' classes)
-        let mut global_classes: Vec<F> = Vec::new();
-        let eps = F::from_f64(1e-9).unwrap();
-        for forest_tree in &self.trees {
-            for c in forest_tree.tree.classes() {
-                if !global_classes.iter().any(|&gc| (gc - c).abs() < eps) {
-                    global_classes.push(c);
-                }
-            }
-        }
-        global_classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let n_samples = x.nrows();
-        let n_classes = global_classes.len();
-        let n_trees_f = F::from_usize(self.trees.len()).unwrap();
         let mut avg_proba = Array2::<F>::zeros((n_samples, n_classes));
-
-        // Map each tree's probabilities to the global class indices and average
-        for (tree_idx, forest_tree) in self.trees.iter().enumerate() {
-            let tree_classes = forest_tree.tree.classes();
-            let tree_proba = &all_proba[tree_idx];
-
-            for (local_ci, &tc) in tree_classes.iter().enumerate() {
-                if let Some(global_ci) = global_classes.iter().position(|&gc| (gc - tc).abs() < eps)
-                {
-                    for i in 0..n_samples {
-                        avg_proba[[i, global_ci]] += tree_proba[[i, local_ci]] / n_trees_f;
-                    }
-                }
-            }
+        for p in per_tree? {
+            avg_proba += &p;
         }
 
         Ok(avg_proba)
@@ -381,142 +359,65 @@ impl<F: Float> FittedRandomForestClassifier<F> {
 
     /// Returns the unique sorted class labels across all trees.
     pub fn classes(&self) -> Vec<F> {
-        let eps = F::from_f64(1e-9).unwrap();
-        let mut classes: Vec<F> = Vec::new();
+        let mut all: Vec<F> = Vec::new();
         for forest_tree in &self.trees {
-            for c in forest_tree.tree.classes() {
-                if !classes.iter().any(|&gc| (gc - c).abs() < eps) {
-                    classes.push(c);
-                }
-            }
+            all.extend(forest_tree.tree.classes());
         }
-        classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        classes
+        sorted_classes(&Array1::from_vec(all))
     }
 }
 
-/// Select `k` distinct feature indices from `0..n_features` without replacement.
-/// If `max_features` is `None`, returns all feature indices.
-fn select_features(n_features: usize, max_features: Option<usize>, rng: &mut StdRng) -> Vec<usize> {
-    match max_features {
-        None => (0..n_features).collect(),
-        Some(k) => {
-            // Fisher-Yates partial shuffle
-            let mut indices: Vec<usize> = (0..n_features).collect();
-            for i in 0..k {
-                let j = rng.gen_range(i..n_features);
-                indices.swap(i, j);
-            }
-            indices.truncate(k);
-            indices.sort_unstable();
-            indices
-        }
-    }
-}
-
-/// Build a sub-matrix selecting specific rows and columns from `x`.
-fn build_sub_matrix<F: Float>(
-    x: &Array2<F>,
-    row_indices: &[usize],
-    col_indices: &[usize],
-) -> Array2<F> {
-    // Select rows first (produces C-contiguous), then columns.
-    let n_rows = row_indices.len();
-    let n_cols = col_indices.len();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for &ri in row_indices {
-        for &ci in col_indices {
-            data.push(x[[ri, ci]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
-}
-
-/// Build a sub-matrix selecting all rows but only specific columns from `x`.
-/// Produces a guaranteed C-contiguous (standard layout) array so that
-/// `row.as_slice()` works in downstream predict calls.
-fn build_sub_matrix_cols<F: Float>(x: &Array2<F>, col_indices: &[usize]) -> Array2<F> {
-    let n_rows = x.nrows();
-    let n_cols = col_indices.len();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for i in 0..n_rows {
-        for &ci in col_indices {
-            data.push(x[[i, ci]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
-}
-
-/// Compute OOB classification accuracy.
-/// For each sample, only trees that did NOT include it in their bootstrap are used.
+/// Compute OOB classification accuracy (sklearn-style): each sample's OOB
+/// prediction is the argmax of the probabilities averaged over the trees that
+/// did *not* see it in their bootstrap sample.
 fn compute_oob_score_classification<F: Float>(
-    trees: &[ForestTree<F>],
+    forest: &FittedRandomForestClassifier<F>,
     x: &Array2<F>,
     y: &Array1<F>,
-    n_samples: usize,
     bootstrap_indices: &[Vec<usize>],
-) -> Option<f64> {
-    use std::collections::HashSet;
+) -> Result<Option<f64>> {
+    let n_samples = x.nrows();
+    let classes = forest.classes();
+    let mut oob_proba = Array2::<F>::zeros((n_samples, classes.len()));
+    let mut oob_counts = vec![0usize; n_samples];
+
+    for (t, in_bag_rows) in bootstrap_indices.iter().enumerate() {
+        let mut in_bag = vec![false; n_samples];
+        for &r in in_bag_rows {
+            in_bag[r] = true;
+        }
+        let oob_rows: Vec<usize> = (0..n_samples).filter(|&i| !in_bag[i]).collect();
+        if oob_rows.is_empty() {
+            continue;
+        }
+        let x_oob = select_rows(x, &oob_rows);
+        let mut acc = Array2::<F>::zeros((oob_rows.len(), classes.len()));
+        forest.accumulate_tree_proba(t, &x_oob, &classes, F::one(), &mut acc)?;
+        for (k, &i) in oob_rows.iter().enumerate() {
+            let mut row = oob_proba.row_mut(i);
+            row += &acc.row(k);
+            oob_counts[i] += 1;
+        }
+    }
 
     let mut correct = 0usize;
     let mut evaluated = 0usize;
-
     for i in 0..n_samples {
-        let mut votes: Vec<F> = Vec::new();
-        for (t_idx, forest_tree) in trees.iter().enumerate() {
-            // Check if sample i was NOT in the bootstrap for tree t_idx
-            let in_bag: HashSet<usize> = bootstrap_indices[t_idx].iter().copied().collect();
-            if in_bag.contains(&i) {
-                continue;
-            }
-            // Get prediction from this tree for sample i
-            let sub_x = build_sub_matrix_cols_single(x, i, &forest_tree.feature_indices);
-            if let Ok(pred) = forest_tree.tree.predict(&sub_x) {
-                votes.push(pred[0]);
-            }
+        if oob_counts[i] == 0 {
+            continue;
         }
-        if !votes.is_empty() {
-            let oob_pred = majority_vote(&votes);
-            if (oob_pred - y[i]).abs() < F::from_f64(1e-9).unwrap() {
-                correct += 1;
-            }
-            evaluated += 1;
+        let pred = classes[argmax_first(oob_proba.row(i).iter().copied())];
+        if pred == y[i] {
+            correct += 1;
         }
+        evaluated += 1;
     }
 
-    if evaluated > 0 {
+    Ok(if evaluated > 0 {
         Some(correct as f64 / evaluated as f64)
     } else {
         None
-    }
-}
-
-/// Build a single-row sub-matrix selecting specific columns for one sample.
-fn build_sub_matrix_cols_single<F: Float>(
-    x: &Array2<F>,
-    row: usize,
-    col_indices: &[usize],
-) -> Array2<F> {
-    let n_cols = col_indices.len();
-    let data: Vec<F> = col_indices.iter().map(|&ci| x[[row, ci]]).collect();
-    Array2::from_shape_vec((1, n_cols), data).expect("shape matches data length")
-}
-
-/// Return the class that appears most frequently in `votes`.
-/// Uses HashMap with f64 bit representation for O(1) lookup per vote.
-#[inline]
-fn majority_vote<F: Float>(votes: &[F]) -> F {
-    use std::collections::HashMap;
-    let mut counts: HashMap<u64, (F, usize)> = HashMap::new();
-    for &v in votes {
-        let key = v.to_f64().unwrap().to_bits();
-        counts.entry(key).and_modify(|e| e.1 += 1).or_insert((v, 1));
-    }
-    counts
-        .into_values()
-        .max_by_key(|&(_, count)| count)
-        .unwrap()
-        .0
+    })
 }
 
 #[cfg(test)]
@@ -587,7 +488,7 @@ mod tests {
 
         let rf = RandomForestClassifier {
             n_estimators: 30,
-            max_features: Some(2),
+            max_features: Some(MaxFeatures::Fixed(2)),
             seed: 99,
             ..Default::default()
         };
@@ -672,7 +573,7 @@ mod tests {
 
         let rf = RandomForestClassifier {
             n_estimators: 5,
-            max_features: Some(5),
+            max_features: Some(MaxFeatures::Fixed(5)),
             seed: 0,
             ..Default::default()
         };
@@ -908,5 +809,224 @@ mod tests {
 impl<F: Float> PredictProba<F> for FittedRandomForestClassifier<F> {
     fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::{
+        BaggingClassifier, ExtraTreesClassifier, ExtraTreesRegressor, RandomForestRegressor,
+        VotingClassifier,
+    };
+    use anofox_ml_trees::TreeNode;
+    use ndarray::{array, ShapeBuilder};
+
+    fn data(n: usize, d: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let x = Array2::from_shape_fn((n, d), |_| next());
+        let y = Array1::from_iter(x.rows().into_iter().map(|r| {
+            if r.iter().take(4).sum::<f64>() > 2.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        (x, y)
+    }
+
+    fn to_fortran(x: &Array2<f64>) -> Array2<f64> {
+        let mut f = Array2::<f64>::zeros(x.raw_dim().f());
+        f.assign(x);
+        assert!(!f.is_standard_layout());
+        f
+    }
+
+    fn split_features(node: &TreeNode<f64>, out: &mut Vec<usize>) {
+        if let TreeNode::Split {
+            feature_index,
+            left,
+            right,
+            ..
+        } = node
+        {
+            out.push(*feature_index);
+            split_features(left, out);
+            split_features(right, out);
+        }
+    }
+
+    /// #45: the default classifier forest samples sqrt(d) features at every
+    /// split (not once per tree), and trees get distinct seeds.
+    #[test]
+    fn rf_samples_features_per_split_and_trees_differ() {
+        let (x, y) = data(400, 16, 3);
+        let rf = RandomForestClassifier::new(5).with_seed(11);
+        assert_eq!(rf.max_features, Some(MaxFeatures::Sqrt));
+        let fitted: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+
+        let mut structures = Vec::new();
+        for t in &fitted.trees {
+            assert_eq!(t.feature_indices, (0..16).collect::<Vec<_>>());
+            let mut feats = Vec::new();
+            split_features(t.tree.tree(), &mut feats);
+            let mut distinct = feats.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert!(
+                distinct.len() > 4,
+                "per-split sampling of 4/16 features should reach more than 4 features, got {distinct:?}"
+            );
+            structures.push(feats);
+        }
+        for i in 0..structures.len() {
+            for j in i + 1..structures.len() {
+                assert_ne!(structures[i], structures[j], "trees {i} and {j} identical");
+            }
+        }
+
+        // Without bootstrap, trees only differ through the per-split RNG.
+        let rf_nb = RandomForestClassifier::new(2)
+            .with_bootstrap(false)
+            .with_seed(5);
+        let f_nb: FittedRandomForestClassifier<f64> = rf_nb.fit(&x, &y).unwrap();
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        split_features(f_nb.trees[0].tree.tree(), &mut a);
+        split_features(f_nb.trees[1].tree.tree(), &mut b);
+        assert_ne!(a, b, "two trees with different seeds must differ");
+    }
+
+    #[test]
+    fn rf_is_reproducible_under_rayon() {
+        let (x, y) = data(200, 9, 4);
+        let rf = RandomForestClassifier::new(16).with_seed(3);
+        let a: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+        for _ in 0..3 {
+            let b: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+            assert_eq!(a.predict_proba(&x).unwrap(), b.predict_proba(&x).unwrap());
+        }
+        let r = RandomForestRegressor::new(16)
+            .with_max_features(Some(MaxFeatures::Sqrt))
+            .with_seed(3);
+        let ra = r.fit(&x, &y).unwrap();
+        let rb = r.fit(&x, &y).unwrap();
+        assert_eq!(ra.predict(&x).unwrap(), rb.predict(&x).unwrap());
+    }
+
+    /// #42: Fortran-order input used to panic.
+    #[test]
+    fn forests_accept_fortran_order_input() {
+        let (x, y) = data(120, 5, 8);
+        let xf = to_fortran(&x);
+
+        let rf = RandomForestClassifier::new(8)
+            .with_seed(1)
+            .with_oob_score(true);
+        let a: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+        let b: FittedRandomForestClassifier<f64> = rf.fit(&xf, &y).unwrap();
+        assert_eq!(a.predict(&x).unwrap(), b.predict(&xf).unwrap());
+        assert_eq!(a.oob_score(), b.oob_score());
+
+        let rr = RandomForestRegressor::new(8).with_seed(1);
+        let ra = rr.fit(&x, &y).unwrap();
+        let rb = rr.fit(&xf, &y).unwrap();
+        assert_eq!(ra.predict(&x).unwrap(), rb.predict(&xf).unwrap());
+
+        let et = ExtraTreesClassifier::new(8).with_seed(1);
+        let ea = et.fit(&x, &y).unwrap();
+        let eb = et.fit(&xf, &y).unwrap();
+        assert_eq!(ea.predict(&x).unwrap(), eb.predict(&xf).unwrap());
+
+        let etr = ExtraTreesRegressor::new(8).with_seed(1);
+        let era = etr.fit(&x, &y).unwrap();
+        let erb = etr.fit(&xf, &y).unwrap();
+        let x_tt = x.t().to_owned();
+        let x_tt = x_tt.t().to_owned();
+        assert_eq!(era.predict(&x).unwrap(), erb.predict(&x_tt).unwrap());
+
+        let bag = BaggingClassifier::new(5).with_seed(1);
+        let ba = bag.fit(&x, &y).unwrap();
+        let bb = bag.fit(&xf, &y).unwrap();
+        assert_eq!(ba.predict(&x).unwrap(), bb.predict(&xf).unwrap());
+    }
+
+    /// #42: tied votes must be resolved deterministically (smallest label).
+    #[test]
+    fn tied_votes_are_deterministic() {
+        // Identical rows with balanced labels -> every leaf is a 50/50 tie.
+        let x = array![[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]];
+        let y = array![9.0, 4.0, 9.0, 4.0];
+        for _ in 0..20 {
+            let rf = RandomForestClassifier::new(6)
+                .with_bootstrap(false)
+                .with_seed(0);
+            let f: FittedRandomForestClassifier<f64> = rf.fit(&x, &y).unwrap();
+            assert_eq!(f.predict(&x).unwrap(), array![4.0, 4.0, 4.0, 4.0]);
+
+            let et = ExtraTreesClassifier::new(6).with_seed(0);
+            assert_eq!(
+                et.fit(&x, &y).unwrap().predict(&x).unwrap(),
+                array![4.0, 4.0, 4.0, 4.0]
+            );
+
+            let bag = BaggingClassifier::new(4).with_bootstrap(false);
+            assert_eq!(
+                bag.fit(&x, &y).unwrap().predict(&x).unwrap(),
+                array![4.0, 4.0, 4.0, 4.0]
+            );
+        }
+
+        // Voting: two members that disagree -> 1:1 tie -> smallest label.
+        let xs = array![[0.0], [1.0], [2.0], [3.0]];
+        let ys = array![0.0, 0.0, 1.0, 1.0];
+        for _ in 0..20 {
+            let vc = VotingClassifier::new()
+                .push("tree", anofox_ml_trees::DecisionTreeClassifier::new())
+                .push("const", ConstClassifier(5.0));
+            let f = vc.fit(&xs, &ys).unwrap();
+            let p = f.predict(&xs).unwrap();
+            assert_eq!(p, array![0.0, 0.0, 1.0, 1.0]);
+        }
+    }
+
+    /// Always predicts a fixed label.
+    struct ConstClassifier(f64);
+    struct FittedConst(f64);
+    impl Fit<f64> for ConstClassifier {
+        type Fitted = FittedConst;
+        fn fit(&self, _x: &Array2<f64>, _y: &Array1<f64>) -> Result<FittedConst> {
+            Ok(FittedConst(self.0))
+        }
+    }
+    impl Predict<f64> for FittedConst {
+        fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+            Ok(Array1::from_elem(x.nrows(), self.0))
+        }
+    }
+
+    /// #45: ExtraTrees also draws a fresh feature subset per split.
+    #[test]
+    fn extra_trees_sample_features_per_split() {
+        let (x, y) = data(300, 16, 21);
+        let et = ExtraTreesClassifier::new(3).with_seed(2);
+        assert_eq!(et.max_features, Some(MaxFeatures::Sqrt));
+        let fitted = et.fit(&x, &y).unwrap();
+        let imp = fitted.feature_importances();
+        let used = imp.iter().filter(|&&v| v > 0.0).count();
+        assert!(used > 4, "only {used} features used across the forest");
+    }
+
+    #[test]
+    fn invalid_max_features_fraction_is_rejected() {
+        let (x, y) = data(20, 4, 1);
+        let rf = RandomForestClassifier::new(2).with_max_features(Some(MaxFeatures::Fraction(1.5)));
+        assert!(Fit::<f64>::fit(&rf, &x, &y).is_err());
     }
 }

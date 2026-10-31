@@ -3,9 +3,9 @@ use ndarray::{Array1, Array2};
 
 use crate::node::TreeNode;
 use crate::split::{
-    compute_impurity, compute_weighted_impurity, find_best_split_weighted,
-    find_best_split_with_features, leaf_value, select_feature_subset, weighted_leaf_value,
-    MaxFeatures, SplitCriterion,
+    child_seed, complement_features, compute_impurity, compute_weighted_impurity,
+    find_best_split_weighted, find_best_split_with_features, leaf_value, select_feature_subset,
+    weighted_leaf_value, BestSplit, MaxFeatures, SplitCriterion,
 };
 
 /// Decision tree regressor parameters (unfitted state).
@@ -19,6 +19,10 @@ pub struct DecisionTreeRegressor {
     /// Per-sample weights.
     #[serde(skip)]
     pub sample_weight: Option<Array1<f64>>,
+    /// Seed for the per-split feature subsampling RNG (only used when
+    /// `max_features` is set). Different seeds give different trees.
+    #[serde(default)]
+    pub seed: u64,
 }
 
 impl DecisionTreeRegressor {
@@ -30,6 +34,7 @@ impl DecisionTreeRegressor {
             min_samples_leaf: 1,
             max_features: None,
             sample_weight: None,
+            seed: 0,
         }
     }
 
@@ -60,6 +65,12 @@ impl DecisionTreeRegressor {
     /// Set per-sample weights.
     pub fn with_sample_weight(mut self, sample_weight: Option<Array1<f64>>) -> Self {
         self.sample_weight = sample_weight;
+        self
+    }
+
+    /// Set the seed of the per-split feature subsampling RNG.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
         self
     }
 }
@@ -93,6 +104,16 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
 
+        if let Some(sw) = &self.sample_weight {
+            if sw.len() != y.len() {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "sample_weight has {} entries but y has {}",
+                    sw.len(),
+                    y.len()
+                )));
+            }
+        }
+
         let indices: Vec<usize> = (0..x.nrows()).collect();
         let n_features = x.ncols();
         let max_features_k = self.max_features.map(|mf| mf.resolve(n_features));
@@ -110,7 +131,7 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
             self.min_samples_leaf,
             max_features_k,
             n_features,
-            0,
+            self.seed,
             effective_weights.as_ref(),
         );
 
@@ -131,7 +152,7 @@ impl<F: Float> Predict<F> for FittedDecisionTreeRegressor<F> {
         let predictions: Vec<F> = x
             .rows()
             .into_iter()
-            .map(|row| self.tree.predict_one(row.as_slice().unwrap()))
+            .map(|row| self.tree.predict_view(row))
             .collect();
 
         Ok(Array1::from_vec(predictions))
@@ -167,7 +188,7 @@ fn build_tree<F: Float>(
     min_samples_leaf: usize,
     max_features_k: Option<usize>,
     n_features: usize,
-    node_id: u64,
+    node_seed: u64,
     weights: Option<&Array1<F>>,
 ) -> TreeNode<F> {
     let n_samples = indices.len();
@@ -192,36 +213,39 @@ fn build_tree<F: Float>(
         };
     }
 
-    let feature_subset;
-    let feature_indices: &[usize] = if let Some(k) = max_features_k {
-        let seed = node_id
-            .wrapping_mul(0x517CC1B727220A95)
-            .wrapping_add(depth as u64);
-        feature_subset = select_feature_subset(n_features, k, seed);
-        &feature_subset
-    } else {
-        feature_subset = (0..n_features).collect();
-        &feature_subset
+    let find = |features: &[usize]| -> Option<BestSplit<F>> {
+        match weights {
+            Some(w) => find_best_split_weighted(
+                x,
+                y,
+                indices,
+                w,
+                SplitCriterion::Mse,
+                min_samples_leaf,
+                features,
+            ),
+            None => find_best_split_with_features(
+                x,
+                y,
+                indices,
+                SplitCriterion::Mse,
+                min_samples_leaf,
+                features,
+            ),
+        }
     };
 
-    let split_result = match weights {
-        Some(w) => find_best_split_weighted(
-            x,
-            y,
-            indices,
-            w,
-            SplitCriterion::Mse,
-            min_samples_leaf,
-            feature_indices,
-        ),
-        None => find_best_split_with_features(
-            x,
-            y,
-            indices,
-            SplitCriterion::Mse,
-            min_samples_leaf,
-            feature_indices,
-        ),
+    // Per-split feature subsampling: fresh subset at every node; fall back
+    // to the remaining features if the drawn ones admit no valid split.
+    let split_result = match max_features_k {
+        Some(k) if k < n_features => {
+            let subset = select_feature_subset(n_features, k, node_seed);
+            find(&subset).or_else(|| find(&complement_features(n_features, &subset)))
+        }
+        _ => {
+            let all: Vec<usize> = (0..n_features).collect();
+            find(&all)
+        }
     };
 
     match split_result {
@@ -236,7 +260,7 @@ fn build_tree<F: Float>(
                 min_samples_leaf,
                 max_features_k,
                 n_features,
-                node_id.wrapping_mul(2).wrapping_add(1),
+                child_seed(node_seed, 0),
                 weights,
             );
             let right = build_tree(
@@ -249,7 +273,7 @@ fn build_tree<F: Float>(
                 min_samples_leaf,
                 max_features_k,
                 n_features,
-                node_id.wrapping_mul(2).wrapping_add(2),
+                child_seed(node_seed, 1),
                 weights,
             );
 

@@ -217,6 +217,7 @@ impl GradientBoostingClassifier {
             min_samples_leaf: self.min_samples_leaf,
             max_features: None,
             sample_weight: None,
+            seed: 0,
         };
 
         let mut rng = StdRng::seed_from_u64(self.seed);
