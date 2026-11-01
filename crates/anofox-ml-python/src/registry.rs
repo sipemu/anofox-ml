@@ -212,6 +212,7 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         predict: |m, x| m.predict(x),
         score_samples: |m, x| Ok::<_, anofox_ml_core::RustMlError>(m.score_samples(x)),
+        decision_function: |m, x| Ok::<_, anofox_ml_core::RustMlError>(m.decision_function(x)),
     }
 
     // ------------------------------------------------------------- svm

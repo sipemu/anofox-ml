@@ -69,6 +69,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   - Before: default 0.1, nearest-rank threshold, strict `>`, so about 10%
     of labels differed from sklearn.
   - **Breaking:** the type and default of `contamination` changed.
+- **IsolationForest follows sklearn.**
+  - Leaf corrections use sklearn's `_average_path_length`, with `c(2) = 1`.
+    The general formula gave 0.154 there, which biased all scores.
+  - `contamination: Option<f64>`, defaulting to sklearn's `'auto'`
+    (offset -0.5). A numeric contamination uses the interpolated
+    percentile.
+  - Inliers are `score >= offset`. New `decision_function`.
+  - Scores agree with sklearn within seed noise.
+  - Python gets `max_samples='auto'` / float and `contamination='auto'`.
+  - **Breaking:** the default contamination changed.
 
 ### Algorithms — new
 

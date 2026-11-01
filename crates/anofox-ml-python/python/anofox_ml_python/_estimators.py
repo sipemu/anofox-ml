@@ -385,15 +385,28 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
 class IsolationForest(OutlierMixin, BaseEstimator):
     _kind = "IsolationForest"
 
-    def __init__(self, n_estimators=100, max_samples=256, contamination=0.1, random_state=None):
+    def __init__(self, n_estimators=100, max_samples="auto", contamination="auto",
+                 random_state=None):
         self.n_estimators = n_estimators
         self.max_samples = max_samples
         self.contamination = contamination
         self.random_state = random_state
 
     def _rust_params(self, X, y):
-        return {"n_estimators": self.n_estimators, "max_samples": self.max_samples,
-                "contamination": self.contamination, "seed": _seed(self.random_state)}
+        n = X.shape[0]
+        if self.max_samples == "auto":
+            ms = min(256, n)
+        elif isinstance(self.max_samples, float):
+            ms = int(self.max_samples * n)
+        else:
+            ms = int(self.max_samples)
+        return {"n_estimators": self.n_estimators, "max_samples": ms,
+                "contamination": None if self.contamination == "auto"
+                else float(self.contamination),
+                "seed": _seed(self.random_state)}
+
+    def decision_function(self, X):
+        return self._call("decision_function", X)
 
     def predict(self, X):
         return np.asarray(self._call("predict", X), dtype=np.int64)

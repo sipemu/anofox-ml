@@ -28,12 +28,18 @@ struct ITree {
     max_depth: usize,
 }
 
+/// Average path length of an unsuccessful BST search over `n` points
+/// (sklearn `_average_path_length`): 0 for n <= 1, 1 for n = 2, else
+/// `2 (ln(n - 1) + γ) - 2 (n - 1) / n`.
 fn c_factor(n: usize) -> f64 {
-    if n <= 1 {
-        return 0.0;
+    match n {
+        0 | 1 => 0.0,
+        2 => 1.0,
+        _ => {
+            let n = n as f64;
+            2.0 * ((n - 1.0).ln() + 0.577_215_664_901_532_9) - 2.0 * (n - 1.0) / n
+        }
     }
-    let n = n as f64;
-    2.0 * ((n - 1.0).ln() + 0.5772156649) - 2.0 * (n - 1.0) / n
 }
 
 fn build_tree(
@@ -128,7 +134,10 @@ fn path_length(tree: &ITree, x: &Array1<f64>) -> f64 {
 pub struct IsolationForest {
     pub n_estimators: usize,
     pub max_samples: usize,
-    pub contamination: f64,
+    /// Expected outlier fraction in `(0, 0.5]`; `None` is sklearn's `'auto'`
+    /// (offset -0.5).
+    #[serde(default)]
+    pub contamination: Option<f64>,
     pub seed: u64,
 }
 
@@ -137,7 +146,7 @@ impl IsolationForest {
         Self {
             n_estimators: 100,
             max_samples: 256,
-            contamination: 0.1,
+            contamination: None,
             seed: 0,
         }
     }
@@ -150,7 +159,7 @@ impl IsolationForest {
         self
     }
     pub fn with_contamination(mut self, c: f64) -> Self {
-        self.contamination = c;
+        self.contamination = Some(c);
         self
     }
     pub fn with_seed(mut self, s: u64) -> Self {
@@ -169,7 +178,8 @@ impl Default for IsolationForest {
 pub struct FittedIsolationForest {
     trees: Vec<ITree>,
     subsample_size: usize,
-    /// Score threshold below which a point is labelled an outlier.
+    /// sklearn's `offset_`: points with `score_samples < threshold` are
+    /// outliers (`decision_function = score_samples - threshold`).
     pub threshold: f64,
     n_features: usize,
 }
@@ -193,6 +203,14 @@ impl FittedIsolationForest {
             })
             .collect();
         Array1::from_vec(scores)
+    }
+}
+
+impl FittedIsolationForest {
+    /// `score_samples - offset` (sklearn `decision_function`): negative for
+    /// outliers.
+    pub fn decision_function(&self, x: &Array2<f64>) -> Array1<f64> {
+        self.score_samples(x) - self.threshold
     }
 }
 
@@ -231,13 +249,25 @@ impl FitUnsupervised<f64> for IsolationForest {
             threshold: 0.0,
             n_features: x.ncols(),
         };
-        // Calibrate threshold so contamination fraction is labelled outlier.
-        let scores = fitted.score_samples(x);
-        let mut sorted: Vec<f64> = scores.iter().copied().collect();
-        sorted.sort_by(anofox_ml_core::labels::label_cmp);
-        let q = (self.contamination * (n as f64 - 1.0)).round() as usize;
-        let q = q.min(n - 1);
-        fitted.threshold = sorted[q];
+        // sklearn's offset_: -0.5 for contamination='auto', else the
+        // 100 · contamination percentile (linear interpolation) of the
+        // training scores.
+        fitted.threshold = match self.contamination {
+            None => -0.5,
+            Some(c) => {
+                if !(c > 0.0 && c <= 0.5) {
+                    return Err(RustMlError::InvalidParameter(format!(
+                        "contamination must be in (0, 0.5], got {c}"
+                    )));
+                }
+                let mut sorted: Vec<f64> = fitted.score_samples(x).to_vec();
+                sorted.sort_by(f64::total_cmp);
+                let pos = c * (n as f64 - 1.0);
+                let lo = pos.floor() as usize;
+                let hi = (lo + 1).min(n - 1);
+                sorted[lo] + (pos - lo as f64) * (sorted[hi] - sorted[lo])
+            }
+        };
 
         Ok(fitted)
     }
@@ -254,7 +284,7 @@ impl Predict<f64> for FittedIsolationForest {
             )));
         }
         let scores = self.score_samples(x);
-        Ok(scores.mapv(|s| if s > self.threshold { 1.0 } else { -1.0 }))
+        Ok(scores.mapv(|s| if s >= self.threshold { 1.0 } else { -1.0 }))
     }
 }
 
@@ -288,5 +318,15 @@ mod tests {
         assert_eq!(preds[50], -1.0);
         assert_eq!(preds[51], -1.0);
         let _ = array![1.0_f64];
+    }
+
+    #[test]
+    fn test_average_path_length_matches_sklearn() {
+        // sklearn _average_path_length([0, 1, 2, 3, 256])
+        assert_eq!(c_factor(0), 0.0);
+        assert_eq!(c_factor(1), 0.0);
+        assert_eq!(c_factor(2), 1.0);
+        assert!((c_factor(3) - 1.207_392_357_589_623).abs() < 1e-12);
+        assert!((c_factor(256) - 10.244_770_920_119_917).abs() < 1e-12);
     }
 }
