@@ -5,7 +5,7 @@
 //!
 //! The dual optimisation problem:
 //!   minimise  0.5 alpha^T K alpha
-//!   subject to  0 <= alpha_i <= 1/(nu*n),  sum(alpha_i) = 1
+//!   subject to  0 <= alpha_i <= 1,  sum(alpha_i) = nu * n  (libsvm's scaling, as sklearn)
 //!
 //! Decision function: f(x) = sum_i alpha_i K(x_i, x) - rho
 //! Prediction: sign(f(x)), +1 = inlier, -1 = outlier
@@ -181,11 +181,15 @@ impl<F: Float> FittedOneClassSvm<F> {
         Ok(Array1::from_vec(scores))
     }
 
-    /// Returns the shifted decision function values (same as `decision_function`).
-    ///
-    /// Provided for API parity with scikit-learn's `score_samples`.
+    /// Unshifted scores `sum_i alpha_i K(x_i, x)` (sklearn's `score_samples`
+    /// = `decision_function + offset_`).
     pub fn score_samples(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        self.decision_function(x)
+        Ok(self.decision_function(x)? + self.rho)
+    }
+
+    /// sklearn's `offset_` (= rho): `decision_function = score_samples - offset`.
+    pub fn offset(&self) -> F {
+        self.rho
     }
 }
 
@@ -225,14 +229,9 @@ impl<F: Float> FitUnsupervised<F> for OneClassSvm {
             },
             self.cache_size,
         );
-        // libsvm's solution has Σα = ν l; this model reports the normalised
-        // dual (Σα = 1), i.e. decision values divided by ν l.
-        let scale = self.nu * x.nrows() as f64;
-        let alphas: Vec<F> = alpha
-            .iter()
-            .map(|&a| F::from_f64(a / scale).unwrap())
-            .collect();
-        let rho = F::from_f64(rho / scale).unwrap();
+        // libsvm's dual (Σα = ν l), as sklearn's `dual_coef_` / `offset_`.
+        let alphas: Vec<F> = alpha.iter().map(|&a| F::from_f64(a).unwrap()).collect();
+        let rho = F::from_f64(rho).unwrap();
 
         let sv_indices: Vec<usize> = (0..x.nrows()).filter(|&i| alphas[i] > F::zero()).collect();
 
@@ -334,9 +333,8 @@ mod tests {
 
     #[test]
     fn test_rbf_matches_sklearn() {
-        // sklearn OneClassSVM(kernel='rbf', gamma=0.5, nu=0.3, tol=1e-10).
-        // sklearn normalises Σα = νn; this crate uses Σα = 1, so decision
-        // values and rho are scaled by 1/(νn) = 1/6.
+        // sklearn OneClassSVM(kernel='rbf', gamma=0.5, nu=0.3, tol=1e-10):
+        // decision_function and offset_ (libsvm scaling, Σα = νn).
         let sk_dec = [
             6.9503616195731865e-09,
             -9.859661975752942e-10,
@@ -360,7 +358,7 @@ mod tests {
             0.13576351210873505,
         ];
         let sk_rho = 1.3410398139399482;
-        let scale = 1.0 / 6.0;
+        let scale = 1.0;
         let (x, _) = parity_data();
         let model = OneClassSvm::new()
             .with_nu(0.3)
@@ -370,7 +368,7 @@ mod tests {
         let fitted: FittedOneClassSvm<f64> = model.fit(&x).unwrap();
         assert!(
             (fitted.rho() - sk_rho * scale).abs() < 1e-5,
-            "rho = {}, sklearn/6 = {}",
+            "rho = {}, sklearn = {}",
             fitted.rho(),
             sk_rho * scale
         );
@@ -378,7 +376,7 @@ mod tests {
         for (i, (d, e)) in dec.iter().zip(sk_dec.iter()).enumerate() {
             assert!(
                 (d - e * scale).abs() < 1e-5,
-                "dec[{i}] = {d}, sklearn/6 = {}",
+                "dec[{i}] = {d}, sklearn = {}",
                 e * scale
             );
         }
@@ -598,10 +596,10 @@ mod tests {
             );
         }
 
-        // score_samples should return the same values.
+        // score_samples = decision_function + offset (sklearn).
         let scores2 = fitted.score_samples(&x_outliers).unwrap();
         for (s1, s2) in scores.iter().zip(scores2.iter()) {
-            assert_abs_diff_eq!(*s1, *s2, epsilon = 1e-10);
+            assert_abs_diff_eq!(*s1 + fitted.offset(), *s2, epsilon = 1e-10);
         }
     }
 

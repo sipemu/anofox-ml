@@ -41,6 +41,18 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
     ddof = 1.
   - **Breaking:** `n_components` is an `Option`, and the fitted fields are
     now `components`, `mixing`, `mean`, `whitening`, `n_iter`.
+- **OneClassSVM uses libsvm's dual scaling, as sklearn.** Σα = ν·n.
+  `score_samples` is `decision_function + offset()` (sklearn's `offset_`).
+  Before, decision values were divided by ν·n and `score_samples` equalled
+  `decision_function`. Predictions are unchanged. **Breaking.**
+- **KernelPCA eigenvalue cleanup is sklearn's `_check_psd_eigenvalues`.**
+  Significantly negative eigenvalues are an error, other negatives become
+  0, and positives below 1e-12·max become 0. Rounding noise was kept
+  before, so `remove_zero_eig` / Python `n_components=None` returned
+  spurious components (79 instead of 4 on rank-4 data). Python
+  `n_components=None` now always removes zero eigenvalues, as sklearn.
+- **Python `KBinsDiscretizer` defaults to `encode='onehot'`,** as sklearn.
+  The output is dense, where sklearn returns a sparse matrix.
 
 ### Algorithms — new
 

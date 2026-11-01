@@ -1594,14 +1594,17 @@ class QuantileTransformer(TransformerMixin, BaseEstimator):
 class KBinsDiscretizer(TransformerMixin, BaseEstimator):
     _kind = "KBinsDiscretizer"
 
-    def __init__(self, n_bins=5, encode="ordinal", strategy="quantile"):
+    # sklearn's default encode='onehot' returns a sparse matrix; here the
+    # one-hot output is dense.
+    def __init__(self, n_bins=5, encode="onehot", strategy="quantile"):
         self.n_bins = n_bins
         self.encode = encode
         self.strategy = strategy
 
     def _rust_params(self, X, y):
         return {"n_bins": self.n_bins,
-                "encode": _choice(self.encode, {"ordinal": "Ordinal", "onehot-dense": "Onehot"},
+                "encode": _choice(self.encode, {"ordinal": "Ordinal", "onehot": "Onehot",
+                                                "onehot-dense": "Onehot"},
                                   "encode"),
                 "strategy": _choice(self.strategy, {"uniform": "Uniform",
                                                     "quantile": "Quantile",
@@ -1667,7 +1670,10 @@ class KernelPCA(TransformerMixin, BaseEstimator):
         else:
             raise ValueError(f"unknown kernel {self.kernel!r}")
         n = X.shape[0] if self.n_components is None else int(self.n_components)
-        return {"n_components": n, "kernel": kernel, "remove_zero_eig": self.remove_zero_eig}
+        # As sklearn: with n_components=None zero-eigenvalue components are
+        # always removed.
+        return {"n_components": n, "kernel": kernel,
+                "remove_zero_eig": self.remove_zero_eig or self.n_components is None}
 
 
 class TruncatedSVD(TransformerMixin, BaseEstimator):
