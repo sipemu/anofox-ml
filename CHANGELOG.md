@@ -87,6 +87,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
     agrees within noise.
   - Gradient-boosting rounds each get their own tree seed.
   - Results without ties are unchanged; tie-breaks differ from before.
+- **CV folds of LassoCV, ElasticNetCV and RidgeCV(cv=k) are contiguous by
+  default,** as sklearn's `cv=int` (`KFold` without shuffling). Before,
+  they were shuffled with a seed, so `alpha_` could differ from sklearn's:
+  LassoCV predictions on diabetes were 13.8 apart, now 2e-3, which is
+  solver tolerance. `with_random_state(seed)` still shuffles. Python
+  `ElasticNetCV` defaults to `l1_ratio=0.5`, as sklearn.
 
 ### Algorithms — new
 

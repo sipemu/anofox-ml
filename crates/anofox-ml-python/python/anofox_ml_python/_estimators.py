@@ -878,14 +878,14 @@ class LassoCV(_LinearAttrs, RegressorMixin, BaseEstimator):
                 "alphas": None if self.alphas is None else [float(a) for a in self.alphas],
                 "with_intercept": self.fit_intercept, "max_iter": self.max_iter,
                 "tol": self.tol,
-                "folds": {"n_folds": int(self.cv), "fold_ids": None,
+                "folds": {"n_folds": int(self.cv), "fold_ids": None, "shuffle": False,
                           "seed": _seed(self.random_state)}}
 
 
 class ElasticNetCV(LassoCV):
     _kind = "ElasticNetCrossValidated"
 
-    def __init__(self, l1_ratio=(0.1, 0.3, 0.5, 0.7, 0.9), eps=1e-3, n_alphas=100,
+    def __init__(self, l1_ratio=0.5, eps=1e-3, n_alphas=100,
                  alphas=None, fit_intercept=True, max_iter=100_000, tol=1e-12, cv=5,
                  random_state=None):
         super().__init__(eps, n_alphas, alphas, fit_intercept, max_iter, tol, cv, random_state)
