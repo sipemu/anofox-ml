@@ -45,6 +45,7 @@
 pub mod adaboost_classifier;
 pub mod adaboost_regressor;
 pub mod bagging_classifier;
+mod bagging_common;
 pub mod bagging_regressor;
 pub mod calibrated_classifier;
 pub mod extra_trees_classifier;

@@ -1,18 +1,23 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
+use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor, MaxFeatures};
 use ndarray::{Array1, Array2};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
+
+use crate::bagging_common::{add_importances, out_of_bag, select_columns, BagSampling};
 
 /// Bagging (Bootstrap Aggregating) regressor parameters (unfitted state).
 ///
-/// Trains an ensemble of decision tree regressors, each on a bootstrap sample
-/// of the data using the **full** feature set. Unlike `RandomForestRegressor`,
-/// bagging does not perform random feature subsampling at the tree level --
-/// every tree sees all features.
+/// Trains an ensemble of decision tree regressors (sklearn's
+/// `BaggingRegressor` with its default tree estimator), each on a bootstrap
+/// sample of the rows and, with `max_features`, on a random subset of the
+/// features drawn once per estimator (`bootstrap_features` draws it with
+/// replacement). Unlike a random forest, the features are not re-drawn at
+/// every split.
 ///
-/// Predictions are the average of individual tree predictions.
+/// Predictions are the average of individual tree predictions. With
+/// `oob_score`, each training sample is also predicted by the trees that
+/// did not see it ([`FittedBaggingRegressor::oob_prediction`],
+/// [`FittedBaggingRegressor::oob_score`]).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BaggingRegressor {
     /// Number of trees in the ensemble.
@@ -24,6 +29,15 @@ pub struct BaggingRegressor {
     pub max_samples: Option<f64>,
     /// Whether to use bootstrap sampling. Default: true.
     pub bootstrap: bool,
+    /// Features drawn for each tree (`None` = all).
+    #[serde(default)]
+    pub max_features: Option<MaxFeatures>,
+    /// Draw each tree's features with replacement.
+    #[serde(default)]
+    pub bootstrap_features: bool,
+    /// Compute the out-of-bag prediction and R² (needs `bootstrap`).
+    #[serde(default)]
+    pub oob_score: bool,
     /// Random seed for reproducibility.
     pub seed: u64,
 }
@@ -36,6 +50,9 @@ impl BaggingRegressor {
             max_depth: None,
             max_samples: None,
             bootstrap: true,
+            max_features: None,
+            bootstrap_features: false,
+            oob_score: false,
             seed: 0,
         }
     }
@@ -52,9 +69,36 @@ impl BaggingRegressor {
         self.bootstrap = bootstrap;
         self
     }
+    /// Features drawn per tree, with replacement if `bootstrap_features`.
+    pub fn with_max_features(
+        mut self,
+        max_features: Option<MaxFeatures>,
+        bootstrap_features: bool,
+    ) -> Self {
+        self.max_features = max_features;
+        self.bootstrap_features = bootstrap_features;
+        self
+    }
+    /// Compute the out-of-bag prediction and score.
+    pub fn with_oob_score(mut self, oob_score: bool) -> Self {
+        self.oob_score = oob_score;
+        self
+    }
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
+    }
+
+    fn sampling(&self) -> BagSampling {
+        BagSampling {
+            n_estimators: self.n_estimators,
+            max_samples: self.max_samples,
+            bootstrap: self.bootstrap,
+            max_features: self.max_features,
+            bootstrap_features: self.bootstrap_features,
+            oob_score: self.oob_score,
+            seed: self.seed,
+        }
     }
 }
 
@@ -69,13 +113,46 @@ impl Default for BaggingRegressor {
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedBaggingRegressor<F: Float> {
     trees: Vec<FittedDecisionTreeRegressor<F>>,
+    /// Feature subset of each tree (empty = all features).
+    #[serde(default)]
+    features: Vec<Vec<usize>>,
     n_features: usize,
+    #[serde(default)]
+    oob_prediction: Option<Array1<F>>,
+    #[serde(default)]
+    oob_score: Option<f64>,
 }
 
 impl<F: Float> Fit<F> for BaggingRegressor {
     type Fitted = FittedBaggingRegressor<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for BaggingRegressor {
+    type Fitted = FittedBaggingRegressor<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`), applied on top of
+    /// the bootstrap counts.
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl BaggingRegressor {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedBaggingRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -86,28 +163,12 @@ impl<F: Float> Fit<F> for BaggingRegressor {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
-        if self.n_estimators == 0 {
-            return Err(RustMlError::InvalidParameter(
-                "n_estimators must be > 0".into(),
-            ));
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, x.nrows())?;
         }
-
         let n_samples = x.nrows();
         let n_features = x.ncols();
-
-        let mut rng = StdRng::seed_from_u64(self.seed);
-
-        // Compute bootstrap sample size
-        let draw_size = if let Some(frac) = self.max_samples {
-            if frac <= 0.0 || frac > 1.0 {
-                return Err(RustMlError::InvalidParameter(
-                    "max_samples must be in (0, 1]".into(),
-                ));
-            }
-            (n_samples as f64 * frac).ceil() as usize
-        } else {
-            n_samples
-        };
+        let plans = self.sampling().plans(n_samples, n_features)?;
 
         let tree_params = DecisionTreeRegressor {
             max_depth: self.max_depth,
@@ -119,27 +180,76 @@ impl<F: Float> Fit<F> for BaggingRegressor {
             ..DecisionTreeRegressor::new()
         };
 
-        // Pre-generate bootstrap row indices for determinism
-        let sample_plans: Vec<Vec<usize>> = (0..self.n_estimators)
-            .map(|_| {
-                if self.bootstrap {
-                    (0..draw_size)
-                        .map(|_| rng.gen_range(0..n_samples))
-                        .collect()
-                } else {
-                    (0..n_samples).collect()
-                }
+        let trees: Vec<FittedDecisionTreeRegressor<F>> = plans
+            .par_iter()
+            .map(|plan| {
+                let xs = select_columns(x, &plan.features);
+                crate::forest_common::fit_tree_on_rows(
+                    &tree_params.clone().with_seed(plan.seed),
+                    &xs,
+                    y,
+                    &plan.rows,
+                    sample_weight,
+                )
             })
-            .collect();
+            .collect::<Result<_>>()?;
+        let features: Vec<Vec<usize>> = plans.iter().map(|p| p.features.clone()).collect();
 
-        // Train trees in parallel -- no feature subsampling
-        let trees: Result<Vec<FittedDecisionTreeRegressor<F>>> = sample_plans
-            .into_par_iter()
-            .map(|row_indices| tree_params.fit_on_rows(x, y, &row_indices, None))
-            .collect();
-        let trees = trees?;
+        let (oob_prediction, oob_score) = if self.oob_score {
+            let mut sum = Array1::<F>::zeros(n_samples);
+            let mut count = vec![0usize; n_samples];
+            for (plan, tree) in plans.iter().zip(&trees) {
+                let oob = out_of_bag(n_samples, &plan.rows);
+                if oob.is_empty() {
+                    continue;
+                }
+                let xs = select_columns(x, &plan.features).select(ndarray::Axis(0), &oob);
+                for (&i, p) in oob.iter().zip(tree.predict(&xs)?) {
+                    sum[i] += p;
+                    count[i] += 1;
+                }
+            }
+            let pred = Array1::from_shape_fn(n_samples, |i| {
+                if count[i] > 0 {
+                    sum[i] / F::from_usize(count[i]).unwrap()
+                } else {
+                    F::nan()
+                }
+            });
+            let score = r2_where_defined(y, &pred);
+            (Some(pred), Some(score))
+        } else {
+            (None, None)
+        };
 
-        Ok(FittedBaggingRegressor { trees, n_features })
+        Ok(FittedBaggingRegressor {
+            trees,
+            features,
+            n_features,
+            oob_prediction,
+            oob_score,
+        })
+    }
+}
+
+/// R² over the samples whose prediction is not NaN.
+fn r2_where_defined<F: Float>(y: &Array1<F>, pred: &Array1<F>) -> f64 {
+    let pairs: Vec<(f64, f64)> = y
+        .iter()
+        .zip(pred)
+        .filter(|(_, p)| !p.is_nan())
+        .map(|(t, p)| (t.to_f64().unwrap(), p.to_f64().unwrap()))
+        .collect();
+    if pairs.is_empty() {
+        return f64::NAN;
+    }
+    let mean = pairs.iter().map(|p| p.0).sum::<f64>() / pairs.len() as f64;
+    let ss_res: f64 = pairs.iter().map(|(t, p)| (t - p).powi(2)).sum();
+    let ss_tot: f64 = pairs.iter().map(|(t, _)| (t - mean).powi(2)).sum();
+    if ss_tot > 0.0 {
+        1.0 - ss_res / ss_tot
+    } else {
+        0.0
     }
 }
 
@@ -153,39 +263,36 @@ impl<F: Float> Predict<F> for FittedBaggingRegressor<F> {
             )));
         }
 
-        let n_samples = x.nrows();
         let n_trees_f = F::from_usize(self.trees.len()).unwrap();
+        let all_preds: Vec<Array1<F>> = self
+            .trees
+            .par_iter()
+            .enumerate()
+            .map(|(t, tree)| tree.predict(&select_columns(x, self.tree_features(t))))
+            .collect::<Result<_>>()?;
 
-        // Collect all tree predictions in parallel
-        let all_preds: Result<Vec<Array1<F>>> =
-            self.trees.par_iter().map(|tree| tree.predict(x)).collect();
-        let all_preds = all_preds?;
-
-        // Average predictions across trees
-        let mut predictions = Vec::with_capacity(n_samples);
-        for i in 0..n_samples {
-            let mut sum = F::zero();
-            for tree_pred in &all_preds {
-                sum += tree_pred[i];
-            }
-            predictions.push(sum / n_trees_f);
+        let mut predictions = Array1::<F>::zeros(x.nrows());
+        for p in &all_preds {
+            predictions += p;
         }
-
-        Ok(Array1::from_vec(predictions))
+        Ok(predictions / n_trees_f)
     }
 }
 
 impl<F: Float> FittedBaggingRegressor<F> {
+    fn tree_features(&self, t: usize) -> &[usize] {
+        self.features.get(t).map_or(&[], Vec::as_slice)
+    }
+
     /// Feature importances averaged across all trees and normalized to sum to 1.
     pub fn feature_importances(&self) -> Array1<F> {
         let mut importances = vec![F::zero(); self.n_features];
-        let n_trees = F::from_usize(self.trees.len()).unwrap();
-
-        for tree in &self.trees {
-            let tree_importances = tree.feature_importances();
-            for (idx, &imp) in tree_importances.iter().enumerate() {
-                importances[idx] += imp / n_trees;
-            }
+        for (t, tree) in self.trees.iter().enumerate() {
+            add_importances(
+                &mut importances,
+                &tree.feature_importances(),
+                self.tree_features(t),
+            );
         }
 
         // Normalize so importances sum to 1
@@ -195,6 +302,23 @@ impl<F: Float> FittedBaggingRegressor<F> {
         } else {
             Array1::zeros(self.n_features)
         }
+    }
+
+    /// Feature subset each tree was trained on (empty = all features).
+    pub fn estimators_features(&self) -> &[Vec<usize>] {
+        &self.features
+    }
+
+    /// Out-of-bag prediction of every training sample (NaN for samples that
+    /// every tree saw); `None` unless fitted with `oob_score`.
+    pub fn oob_prediction(&self) -> Option<&Array1<F>> {
+        self.oob_prediction.as_ref()
+    }
+
+    /// Out-of-bag R² over the samples with an out-of-bag prediction; `None`
+    /// unless fitted with `oob_score`.
+    pub fn oob_score(&self) -> Option<f64> {
+        self.oob_score
     }
 
     /// Number of trees in the ensemble.

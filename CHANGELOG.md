@@ -466,6 +466,12 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     `max_features`. In both estimators each round's tree now draws its
     features with its own seed. Before, every round reused one seed, so all
     trees drew the same feature sequence.
+  - Bagging{Classifier,Regressor}: `max_features` / `bootstrap_features`
+    (one feature subset per estimator, as sklearn), `oob_score` with
+    `oob_decision_function` / `oob_prediction`, `FitWeighted`, and
+    per-estimator tree seeds. **Breaking:** `BaggingClassifier::predict` is
+    the argmax of the averaged probabilities (sklearn) instead of a majority
+    vote.
 
 - **LGBM parity, part 2 (#50):** checked against LightGBM 4.7.
   - The L1 objective starts from the (weighted) median and refits every

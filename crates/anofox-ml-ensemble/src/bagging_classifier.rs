@@ -1,18 +1,27 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
-use anofox_ml_trees::{DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion};
-use ndarray::{Array1, Array2};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_trees::{
+    DecisionTreeClassifier, FittedDecisionTreeClassifier, MaxFeatures, SplitCriterion,
+};
+use ndarray::{Array1, Array2, Axis};
 use rayon::prelude::*;
+
+use crate::bagging_common::{add_importances, out_of_bag, select_columns, BagSampling};
+use crate::forest_common::{argmax_first, sorted_classes};
 
 /// Bagging (Bootstrap Aggregating) classifier parameters (unfitted state).
 ///
-/// Trains an ensemble of decision tree classifiers, each on a bootstrap sample
-/// of the data using the **full** feature set. Unlike `RandomForestClassifier`,
-/// bagging does not perform random feature subsampling at the tree level --
-/// every tree sees all features.
+/// Trains an ensemble of decision tree classifiers (sklearn's
+/// `BaggingClassifier` with its default tree estimator), each on a
+/// bootstrap sample of the rows and, with `max_features`, on a random subset
+/// of the features drawn once per estimator (`bootstrap_features` draws it
+/// with replacement). Unlike a random forest, the features are not re-drawn
+/// at every split.
 ///
-/// Predictions are made by majority vote across all trees.
+/// As in sklearn, `predict` is the class with the highest averaged
+/// probability. With `oob_score`, each training sample is also scored by
+/// the trees that did not see it
+/// ([`FittedBaggingClassifier::oob_decision_function`],
+/// [`FittedBaggingClassifier::oob_score`]).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BaggingClassifier {
     /// Number of trees in the ensemble.
@@ -24,6 +33,16 @@ pub struct BaggingClassifier {
     pub max_samples: Option<f64>,
     /// Whether to use bootstrap sampling. Default: true.
     pub bootstrap: bool,
+    /// Features drawn for each tree (`None` = all).
+    #[serde(default)]
+    pub max_features: Option<MaxFeatures>,
+    /// Draw each tree's features with replacement.
+    #[serde(default)]
+    pub bootstrap_features: bool,
+    /// Compute the out-of-bag decision function and accuracy (needs
+    /// `bootstrap`).
+    #[serde(default)]
+    pub oob_score: bool,
     /// Random seed for reproducibility.
     pub seed: u64,
 }
@@ -36,6 +55,9 @@ impl BaggingClassifier {
             max_depth: None,
             max_samples: None,
             bootstrap: true,
+            max_features: None,
+            bootstrap_features: false,
+            oob_score: false,
             seed: 0,
         }
     }
@@ -52,9 +74,36 @@ impl BaggingClassifier {
         self.bootstrap = bootstrap;
         self
     }
+    /// Features drawn per tree, with replacement if `bootstrap_features`.
+    pub fn with_max_features(
+        mut self,
+        max_features: Option<MaxFeatures>,
+        bootstrap_features: bool,
+    ) -> Self {
+        self.max_features = max_features;
+        self.bootstrap_features = bootstrap_features;
+        self
+    }
+    /// Compute the out-of-bag decision function and score.
+    pub fn with_oob_score(mut self, oob_score: bool) -> Self {
+        self.oob_score = oob_score;
+        self
+    }
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self
+    }
+
+    fn sampling(&self) -> BagSampling {
+        BagSampling {
+            n_estimators: self.n_estimators,
+            max_samples: self.max_samples,
+            bootstrap: self.bootstrap,
+            max_features: self.max_features,
+            bootstrap_features: self.bootstrap_features,
+            oob_score: self.oob_score,
+            seed: self.seed,
+        }
     }
 }
 
@@ -69,13 +118,50 @@ impl Default for BaggingClassifier {
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedBaggingClassifier<F: Float> {
     trees: Vec<FittedDecisionTreeClassifier<F>>,
+    /// Feature subset of each tree (empty = all features).
+    #[serde(default)]
+    features: Vec<Vec<usize>>,
+    /// Sorted training labels (empty for models saved before they were
+    /// stored: then the union of the trees' classes).
+    #[serde(default)]
+    classes: Vec<F>,
     n_features: usize,
+    #[serde(default)]
+    oob_decision_function: Option<Array2<F>>,
+    #[serde(default)]
+    oob_score: Option<f64>,
 }
 
 impl<F: Float> Fit<F> for BaggingClassifier {
     type Fitted = FittedBaggingClassifier<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for BaggingClassifier {
+    type Fitted = FittedBaggingClassifier<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`), applied on top of
+    /// the bootstrap counts.
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl BaggingClassifier {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedBaggingClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -86,28 +172,12 @@ impl<F: Float> Fit<F> for BaggingClassifier {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
-        if self.n_estimators == 0 {
-            return Err(RustMlError::InvalidParameter(
-                "n_estimators must be > 0".into(),
-            ));
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, x.nrows())?;
         }
-
         let n_samples = x.nrows();
         let n_features = x.ncols();
-
-        let mut rng = StdRng::seed_from_u64(self.seed);
-
-        // Compute bootstrap sample size
-        let draw_size = if let Some(frac) = self.max_samples {
-            if frac <= 0.0 || frac > 1.0 {
-                return Err(RustMlError::InvalidParameter(
-                    "max_samples must be in (0, 1]".into(),
-                ));
-            }
-            (n_samples as f64 * frac).ceil() as usize
-        } else {
-            n_samples
-        };
+        let plans = self.sampling().plans(n_samples, n_features)?;
 
         let tree_params = DecisionTreeClassifier {
             max_depth: self.max_depth,
@@ -121,74 +191,111 @@ impl<F: Float> Fit<F> for BaggingClassifier {
             ..DecisionTreeClassifier::new()
         };
 
-        // Pre-generate bootstrap row indices for determinism
-        let sample_plans: Vec<Vec<usize>> = (0..self.n_estimators)
-            .map(|_| {
-                if self.bootstrap {
-                    (0..draw_size)
-                        .map(|_| rng.gen_range(0..n_samples))
-                        .collect()
-                } else {
-                    (0..n_samples).collect()
-                }
+        let trees: Vec<FittedDecisionTreeClassifier<F>> = plans
+            .par_iter()
+            .map(|plan| {
+                let xs = select_columns(x, &plan.features);
+                crate::forest_common::fit_tree_on_rows(
+                    &tree_params.clone().with_seed(plan.seed),
+                    &xs,
+                    y,
+                    &plan.rows,
+                    sample_weight,
+                )
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
-        // Train trees in parallel -- no feature subsampling
-        let trees: Result<Vec<FittedDecisionTreeClassifier<F>>> = sample_plans
-            .into_par_iter()
-            .map(|row_indices| tree_params.fit_on_rows(x, y, &row_indices, None))
-            .collect();
-        let trees = trees?;
+        let mut fitted = FittedBaggingClassifier {
+            trees,
+            features: plans.iter().map(|p| p.features.clone()).collect(),
+            classes: sorted_classes(y),
+            n_features,
+            oob_decision_function: None,
+            oob_score: None,
+        };
 
-        Ok(FittedBaggingClassifier { trees, n_features })
+        if self.oob_score {
+            let n_classes = fitted.classes.len();
+            let mut sum = Array2::<F>::zeros((n_samples, n_classes));
+            let mut count = vec![0usize; n_samples];
+            for (t, plan) in plans.iter().enumerate() {
+                let oob = out_of_bag(n_samples, &plan.rows);
+                if oob.is_empty() {
+                    continue;
+                }
+                let xs = x.select(Axis(0), &oob);
+                let proba = fitted.tree_proba(t, &xs)?;
+                for (k, &i) in oob.iter().enumerate() {
+                    let mut row = sum.row_mut(i);
+                    row += &proba.row(k);
+                    count[i] += 1;
+                }
+            }
+            let (mut correct, mut scored) = (0usize, 0usize);
+            for (i, mut row) in sum.rows_mut().into_iter().enumerate() {
+                if count[i] == 0 {
+                    row.fill(F::nan());
+                    continue;
+                }
+                row /= F::from_usize(count[i]).unwrap();
+                scored += 1;
+                if fitted.classes[argmax_first(row.iter().copied())] == y[i] {
+                    correct += 1;
+                }
+            }
+            fitted.oob_score = Some(if scored > 0 {
+                correct as f64 / scored as f64
+            } else {
+                f64::NAN
+            });
+            fitted.oob_decision_function = Some(sum);
+        }
+        Ok(fitted)
     }
 }
 
 impl<F: Float> Predict<F> for FittedBaggingClassifier<F> {
+    /// The class with the highest averaged probability (sklearn).
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-
-        let n_samples = x.nrows();
-        let n_trees = self.trees.len();
-
-        // Collect all tree predictions in parallel
-        let all_preds: Result<Vec<Array1<F>>> =
-            self.trees.par_iter().map(|tree| tree.predict(x)).collect();
-        let all_preds = all_preds?;
-
-        // Aggregate votes per sample (majority vote)
-        let mut predictions = Vec::with_capacity(n_samples);
-        let mut votes = Vec::with_capacity(n_trees);
-        for i in 0..n_samples {
-            votes.clear();
-            for tree_pred in &all_preds {
-                votes.push(tree_pred[i]);
-            }
-            predictions.push(anofox_ml_trees::split::majority_vote(&votes));
-        }
-
-        Ok(Array1::from_vec(predictions))
+        let proba = self.predict_proba(x)?;
+        let classes = self.classes();
+        Ok(proba
+            .rows()
+            .into_iter()
+            .map(|row| classes[argmax_first(row.iter().copied())])
+            .collect())
     }
 }
 
 impl<F: Float> FittedBaggingClassifier<F> {
+    fn tree_features(&self, t: usize) -> &[usize] {
+        self.features.get(t).map_or(&[], Vec::as_slice)
+    }
+
+    /// Probabilities of tree `t` for the (full-width) rows `x`, mapped to
+    /// the ensemble's class columns.
+    fn tree_proba(&self, t: usize, x: &Array2<F>) -> Result<Array2<F>> {
+        let tree = &self.trees[t];
+        let local = tree.predict_proba(&select_columns(x, self.tree_features(t)))?;
+        let classes = self.classes();
+        let mut out = Array2::<F>::zeros((x.nrows(), classes.len()));
+        for (local_ci, tc) in tree.classes().into_iter().enumerate() {
+            if let Some(ci) = classes.iter().position(|&c| c == tc) {
+                out.column_mut(ci).assign(&local.column(local_ci));
+            }
+        }
+        Ok(out)
+    }
+
     /// Feature importances averaged across all trees and normalized to sum to 1.
     pub fn feature_importances(&self) -> Array1<F> {
         let mut importances = vec![F::zero(); self.n_features];
-        let n_trees = F::from_usize(self.trees.len()).unwrap();
-
-        for tree in &self.trees {
-            let tree_importances = tree.feature_importances();
-            for (idx, &imp) in tree_importances.iter().enumerate() {
-                importances[idx] += imp / n_trees;
-            }
+        for (t, tree) in self.trees.iter().enumerate() {
+            add_importances(
+                &mut importances,
+                &tree.feature_importances(),
+                self.tree_features(t),
+            );
         }
 
         // Normalize so importances sum to 1
@@ -205,6 +312,24 @@ impl<F: Float> FittedBaggingClassifier<F> {
         self.trees.len()
     }
 
+    /// Feature subset each tree was trained on (empty = all features).
+    pub fn estimators_features(&self) -> &[Vec<usize>] {
+        &self.features
+    }
+
+    /// Out-of-bag class probabilities of every training sample (NaN rows
+    /// for samples that every tree saw); `None` unless fitted with
+    /// `oob_score`.
+    pub fn oob_decision_function(&self) -> Option<&Array2<F>> {
+        self.oob_decision_function.as_ref()
+    }
+
+    /// Out-of-bag accuracy over the samples with an out-of-bag prediction;
+    /// `None` unless fitted with `oob_score`.
+    pub fn oob_score(&self) -> Option<f64> {
+        self.oob_score
+    }
+
     /// Predict class probabilities for each sample.
     ///
     /// Returns an `Array2<F>` of shape `(n_samples, n_classes)` where each row
@@ -217,48 +342,15 @@ impl<F: Float> FittedBaggingClassifier<F> {
                 x.ncols()
             )));
         }
-
-        // Collect probabilities from each tree in parallel
-        let all_proba: Result<Vec<Array2<F>>> = self
-            .trees
-            .par_iter()
-            .map(|tree| tree.predict_proba(x))
-            .collect();
-        let all_proba = all_proba?;
-
-        // Determine global class set (union of all trees' classes)
-        let mut global_classes: Vec<F> = Vec::new();
-        let eps = F::from_f64(1e-9).unwrap();
-        for tree in &self.trees {
-            for c in tree.classes() {
-                if !global_classes.iter().any(|&gc| (gc - c).abs() < eps) {
-                    global_classes.push(c);
-                }
-            }
+        let all: Vec<Array2<F>> = (0..self.trees.len())
+            .into_par_iter()
+            .map(|t| self.tree_proba(t, x))
+            .collect::<Result<_>>()?;
+        let mut avg = Array2::<F>::zeros((x.nrows(), self.classes().len()));
+        for p in &all {
+            avg += p;
         }
-        global_classes.sort_by(anofox_ml_trees::split::cmp_nan_last);
-
-        let n_samples = x.nrows();
-        let n_classes = global_classes.len();
-        let n_trees_f = F::from_usize(self.trees.len()).unwrap();
-        let mut avg_proba = Array2::<F>::zeros((n_samples, n_classes));
-
-        // Map each tree's probabilities to the global class indices and average
-        for (tree_idx, tree) in self.trees.iter().enumerate() {
-            let tree_classes = tree.classes();
-            let tree_proba = &all_proba[tree_idx];
-
-            for (local_ci, &tc) in tree_classes.iter().enumerate() {
-                if let Some(global_ci) = global_classes.iter().position(|&gc| (gc - tc).abs() < eps)
-                {
-                    for i in 0..n_samples {
-                        avg_proba[[i, global_ci]] += tree_proba[[i, local_ci]] / n_trees_f;
-                    }
-                }
-            }
-        }
-
-        Ok(avg_proba)
+        Ok(avg / F::from_usize(self.trees.len()).unwrap())
     }
 
     /// Compute classification accuracy on the given data.
@@ -273,13 +365,15 @@ impl<F: Float> FittedBaggingClassifier<F> {
         Ok(correct as f64 / n as f64)
     }
 
-    /// Returns the unique sorted class labels across all trees.
+    /// The sorted class labels.
     pub fn classes(&self) -> Vec<F> {
-        let eps = F::from_f64(1e-9).unwrap();
+        if !self.classes.is_empty() {
+            return self.classes.clone();
+        }
         let mut classes: Vec<F> = Vec::new();
         for tree in &self.trees {
             for c in tree.classes() {
-                if !classes.iter().any(|&gc| (gc - c).abs() < eps) {
+                if !classes.contains(&c) {
                     classes.push(c);
                 }
             }
