@@ -1728,18 +1728,28 @@ class OPTICS(ClusterMixin, BaseEstimator):
 class MeanShift(ClusterMixin, BaseEstimator):
     _kind = "MeanShift"
 
-    def __init__(self, bandwidth=None, max_iter=300):
+    def __init__(self, *, bandwidth=None, seeds=None, bin_seeding=False, min_bin_freq=1,
+                 cluster_all=True, max_iter=300):
         self.bandwidth = bandwidth
+        self.seeds = seeds
+        self.bin_seeding = bin_seeding
+        self.min_bin_freq = min_bin_freq
+        self.cluster_all = cluster_all
         self.max_iter = max_iter
 
     def _rust_params(self, X, y):
-        bw = self.bandwidth
-        if bw is None:  # median nearest-neighbour-ish heuristic
-            d = np.sqrt(((X[:, None, :] - X[None, :, :]) ** 2).sum(-1)) if len(X) <= 2000 \
-                else None
-            bw = float(np.quantile(d[np.triu_indices(len(X), 1)], 0.3)) if d is not None \
-                else float(X.std())
-        return {"bandwidth": float(bw), "max_iter": self.max_iter}
+        seeds = None
+        if self.seeds is not None:
+            arr = np.ascontiguousarray(self.seeds, dtype=np.float64)
+            seeds = {"v": 1, "dim": list(arr.shape), "data": arr.ravel().tolist()}
+        return {"bandwidth": None if self.bandwidth is None else float(self.bandwidth),
+                "seeds": seeds, "bin_seeding": bool(self.bin_seeding),
+                "min_bin_freq": int(self.min_bin_freq), "cluster_all": bool(self.cluster_all),
+                "max_iter": int(self.max_iter)}
+
+    @property
+    def cluster_centers_(self):
+        return _nd(self._fitted_state()["cluster_centers"])
 
 
 class Birch(ClusterMixin, BaseEstimator):

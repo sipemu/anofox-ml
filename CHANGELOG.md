@@ -606,6 +606,18 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   It matches sklearn for Euclidean, Manhattan and precomputed input; Python
   adds `metric` and a `ClassicalMDS` alias.
 
+- **MeanShift (#61)** follows sklearn.
+  - `bandwidth: Option<f64>` (`None` estimates it with the new
+    `estimate_bandwidth`).
+  - New `seeds`, `bin_seeding` / `min_bin_freq` and `cluster_all`.
+  - The stopping threshold is `1e-3 · bandwidth`.
+  - Seeds shift in parallel through the neighbour index, instead of
+    copying every row on every shift.
+  - Centres are sorted by intensity and suppressed within the bandwidth,
+    where before the first-found centre won within bandwidth / 2.
+  - Centres, labels and `n_iter` match sklearn exactly.
+  - **Breaking:** `bandwidth` is an `Option` and `tol` is gone.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

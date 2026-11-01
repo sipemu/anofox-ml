@@ -254,3 +254,14 @@ def test_classical_mds_matches_sklearn():
         ours = am.ClassicalMDS(3, metric=metric).fit_transform(X)
         ref = ClassicalMDS(n_components=3, metric=metric).fit_transform(X)
         np.testing.assert_allclose(ours, ref, atol=1e-9)
+
+
+def test_mean_shift_matches_sklearn():
+    from sklearn import cluster as skc
+
+    Xb = np.vstack([X[:, :2], X[:, :2] + 6.0])
+    for kw in [dict(), dict(bin_seeding=True), dict(bandwidth=1.0, cluster_all=False)]:
+        ours = am.MeanShift(**kw).fit(Xb)
+        ref = skc.MeanShift(**kw).fit(Xb)
+        np.testing.assert_allclose(ours.cluster_centers_, ref.cluster_centers_, atol=1e-10)
+        assert list(ours.labels_) == list(ref.labels_)
