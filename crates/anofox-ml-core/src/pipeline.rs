@@ -111,7 +111,7 @@ where
         y: Option<&Array1<F>>,
     ) -> Result<(T::Fitted, Option<Array2<F>>)> {
         match y {
-            Some(y) => Ok((self.0.fit(x, y)?, None)),
+            Some(y) => self.0.fit_transform_supervised(x, y),
             None => crate::traits::FitUnsupervised::<F>::fit(self, x).map(|f| (f, None)),
         }
     }

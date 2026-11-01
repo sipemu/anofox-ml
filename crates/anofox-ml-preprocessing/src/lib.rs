@@ -58,6 +58,7 @@ pub mod select_k_best;
 pub mod simple_imputer;
 pub(crate) mod special;
 pub mod standard_scaler;
+pub mod target_encoder;
 pub mod truncated_svd;
 pub mod variance_threshold;
 
@@ -99,5 +100,6 @@ pub use select_from_model::{FittedSelectFromModel, SelectFromModel, Threshold};
 pub use select_k_best::{FittedSelectKBest, SelectKBest};
 pub use simple_imputer::{FittedSimpleImputer, ImputeStrategy, SimpleImputer};
 pub use standard_scaler::{FittedStandardScaler, StandardScaler};
+pub use target_encoder::{FittedTargetEncoder, TargetEncoder, TargetSmooth, TargetType};
 pub use truncated_svd::{FittedTruncatedSvd, TruncatedSvd};
 pub use variance_threshold::{FittedVarianceThreshold, VarianceThreshold};

@@ -10,6 +10,19 @@ use crate::float::Float;
 pub trait Fit<F: Float> {
     type Fitted;
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted>;
+
+    /// Pipeline hook for supervised transformers: fit and optionally return
+    /// the transformed training data. The default calls [`fit`](Self::fit)
+    /// and returns `None` (the pipeline then calls `transform`). Transformers
+    /// whose training output differs from `fit(X, y).transform(X)` override
+    /// it — e.g. `TargetEncoder`, whose `fit_transform` is cross-fitted.
+    fn fit_transform_supervised(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+    ) -> Result<(Self::Fitted, Option<Array2<F>>)> {
+        Ok((self.fit(x, y)?, None))
+    }
 }
 
 /// Unsupervised learning: fit on X only (e.g., scalers, PCA).

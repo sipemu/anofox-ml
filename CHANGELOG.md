@@ -673,6 +673,19 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   `degree = 0` with a bias is allowed, as in sklearn. Output matches
   sklearn 1.8.
 
+- **TargetEncoder (#56):** a port of sklearn's `TargetEncoder`.
+  - `smooth` is `Auto` (empirical Bayes) or a fixed value.
+  - Continuous, binary and multiclass targets (one-vs-rest columns grouped
+    by feature). Unknown categories map to the target mean; NaN is its own
+    category.
+  - `fit_transform` cross-fits (stratified folds for class targets).
+  - New core hook `Fit::fit_transform_supervised`: `Supervised(encoder)` in
+    a pipeline, FeatureUnion or ColumnTransformer gets the cross-fitted
+    training output, as sklearn's pipeline does.
+  - Encodings and `transform` match sklearn 1.8 to 1e-12. Fold assignment
+    uses this crate's seeded splitters, so cross-fitted values differ from
+    sklearn's.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
