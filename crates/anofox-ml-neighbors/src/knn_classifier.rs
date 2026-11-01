@@ -1,9 +1,8 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2};
-use rayon::prelude::*;
 
-use crate::distance::{compute_distances_batch, DistanceMetric};
-use crate::kdtree::KdTree;
+use crate::distance::DistanceMetric;
+use crate::index::{NeighborAlgorithm, NeighborIndex};
 
 /// Weighting strategy for KNN.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -11,8 +10,27 @@ pub enum WeightFunction {
     /// All neighbors contribute equally.
     #[default]
     Uniform,
-    /// Closer neighbors have more influence (weight = 1/distance).
+    /// Closer neighbors have more influence (weight = 1/distance). A query
+    /// with neighbours at distance 0 uses only those, with equal weights
+    /// (sklearn).
     Distance,
+}
+
+/// Neighbour weights of one query (sklearn's `_get_weights`).
+pub(crate) fn neighbor_weights<F: Float>(dists: &[F], weights: WeightFunction) -> Vec<F> {
+    match weights {
+        WeightFunction::Uniform => vec![F::one(); dists.len()],
+        WeightFunction::Distance => {
+            if dists.iter().any(|&d| d == F::zero()) {
+                dists
+                    .iter()
+                    .map(|&d| if d == F::zero() { F::one() } else { F::zero() })
+                    .collect()
+            } else {
+                dists.iter().map(|&d| F::one() / d).collect()
+            }
+        }
+    }
 }
 
 /// KNN classifier parameters (unfitted state).
@@ -21,6 +39,9 @@ pub struct KnnClassifier {
     pub n_neighbors: usize,
     pub metric: DistanceMetric,
     pub weights: WeightFunction,
+    /// Neighbour search algorithm (sklearn's `algorithm`).
+    #[serde(default)]
+    pub algorithm: NeighborAlgorithm,
 }
 
 impl KnnClassifier {
@@ -30,6 +51,7 @@ impl KnnClassifier {
             n_neighbors: k,
             metric: DistanceMetric::default(),
             weights: WeightFunction::default(),
+            algorithm: NeighborAlgorithm::default(),
         }
     }
 
@@ -44,6 +66,12 @@ impl KnnClassifier {
         self.metric = metric;
         self
     }
+
+    /// Set the neighbour search algorithm.
+    pub fn with_algorithm(mut self, algorithm: NeighborAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
 }
 
 impl Default for KnnClassifier {
@@ -52,156 +80,160 @@ impl Default for KnnClassifier {
     }
 }
 
-/// Fitted KNN classifier — stores training data (lazy learner).
-///
-/// Uses a KD-tree for Euclidean distance (O(log n) per query) and
-/// brute-force search for other metrics.
+/// Fitted KNN classifier — stores training data (lazy learner) in a
+/// [`NeighborIndex`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedKnnClassifier<F: Float> {
-    x_train: Array2<F>,
-    y_train: Array1<F>,
-    kdtree: Option<KdTree<F>>,
+    index: NeighborIndex<F>,
+    /// Sorted class labels.
+    classes: Vec<F>,
+    /// Class index of every training sample.
+    y_class: Vec<usize>,
     n_neighbors: usize,
-    metric: DistanceMetric,
     weights: WeightFunction,
+}
+
+/// Check `X`/`y` and `n_neighbors` for the k-nearest-neighbour estimators.
+pub(crate) fn check_knn_fit<F: Float>(x: &Array2<F>, y: &Array1<F>, k: usize) -> Result<()> {
+    if x.nrows() != y.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "X has {} rows but y has {} elements",
+            x.nrows(),
+            y.len()
+        )));
+    }
+    if x.is_empty() {
+        return Err(RustMlError::EmptyInput("training data is empty".into()));
+    }
+    if k == 0 {
+        return Err(RustMlError::InvalidParameter(
+            "n_neighbors must be > 0".into(),
+        ));
+    }
+    if k > x.nrows() {
+        return Err(RustMlError::InvalidParameter(format!(
+            "n_neighbors ({}) > number of training samples ({})",
+            k,
+            x.nrows()
+        )));
+    }
+    Ok(())
+}
+
+/// Sorted distinct labels and the class index of every label.
+pub(crate) fn encode_classes<F: Float>(y: &Array1<F>) -> (Vec<F>, Vec<usize>) {
+    let mut classes: Vec<F> = y.to_vec();
+    classes.sort_by(crate::total_cmp);
+    classes.dedup_by(|a, b| crate::total_cmp(a, b).is_eq());
+    let idx = y
+        .iter()
+        .map(|v| {
+            classes
+                .binary_search_by(|c| crate::total_cmp(c, v))
+                .expect("label in classes")
+        })
+        .collect();
+    (classes, idx)
 }
 
 impl<F: Float> Fit<F> for KnnClassifier {
     type Fitted = FittedKnnClassifier<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
-        if self.n_neighbors == 0 {
-            return Err(RustMlError::InvalidParameter(
-                "n_neighbors must be > 0".into(),
-            ));
-        }
-        if self.n_neighbors > x.nrows() {
-            return Err(RustMlError::InvalidParameter(format!(
-                "n_neighbors ({}) > number of training samples ({})",
-                self.n_neighbors,
-                x.nrows()
-            )));
-        }
-
-        // Build KD-tree for Euclidean distance
-        let kdtree = if self.metric == DistanceMetric::Euclidean {
-            let points: Vec<(Vec<F>, usize)> = x
-                .rows()
-                .into_iter()
-                .enumerate()
-                .map(|(i, row)| (row.to_vec(), i))
-                .collect();
-            Some(KdTree::build(&points, x.ncols()))
-        } else {
-            None
-        };
-
+        check_knn_fit(x, y, self.n_neighbors)?;
+        let index = NeighborIndex::new(x, self.metric, self.algorithm, Some(self.n_neighbors))?;
+        let (classes, y_class) = encode_classes(y);
         Ok(FittedKnnClassifier {
-            // Stored C-contiguous so the brute-force path can use row slices.
-            x_train: x.as_standard_layout().into_owned(),
-            y_train: y.to_owned(),
-            kdtree,
+            index,
+            classes,
+            y_class,
             n_neighbors: self.n_neighbors,
-            metric: self.metric,
             weights: self.weights,
         })
     }
 }
 
 impl<F: Float + Send + Sync> Predict<F> for FittedKnnClassifier<F> {
+    /// The class with the largest (weighted) vote; ties go to the smallest
+    /// label, as in sklearn.
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.x_train.ncols() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.x_train.ncols(),
-                x.ncols()
-            )));
-        }
-
-        // Parallel prediction using rayon — iterate ndarray rows directly
-        let x_std = crate::standard_layout(x);
-        let x: &Array2<F> = &x_std;
-        let predictions: Vec<F> = (0..x.nrows())
-            .into_par_iter()
-            .map(|i| {
-                let row = x.row(i);
-                let row_slice = row.as_slice().expect("standard layout");
-                let neighbors = self.find_neighbors(row_slice);
-                weighted_majority_vote(&neighbors, self.weights)
-            })
-            .collect();
-
-        Ok(Array1::from_vec(predictions))
+        let proba = self.predict_proba(x)?;
+        Ok(proba
+            .rows()
+            .into_iter()
+            .map(|row| self.classes[argmax_first(row.iter().copied())])
+            .collect())
     }
+}
+
+/// Index of the first maximum.
+pub(crate) fn argmax_first<F: Float>(values: impl Iterator<Item = F>) -> usize {
+    let mut best = (0, F::neg_infinity());
+    for (i, v) in values.enumerate() {
+        if v > best.1 {
+            best = (i, v);
+        }
+    }
+    best.0
 }
 
 impl<F: Float> FittedKnnClassifier<F> {
-    /// Find k nearest neighbors, returning (distance, label) pairs.
-    fn find_neighbors(&self, query: &[F]) -> Vec<(F, F)> {
-        if let Some(ref kdtree) = self.kdtree {
-            // KD-tree path (Euclidean only)
-            kdtree
-                .query_k_nearest(query, self.n_neighbors)
-                .into_iter()
-                .map(|(dist, idx)| (dist, self.y_train[idx]))
-                .collect()
-        } else {
-            // Brute-force path — batch distance is faster than per-row calls.
-            let query_view = ndarray::ArrayView1::from(query);
-            let dists = compute_distances_batch(&query_view, &self.x_train, self.metric);
-            let mut distances: Vec<(F, F)> = dists
-                .into_iter()
-                .zip(self.y_train.iter().copied())
-                .collect();
-            // Stable sort: equal distances keep training order (lower index first).
-            distances.sort_by(|a, b| crate::total_cmp(&a.0, &b.0));
-            distances.truncate(self.n_neighbors);
-            distances
+    /// Sorted class labels (columns of [`predict_proba`](Self::predict_proba)).
+    pub fn classes(&self) -> &[F] {
+        &self.classes
+    }
+
+    /// The neighbour index.
+    pub fn index(&self) -> &NeighborIndex<F> {
+        &self.index
+    }
+
+    /// Distances and training indices of the `k` (default `n_neighbors`)
+    /// nearest training samples of every row of `x`.
+    pub fn kneighbors(
+        &self,
+        x: &Array2<F>,
+        k: Option<usize>,
+    ) -> Result<(Array2<F>, Array2<usize>)> {
+        self.index.kneighbors(x, k.unwrap_or(self.n_neighbors))
+    }
+
+    /// Class probabilities: the (weighted) share of each class among the
+    /// neighbours.
+    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        let (dist, idx) = self.index.kneighbors(x, self.n_neighbors)?;
+        let mut proba = Array2::zeros((x.nrows(), self.classes.len()));
+        for (i, mut row) in proba.rows_mut().into_iter().enumerate() {
+            let d = dist.row(i).to_vec();
+            let w = neighbor_weights(&d, self.weights);
+            for (&j, &wj) in idx.row(i).iter().zip(&w) {
+                row[self.y_class[j]] += wj;
+            }
+            let total = row.sum();
+            if total > F::zero() {
+                row /= total;
+            }
         }
+        Ok(proba)
     }
 }
 
-/// Weighted majority vote among neighbors.
-///
-/// Deterministic: per-class weights are accumulated over classes sorted
-/// ascending and the first maximum wins, so ties resolve to the **smallest
-/// class label**, exactly like sklearn (`stats.mode` / `weighted_mode` over
-/// the sorted `classes_`). The previous `HashMap` iteration order made tied
-/// votes random across runs (#42).
-#[inline]
-fn weighted_majority_vote<F: Float>(neighbors: &[(F, F)], weights: WeightFunction) -> F {
-    // (class, weight) pairs; k is small, so a sorted Vec beats a map.
-    let mut votes: Vec<(F, F)> = neighbors
-        .iter()
-        .map(|&(dist, class)| {
-            let w = match weights {
-                WeightFunction::Uniform => F::one(),
-                WeightFunction::Distance => {
-                    if dist < F::from_f64(1e-15).unwrap() {
-                        F::from_f64(1e15).unwrap()
-                    } else {
-                        F::one() / dist
-                    }
-                }
-            };
-            (class, w)
-        })
-        .collect();
-    votes.sort_by(|a, b| crate::total_cmp(&a.0, &b.0));
+impl<F: Float> PredictProba<F> for FittedKnnClassifier<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        FittedKnnClassifier::predict_proba(self, x)
+    }
+}
 
-    let mut best_class = votes[0].0;
-    let mut best_weight = F::neg_infinity();
+/// Weighted majority vote among (distance, label) neighbours: ties go to
+/// the smallest label (sklearn's `mode` / `weighted_mode`).
+#[cfg(test)]
+fn weighted_majority_vote<F: Float>(neighbors: &[(F, F)], weights: WeightFunction) -> F {
+    let d: Vec<F> = neighbors.iter().map(|n| n.0).collect();
+    let w = neighbor_weights(&d, weights);
+    let mut votes: Vec<(F, F)> = neighbors.iter().map(|n| n.1).zip(w).collect();
+    votes.sort_by(|a, b| crate::total_cmp(&a.0, &b.0));
+    let mut best = (votes[0].0, F::neg_infinity());
     let mut i = 0;
     while i < votes.len() {
         let class = votes[i].0;
@@ -210,12 +242,11 @@ fn weighted_majority_vote<F: Float>(neighbors: &[(F, F)], weights: WeightFunctio
             total += votes[i].1;
             i += 1;
         }
-        if total > best_weight {
-            best_weight = total;
-            best_class = class;
+        if total > best.1 {
+            best = (class, total);
         }
     }
-    best_class
+    best.0
 }
 
 #[cfg(test)]

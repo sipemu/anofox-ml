@@ -42,6 +42,8 @@ SPECIAL = {
     "NuSVC": dict(params=dict(probability=True)),
     "KMeans": dict(params=dict(n_clusters=3, random_state=0)),
     "MeanShift": dict(params=dict(bandwidth=2.0)),
+    "RadiusNeighborsClassifier": dict(params=dict(radius=3.0)),
+    "RadiusNeighborsRegressor": dict(params=dict(radius=3.0)),
     "SpectralClustering": dict(params=dict(n_clusters=3, random_state=0)),
     "TSNE": dict(params=dict(perplexity=10.0, max_iter=250, random_state=0)),
 }
@@ -121,7 +123,7 @@ def test_not_fitted_and_param_errors():
     with pytest.raises(ValueError, match="features"):
         am.Ridge().fit(X, y_reg).predict(X[:, :2])
     with pytest.raises(AttributeError):
-        am.KNeighborsClassifier().fit(X, y_bin).predict_proba(X)
+        am.LinearSVC().fit(X, y_bin).predict_proba(X)
 
 
 def test_string_labels_and_class_weight():
@@ -199,3 +201,28 @@ def test_joblib_parallel_fits():
         joblib.delayed(lambda a: am.Ridge(alpha=a).fit(X, y_reg))(a) for a in (0.1, 1.0)
     )
     assert len(fitted) == 2 and fitted[0].predict(X).shape == (80,)
+
+
+def test_neighbors_match_sklearn():
+    from sklearn import neighbors as skn
+
+    Xq = X[:10] + 0.3
+    for metric, p in [("minkowski", 2), ("minkowski", 3), ("chebyshev", 2), ("manhattan", 2)]:
+        for algorithm in ["brute", "kd_tree"]:
+            kw = dict(metric=metric, p=p, algorithm=algorithm, weights="distance")
+            ours = am.KNeighborsClassifier(n_neighbors=7, **kw).fit(X, y_multi)
+            ref = skn.KNeighborsClassifier(n_neighbors=7, **kw).fit(X, y_multi)
+            np.testing.assert_allclose(ours.predict_proba(Xq), ref.predict_proba(Xq), atol=1e-12)
+            ours = am.KNeighborsRegressor(n_neighbors=7, **kw).fit(X, y_reg)
+            ref = skn.KNeighborsRegressor(n_neighbors=7, **kw).fit(X, y_reg)
+            np.testing.assert_allclose(ours.predict(Xq), ref.predict(Xq), atol=1e-12)
+
+    far = np.vstack([Xq, np.full((1, 4), 50.0)])
+    for label, y in [(7, y_multi), ("yes", y_bin)]:
+        ours = am.RadiusNeighborsClassifier(radius=1.5, outlier_label=label).fit(X, y)
+        ref = skn.RadiusNeighborsClassifier(radius=1.5, outlier_label=label).fit(X, y)
+        assert list(ours.predict(far)) == list(ref.predict(far))
+        np.testing.assert_allclose(ours.predict_proba(far), ref.predict_proba(far), atol=1e-12)
+    ours = am.RadiusNeighborsRegressor(radius=1.5).fit(X, y_reg)
+    ref = skn.RadiusNeighborsRegressor(radius=1.5).fit(X, y_reg)
+    np.testing.assert_allclose(ours.predict(Xq), ref.predict(Xq), atol=1e-12)

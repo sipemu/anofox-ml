@@ -2,9 +2,10 @@
 //!
 //! This crate provides [`KnnClassifier`] and [`KnnRegressor`], both of which
 //! support configurable distance metrics ([`DistanceMetric`]) and weighting
-//! strategies ([`WeightFunction`]). When Euclidean distance is selected, a
-//! KD-tree is built at fit time for efficient O(log n) neighbor lookups;
-//! other metrics use brute-force search.
+//! strategies ([`WeightFunction`]), plus the radius-neighbour estimators and
+//! the local outlier factor. All of them search through a shared
+//! [`NeighborIndex`] (KD-tree or brute force, chosen like sklearn's
+//! `algorithm="auto"`), which the clustering and manifold crates use too.
 //!
 //! # Examples
 //!
@@ -33,15 +34,22 @@
 //! ```
 
 pub mod distance;
-pub mod kdtree;
+pub mod index;
+mod kdtree;
 pub mod knn_classifier;
 pub mod knn_regressor;
 pub mod lof;
+pub mod radius;
 
 pub use distance::DistanceMetric;
+pub use index::{NeighborAlgorithm, NeighborIndex, RadiusNeighbors};
 pub use knn_classifier::{FittedKnnClassifier, KnnClassifier, WeightFunction};
 pub use knn_regressor::{FittedKnnRegressor, KnnRegressor};
 pub use lof::{FittedLocalOutlierFactor, LocalOutlierFactor, LofAlgorithm};
+pub use radius::{
+    FittedRadiusNeighborsClassifier, FittedRadiusNeighborsRegressor, RadiusNeighborsClassifier,
+    RadiusNeighborsRegressor,
+};
 
 /// Return `x` in standard (C-contiguous) layout: borrowed when it already is,
 /// otherwise a one-off row-major copy. Lets `row(i).as_slice()` fast paths

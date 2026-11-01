@@ -497,6 +497,34 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     results change for the L1 objective, weighted fits, multiclass LGBM and
     categorical features.
 
+- **Neighbours, part 1 (#60):**
+  - New `NeighborIndex` (sklearn's `NearestNeighbors`): batched, parallel
+    `kneighbors`, `kneighbors_self` (each sample excluded from its own
+    list), `radius_neighbors` and `radius_neighbors_self`.
+    `NeighborAlgorithm::Auto` follows sklearn's rule (brute force for
+    non-Minkowski metrics, more than 15 features or
+    `k >= n_samples / 2`). Results are exact and identical across
+    algorithms, with ties going to the lower index.
+  - The KD-tree is rewritten. It stores a flat permuted copy of the data,
+    uses leaves of 30 points and splits at the median of the widest
+    dimension (`select_nth_unstable`). It prunes with node bounding boxes,
+    so it serves every Minkowski metric. Building it no longer sorts at
+    every level.
+  - Euclidean brute force pre-selects candidates with a matrix product,
+    then ranks them by exact distances (about 4× faster, still exact).
+  - New metrics `Chebyshev`, `Minkowski(p)` and `Precomputed`.
+  - kNN estimators: `algorithm`, `kneighbors`, `predict_proba` /
+    `PredictProba` for the classifier. `weights = Distance` uses sklearn's
+    rule: neighbours at distance 0 take all the weight, replacing the old
+    `1e15` cap.
+  - New `RadiusNeighborsClassifier` (with `outlier_label`) and
+    `RadiusNeighborsRegressor` (NaN without neighbours), also in the
+    Python bindings, which gain `p`, `algorithm` and the new metrics.
+  - LOF uses the shared index.
+  - All of this matches sklearn 1.8 (Rust and Python parity tests).
+  - **Breaking:** the public `kdtree` module is gone, and fitted kNN
+    models saved by earlier versions do not load.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

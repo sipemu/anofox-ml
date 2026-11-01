@@ -36,6 +36,7 @@ fn test_golden_knn_classifier() {
             n_neighbors,
             weights,
             metric,
+            ..Default::default()
         };
 
         let fitted = Fit::fit(&knn, &x_train, &y_train).unwrap();
@@ -76,6 +77,7 @@ fn test_golden_knn_regressor() {
             n_neighbors,
             weights,
             metric,
+            ..Default::default()
         };
 
         let fitted = Fit::fit(&knn, &x_train, &y_train).unwrap();

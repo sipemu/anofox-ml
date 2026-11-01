@@ -122,7 +122,8 @@ pub mod prelude {
     };
 
     pub use anofox_ml_neighbors::{
-        DistanceMetric, KnnClassifier, KnnRegressor, LocalOutlierFactor, WeightFunction,
+        DistanceMetric, KnnClassifier, KnnRegressor, LocalOutlierFactor, NeighborAlgorithm,
+        NeighborIndex, RadiusNeighborsClassifier, RadiusNeighborsRegressor, WeightFunction,
     };
 
     pub use anofox_ml_trees::{

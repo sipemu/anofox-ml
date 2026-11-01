@@ -1131,37 +1131,100 @@ class BernoulliNB(_DiscreteNB):
         return p
 
 
-_METRIC = {"euclidean": "Euclidean", "manhattan": "Manhattan", "cosine": "Cosine",
-           "minkowski": "Euclidean"}
+_METRIC = {"euclidean": "Euclidean", "l2": "Euclidean", "manhattan": "Manhattan",
+           "cityblock": "Manhattan", "l1": "Manhattan", "chebyshev": "Chebyshev",
+           "infinity": "Chebyshev", "cosine": "Cosine", "precomputed": "Precomputed"}
 _WEIGHTS = {"uniform": "Uniform", "distance": "Distance"}
+_ALGORITHM = {"auto": "Auto", "brute": "BruteForce", "kd_tree": "KdTree"}
+
+
+def _neighbor_params(est):
+    if est.metric == "minkowski":
+        metric = {"Minkowski": float(est.p)}
+    else:
+        metric = _choice(est.metric, _METRIC, "metric")
+    return {"weights": _choice(est.weights, _WEIGHTS, "weights"),
+            "metric": metric,
+            "algorithm": _choice(est.algorithm, _ALGORITHM, "algorithm")}
 
 
 class KNeighborsClassifier(ClassifierMixin, BaseEstimator):
     _kind = "KnnClassifier"
 
-    def __init__(self, n_neighbors=5, weights="uniform", metric="minkowski"):
+    def __init__(self, n_neighbors=5, weights="uniform", algorithm="auto", p=2,
+                 metric="minkowski"):
         self.n_neighbors = n_neighbors
         self.weights = weights
+        self.algorithm = algorithm
+        self.p = p
         self.metric = metric
 
     def _rust_params(self, X, y):
-        return {"n_neighbors": self.n_neighbors,
-                "weights": _choice(self.weights, _WEIGHTS, "weights"),
-                "metric": _choice(self.metric, _METRIC, "metric")}
+        return {"n_neighbors": self.n_neighbors, **_neighbor_params(self)}
 
 
 class KNeighborsRegressor(RegressorMixin, BaseEstimator):
     _kind = "KnnRegressor"
 
-    def __init__(self, n_neighbors=5, weights="uniform", metric="minkowski"):
+    def __init__(self, n_neighbors=5, weights="uniform", algorithm="auto", p=2,
+                 metric="minkowski"):
         self.n_neighbors = n_neighbors
         self.weights = weights
+        self.algorithm = algorithm
+        self.p = p
         self.metric = metric
 
     def _rust_params(self, X, y):
-        return {"n_neighbors": self.n_neighbors,
-                "weights": _choice(self.weights, _WEIGHTS, "weights"),
-                "metric": _choice(self.metric, _METRIC, "metric")}
+        return {"n_neighbors": self.n_neighbors, **_neighbor_params(self)}
+
+
+class RadiusNeighborsClassifier(ClassifierMixin, BaseEstimator):
+    _kind = "RadiusNeighborsClassifier"
+
+    def __init__(self, radius=1.0, weights="uniform", algorithm="auto", p=2,
+                 metric="minkowski", outlier_label=None):
+        self.radius = radius
+        self.weights = weights
+        self.algorithm = algorithm
+        self.p = p
+        self.metric = metric
+        self.outlier_label = outlier_label
+
+    def _rust_params(self, X, y):
+        # Labels are encoded as class indices: a training class maps to its
+        # index, any other outlier label to -1 (decoded in ``predict``).
+        label = self.outlier_label
+        if label is None:
+            enc = None
+        else:
+            hits = np.flatnonzero(self.classes_ == label)
+            enc = float(hits[0]) if len(hits) else -1.0
+        return {"radius": float(self.radius), **_neighbor_params(self),
+                "outlier_label": enc}
+
+    def predict(self, X):
+        pred = np.asarray(self._call("predict", X), dtype=np.int64)
+        if not (pred < 0).any():
+            return self.classes_[pred]
+        out = np.empty(len(pred), dtype=np.result_type(self.classes_, np.asarray(self.outlier_label)))
+        out[pred >= 0] = self.classes_[pred[pred >= 0]]
+        out[pred < 0] = self.outlier_label
+        return out
+
+
+class RadiusNeighborsRegressor(RegressorMixin, BaseEstimator):
+    _kind = "RadiusNeighborsRegressor"
+
+    def __init__(self, radius=1.0, weights="uniform", algorithm="auto", p=2,
+                 metric="minkowski"):
+        self.radius = radius
+        self.weights = weights
+        self.algorithm = algorithm
+        self.p = p
+        self.metric = metric
+
+    def _rust_params(self, X, y):
+        return {"radius": float(self.radius), **_neighbor_params(self)}
 
 
 class LocalOutlierFactor(OutlierMixin, BaseEstimator):

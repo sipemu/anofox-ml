@@ -12,13 +12,12 @@
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use ndarray::{Array1, Array2};
-use rayon::prelude::*;
 
-use crate::kdtree::KdTree;
+use crate::distance::DistanceMetric;
+use crate::index::{NeighborAlgorithm, NeighborIndex};
 
-/// Algorithm used for k-NN lookup. `Auto` picks `KdTree` when `n_features ≤ 20`
-/// and falls back to brute force otherwise (KD-tree quickly degenerates as
-/// dimensionality grows past ~20).
+/// Algorithm used for k-NN lookup. `Auto` follows sklearn's rule (see
+/// [`NeighborAlgorithm::Auto`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LofAlgorithm {
     Auto,
@@ -63,100 +62,11 @@ pub struct FittedLocalOutlierFactor {
     pub predictions: Array1<f64>,
 }
 
-fn euclidean(a: &[f64], b: &[f64]) -> f64 {
-    let mut acc = 0.0;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        let d = x - y;
-        acc += d * d;
-    }
-    acc.sqrt()
-}
-
-/// Brute-force k-NN: O(n²d) per query. Used when `d` is too large for
-/// KD-tree to help.
-fn brute_knn(x: &Array2<f64>, k: usize) -> Vec<Vec<(usize, f64)>> {
-    let n = x.nrows();
-    (0..n)
-        .into_par_iter()
-        .map(|i| {
-            use std::cmp::Ordering;
-            #[derive(Clone, Copy)]
-            struct DPair(usize, f64);
-            impl Ord for DPair {
-                fn cmp(&self, other: &Self) -> Ordering {
-                    self.1.total_cmp(&other.1)
-                }
-            }
-            impl PartialOrd for DPair {
-                fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                    Some(self.cmp(other))
-                }
-            }
-            impl Eq for DPair {}
-            impl PartialEq for DPair {
-                fn eq(&self, other: &Self) -> bool {
-                    self.1 == other.1
-                }
-            }
-
-            let ri = x.row(i).to_vec();
-            let ri = ri.as_slice();
-            let mut heap: std::collections::BinaryHeap<DPair> =
-                std::collections::BinaryHeap::with_capacity(k);
-            for j in 0..x.nrows() {
-                if j == i {
-                    continue;
-                }
-                let rj = x.row(j).to_vec();
-                let rj = rj.as_slice();
-                let d = euclidean(ri, rj);
-                if heap.len() < k {
-                    heap.push(DPair(j, d));
-                } else if let Some(top) = heap.peek() {
-                    if d < top.1 {
-                        heap.pop();
-                        heap.push(DPair(j, d));
-                    }
-                }
-            }
-            let mut v: Vec<(usize, f64)> = heap.into_iter().map(|p| (p.0, p.1)).collect();
-            v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-            v
-        })
-        .collect()
-}
-
-/// KD-tree k-NN: O(n log n) construction, ~O(log n) per query in low dim.
-fn kdtree_knn(x: &Array2<f64>, k: usize) -> Vec<Vec<(usize, f64)>> {
-    let n = x.nrows();
-    let d = x.ncols();
-    let pts: Vec<(Vec<f64>, usize)> = (0..n).map(|i| (x.row(i).to_vec(), i)).collect();
-    let tree = KdTree::<f64>::build(&pts, d);
-    (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let q = x.row(i).to_vec();
-            // Query k+1 then drop the self-match if present.
-            let raw = tree.query_k_nearest(&q, k + 1);
-            let mut v: Vec<(usize, f64)> = raw
-                .into_iter()
-                .filter(|(_, idx)| *idx != i)
-                .take(k)
-                .map(|(d, idx)| (idx, d))
-                .collect();
-            // KD-tree result is already ascending; ensure deterministic order.
-            v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-            v
-        })
-        .collect()
-}
-
 impl FitUnsupervised<f64> for LocalOutlierFactor {
     type Fitted = FittedLocalOutlierFactor;
 
     fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
         let n = x.nrows();
-        let d = x.ncols();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
         }
@@ -165,17 +75,23 @@ impl FitUnsupervised<f64> for LocalOutlierFactor {
             return Err(RustMlError::InvalidParameter("n_neighbors >= 1".into()));
         }
 
-        // 1. k-NN: KD-tree for low-dim, brute force for high-dim.
-        let use_kdtree = match self.algorithm {
-            LofAlgorithm::KdTree => true,
-            LofAlgorithm::BruteForce => false,
-            LofAlgorithm::Auto => d <= 20,
+        // 1. k-NN of every sample among the others.
+        let algorithm = match self.algorithm {
+            LofAlgorithm::KdTree => NeighborAlgorithm::KdTree,
+            LofAlgorithm::BruteForce => NeighborAlgorithm::BruteForce,
+            LofAlgorithm::Auto => NeighborAlgorithm::Auto,
         };
-        let neighbors: Vec<Vec<(usize, f64)>> = if use_kdtree {
-            kdtree_knn(x, k)
-        } else {
-            brute_knn(x, k)
-        };
+        let index = NeighborIndex::new(x, DistanceMetric::Euclidean, algorithm, Some(k))?;
+        let (dist, idx) = index.kneighbors_self(k)?;
+        let neighbors: Vec<Vec<(usize, f64)>> = (0..n)
+            .map(|i| {
+                idx.row(i)
+                    .iter()
+                    .copied()
+                    .zip(dist.row(i).iter().copied())
+                    .collect()
+            })
+            .collect();
         let k_dist: Vec<f64> = neighbors
             .iter()
             .map(|nbrs| nbrs.last().map(|p| p.1).unwrap_or(0.0))

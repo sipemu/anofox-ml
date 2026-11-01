@@ -460,10 +460,24 @@ registry! {
         fitted: neighbors::FittedKnnClassifier<f64>,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m, x),
     }
     KnnRegressor {
         config: neighbors::KnnRegressor = Default::default(),
         fitted: neighbors::FittedKnnRegressor<f64>,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+    }
+    RadiusNeighborsClassifier {
+        config: neighbors::RadiusNeighborsClassifier = Default::default(),
+        fitted: neighbors::FittedRadiusNeighborsClassifier<f64>,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m, x),
+    }
+    RadiusNeighborsRegressor {
+        config: neighbors::RadiusNeighborsRegressor = Default::default(),
+        fitted: neighbors::FittedRadiusNeighborsRegressor<f64>,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }

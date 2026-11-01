@@ -12,6 +12,106 @@ pub enum DistanceMetric {
     /// Useful for text and high-dimensional data where the angle between
     /// vectors matters more than their magnitude.
     Cosine,
+    /// Chebyshev (L∞) distance: the largest coordinate difference.
+    Chebyshev,
+    /// Minkowski distance `(Σ |a_i - b_i|^p)^(1/p)` with `p ≥ 1`
+    /// (`p = 1` is Manhattan, `p = 2` Euclidean).
+    Minkowski(f64),
+    /// The inputs already are distances: at fit time the square matrix of
+    /// training distances, at query time `(n_queries, n_train)` distances to
+    /// the training samples (sklearn's `metric="precomputed"`).
+    Precomputed,
+}
+
+impl DistanceMetric {
+    /// The same metric with `Minkowski(1 | 2 | ∞)` written as Manhattan,
+    /// Euclidean and Chebyshev.
+    pub(crate) fn canonical(self) -> Self {
+        match self {
+            DistanceMetric::Minkowski(1.0) => DistanceMetric::Manhattan,
+            DistanceMetric::Minkowski(2.0) => DistanceMetric::Euclidean,
+            DistanceMetric::Minkowski(p) if p == f64::INFINITY => DistanceMetric::Chebyshev,
+            m => m,
+        }
+    }
+
+    /// Reject parameters that do not define a metric.
+    pub(crate) fn validate(self) -> anofox_ml_core::Result<()> {
+        if let DistanceMetric::Minkowski(p) = self {
+            if p.is_nan() || p < 1.0 {
+                return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                    "Minkowski p must be >= 1, got {p}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the metric is a Minkowski norm (KD-tree bounding boxes give
+    /// valid lower bounds for it).
+    pub(crate) fn is_minkowski(self) -> bool {
+        matches!(
+            self,
+            DistanceMetric::Euclidean
+                | DistanceMetric::Manhattan
+                | DistanceMetric::Chebyshev
+                | DistanceMetric::Minkowski(_)
+        )
+    }
+
+    /// Reduced distance: a monotone transform of the distance that is
+    /// cheaper to compute (squared for Euclidean, `Σ|d|^p` for Minkowski).
+    #[inline]
+    pub(crate) fn rdist<F: Float>(self, a: &[F], b: &[F]) -> F {
+        match self {
+            DistanceMetric::Euclidean => euclidean_squared_chunked(a, b),
+            DistanceMetric::Manhattan => manhattan_chunked(a, b),
+            DistanceMetric::Cosine => cosine_distance_chunked(a, b),
+            DistanceMetric::Chebyshev => a
+                .iter()
+                .zip(b)
+                .fold(F::zero(), |m, (&x, &y)| m.max((x - y).abs())),
+            DistanceMetric::Minkowski(p) => {
+                let p = F::from_f64(p).unwrap();
+                a.iter()
+                    .zip(b)
+                    .fold(F::zero(), |s, (&x, &y)| s + (x - y).abs().powf(p))
+            }
+            DistanceMetric::Precomputed => F::nan(),
+        }
+    }
+
+    /// Fold one coordinate's absolute difference into a reduced distance.
+    #[inline]
+    pub(crate) fn rdist_add<F: Float>(self, acc: F, diff: F) -> F {
+        match self {
+            DistanceMetric::Euclidean => acc + diff * diff,
+            DistanceMetric::Manhattan => acc + diff,
+            DistanceMetric::Chebyshev => acc.max(diff),
+            DistanceMetric::Minkowski(p) => acc + diff.powf(F::from_f64(p).unwrap()),
+            DistanceMetric::Cosine | DistanceMetric::Precomputed => acc,
+        }
+    }
+
+    /// Distance from a reduced distance.
+    #[inline]
+    pub(crate) fn rdist_to_dist<F: Float>(self, r: F) -> F {
+        match self {
+            DistanceMetric::Euclidean => r.sqrt(),
+            DistanceMetric::Minkowski(p) => r.powf(F::from_f64(1.0 / p).unwrap()),
+            _ => r,
+        }
+    }
+
+    /// Reduced distance from a distance.
+    #[inline]
+    pub(crate) fn dist_to_rdist<F: Float>(self, d: F) -> F {
+        match self {
+            DistanceMetric::Euclidean => d * d,
+            DistanceMetric::Minkowski(p) => d.powf(F::from_f64(p).unwrap()),
+            _ => d,
+        }
+    }
 }
 
 /// Compute the squared Euclidean distance between two slices using a
@@ -175,7 +275,8 @@ fn cosine_distance_chunked<F: Float>(a: &[F], b: &[F]) -> F {
     }
 }
 
-/// Compute the distance between two points.
+/// Compute the distance between two points (`Precomputed` gives NaN: there
+/// is nothing to compute).
 ///
 /// The function is `#[inline]` to allow the compiler to specialize and
 /// auto-vectorize the hot loop when the metric is known at the call-site.
@@ -202,11 +303,8 @@ pub fn compute_distance<F: Float>(
         }
     };
 
-    match metric {
-        DistanceMetric::Euclidean => euclidean_squared_chunked(a_slice, b_slice).sqrt(),
-        DistanceMetric::Manhattan => manhattan_chunked(a_slice, b_slice),
-        DistanceMetric::Cosine => cosine_distance_chunked(a_slice, b_slice),
-    }
+    let metric = metric.canonical();
+    metric.rdist_to_dist(metric.rdist(a_slice, b_slice))
 }
 
 /// Compute distances from a single query point to all rows in a matrix.
@@ -237,25 +335,10 @@ pub fn compute_distances_batch<F: Float>(
     let n_rows = data.nrows();
     let mut result = Vec::with_capacity(n_rows);
 
-    match metric {
-        DistanceMetric::Euclidean => {
-            for row in data.rows() {
-                let r = row.as_slice().expect("standard layout");
-                result.push(euclidean_squared_chunked(q, r).sqrt());
-            }
-        }
-        DistanceMetric::Manhattan => {
-            for row in data.rows() {
-                let r = row.as_slice().expect("standard layout");
-                result.push(manhattan_chunked(q, r));
-            }
-        }
-        DistanceMetric::Cosine => {
-            for row in data.rows() {
-                let r = row.as_slice().expect("standard layout");
-                result.push(cosine_distance_chunked(q, r));
-            }
-        }
+    let metric = metric.canonical();
+    for row in data.rows() {
+        let r = row.as_slice().expect("standard layout");
+        result.push(metric.rdist_to_dist(metric.rdist(q, r)));
     }
 
     result
