@@ -199,13 +199,9 @@ impl AdaBoostRegressor {
             let bootstrap_indices: Vec<usize> =
                 (0..n_samples).map(|_| dist.sample(&mut rng)).collect();
 
-            let x_bootstrap = build_sub_rows(x, &bootstrap_indices);
-            let y_bootstrap =
-                Array1::from_vec(bootstrap_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
-
-            // Fit weak learner on the bootstrap sample.
+            // Fit weak learner on the bootstrap sample (without copying X).
             let fitted_tree: FittedDecisionTreeRegressor<F> =
-                tree_params.fit(&x_bootstrap, &y_bootstrap)?;
+                tree_params.fit_on_rows(x, y, &bootstrap_indices, None)?;
 
             // Predict on the *full* training set.
             let preds = fitted_tree.predict(x)?;
@@ -371,11 +367,6 @@ fn weighted_median<F: Float>(preds: &[F], weights: &[F]) -> F {
         }
     }
     preds[*order.last().expect("at least one estimator")]
-}
-
-/// Build a sub-matrix selecting specific rows from `x`.
-fn build_sub_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
-    x.select(ndarray::Axis(0), row_indices)
 }
 
 #[cfg(test)]

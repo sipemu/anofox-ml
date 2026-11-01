@@ -6,7 +6,7 @@ use ndarray::{Array1, Array2};
 /// Convert a Float value to a u64 key suitable for HashMap use.
 /// Uses f64 bit representation for exact equality matching.
 #[inline]
-fn float_key<F: Float>(v: F) -> u64 {
+pub(crate) fn float_key<F: Float>(v: F) -> u64 {
     v.to_f64().unwrap().to_bits()
 }
 
@@ -252,10 +252,10 @@ fn sort_feature_pairs<F: Float>(
 }
 
 /// Candidate best split (without index vectors) used during the search.
-struct CandidateSplit<F: Float> {
-    feature: usize,
-    threshold: F,
-    improvement: F,
+pub(crate) struct CandidateSplit<F: Float> {
+    pub(crate) feature: usize,
+    pub(crate) threshold: F,
+    pub(crate) improvement: F,
 }
 
 /// If `improvement` beats `best_improvement`, record the candidate.
@@ -263,7 +263,7 @@ struct CandidateSplit<F: Float> {
 /// Index vectors are NOT allocated here — they are reconstructed once
 /// after the search completes, avoiding repeated allocations.
 #[inline]
-fn try_update_best_split<F: Float>(
+pub(crate) fn try_update_best_split<F: Float>(
     improvement: F,
     best_improvement: &mut F,
     best: &mut Option<CandidateSplit<F>>,
@@ -282,7 +282,7 @@ fn try_update_best_split<F: Float>(
 
 /// Accumulator that tracks split impurity incrementally as samples move
 /// from the "right" partition to the "left" partition.
-trait SplitAccumulator<F: Float> {
+pub(crate) trait SplitAccumulator<F: Float> {
     /// Reset the accumulator with all samples in "right".
     fn reset(&mut self, y: &Array1<F>, indices: &[usize]);
     /// Move sample `idx` from right to left.
@@ -377,7 +377,7 @@ impl<F: Float> ClassificationAccumulator<F> {
 }
 
 /// Regression accumulator using running sum and sum-of-squares.
-struct RegressionAccumulator<F: Float> {
+pub(crate) struct RegressionAccumulator<F: Float> {
     left_sum: F,
     left_sum_sq: F,
     right_sum: F,
@@ -387,7 +387,7 @@ struct RegressionAccumulator<F: Float> {
 }
 
 impl<F: Float> RegressionAccumulator<F> {
-    fn new(y: &Array1<F>, indices: &[usize]) -> Self {
+    pub(crate) fn new(y: &Array1<F>, indices: &[usize]) -> Self {
         let mut total_sum = F::zero();
         let mut total_sum_sq = F::zero();
         for &i in indices {
@@ -542,7 +542,7 @@ impl<F: Float> SplitAccumulator<F> for WeightedClassificationAccumulator<'_, F> 
 /// Regression accumulator over weighted running sums `Σw`, `Σwy`, `Σwy²`.
 /// With unit weights it performs exactly the arithmetic of the unweighted
 /// one.
-struct WeightedRegressionAccumulator<'w, F: Float> {
+pub(crate) struct WeightedRegressionAccumulator<'w, F: Float> {
     weights: &'w Array1<F>,
     left: [F; 3],
     right: [F; 3],
@@ -551,7 +551,7 @@ struct WeightedRegressionAccumulator<'w, F: Float> {
 }
 
 impl<'w, F: Float> WeightedRegressionAccumulator<'w, F> {
-    fn new(y: &Array1<F>, indices: &[usize], weights: &'w Array1<F>) -> Self {
+    pub(crate) fn new(y: &Array1<F>, indices: &[usize], weights: &'w Array1<F>) -> Self {
         let mut acc = Self {
             weights,
             left: [F::zero(); 3],
@@ -619,7 +619,7 @@ impl<F: Float> SplitAccumulator<F> for WeightedRegressionAccumulator<'_, F> {
 /// Returns `Some((threshold, improvement))` when the split passes the
 /// distinct-value and min-samples-leaf gates, or `None` otherwise.
 #[inline]
-fn evaluate_candidate_split<F: Float, A: SplitAccumulator<F>>(
+pub(crate) fn evaluate_candidate_split<F: Float, A: SplitAccumulator<F>>(
     acc: &A,
     n: usize,
     min_samples_leaf: usize,
@@ -784,7 +784,11 @@ fn build_class_map<F: Float>(y: &Array1<F>, indices: &[usize]) -> HashMap<u64, u
 
 /// Compute Gini or Entropy impurity from class counts (O(k) where k = n_classes).
 #[inline]
-fn impurity_from_counts<F: Float>(counts: &[usize], total: usize, criterion: SplitCriterion) -> F {
+pub(crate) fn impurity_from_counts<F: Float>(
+    counts: &[usize],
+    total: usize,
+    criterion: SplitCriterion,
+) -> F {
     let n = F::from_usize(total).unwrap();
     match criterion {
         SplitCriterion::Gini => {
@@ -815,7 +819,7 @@ fn impurity_from_counts<F: Float>(counts: &[usize], total: usize, criterion: Spl
 
 /// Gini or Entropy impurity from (weighted) per-class totals.
 #[inline]
-fn impurity_from_weights<F: Float, I: Iterator<Item = F>>(
+pub(crate) fn impurity_from_weights<F: Float, I: Iterator<Item = F>>(
     class_weights: I,
     total_weight: F,
     criterion: SplitCriterion,

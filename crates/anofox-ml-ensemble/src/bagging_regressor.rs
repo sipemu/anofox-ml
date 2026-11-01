@@ -134,11 +134,7 @@ impl<F: Float> Fit<F> for BaggingRegressor {
         // Train trees in parallel -- no feature subsampling
         let trees: Result<Vec<FittedDecisionTreeRegressor<F>>> = sample_plans
             .into_par_iter()
-            .map(|row_indices| {
-                let x_sub = build_sub_matrix_rows(x, &row_indices);
-                let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
-                tree_params.fit(&x_sub, &y_sub)
-            })
+            .map(|row_indices| tree_params.fit_on_rows(x, y, &row_indices, None))
             .collect();
         let trees = trees?;
 
@@ -225,19 +221,6 @@ impl<F: Float> FittedBaggingRegressor<F> {
             0.0
         })
     }
-}
-
-/// Build a sub-matrix selecting specific rows (all columns) from `x`.
-fn build_sub_matrix_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
-    let n_rows = row_indices.len();
-    let n_cols = x.ncols();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for &ri in row_indices {
-        for ci in 0..n_cols {
-            data.push(x[[ri, ci]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
 }
 
 #[cfg(test)]

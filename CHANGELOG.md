@@ -417,6 +417,23 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     methods are replaced by pickling.
   - `Lasso` / `ElasticNet` use anofox-regression's penalty scaling, which
     does not yet match sklearn's `alpha` (#72).
+- **Tree and boosting performance (#48):**
+  - Decision trees presort every feature once per tree and split nodes by
+    stable partition (no per-node sorting); classes are encoded once per
+    tree instead of hashed per sample move. Trees are byte-identical to
+    before and fit 2–2.7× faster.
+  - New `DecisionTreeClassifier::fit_on_rows` / `DecisionTreeRegressor::
+    fit_on_rows` fit on (bootstrap) row lists without copying `X`; random
+    forests, bagging, gradient-boosting subsampling and AdaBoost.R2 use
+    them (same results, no per-tree copy of `X`).
+  - LGBM: histogram subtraction (only the smaller child's histograms are
+    built), per-feature bin counts, column-major bins for histograms and
+    row-major bins for prediction, no per-row allocations, O(1) categorical
+    routing, histograms built in parallel for large nodes. Fitting is
+    3.5–4× faster with the same predictions.
+  - Weighted splits use running weighted sums (see #37) and the RF OOB score
+    uses an in-bag mask.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

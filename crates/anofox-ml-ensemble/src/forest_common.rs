@@ -67,33 +67,61 @@ pub(crate) fn select_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Arr
 }
 
 /// Index of the first maximum (ties -> lowest index, like `numpy.argmax`).
-/// Fit one forest tree on the bootstrap rows, passing the matching slice of
-/// the forest-level sample weights. A bootstrap draw whose weights are all
-/// zero carries no information about the weighting and is fitted unweighted.
-pub(crate) fn fit_tree_on_rows<F, T, FT>(
+/// A tree that can be fitted on sample rows of `X` without copying it.
+pub(crate) trait FitOnRows<F: Float> {
+    type Fitted;
+    fn fit_rows(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        rows: &[usize],
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted>;
+}
+
+impl<F: Float> FitOnRows<F> for anofox_ml_trees::DecisionTreeClassifier {
+    type Fitted = anofox_ml_trees::FittedDecisionTreeClassifier<F>;
+    fn fit_rows(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        rows: &[usize],
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_on_rows(x, y, rows, sample_weight)
+    }
+}
+
+impl<F: Float> FitOnRows<F> for anofox_ml_trees::DecisionTreeRegressor {
+    type Fitted = anofox_ml_trees::FittedDecisionTreeRegressor<F>;
+    fn fit_rows(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        rows: &[usize],
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_on_rows(x, y, rows, sample_weight)
+    }
+}
+
+/// Fit one tree on the (bootstrap) rows without copying `X`, passing the
+/// forest-level sample weights. A draw whose weights are all zero carries no
+/// information about the weighting and is fitted unweighted.
+pub(crate) fn fit_tree_on_rows<F, T>(
     tree: &T,
     x: &Array2<F>,
     y: &Array1<F>,
     rows: &[usize],
     sample_weight: Option<&Array1<F>>,
-) -> Result<FT>
+) -> Result<T::Fitted>
 where
     F: Float,
-    T: anofox_ml_core::Fit<F, Fitted = FT> + anofox_ml_core::FitWeighted<F, Fitted = FT>,
+    T: FitOnRows<F>,
 {
-    let x_sub = select_rows(x, rows);
-    let y_sub = y.select(ndarray::Axis(0), rows);
-    match sample_weight {
-        Some(w) => {
-            let w_sub = w.select(ndarray::Axis(0), rows);
-            if w_sub.iter().fold(F::zero(), |a, &b| a + b) > F::zero() {
-                tree.fit_weighted(&x_sub, &y_sub, Some(&w_sub))
-            } else {
-                tree.fit(&x_sub, &y_sub)
-            }
-        }
-        None => tree.fit(&x_sub, &y_sub),
-    }
+    let sample_weight =
+        sample_weight.filter(|w| rows.iter().fold(F::zero(), |a, &r| a + w[r]) > F::zero());
+    tree.fit_rows(x, y, rows, sample_weight)
 }
 
 pub(crate) fn argmax_first<F: Float>(values: impl IntoIterator<Item = F>) -> usize {
