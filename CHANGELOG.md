@@ -124,6 +124,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `y_thresholds_`); before, they were a step function. New
   `out_of_bounds` (`Nan` default / `Clip` / `Raise`); before, inputs
   outside the range were always clipped.
+- **CCA is a port of sklearn's `CCA`.** It uses NIPALS mode B with
+  canonical deflation and `scale`, plus `_svd_flip_1d` signs, and exposes
+  weights, loadings, rotations and `n_iter`. Before, it was the
+  closed-form SVD solution: the canonical correlations were the same, but
+  scores and weights were scaled and signed differently from sklearn's.
+  It matches sklearn now. **Breaking:** `FittedCca` fields changed.
 
 ### Algorithms — new
 
