@@ -233,3 +233,15 @@ def test_tsne_array_init_and_defaults():
     emb = am.TSNE(perplexity=10.0, init=init, method="exact", max_iter=300).fit_transform(X)
     assert emb.shape == (80, 2) and np.isfinite(emb).all()
     assert am.TSNE().get_params()["learning_rate"] == "auto"
+
+
+def test_agglomerative_matches_sklearn():
+    from sklearn import cluster as skc
+
+    for linkage in ["ward", "complete", "average", "single"]:
+        ours = am.AgglomerativeClustering(3, linkage=linkage).fit(X)
+        ref = skc.AgglomerativeClustering(3, linkage=linkage).fit(X)
+        assert list(ours.labels_) == list(ref.labels_)
+    ours = am.AgglomerativeClustering(None, linkage="average", distance_threshold=2.0).fit(X)
+    ref = skc.AgglomerativeClustering(None, linkage="average", distance_threshold=2.0).fit(X)
+    assert list(ours.labels_) == list(ref.labels_)

@@ -1756,15 +1756,20 @@ class Birch(ClusterMixin, BaseEstimator):
 class AgglomerativeClustering(ClusterMixin, BaseEstimator):
     _kind = "AgglomerativeClustering"
 
-    def __init__(self, n_clusters=2, linkage="ward"):
+    def __init__(self, n_clusters=2, *, linkage="ward", distance_threshold=None):
         self.n_clusters = n_clusters
         self.linkage = linkage
+        self.distance_threshold = distance_threshold
 
     def _rust_params(self, X, y):
-        return {"n_clusters": self.n_clusters,
+        if (self.n_clusters is None) == (self.distance_threshold is None):
+            raise ValueError("Exactly one of n_clusters and distance_threshold has to be set")
+        return {"n_clusters": 1 if self.n_clusters is None else int(self.n_clusters),
                 "linkage": _choice(self.linkage, {"ward": "Ward", "complete": "Complete",
                                                   "average": "Average", "single": "Single"},
-                                   "linkage")}
+                                   "linkage"),
+                "distance_threshold": None if self.distance_threshold is None
+                else float(self.distance_threshold)}
 
 
 class SpectralClustering(ClusterMixin, BaseEstimator):

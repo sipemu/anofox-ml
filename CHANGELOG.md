@@ -586,6 +586,19 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     (default 10). Large k-NN graphs use the sparse eigensolver. Python
     gains `affinity="nearest_neighbors"`, `n_neighbors` and `n_init`.
 
+- **AgglomerativeClustering (#61)** builds the tree like sklearn.
+  - Single linkage uses Prim's MST with O(n) memory.
+  - Complete, average and Ward use scipy's nearest-neighbour chain with
+    Lance–Williams updates, O(n²) in total. Before, single, complete and
+    average ran a naive O(n³) loop.
+  - Merges are sorted and relabelled, exposing `children` and `distances`.
+  - Labels come from a port of sklearn's `_hc_cut`, so the label numbering
+    matches too.
+  - New `distance_threshold` (also in Python).
+  - The `RUSTML_AGGLO_NAIVE` environment switch is removed.
+  - Children, distances and labels match sklearn exactly for all four
+    linkages.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
