@@ -174,14 +174,14 @@ registry! {
     HistGradientBoostingClassifier {
         config: ensemble::HistGradientBoostingClassifier = Default::default(),
         fitted: ensemble::FittedHistGradientBoostingClassifier,
-        fit: |c, x, y, w| sup(K, c, x, y, w),
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
     }
     HistGradientBoostingRegressor {
         config: ensemble::HistGradientBoostingRegressor = Default::default(),
         fitted: ensemble::FittedHistGradientBoostingRegressor,
-        fit: |c, x, y, w| sup(K, c, x, y, w),
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
     LgbmClassifier {

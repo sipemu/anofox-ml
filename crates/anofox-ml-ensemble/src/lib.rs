@@ -59,6 +59,7 @@ pub mod random_forest_classifier;
 pub mod random_forest_regressor;
 pub mod stacking_classifier;
 pub mod stacking_regressor;
+mod util;
 pub mod voting_classifier;
 pub mod voting_regressor;
 

@@ -299,10 +299,11 @@ class BaggingRegressor(RegressorMixin, _Bagging):
 
 
 class _HistGradientBoosting(BaseEstimator):
-    def __init__(self, learning_rate=0.1, max_iter=100, max_depth=6, min_samples_leaf=20,
-                 l2_regularization=0.0, max_bins=255):
+    def __init__(self, learning_rate=0.1, max_iter=100, max_leaf_nodes=31, max_depth=None,
+                 min_samples_leaf=20, l2_regularization=0.0, max_bins=255):
         self.learning_rate = learning_rate
         self.max_iter = max_iter
+        self.max_leaf_nodes = max_leaf_nodes
         self.max_depth = max_depth
         self.min_samples_leaf = min_samples_leaf
         self.l2_regularization = l2_regularization
@@ -310,7 +311,8 @@ class _HistGradientBoosting(BaseEstimator):
 
     def _rust_params(self, X, y):
         return {"learning_rate": self.learning_rate, "n_estimators": self.max_iter,
-                "max_depth": self.max_depth, "min_samples_leaf": self.min_samples_leaf,
+                "max_leaf_nodes": self.max_leaf_nodes, "max_depth": self.max_depth,
+                "min_samples_leaf": self.min_samples_leaf,
                 "l2_regularization": self.l2_regularization, "max_bins": self.max_bins}
 
 

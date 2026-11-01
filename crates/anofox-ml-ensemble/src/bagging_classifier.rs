@@ -170,7 +170,7 @@ impl<F: Float> Predict<F> for FittedBaggingClassifier<F> {
             for tree_pred in &all_preds {
                 votes.push(tree_pred[i]);
             }
-            predictions.push(majority_vote(&votes));
+            predictions.push(anofox_ml_trees::split::majority_vote(&votes));
         }
 
         Ok(Array1::from_vec(predictions))
@@ -286,13 +286,6 @@ impl<F: Float> FittedBaggingClassifier<F> {
         classes.sort_by(anofox_ml_trees::split::cmp_nan_last);
         classes
     }
-}
-
-/// Return the class that appears most frequently in `votes` (deterministic;
-/// ties go to the smallest class label).
-#[inline]
-fn majority_vote<F: Float>(votes: &[F]) -> F {
-    anofox_ml_trees::split::majority_vote(votes)
 }
 
 #[cfg(test)]

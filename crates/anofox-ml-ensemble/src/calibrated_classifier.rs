@@ -282,9 +282,9 @@ impl<F: Float + 'static> Fit<F> for CalibratedClassifierCV<F> {
             .collect();
 
         for (train_idx, test_idx) in &folds {
-            let x_train = select_rows(x, train_idx);
+            let x_train = crate::forest_common::select_rows(x, train_idx);
             let y_train = select_elements(y, train_idx);
-            let x_test = select_rows(x, test_idx);
+            let x_test = crate::forest_common::select_rows(x, test_idx);
 
             let fitted = self.base_estimator.fit_box(&x_train, &y_train)?;
             let scores = fitted.scores(&x_test)?;
@@ -554,14 +554,6 @@ fn stratified_k_fold<F: Float>(
             (train, test)
         })
         .collect()
-}
-
-fn select_rows<F: Float>(x: &Array2<F>, indices: &[usize]) -> Array2<F> {
-    let mut out = Array2::<F>::zeros((indices.len(), x.ncols()));
-    for (r_new, &r) in indices.iter().enumerate() {
-        out.row_mut(r_new).assign(&x.row(r));
-    }
-    out
 }
 
 fn select_elements<F: Float>(y: &Array1<F>, indices: &[usize]) -> Array1<F> {

@@ -1,42 +1,12 @@
 //! Voting regressor: averages predictions from multiple heterogeneous models.
 
+use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
-/// Internal trait for type-erased fit.
-trait FitPredictBox<F: Float>: Send + Sync {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>>;
-}
-
-trait PredBox<F: Float>: Send + Sync {
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>>;
-}
-
-impl<F, T> FitPredictBox<F> for T
-where
-    F: Float,
-    T: Fit<F> + Send + Sync,
-    T::Fitted: Predict<F> + Send + Sync + 'static,
-{
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>> {
-        let fitted = Fit::fit(self, x, y)?;
-        Ok(Box::new(fitted))
-    }
-}
-
-impl<F, T> PredBox<F> for T
-where
-    F: Float,
-    T: Predict<F> + Send + Sync,
-{
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        self.predict(x)
-    }
-}
-
 struct NamedEstimator<F: Float> {
     name: String,
-    estimator: Box<dyn FitPredictBox<F>>,
+    estimator: Box<dyn FitPredBox<F>>,
     weight: F,
 }
 

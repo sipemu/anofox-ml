@@ -7,6 +7,7 @@
 //! predictions are generated with stratified, shuffled k-fold CV during
 //! fitting to avoid leakage.
 
+use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::utils::stratified_k_fold;
 use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2};
@@ -27,42 +28,12 @@ pub enum StackMethod {
     PredictProba,
 }
 
-trait FitPredBox<F: Float>: Send + Sync {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>>;
-}
-
 trait FitProbaBox<F: Float>: Send + Sync {
     fn fit_proba_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ProbaBox<F>>>;
 }
 
-trait PredBox<F: Float>: Send + Sync {
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>>;
-}
-
 trait ProbaBox<F: Float>: Send + Sync {
     fn predict_proba_box(&self, x: &Array2<F>) -> Result<Array2<F>>;
-}
-
-impl<F, T> FitPredBox<F> for T
-where
-    F: Float,
-    T: Fit<F> + Send + Sync,
-    T::Fitted: Predict<F> + Send + Sync + 'static,
-{
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>> {
-        let fitted = Fit::fit(self, x, y)?;
-        Ok(Box::new(fitted))
-    }
-}
-
-impl<F, T> PredBox<F> for T
-where
-    F: Float,
-    T: Predict<F> + Send + Sync,
-{
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        self.predict(x)
-    }
 }
 
 /// Wrapper for estimators whose Fitted type implements both Predict and PredictProba.

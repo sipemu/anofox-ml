@@ -3,47 +3,17 @@
 //! Supports hard voting (majority vote) and soft voting (average probabilities,
 //! requires predict_proba on fitted models — not yet implemented).
 
+use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 /// A named estimator for the voting ensemble.
 struct NamedEstimator<F: Float> {
     name: String,
-    estimator: Box<dyn FitPredictClone<F>>,
-}
-
-/// Internal trait combining Fit + Send + Sync for trait objects.
-trait FitPredictClone<F: Float>: Send + Sync {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictBox<F>>>;
-}
-
-trait PredictBox<F: Float>: Send + Sync {
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>>;
+    estimator: Box<dyn FitPredBox<F>>,
 }
 
 /// Blanket impl: any Fit+Predict type can be a voting member.
-impl<F, T> FitPredictClone<F> for T
-where
-    F: Float,
-    T: Fit<F> + Send + Sync,
-    T::Fitted: Predict<F> + Send + Sync + 'static,
-{
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictBox<F>>> {
-        let fitted = Fit::fit(self, x, y)?;
-        Ok(Box::new(fitted))
-    }
-}
-
-impl<F, T> PredictBox<F> for T
-where
-    F: Float,
-    T: Predict<F> + Send + Sync,
-{
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        self.predict(x)
-    }
-}
-
 /// Voting classifier that combines multiple models via majority vote.
 pub struct VotingClassifier<F: Float> {
     estimators: Vec<NamedEstimator<F>>,
@@ -73,7 +43,7 @@ impl<F: Float> VotingClassifier<F> {
 
 /// Fitted voting classifier.
 pub struct FittedVotingClassifier<F: Float> {
-    fitted_models: Vec<(String, Box<dyn PredictBox<F>>)>,
+    fitted_models: Vec<(String, Box<dyn PredBox<F>>)>,
     n_features: usize,
 }
 

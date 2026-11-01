@@ -1,39 +1,9 @@
 //! Stacking regressor: two-level ensemble where base models' predictions
 //! are combined by a meta-estimator.
 
+use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
-
-/// Internal trait for type-erased fit/predict.
-trait FitPredBox<F: Float>: Send + Sync {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>>;
-}
-
-trait PredBox<F: Float>: Send + Sync {
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>>;
-}
-
-impl<F, T> FitPredBox<F> for T
-where
-    F: Float,
-    T: Fit<F> + Send + Sync,
-    T::Fitted: Predict<F> + Send + Sync + 'static,
-{
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>> {
-        let fitted = Fit::fit(self, x, y)?;
-        Ok(Box::new(fitted))
-    }
-}
-
-impl<F, T> PredBox<F> for T
-where
-    F: Float,
-    T: Predict<F> + Send + Sync,
-{
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        self.predict(x)
-    }
-}
 
 /// Stacking regressor.
 ///
@@ -121,9 +91,9 @@ impl<F: Float + 'static> Fit<F> for StackingRegressor<F> {
 
         for (bi, (_, est)) in self.base_estimators.iter().enumerate() {
             for (train_idx, test_idx) in &folds {
-                let x_train = select_rows(x, train_idx);
+                let x_train = crate::forest_common::select_rows(x, train_idx);
                 let y_train = select_elements(y, train_idx);
-                let x_test = select_rows(x, test_idx);
+                let x_test = crate::forest_common::select_rows(x, test_idx);
 
                 let fitted = est.fit_box(&x_train, &y_train)?;
                 let preds = fitted.predict_box(&x_test)?;
@@ -192,17 +162,6 @@ fn simple_k_fold(n: usize, k: usize) -> Vec<(Vec<usize>, Vec<usize>)> {
         start = end;
     }
     folds
-}
-
-fn select_rows<F: Float>(x: &Array2<F>, indices: &[usize]) -> Array2<F> {
-    let ncols = x.ncols();
-    let mut data = Vec::with_capacity(indices.len() * ncols);
-    for &i in indices {
-        for j in 0..ncols {
-            data.push(x[[i, j]]);
-        }
-    }
-    Array2::from_shape_vec((indices.len(), ncols), data).unwrap()
 }
 
 fn select_elements<F: Float>(y: &Array1<F>, indices: &[usize]) -> Array1<F> {

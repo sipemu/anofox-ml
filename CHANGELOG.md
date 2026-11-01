@@ -434,6 +434,19 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - Weighted splits use running weighted sums (see #37) and the RF OOB score
     uses an in-bag mask.
 
+- **HistGradientBoosting on the LGBM engine (#49):**
+  - `HistGradientBoostingRegressor` / `HistGradientBoostingClassifier` are
+    facades over the LGBM engine with sklearn's defaults
+    (`max_leaf_nodes = 31`, `max_depth = None`, leaf-wise growth). They gain
+    native missing-value handling, `FitWeighted`, feature importances and
+    the engine's speed-ups; the separate histogram implementation is gone.
+  - **Breaking:** `max_depth` is `Option<usize>` (default `None`), there is
+    a new `max_leaf_nodes`, results change, and fitted HGB models saved by
+    earlier versions do not load.
+  - Ensemble helpers are shared instead of duplicated (`majority_vote`,
+    `select_rows`, the boxed-estimator traits of voting / stacking); the
+    tree classifier and regressor share one tree engine (#48).
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
