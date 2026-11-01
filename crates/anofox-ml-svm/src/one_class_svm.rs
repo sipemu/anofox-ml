@@ -42,7 +42,7 @@ impl OneClassSvm {
     pub fn new() -> Self {
         Self {
             nu: 0.5,
-            kernel: SvmKernel::Rbf { gamma: 1.0 },
+            kernel: SvmKernel::default(),
             max_iter: 1000,
             tol: 1e-4,
         }
@@ -85,19 +85,7 @@ impl OneClassSvm {
         if self.tol <= 0.0 {
             return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
-        match &self.kernel {
-            SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "gamma must be positive for RBF kernel".into(),
-                ));
-            }
-            SvmKernel::Polynomial { degree, .. } if *degree == 0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "degree must be at least 1 for polynomial kernel".into(),
-                ));
-            }
-            _ => {}
-        }
+        self.kernel.validate(false)?;
         Ok(())
     }
 }
@@ -367,8 +355,9 @@ impl<F: Float> FitUnsupervised<F> for OneClassSvm {
 
         let nu = F::from_f64(self.nu).unwrap();
         let tol = F::from_f64(self.tol).unwrap();
+        let kernel = self.kernel.resolve(x);
 
-        let (alphas, rho) = solve_one_class_svm(x, &self.kernel, nu, self.max_iter, tol);
+        let (alphas, rho) = solve_one_class_svm(x, &kernel, nu, self.max_iter, tol);
 
         // Extract support vectors (non-zero alphas).
         let sv_threshold = F::from_f64(1e-8).unwrap();
@@ -383,7 +372,7 @@ impl<F: Float> FitUnsupervised<F> for OneClassSvm {
                 support_vectors: x.to_owned(),
                 dual_coefs,
                 rho,
-                kernel: self.kernel.clone(),
+                kernel: kernel.clone(),
                 n_features: x.ncols(),
             });
         }
@@ -402,7 +391,7 @@ impl<F: Float> FitUnsupervised<F> for OneClassSvm {
             support_vectors,
             dual_coefs,
             rho,
-            kernel: self.kernel.clone(),
+            kernel: kernel.clone(),
             n_features,
         })
     }
@@ -448,7 +437,7 @@ mod tests {
     #[test]
     fn test_dual_is_feasible() {
         let (x, _) = parity_data();
-        let kernel = SvmKernel::Rbf { gamma: 0.5 };
+        let kernel = SvmKernel::rbf(0.5);
         let n = x.nrows() as f64;
         for &(nu, max_iter) in &[(0.3, 50usize), (0.3, 20_000), (0.9, 500), (0.05, 500)] {
             let (alpha, _rho) = solve_one_class_svm(&x, &kernel, nu, max_iter, 1e-12);
@@ -491,7 +480,7 @@ mod tests {
         let (x, _) = parity_data();
         let model = OneClassSvm::new()
             .with_nu(0.3)
-            .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+            .with_kernel(SvmKernel::rbf(0.5))
             .with_max_iter(100_000)
             .with_tol(1e-12);
         let fitted: FittedOneClassSvm<f64> = model.fit(&x).unwrap();
@@ -526,7 +515,7 @@ mod tests {
         ];
 
         let ocsvm = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 10.0 })
+            .with_kernel(SvmKernel::rbf(10.0))
             .with_nu(0.1)
             .with_max_iter(5000);
         let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
@@ -556,7 +545,7 @@ mod tests {
         ];
 
         let ocsvm = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 10.0 })
+            .with_kernel(SvmKernel::rbf(10.0))
             .with_nu(0.1)
             .with_max_iter(5000);
         let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
@@ -587,13 +576,13 @@ mod tests {
         ];
 
         let ocsvm_low = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
+            .with_kernel(SvmKernel::rbf(1.0))
             .with_nu(0.1)
             .with_max_iter(5000);
         let fitted_low: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm_low, &x).unwrap();
 
         let ocsvm_high = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
+            .with_kernel(SvmKernel::rbf(1.0))
             .with_nu(0.9)
             .with_max_iter(5000);
         let fitted_high: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm_high, &x).unwrap();
@@ -635,10 +624,7 @@ mod tests {
 
         // Polynomial kernel
         let ocsvm = OneClassSvm::new()
-            .with_kernel(SvmKernel::Polynomial {
-                degree: 2,
-                coef0: 1.0,
-            })
+            .with_kernel(SvmKernel::poly(2, 1.0, 1.0))
             .with_nu(0.5)
             .with_max_iter(5000);
         let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
@@ -647,7 +633,7 @@ mod tests {
 
         // RBF kernel
         let ocsvm = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
+            .with_kernel(SvmKernel::rbf(1.0))
             .with_nu(0.5)
             .with_max_iter(5000);
         let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x).unwrap();
@@ -660,7 +646,7 @@ mod tests {
         let x_train = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0],];
 
         let ocsvm = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
+            .with_kernel(SvmKernel::rbf(1.0))
             .with_nu(0.5)
             .with_max_iter(5000);
         let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
@@ -712,7 +698,7 @@ mod tests {
         ];
 
         let ocsvm = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 10.0 })
+            .with_kernel(SvmKernel::rbf(10.0))
             .with_nu(0.1)
             .with_max_iter(5000);
         let fitted: FittedOneClassSvm<f64> = FitUnsupervised::fit(&ocsvm, &x_train).unwrap();
@@ -747,7 +733,7 @@ mod tests {
         ];
 
         let ocsvm = OneClassSvm::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
+            .with_kernel(SvmKernel::rbf(1.0))
             .with_nu(0.5)
             .with_max_iter(5000);
         let fitted: FittedOneClassSvm<f32> = FitUnsupervised::fit(&ocsvm, &x).unwrap();

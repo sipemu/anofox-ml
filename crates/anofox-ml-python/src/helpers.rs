@@ -18,18 +18,45 @@ pub(crate) fn not_fitted() -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Not fitted")
 }
 
+/// sklearn-style `gamma`: a positive float, `"scale"` or `"auto"`.
+#[derive(pyo3::FromPyObject)]
+pub(crate) enum PyGamma {
+    Value(f64),
+    Name(String),
+}
+
+pub(crate) fn parse_gamma(gamma: PyGamma) -> pyo3::PyResult<anofox_ml_svm::Gamma> {
+    match gamma {
+        PyGamma::Value(v) => Ok(anofox_ml_svm::Gamma::Value(v)),
+        PyGamma::Name(s) => match s.as_str() {
+            "scale" => Ok(anofox_ml_svm::Gamma::Scale),
+            "auto" => Ok(anofox_ml_svm::Gamma::Auto),
+            other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "unknown gamma '{other}'; expected a float, 'scale' or 'auto'"
+            ))),
+        },
+    }
+}
+
 pub(crate) fn parse_kernel(
     kernel: &str,
-    gamma: f64,
+    gamma: PyGamma,
     degree: usize,
     coef0: f64,
 ) -> pyo3::PyResult<anofox_ml_svm::SvmKernel> {
+    let gamma = parse_gamma(gamma)?;
     match kernel {
         "linear" => Ok(anofox_ml_svm::SvmKernel::Linear),
         "rbf" => Ok(anofox_ml_svm::SvmKernel::Rbf { gamma }),
-        "poly" | "polynomial" => Ok(anofox_ml_svm::SvmKernel::Polynomial { degree, coef0 }),
+        "poly" | "polynomial" => Ok(anofox_ml_svm::SvmKernel::Polynomial {
+            degree,
+            gamma,
+            coef0,
+        }),
+        "sigmoid" => Ok(anofox_ml_svm::SvmKernel::Sigmoid { gamma, coef0 }),
+        "precomputed" => Ok(anofox_ml_svm::SvmKernel::Precomputed),
         other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "unknown kernel '{}'; expected 'linear', 'rbf', or 'poly'",
+            "unknown kernel '{}'; expected 'linear', 'rbf', 'poly', 'sigmoid' or 'precomputed'",
             other
         ))),
     }
@@ -52,8 +79,9 @@ pub(crate) fn parse_solver(s: &str) -> pyo3::PyResult<anofox_ml_neural_networks:
     match s {
         "adam" => Ok(anofox_ml_neural_networks::Solver::Adam),
         "sgd" => Ok(anofox_ml_neural_networks::Solver::Sgd),
+        "lbfgs" => Ok(anofox_ml_neural_networks::Solver::Lbfgs),
         other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "unknown solver '{}'; expected 'adam' or 'sgd'",
+            "unknown solver '{}'; expected 'adam', 'sgd' or 'lbfgs'",
             other
         ))),
     }

@@ -558,20 +558,22 @@ fn bench_svc_rbf_1000x20(c: &mut Criterion) {
         b.iter(|| {
             let m = Svc {
                 c: 1.0,
-                kernel: SvmKernel::Rbf { gamma: 0.05 },
+                kernel: SvmKernel::rbf(0.05),
                 max_iter: 1000,
                 tol: 1e-3,
                 seed: 42,
+                ..Svc::default()
             };
             Fit::fit(&m, black_box(&x_train), black_box(&y_train)).unwrap()
         });
     });
     let m = Svc {
         c: 1.0,
-        kernel: SvmKernel::Rbf { gamma: 0.05 },
+        kernel: SvmKernel::rbf(0.05),
         max_iter: 1000,
         tol: 1e-3,
         seed: 42,
+        ..Svc::default()
     };
     let fitted = Fit::fit(&m, &x_train, &y_train).unwrap();
     group.bench_function("predict", |b| {

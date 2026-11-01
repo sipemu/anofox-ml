@@ -8,7 +8,7 @@ use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 use crate::kernel::SvmKernel;
-use crate::svc;
+use crate::svc::{self, DecisionFunctionShape};
 
 /// Nu-Support Vector Classifier (unfitted state).
 ///
@@ -20,8 +20,8 @@ use crate::svc;
 /// Uses the type-state pattern: call [`Fit::fit`] to produce a [`FittedNuSvc`]
 /// that can make predictions.
 ///
-/// For multi-class problems, a one-vs-rest (OvR) strategy is used
-/// automatically.
+/// For multi-class problems, a one-vs-one strategy is used (as libsvm),
+/// via the underlying [`Svc`](crate::Svc).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NuSvc {
     /// Nu parameter in (0, 1]. Upper bound on the fraction of margin errors
@@ -35,6 +35,15 @@ pub struct NuSvc {
     pub tol: f64,
     /// Random seed for reproducibility.
     pub seed: u64,
+    /// Fit Platt-scaling models so that `predict_proba` is available.
+    #[serde(default)]
+    pub probability: bool,
+    /// Layout of `decision_function` for more than two classes.
+    #[serde(default)]
+    pub decision_function_shape: DecisionFunctionShape,
+    /// Break voting ties by decision-function confidence (`Ovr` only).
+    #[serde(default)]
+    pub break_ties: bool,
 }
 
 impl NuSvc {
@@ -42,11 +51,32 @@ impl NuSvc {
     pub fn new() -> Self {
         Self {
             nu: 0.5,
-            kernel: SvmKernel::Rbf { gamma: 1.0 },
+            kernel: SvmKernel::default(),
             max_iter: 1000,
             tol: 1e-4,
             seed: 0,
+            probability: false,
+            decision_function_shape: DecisionFunctionShape::Ovr,
+            break_ties: false,
         }
+    }
+
+    /// Enable Platt-scaled probability estimates.
+    pub fn with_probability(mut self, probability: bool) -> Self {
+        self.probability = probability;
+        self
+    }
+
+    /// Set the multi-class decision-function layout.
+    pub fn with_decision_function_shape(mut self, shape: DecisionFunctionShape) -> Self {
+        self.decision_function_shape = shape;
+        self
+    }
+
+    /// Break voting ties by decision-function confidence.
+    pub fn with_break_ties(mut self, break_ties: bool) -> Self {
+        self.break_ties = break_ties;
+        self
     }
 
     /// Set the nu parameter.
@@ -92,19 +122,7 @@ impl NuSvc {
         if self.tol <= 0.0 {
             return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
-        match &self.kernel {
-            SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "gamma must be positive for RBF kernel".into(),
-                ));
-            }
-            SvmKernel::Polynomial { degree, .. } if *degree == 0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "degree must be at least 1 for polynomial kernel".into(),
-                ));
-            }
-            _ => {}
-        }
+        self.kernel.validate(true)?;
         Ok(())
     }
 }
@@ -141,11 +159,32 @@ impl<F: Float> FittedNuSvc<F> {
         self.inner.n_support()
     }
 
-    /// Compute raw decision function scores for each sample.
-    ///
-    /// Returns a 2D array of shape `(n_samples, n_classifiers)`.
+    /// Decision function; see [`FittedSvc::decision_function`](crate::FittedSvc::decision_function)
+    /// for the shapes.
     pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
         self.inner.decision_function(x)
+    }
+
+    /// Platt-scaled class probabilities (requires `probability = true`).
+    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.inner.predict_proba(x)
+    }
+
+    /// The underlying fitted C-SVC.
+    pub fn inner(&self) -> &svc::FittedSvc<F> {
+        &self.inner
+    }
+}
+
+impl<F: Float> anofox_ml_core::DecisionFunction<F> for FittedNuSvc<F> {
+    fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.inner.decision_function(x)
+    }
+}
+
+impl<F: Float> anofox_ml_core::PredictProba<F> for FittedNuSvc<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.inner.predict_proba(x)
     }
 }
 
@@ -176,11 +215,8 @@ fn bisect_c_for_nu<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
     nu: f64,
-    kernel: &SvmKernel,
-    max_iter: usize,
-    tol: f64,
-    seed: u64,
-) -> Result<svc::FittedSvc<F>> {
+    template: &crate::Svc,
+) -> Result<(svc::FittedSvc<F>, f64)> {
     let n = x.nrows();
     let target_svs = (nu * n as f64).round() as usize;
     let target_svs = target_svs.clamp(1, n);
@@ -188,19 +224,14 @@ fn bisect_c_for_nu<F: Float>(
     let mut c_lo = 1e-4f64;
     let mut c_hi = 1e4f64;
 
-    let mut best_fitted: Option<svc::FittedSvc<F>> = None;
+    let mut best_fitted: Option<(svc::FittedSvc<F>, f64)> = None;
     let mut best_diff = usize::MAX;
 
     for _iter in 0..40 {
         // Bisect in log-space since C spans several orders of magnitude.
         let c = (c_lo.ln() * 0.5 + c_hi.ln() * 0.5).exp();
 
-        let svc_model = crate::Svc::new()
-            .with_c(c)
-            .with_kernel(kernel.clone())
-            .with_max_iter(max_iter)
-            .with_tol(tol)
-            .with_seed(seed);
+        let svc_model = template.clone().with_c(c);
 
         let fitted: svc::FittedSvc<F> = svc_model.fit(x, y)?;
         let n_sv = fitted.n_support();
@@ -213,7 +244,7 @@ fn bisect_c_for_nu<F: Float>(
 
         if diff < best_diff {
             best_diff = diff;
-            best_fitted = Some(fitted);
+            best_fitted = Some((fitted, c));
         }
 
         if diff == 0 {
@@ -264,34 +295,40 @@ impl<F: Float> Fit<F> for NuSvc {
             ));
         }
 
-        // Feasibility check: nu must be achievable for each binary sub-problem.
-        // For a two-class split, nu <= 2 * min(n_pos, n_neg) / n_total.
-        let n_total = y.len();
+        // Feasibility check (libsvm): for every one-vs-one pair (i, j),
+        // nu <= 2 * min(n_i, n_j) / (n_i + n_j).
         let eps = F::from_f64(1e-12).unwrap();
-        for label in &class_labels {
-            let n_pos = y.iter().filter(|&&yi| (yi - *label).abs() < eps).count();
-            let n_neg = n_total - n_pos;
-            let max_nu = 2.0 * (n_pos.min(n_neg) as f64) / (n_total as f64);
-            if self.nu > max_nu + 1e-12 {
-                return Err(RustMlError::InvalidParameter(format!(
-                    "nu={} is infeasible (class {:?} has max feasible nu = {:.4})",
-                    self.nu, *label, max_nu
-                )));
+        let counts: Vec<usize> = class_labels
+            .iter()
+            .map(|label| y.iter().filter(|&&yi| (yi - *label).abs() < eps).count())
+            .collect();
+        for i in 0..counts.len() {
+            for j in (i + 1)..counts.len() {
+                let max_nu =
+                    2.0 * (counts[i].min(counts[j]) as f64) / ((counts[i] + counts[j]) as f64);
+                if self.nu > max_nu + 1e-12 {
+                    return Err(RustMlError::InvalidParameter(format!(
+                        "nu={} is infeasible (classes {:?}/{:?} allow at most nu = {:.4})",
+                        self.nu, class_labels[i], class_labels[j], max_nu
+                    )));
+                }
             }
         }
 
         // Bisect C so the resulting C-SVC has a fraction of support vectors
-        // approximately equal to nu. This is the principled equivalence
-        // between nu-SVC and C-SVC that libsvm uses internally.
-        let inner = bisect_c_for_nu(
-            x,
-            y,
-            self.nu,
-            &self.kernel,
-            self.max_iter,
-            self.tol,
-            self.seed,
-        )?;
+        // approximately equal to nu (an approximation of the nu-SVC dual;
+        // libsvm solves the nu dual directly).
+        let template = crate::Svc::new()
+            .with_kernel(self.kernel.clone())
+            .with_max_iter(self.max_iter)
+            .with_tol(self.tol)
+            .with_seed(self.seed)
+            .with_decision_function_shape(self.decision_function_shape)
+            .with_break_ties(self.break_ties);
+        let (mut inner, best_c) = bisect_c_for_nu(x, y, self.nu, &template)?;
+        if self.probability {
+            inner = template.with_c(best_c).with_probability(true).fit(x, y)?;
+        }
         Ok(FittedNuSvc { inner })
     }
 }
@@ -339,7 +376,7 @@ mod tests {
         let (x, y) = well_separated_data();
         let nu_svc = NuSvc::new()
             .with_nu(0.5)
-            .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+            .with_kernel(SvmKernel::rbf(0.5))
             .with_max_iter(5000);
         let fitted: FittedNuSvc<f64> = nu_svc.fit(&x, &y).unwrap();
 
@@ -357,10 +394,7 @@ mod tests {
         let (x, y) = well_separated_data();
         let nu_svc = NuSvc::new()
             .with_nu(0.5)
-            .with_kernel(SvmKernel::Polynomial {
-                degree: 2,
-                coef0: 1.0,
-            })
+            .with_kernel(SvmKernel::poly(2, 1.0, 1.0))
             .with_max_iter(5000);
         let fitted: FittedNuSvc<f64> = nu_svc.fit(&x, &y).unwrap();
 
@@ -398,7 +432,7 @@ mod tests {
         // nu = 1.0 => softest margin (max nu for balanced classes is 1.0)
         let nu_svc = NuSvc::new()
             .with_nu(1.0)
-            .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+            .with_kernel(SvmKernel::rbf(0.5))
             .with_max_iter(5000);
         let fitted: FittedNuSvc<f64> = nu_svc.fit(&x, &y).unwrap();
 
@@ -429,7 +463,7 @@ mod tests {
 
         let nu_svc = NuSvc::new()
             .with_nu(0.5)
-            .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+            .with_kernel(SvmKernel::rbf(0.5))
             .with_max_iter(5000);
         let fitted: FittedNuSvc<f64> = nu_svc.fit(&x, &y).unwrap();
 

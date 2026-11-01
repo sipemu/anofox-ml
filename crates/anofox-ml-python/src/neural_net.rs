@@ -40,6 +40,7 @@ impl MlpClassifier {
                 seed,
                 batch_size,
                 alpha,
+                ..Default::default()
             },
             fitted: None,
         })
@@ -138,6 +139,7 @@ impl MlpRegressor {
                 seed,
                 batch_size,
                 alpha,
+                ..Default::default()
             },
             fitted: None,
         })

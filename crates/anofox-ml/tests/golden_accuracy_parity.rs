@@ -87,7 +87,7 @@ fn test_parity_nu_svr_rbf() {
     let fitted: anofox_ml::svm::FittedNuSvr<f64> = NuSvr::new()
         .with_nu(0.5)
         .with_c(10.0)
-        .with_kernel(SvmKernel::Rbf { gamma: 0.1 })
+        .with_kernel(SvmKernel::rbf(0.1))
         .with_max_iter(20000)
         .fit(&x, &y)
         .unwrap();

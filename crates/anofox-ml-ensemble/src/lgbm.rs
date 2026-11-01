@@ -143,8 +143,7 @@ fn compute_bins(
                     .unwrap_or(edges.len().saturating_sub(1));
                 binned[[i, j]] = bin.min((MISSING_BIN - 1) as usize) as u8;
             } else {
-                let bin = edges.partition_point(|&e| e < v) as u8;
-                binned[[i, j]] = bin.min(MISSING_BIN - 1);
+                binned[[i, j]] = numeric_bin(v, &edges);
             }
         }
 
@@ -155,6 +154,26 @@ fn compute_bins(
     }
 
     (binned, all_bins)
+}
+
+/// Bin index of a non-NaN numeric value. The index is clamped *before* the
+/// narrowing cast so it can never wrap around or collide with `MISSING_BIN`.
+#[inline]
+fn numeric_bin(v: f64, edges: &[f64]) -> u8 {
+    edges
+        .partition_point(|&e| e < v)
+        .min(MISSING_BIN as usize - 1) as u8
+}
+
+/// Validate `max_bins` (LightGBM-style: at most 255 value bins; the missing
+/// bin is extra). Larger values used to wrap silently in the `u8` bins.
+fn validate_max_bins(max_bins: usize) -> Result<()> {
+    if !(2..=DEFAULT_MAX_BINS).contains(&max_bins) {
+        return Err(RustMlError::InvalidParameter(format!(
+            "max_bins must be in [2, {DEFAULT_MAX_BINS}], got {max_bins}"
+        )));
+    }
+    Ok(())
 }
 
 fn bin_row(row: &[f64], all_bins: &[FeatureBins]) -> Vec<u8> {
@@ -170,8 +189,7 @@ fn bin_row(row: &[f64], all_bins: &[FeatureBins]) -> Vec<u8> {
                     .map(|b| b.min((MISSING_BIN - 1) as usize) as u8)
                     .unwrap_or(MISSING_BIN - 1)
             } else {
-                let bin = bins.edges.partition_point(|&e| e < v) as u8;
-                bin.min(MISSING_BIN - 1)
+                numeric_bin(v, &bins.edges)
             }
         })
         .collect()
@@ -320,7 +338,59 @@ fn leaf_gain(grad_sum: f64, hess_sum: f64, l1: f64, l2: f64) -> f64 {
     }
 }
 
+/// L1 soft-thresholded gradient sum.
+#[inline]
+fn threshold_l1(grad_sum: f64, l1: f64) -> f64 {
+    grad_sum.signum() * (grad_sum.abs() - l1).max(0.0)
+}
+
+/// Gain of a leaf with a *given* (possibly clamped) output:
+/// `-(2 T(G) w + (H + l2) w^2)` (LightGBM's `GetLeafGainGivenOutput`).
+/// Equals [`leaf_gain`] when `w` is the unconstrained optimum.
+#[inline]
+fn leaf_gain_given_output(grad_sum: f64, hess_sum: f64, l1: f64, l2: f64, output: f64) -> f64 {
+    -(2.0 * threshold_l1(grad_sum, l1) * output + (hess_sum + l2) * output * output)
+}
+
+/// Output bounds `(lo, hi)` a leaf must respect for monotone constraints.
+type OutputBounds = (f64, f64);
+
+const UNBOUNDED: OutputBounds = (f64::NEG_INFINITY, f64::INFINITY);
+
+/// Child output bounds after splitting a leaf with bounds `parent` on a
+/// feature with monotone constraint `mono` (LightGBM "basic" method): for a
+/// constrained feature the bounds are split at the midpoint of the two
+/// child outputs, otherwise both children inherit the parent's bounds.
+fn child_bounds(
+    parent: OutputBounds,
+    mono: i8,
+    left_value: f64,
+    right_value: f64,
+) -> (OutputBounds, OutputBounds) {
+    let (lo, hi) = parent;
+    let mid = 0.5 * (left_value + right_value);
+    match mono {
+        1 => ((lo, mid), (mid, hi)),
+        -1 => ((mid, hi), (lo, mid)),
+        _ => (parent, parent),
+    }
+}
+
+/// Monotone constraint of `feat` (categorical features are never constrained).
+#[inline]
+fn monotone_of(feat: usize, all_bins: &[FeatureBins], monotone_constraints: &[i8]) -> i8 {
+    if all_bins[feat].is_categorical {
+        0
+    } else {
+        monotone_constraints.get(feat).copied().unwrap_or(0)
+    }
+}
+
 /// Find the best split for this node across all candidate features.
+///
+/// With monotone constraints, child outputs are clamped to the node's
+/// `bounds`, the gain is computed for the clamped outputs, and splits whose
+/// outputs violate the constraint direction are rejected.
 #[allow(clippy::too_many_arguments)]
 fn find_best_split(
     binned_x: &Array2<u8>,
@@ -335,6 +405,8 @@ fn find_best_split(
     l1: f64,
     l2: f64,
     monotone_constraints: &[i8],
+    bounds: OutputBounds,
+    parent_value: f64,
 ) -> Option<BestSplit> {
     let n_bins = DEFAULT_MAX_BINS;
     let mut best: Option<BestSplit> = None;
@@ -344,7 +416,15 @@ fn find_best_split(
     let total_hess: f64 = indices.iter().map(|&i| hessians[i]).sum();
     let total_count = indices.len();
 
-    let parent_gain = leaf_gain(total_grad, total_hess, l1, l2);
+    // Constrained mode: any monotone constraint is active. Outputs are then
+    // clamped to `bounds` and gains evaluated for the clamped outputs.
+    let constrained = monotone_constraints.iter().any(|&m| m != 0);
+    let (lo, hi) = bounds;
+    let parent_gain = if constrained {
+        leaf_gain_given_output(total_grad, total_hess, l1, l2, parent_value)
+    } else {
+        leaf_gain(total_grad, total_hess, l1, l2)
+    };
 
     for &feat in feature_indices {
         hist.reset();
@@ -410,23 +490,27 @@ fn find_best_split(
                     continue;
                 }
 
-                let left_g = leaf_gain(left_grad, left_hess, l1, l2);
-                let right_g = leaf_gain(right_grad, right_hess, l1, l2);
-                let gain = 0.5 * (left_g + right_g - parent_gain);
-
-                // Monotone constraint check: feature with monotone=+1 requires
-                // left_value <= right_value (predictions increase as bin increases).
-                // Categorical features cannot be monotone-constrained in a simple way.
-                let left_val = leaf_value(left_grad, left_hess, l1, l2);
-                let right_val = leaf_value(right_grad, right_hess, l1, l2);
-                let mono = monotone_constraints.get(feat).copied().unwrap_or(0);
-                if !all_bins[feat].is_categorical && mono != 0 {
-                    match mono {
+                let mut left_val = leaf_value(left_grad, left_hess, l1, l2);
+                let mut right_val = leaf_value(right_grad, right_hess, l1, l2);
+                let gain = if constrained {
+                    left_val = left_val.clamp(lo, hi);
+                    right_val = right_val.clamp(lo, hi);
+                    // Monotone constraint check: feature with monotone=+1
+                    // requires left_value <= right_value (predictions
+                    // increase as bin increases), -1 the opposite.
+                    match monotone_of(feat, all_bins, monotone_constraints) {
                         1 if left_val > right_val => continue,
                         -1 if left_val < right_val => continue,
                         _ => {}
                     }
-                }
+                    let left_g = leaf_gain_given_output(left_grad, left_hess, l1, l2, left_val);
+                    let right_g = leaf_gain_given_output(right_grad, right_hess, l1, l2, right_val);
+                    0.5 * (left_g + right_g - parent_gain)
+                } else {
+                    let left_g = leaf_gain(left_grad, left_hess, l1, l2);
+                    let right_g = leaf_gain(right_grad, right_hess, l1, l2);
+                    0.5 * (left_g + right_g - parent_gain)
+                };
 
                 if gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain) {
                     best = Some(BestSplit {
@@ -517,6 +601,8 @@ struct LeafCandidate {
     split: BestSplit,
     indices: Vec<usize>,
     depth: usize,
+    /// Output bounds of this leaf (monotone constraints).
+    bounds: OutputBounds,
 }
 
 impl PartialEq for LeafCandidate {
@@ -591,6 +677,8 @@ fn build_lgbm_tree(
         params.reg_alpha,
         params.reg_lambda,
         &params.monotone_constraints,
+        UNBOUNDED,
+        root_value,
     );
 
     let mut heap: BinaryHeap<LeafCandidate> = BinaryHeap::new();
@@ -601,6 +689,7 @@ fn build_lgbm_tree(
             split,
             indices: root_indices,
             depth: 0,
+            bounds: UNBOUNDED,
         });
     }
 
@@ -666,10 +755,32 @@ fn build_lgbm_tree(
 
         n_leaves += 1; // One leaf became two leaves (net +1)
 
+        // Propagate output bounds to the children (LightGBM "basic"
+        // monotone method) so that deeper splits — on any feature — can
+        // never break global monotonicity.
+        let (left_bounds, right_bounds) = child_bounds(
+            candidate.bounds,
+            monotone_of(split.feature, all_bins, &params.monotone_constraints),
+            split.left_value,
+            split.right_value,
+        );
+
         // Try to split the new children
-        for (child_id, child_indices, depth) in [
-            (left_id, left_idx, candidate.depth + 1),
-            (right_id, right_idx, candidate.depth + 1),
+        for (child_id, child_indices, depth, bounds, value) in [
+            (
+                left_id,
+                left_idx,
+                candidate.depth + 1,
+                left_bounds,
+                split.left_value,
+            ),
+            (
+                right_id,
+                right_idx,
+                candidate.depth + 1,
+                right_bounds,
+                split.right_value,
+            ),
         ] {
             if child_indices.len() < 2 * params.min_child_samples {
                 continue;
@@ -692,6 +803,8 @@ fn build_lgbm_tree(
                 params.reg_alpha,
                 params.reg_lambda,
                 &params.monotone_constraints,
+                bounds,
+                value,
             );
             if let Some(s) = child_split {
                 heap.push(LeafCandidate {
@@ -700,6 +813,7 @@ fn build_lgbm_tree(
                     split: s,
                     indices: child_indices,
                     depth,
+                    bounds,
                 });
             }
         }
@@ -954,6 +1068,11 @@ impl LgbmRegressor {
         self.colsample_bytree = c;
         self
     }
+    /// Maximum number of bins for non-missing values (2..=255, default 255).
+    pub fn with_max_bins(mut self, b: usize) -> Self {
+        self.max_bins = b;
+        self
+    }
     pub fn with_min_data_in_bin(mut self, n: usize) -> Self {
         self.min_data_in_bin = n;
         self
@@ -1190,6 +1309,7 @@ impl LgbmRegressor {
             )));
         }
         validate_eval_opts(opts, x.ncols())?;
+        validate_max_bins(self.max_bins)?;
 
         let n = x.nrows();
         let p = x.ncols();
@@ -1539,6 +1659,11 @@ impl LgbmClassifier {
         self.colsample_bytree = c;
         self
     }
+    /// Maximum number of bins for non-missing values (2..=255, default 255).
+    pub fn with_max_bins(mut self, b: usize) -> Self {
+        self.max_bins = b;
+        self
+    }
     pub fn with_min_data_in_bin(mut self, n: usize) -> Self {
         self.min_data_in_bin = n;
         self
@@ -1753,6 +1878,7 @@ impl LgbmClassifier {
             }
         }
         validate_eval_opts(opts, x.ncols())?;
+        validate_max_bins(self.max_bins)?;
 
         let n = x.nrows();
         let p = x.ncols();
@@ -2644,6 +2770,137 @@ mod tests {
         for &p in preds.iter() {
             assert!(p.is_finite());
         }
+    }
+
+    /// Deterministic LCG for test data.
+    fn lcg_uniform(state: &mut u64) -> f64 {
+        *state = (1_664_525 * *state + 1_013_904_223) % (1 << 32);
+        *state as f64 / (1u64 << 32) as f64
+    }
+
+    /// y = 3 x0 + 4 x1 (0.5 - x0): increasing in x0 on average but
+    /// *decreasing* in x0 for large x1, so trees must fight the data to stay
+    /// monotone. With only local child checks, deeper splits on x1 broke
+    /// global monotonicity in x0 (#47).
+    fn monotone_conflict_data(n: usize) -> (Array2<f64>, Array1<f64>) {
+        let mut st = 7u64;
+        let mut x = Array2::<f64>::zeros((n, 2));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x0 = lcg_uniform(&mut st);
+            let x1 = lcg_uniform(&mut st);
+            let noise = lcg_uniform(&mut st) - 0.5;
+            x[[i, 0]] = x0;
+            x[[i, 1]] = x1;
+            y[i] = 3.0 * x0 + 4.0 * x1 * (0.5 - x0) + 0.3 * noise;
+        }
+        (x, y)
+    }
+
+    /// Predictions along x0 for every x1 on a grid; returns the largest
+    /// violation of the requested direction (0 = perfectly monotone).
+    fn max_monotone_violation(predict: impl Fn(&Array2<f64>) -> Array1<f64>, sign: f64) -> f64 {
+        let n0 = 60;
+        let mut worst: f64 = 0.0;
+        for k in 0..=12 {
+            let x1 = -0.1 + k as f64 * 0.1;
+            let grid = Array2::from_shape_fn((n0, 2), |(i, j)| {
+                if j == 0 {
+                    -0.1 + 1.2 * i as f64 / (n0 - 1) as f64
+                } else {
+                    x1
+                }
+            });
+            let p = predict(&grid);
+            for w in p.as_slice().unwrap().windows(2) {
+                worst = worst.max(sign * (w[0] - w[1]));
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn test_lgbm_monotone_increasing_is_global() {
+        let (x, y) = monotone_conflict_data(400);
+        let fitted = LgbmRegressor::new()
+            .with_n_estimators(60)
+            .with_num_leaves(31)
+            .with_min_child_samples(5)
+            .with_monotone_constraints(vec![1, 0])
+            .fit(&x, &y)
+            .unwrap();
+        let viol = max_monotone_violation(|g| fitted.predict(g).unwrap(), 1.0);
+        assert!(viol <= 1e-12, "monotone(+1) violated by {viol}");
+        // The unconstrained model does follow the non-monotone data.
+        let free = LgbmRegressor::new()
+            .with_n_estimators(60)
+            .with_num_leaves(31)
+            .with_min_child_samples(5)
+            .fit(&x, &y)
+            .unwrap();
+        let viol_free = max_monotone_violation(|g| free.predict(g).unwrap(), 1.0);
+        assert!(
+            viol_free > 0.05,
+            "test data should be non-monotone, {viol_free}"
+        );
+    }
+
+    #[test]
+    fn test_lgbm_monotone_decreasing_is_global_classifier() {
+        let (x, y) = monotone_conflict_data(400);
+        // Flip: decreasing in x0 on average, increasing for large x1.
+        let labels = y.mapv(|v| if v < 1.0 { 1.0 } else { 0.0 });
+        let fitted = LgbmClassifier::new()
+            .with_n_estimators(60)
+            .with_num_leaves(15)
+            .with_min_child_samples(5)
+            .with_monotone_constraints(vec![-1, 0])
+            .fit(&x, &labels)
+            .unwrap();
+        let viol = max_monotone_violation(
+            |g| fitted.predict_proba(g).unwrap().column(1).to_owned(),
+            -1.0,
+        );
+        assert!(viol <= 1e-12, "monotone(-1) violated by {viol}");
+    }
+
+    #[test]
+    fn test_child_bounds_split_at_midpoint() {
+        assert_eq!(
+            child_bounds(UNBOUNDED, 1, 1.0, 3.0),
+            ((f64::NEG_INFINITY, 2.0), (2.0, f64::INFINITY))
+        );
+        assert_eq!(
+            child_bounds((0.0, 5.0), -1, 3.0, 1.0),
+            ((2.0, 5.0), (0.0, 2.0))
+        );
+        assert_eq!(
+            child_bounds((0.0, 5.0), 0, 3.0, 1.0),
+            ((0.0, 5.0), (0.0, 5.0))
+        );
+        // Given-output gain equals the closed form at the optimum.
+        let (g, h, l1, l2) = (-3.0, 2.0, 0.5, 1.0);
+        let w = leaf_value(g, h, l1, l2);
+        assert!((leaf_gain_given_output(g, h, l1, l2, w) - leaf_gain(g, h, l1, l2)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_lgbm_max_bins_validated() {
+        let x = Array2::from_shape_fn((300, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(300, |i| i as f64);
+        for bad in [0usize, 1, 256, 1000] {
+            let r = LgbmRegressor::new().with_max_bins(bad).fit(&x, &y);
+            assert!(matches!(r, Err(RustMlError::InvalidParameter(_))), "{bad}");
+            let c = LgbmClassifier::new()
+                .with_max_bins(bad)
+                .fit(&x, &y.mapv(|v| (v > 150.0) as u8 as f64));
+            assert!(matches!(c, Err(RustMlError::InvalidParameter(_))), "{bad}");
+        }
+        assert!(LgbmRegressor::new().with_max_bins(255).fit(&x, &y).is_ok());
+        // Numeric bins are clamped before the narrowing cast.
+        let edges: Vec<f64> = (0..400).map(|v| v as f64).collect();
+        assert_eq!(numeric_bin(1e9, &edges), MISSING_BIN - 1);
+        assert_eq!(numeric_bin(0.5, &edges), 1);
     }
 
     #[test]

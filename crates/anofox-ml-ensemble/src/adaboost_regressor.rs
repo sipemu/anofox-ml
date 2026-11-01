@@ -1,4 +1,5 @@
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_trees::split::cmp_nan_last;
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 use ndarray::{Array1, Array2};
 use rand::distributions::WeightedIndex;
@@ -25,10 +26,12 @@ impl Default for AdaBoostLoss {
 
 /// AdaBoost regressor parameters (unfitted state).
 ///
-/// Implements the AdaBoost.R2 algorithm for regression. Each boosting round
-/// fits a decision tree regressor on a weighted bootstrap sample, then adjusts
-/// sample weights so that samples with higher prediction error receive greater
-/// emphasis in subsequent rounds.
+/// Implements the AdaBoost.R2 algorithm (Drucker, 1997) as in scikit-learn.
+/// Each boosting round fits a decision tree regressor on a weighted bootstrap
+/// sample, then adjusts sample weights by `beta^((1 - L_i) * learning_rate)`
+/// so that samples with higher prediction error receive greater emphasis in
+/// subsequent rounds. Predictions are the **weighted median** of the
+/// estimators' predictions (weights `learning_rate * ln(1 / beta)`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AdaBoostRegressor {
     /// Number of boosting rounds (weak learners).
@@ -152,11 +155,10 @@ impl<F: Float> Fit<F> for AdaBoostRegressor {
         let mut estimators = Vec::with_capacity(self.n_estimators);
         let mut estimator_weights = Vec::with_capacity(self.n_estimators);
 
-        let eps = F::from_f64(1e-15).unwrap();
         let half = F::from_f64(0.5).unwrap();
 
-        for _ in 0..self.n_estimators {
-            // Create weighted bootstrap sample.
+        for iboost in 0..self.n_estimators {
+            // Create weighted bootstrap sample (as sklearn's AdaBoost.R2).
             let weights_f64: Vec<f64> = weights.iter().map(|w| w.to_f64().unwrap()).collect();
             let dist = WeightedIndex::new(&weights_f64).map_err(|e| {
                 RustMlError::InvalidParameter(format!("invalid sample weights: {e}"))
@@ -176,29 +178,29 @@ impl<F: Float> Fit<F> for AdaBoostRegressor {
             // Predict on the *full* training set.
             let preds = fitted_tree.predict(x)?;
 
-            // Compute absolute errors.
+            // Absolute errors; the maximum D is taken over samples with
+            // positive weight (sklearn masks zero-weight samples).
             let abs_errors: Vec<F> = (0..n_samples).map(|i| (y[i] - preds[i]).abs()).collect();
-
-            // Maximum error D.
             let d_max = abs_errors
                 .iter()
-                .copied()
+                .zip(weights.iter())
+                .filter(|(_, &w)| w > F::zero())
+                .map(|(&e, _)| e)
                 .fold(F::zero(), |a, b| if b > a { b } else { a });
 
-            // If D is zero, the tree perfectly predicts -- keep it and stop.
-            if d_max <= eps {
-                estimators.push(fitted_tree);
-                estimator_weights.push(lr);
-                break;
-            }
-
-            // Compute individual losses.
+            // Individual losses in [0, 1] (all zero when D == 0).
             let losses: Vec<F> = abs_errors
                 .iter()
-                .map(|&e| compute_loss(e, d_max, self.loss))
+                .map(|&e| {
+                    if d_max > F::zero() {
+                        compute_loss(e, d_max, self.loss)
+                    } else {
+                        F::zero()
+                    }
+                })
                 .collect();
 
-            // Compute weighted average loss.
+            // Weighted average loss.
             let w_sum: F = weights.iter().copied().fold(F::zero(), |a, b| a + b);
             let l_bar: F = weights
                 .iter()
@@ -206,6 +208,13 @@ impl<F: Float> Fit<F> for AdaBoostRegressor {
                 .map(|(&w, &l)| w * l)
                 .fold(F::zero(), |a, b| a + b)
                 / w_sum;
+
+            if l_bar <= F::zero() {
+                // Perfect fit: keep it with unit weight and stop (sklearn).
+                estimators.push(fitted_tree);
+                estimator_weights.push(F::one());
+                break;
+            }
 
             // If average loss is >= 0.5, stop (weak learner is no better than random).
             if l_bar >= half {
@@ -216,28 +225,23 @@ impl<F: Float> Fit<F> for AdaBoostRegressor {
                 break;
             }
 
-            // Compute beta.
             let beta = l_bar / (F::one() - l_bar);
-
-            // Update sample weights: w_i *= beta^(1-L_i).
-            for i in 0..n_samples {
-                let exponent = F::one() - losses[i];
-                weights[i] = weights[i] * beta.powf(exponent);
-            }
-
-            // Normalize weights.
-            let w_total: F = weights.iter().copied().fold(F::zero(), |a, b| a + b);
-            if w_total > F::zero() {
-                for w in &mut weights {
-                    *w = *w / w_total;
-                }
-            }
-
             // Estimator weight = learning_rate * ln(1/beta).
-            let alpha = lr * (F::one() / (beta + eps)).ln();
-
+            let alpha = lr * (F::one() / beta).ln();
             estimators.push(fitted_tree);
             estimator_weights.push(alpha);
+
+            if iboost + 1 == self.n_estimators {
+                break;
+            }
+            update_sample_weights(&mut weights, &losses, beta, lr);
+            let w_total: F = weights.iter().copied().fold(F::zero(), |a, b| a + b);
+            if !w_total.is_finite() || w_total <= F::zero() {
+                break;
+            }
+            for w in &mut weights {
+                *w /= w_total;
+            }
         }
 
         Ok(FittedAdaBoostRegressor {
@@ -259,22 +263,26 @@ impl<F: Float> Predict<F> for FittedAdaBoostRegressor<F> {
         }
 
         let n_samples = x.nrows();
+        let n_est = self.estimators.len();
 
-        // Weighted average of estimator predictions.
-        let mut weighted_sum = Array1::<F>::zeros(n_samples);
-        let mut weight_total = F::zero();
+        // Weighted median of the estimator predictions (AdaBoost.R2 /
+        // sklearn): sort the predictions per sample and take the first one
+        // whose cumulative estimator weight reaches half the total.
+        let all_preds: Vec<Array1<F>> = self
+            .estimators
+            .iter()
+            .map(|t| t.predict(x))
+            .collect::<Result<_>>()?;
 
-        for (tree, &alpha) in self.estimators.iter().zip(self.estimator_weights.iter()) {
-            let tree_preds = tree.predict(x)?;
-            weighted_sum = weighted_sum + &(tree_preds * alpha);
-            weight_total = weight_total + alpha;
+        let mut out = Array1::<F>::zeros(n_samples);
+        let mut column: Vec<F> = Vec::with_capacity(n_est);
+        for i in 0..n_samples {
+            column.clear();
+            column.extend(all_preds.iter().map(|p| p[i]));
+            out[i] = weighted_median(&column, &self.estimator_weights);
         }
 
-        if weight_total > F::zero() {
-            weighted_sum.mapv_inplace(|v| v / weight_total);
-        }
-
-        Ok(weighted_sum)
+        Ok(out)
     }
 }
 
@@ -305,6 +313,34 @@ fn compute_loss<F: Float>(error: F, d_max: F, loss: AdaBoostLoss) -> F {
     }
 }
 
+/// AdaBoost.R2 weight update with shrinkage (sklearn):
+/// `w_i *= beta^((1 - L_i) * learning_rate)` for samples with positive weight.
+fn update_sample_weights<F: Float>(weights: &mut [F], losses: &[F], beta: F, lr: F) {
+    for (w, &l) in weights.iter_mut().zip(losses) {
+        if *w > F::zero() {
+            *w *= beta.powf((F::one() - l) * lr);
+        }
+    }
+}
+
+/// Weighted median of `preds` (one per estimator): the smallest prediction
+/// whose cumulative estimator weight (in prediction order) is
+/// `>= 0.5 * total` (sklearn's `_get_median_predict`).
+fn weighted_median<F: Float>(preds: &[F], weights: &[F]) -> F {
+    let mut order: Vec<usize> = (0..preds.len()).collect();
+    order.sort_by(|&a, &b| cmp_nan_last(&preds[a], &preds[b]));
+    let total = weights.iter().copied().fold(F::zero(), |a, b| a + b);
+    let half = F::from_f64(0.5).unwrap() * total;
+    let mut cdf = F::zero();
+    for &e in &order {
+        cdf += weights[e];
+        if cdf >= half {
+            return preds[e];
+        }
+    }
+    preds[*order.last().expect("at least one estimator")]
+}
+
 /// Build a sub-matrix selecting specific rows from `x`.
 fn build_sub_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
     x.select(ndarray::Axis(0), row_indices)
@@ -315,6 +351,56 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_weighted_median_not_mean() {
+        // Regression: predictions used to be the weighted *mean*.
+        let preds = [10.0, 1.0, 2.0];
+        let weights = [0.5, 0.2, 0.3];
+        // Sorted: 1 (0.2), 2 (0.5 cum) -> cdf reaches 0.5 * 1.0 at 2.
+        assert_eq!(weighted_median(&preds, &weights), 2.0);
+        assert_eq!(weighted_median(&[3.0, 7.0], &[0.4, 0.6]), 7.0);
+        assert_eq!(weighted_median(&[3.0, 7.0], &[0.5, 0.5]), 3.0);
+        // Single estimator with zero weight (worse-than-random first round).
+        assert_eq!(weighted_median(&[4.0], &[0.0]), 4.0);
+    }
+
+    #[test]
+    fn test_predict_is_weighted_median_of_estimators() {
+        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]];
+        let y = array![1.0, 3.0, 2.0, 5.0, 4.0, 8.0, 6.0, 9.0];
+        let fitted: FittedAdaBoostRegressor<f64> = AdaBoostRegressor::new()
+            .with_n_estimators(7)
+            .with_max_depth(Some(1))
+            .with_seed(5)
+            .fit(&x, &y)
+            .unwrap();
+        let preds = fitted.predict(&x).unwrap();
+        let per_tree: Vec<Array1<f64>> = fitted
+            .estimators
+            .iter()
+            .map(|t| t.predict(&x).unwrap())
+            .collect();
+        for i in 0..x.nrows() {
+            let col: Vec<f64> = per_tree.iter().map(|p| p[i]).collect();
+            // Must be one of the estimators' predictions (a median, not a mean).
+            assert!(col.contains(&preds[i]));
+            assert_eq!(preds[i], weighted_median(&col, &fitted.estimator_weights));
+        }
+    }
+
+    #[test]
+    fn test_learning_rate_in_weight_update() {
+        // sklearn: w_i *= beta ** ((1 - L_i) * learning_rate).
+        let mut w = vec![0.5, 0.25, 0.25, 0.0];
+        let losses = [0.0, 1.0, 0.5, 0.3];
+        update_sample_weights(&mut w, &losses, 0.25, 0.5);
+        assert_abs_diff_eq!(w[0], 0.5 * 0.25f64.powf(0.5), epsilon = 1e-15);
+        assert_abs_diff_eq!(w[1], 0.25, epsilon = 1e-15);
+        assert_abs_diff_eq!(w[2], 0.25 * 0.25f64.powf(0.25), epsilon = 1e-15);
+        // Zero-weight samples stay at zero.
+        assert_eq!(w[3], 0.0);
+    }
 
     #[test]
     fn test_basic_regression() {

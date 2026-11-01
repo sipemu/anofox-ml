@@ -82,6 +82,76 @@ impl<F: Float> TreeNode<F> {
         }
     }
 
+    /// Number of leaves in this (sub)tree.
+    pub fn n_leaves(&self) -> usize {
+        match self {
+            TreeNode::Leaf { .. } => 1,
+            TreeNode::Split { left, right, .. } => left.n_leaves() + right.n_leaves(),
+        }
+    }
+
+    /// Leaf index (pre-order numbering, left subtree before right, starting
+    /// at 0) of the leaf reached by every row of `x` (any layout/stride).
+    ///
+    /// The numbering matches [`TreeNode::leaf_values_mut`], so the two can be
+    /// combined to re-estimate leaf values after fitting (e.g. the Newton
+    /// step of gradient boosting).
+    pub fn apply(&self, x: &ndarray::Array2<F>) -> Vec<usize> {
+        let mut out = vec![0usize; x.nrows()];
+        let rows: Vec<usize> = (0..x.nrows()).collect();
+        let mut next_leaf = 0usize;
+        self.apply_rec(x, rows, &mut next_leaf, &mut out);
+        out
+    }
+
+    fn apply_rec(
+        &self,
+        x: &ndarray::Array2<F>,
+        rows: Vec<usize>,
+        next_leaf: &mut usize,
+        out: &mut [usize],
+    ) {
+        match self {
+            TreeNode::Leaf { .. } => {
+                for r in rows {
+                    out[r] = *next_leaf;
+                }
+                *next_leaf += 1;
+            }
+            TreeNode::Split {
+                feature_index,
+                threshold,
+                left,
+                right,
+                ..
+            } => {
+                let (l, r): (Vec<usize>, Vec<usize>) = rows
+                    .into_iter()
+                    .partition(|&i| x[[i, *feature_index]] <= *threshold);
+                left.apply_rec(x, l, next_leaf, out);
+                right.apply_rec(x, r, next_leaf, out);
+            }
+        }
+    }
+
+    /// Mutable references to all leaf values in pre-order (left before
+    /// right), matching the numbering of [`TreeNode::apply`].
+    pub fn leaf_values_mut(&mut self) -> Vec<&mut F> {
+        let mut out = Vec::new();
+        self.collect_leaf_values_mut(&mut out);
+        out
+    }
+
+    fn collect_leaf_values_mut<'a>(&'a mut self, out: &mut Vec<&'a mut F>) {
+        match self {
+            TreeNode::Leaf { value, .. } => out.push(value),
+            TreeNode::Split { left, right, .. } => {
+                left.collect_leaf_values_mut(out);
+                right.collect_leaf_values_mut(out);
+            }
+        }
+    }
+
     /// Compute feature importances by accumulating weighted impurity decreases.
     pub fn feature_importances(&self, n_features: usize, total_samples: usize) -> Vec<F> {
         let mut importances = vec![F::zero(); n_features];

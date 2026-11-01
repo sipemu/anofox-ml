@@ -142,14 +142,18 @@ pub mod prelude {
         MiniBatchKMeans,
     };
 
-    pub use anofox_ml_naive_bayes::{BernoulliNB, GaussianNB, MultinomialNB};
+    pub use anofox_ml_naive_bayes::{
+        BernoulliNB, CategoricalNB, ComplementNB, GaussianNB, MultinomialNB,
+    };
 
     pub use anofox_ml_discriminant::{
         FittedLinearDiscriminantAnalysis, FittedQuadraticDiscriminantAnalysis,
         LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis,
     };
 
-    pub use anofox_ml_svm::{LinearSvc, LinearSvr, NuSvc, NuSvr, OneClassSvm, Svc, SvmKernel, Svr};
+    pub use anofox_ml_svm::{
+        Gamma, LinearSvc, LinearSvr, NuSvc, NuSvr, OneClassSvm, Svc, SvmKernel, Svr,
+    };
 
     pub use anofox_ml_neural_networks::{MlpClassifier, MlpRegressor};
 

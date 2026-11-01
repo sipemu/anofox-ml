@@ -1,18 +1,19 @@
 use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion};
 use ndarray::{Array1, Array2};
-use rand::distributions::WeightedIndex;
-use rand::prelude::Distribution;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
+
+use crate::forest_common::{argmax_first, class_index, sorted_classes};
 
 /// AdaBoost classifier parameters (unfitted state).
 ///
 /// Implements the SAMME (Stagewise Additive Modeling using a Multi-class
-/// Exponential loss function) algorithm. Each boosting round fits a decision
-/// tree (typically a stump with `max_depth = 1`) on a weighted bootstrap
-/// sample, then adjusts sample weights so that misclassified examples receive
-/// greater emphasis in subsequent rounds.
+/// Exponential loss function) algorithm as in scikit-learn >= 1.4 (which
+/// removed SAMME.R). Each boosting round fits a decision tree (typically a
+/// stump with `max_depth = 1`) on the full training set with the current
+/// sample weights, then up-weights misclassified samples by
+/// `exp(alpha)` so they receive greater emphasis in subsequent rounds.
+///
+/// `predict_proba` is `softmax(decision_function / (K - 1))` like sklearn.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AdaBoostClassifier {
     /// Number of boosting rounds (weak learners).
@@ -75,6 +76,9 @@ pub struct FittedAdaBoostClassifier<F: Float> {
     estimators: Vec<FittedDecisionTreeClassifier<F>>,
     /// Weight (alpha) for each estimator.
     estimator_weights: Vec<F>,
+    /// Weighted training error of each estimator.
+    #[serde(default)]
+    estimator_errors: Vec<F>,
     /// Unique class labels sorted in ascending order.
     classes: Vec<F>,
     /// Number of features expected at prediction time.
@@ -106,7 +110,7 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
             ));
         }
 
-        let classes = unique_sorted(y);
+        let classes = sorted_classes(y);
         let n_classes = classes.len();
         if n_classes < 2 {
             return Err(RustMlError::InvalidParameter(
@@ -116,9 +120,10 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
 
         let n_samples = x.nrows();
         let n_features = x.ncols();
-        let lr = F::from_f64(self.learning_rate).unwrap();
+        let lr = self.learning_rate;
+        let k_f = n_classes as f64;
 
-        let tree_params = DecisionTreeClassifier {
+        let base_tree = DecisionTreeClassifier {
             max_depth: self.max_depth,
             min_samples_split: 2,
             min_samples_leaf: 1,
@@ -126,90 +131,79 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
             max_features: None,
             sample_weight: None,
             class_weight: None,
-            seed: 0,
+            seed: self.seed,
         };
 
-        let mut rng = StdRng::seed_from_u64(self.seed);
-
-        // Initialize sample weights uniformly.
-        let mut weights: Vec<F> = vec![F::one() / F::from_usize(n_samples).unwrap(); n_samples];
+        // Sample weights, kept normalized to sum to 1.
+        let mut weights = Array1::<f64>::from_elem(n_samples, 1.0 / n_samples as f64);
 
         let mut estimators = Vec::with_capacity(self.n_estimators);
         let mut estimator_weights = Vec::with_capacity(self.n_estimators);
+        let mut estimator_errors = Vec::with_capacity(self.n_estimators);
+        let mut incorrect = vec![false; n_samples];
 
-        let n_classes_f = F::from_usize(n_classes).unwrap();
-        let eps = F::from_f64(1e-15).unwrap();
-
-        for _ in 0..self.n_estimators {
-            // Create weighted bootstrap sample.
-            let weights_f64: Vec<f64> = weights.iter().map(|w| w.to_f64().unwrap()).collect();
-            let dist = WeightedIndex::new(&weights_f64).map_err(|e| {
-                RustMlError::InvalidParameter(format!("invalid sample weights: {e}"))
-            })?;
-
-            let bootstrap_indices: Vec<usize> =
-                (0..n_samples).map(|_| dist.sample(&mut rng)).collect();
-
-            let x_bootstrap = build_sub_rows(x, &bootstrap_indices);
-            let y_bootstrap =
-                Array1::from_vec(bootstrap_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
-
-            // Fit weak learner on the bootstrap sample.
-            let fitted_tree: FittedDecisionTreeClassifier<F> =
-                tree_params.fit(&x_bootstrap, &y_bootstrap)?;
-
-            // Predict on the *full* training set.
+        for iboost in 0..self.n_estimators {
+            // SAMME (sklearn >= 1.4): the weak learner is fit on the full
+            // data with the current sample weights.
+            let tree = base_tree.clone().with_sample_weight(Some(weights.clone()));
+            let fitted_tree: FittedDecisionTreeClassifier<F> = tree.fit(x, y)?;
             let preds = fitted_tree.predict(x)?;
 
-            // Compute weighted error.
-            let mut err = F::zero();
-            let mut w_sum = F::zero();
+            let mut err = 0.0;
+            let mut w_sum = 0.0;
             for i in 0..n_samples {
-                w_sum = w_sum + weights[i];
-                if !approx_eq(preds[i], y[i], eps) {
-                    err = err + weights[i];
+                incorrect[i] = preds[i] != y[i];
+                w_sum += weights[i];
+                if incorrect[i] {
+                    err += weights[i];
                 }
             }
-            err = err / w_sum;
+            let err = err / w_sum;
 
-            // If error is too high, stop early.
-            let err_threshold = F::one() - F::one() / n_classes_f;
-            if err >= err_threshold {
-                // If this is the first estimator, keep it with zero weight
-                // so we still have something to predict with.
+            if err <= 0.0 {
+                // Perfect fit: keep it with unit weight and stop.
+                estimators.push(fitted_tree);
+                estimator_weights.push(F::one());
+                estimator_errors.push(F::zero());
+                break;
+            }
+            if err >= 1.0 - 1.0 / k_f {
+                // Worse than random guessing: discard and stop.
                 if estimators.is_empty() {
-                    estimators.push(fitted_tree);
-                    estimator_weights.push(F::zero());
+                    return Err(RustMlError::InvalidParameter(
+                        "base estimator in AdaBoostClassifier is worse than random; \
+                         the ensemble cannot be fit"
+                            .into(),
+                    ));
                 }
                 break;
             }
 
-            // Compute estimator weight (SAMME formula).
-            let alpha =
-                lr * (((F::one() - err) / (err + eps)).ln() + (n_classes_f - F::one()).ln());
-
-            // Update sample weights.
-            for i in 0..n_samples {
-                if !approx_eq(preds[i], y[i], eps) {
-                    weights[i] = weights[i] * alpha.exp();
-                }
-            }
-
-            // Normalize weights.
-            let w_total: F = weights.iter().copied().fold(F::zero(), |a, b| a + b);
-            if w_total > F::zero() {
-                for w in &mut weights {
-                    *w = *w / w_total;
-                }
-            }
-
+            let alpha = lr * (((1.0 - err) / err).ln() + (k_f - 1.0).ln());
             estimators.push(fitted_tree);
-            estimator_weights.push(alpha);
+            estimator_weights.push(F::from_f64(alpha).unwrap());
+            estimator_errors.push(F::from_f64(err).unwrap());
+
+            if iboost + 1 == self.n_estimators {
+                break;
+            }
+            let boost = alpha.exp();
+            for i in 0..n_samples {
+                if incorrect[i] && weights[i] > 0.0 {
+                    weights[i] *= boost;
+                }
+            }
+            let total = weights.sum();
+            if !total.is_finite() || total <= 0.0 {
+                break;
+            }
+            weights /= total;
         }
 
         Ok(FittedAdaBoostClassifier {
             estimators,
             estimator_weights,
+            estimator_errors,
             classes,
             n_features,
         })
@@ -218,49 +212,25 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
 
 impl<F: Float> Predict<F> for FittedAdaBoostClassifier<F> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-
-        let n_samples = x.nrows();
-        let mut predictions = Vec::with_capacity(n_samples);
-        let eps = F::from_f64(1e-9).unwrap();
-
-        for i in 0..n_samples {
-            let row = x.row(i);
-            let row_arr = row.to_owned().insert_axis(ndarray::Axis(0));
-
-            // Compute weighted vote for each class.
-            let mut class_scores: Vec<F> = vec![F::zero(); self.classes.len()];
-            for (tree, &alpha) in self.estimators.iter().zip(self.estimator_weights.iter()) {
-                let pred = tree.predict(&row_arr)?;
-                let pred_val = pred[0];
-                // Find which class this prediction corresponds to.
-                for (k, &cls) in self.classes.iter().enumerate() {
-                    if (pred_val - cls).abs() < eps {
-                        class_scores[k] = class_scores[k] + alpha;
-                        break;
+        let dec = self.decision_function(x)?;
+        let preds = if self.classes.len() == 2 {
+            dec.column(0)
+                .iter()
+                .map(|&d| {
+                    if d > F::zero() {
+                        self.classes[1]
+                    } else {
+                        self.classes[0]
                     }
-                }
-            }
-
-            // Pick class with maximum weighted vote.
-            let mut best_class = 0;
-            let mut best_score = class_scores[0];
-            for (k, &score) in class_scores.iter().enumerate().skip(1) {
-                if score > best_score {
-                    best_score = score;
-                    best_class = k;
-                }
-            }
-            predictions.push(self.classes[best_class]);
-        }
-
-        Ok(Array1::from_vec(predictions))
+                })
+                .collect()
+        } else {
+            dec.rows()
+                .into_iter()
+                .map(|row| self.classes[argmax_first(row.iter().copied())])
+                .collect()
+        };
+        Ok(preds)
     }
 }
 
@@ -280,12 +250,20 @@ impl<F: Float> FittedAdaBoostClassifier<F> {
         &self.estimator_weights
     }
 
-    /// Predict class probabilities for each sample.
+    /// The weighted training error of each estimator (empty for models
+    /// deserialized from older versions).
+    pub fn estimator_errors(&self) -> &[F] {
+        &self.estimator_errors
+    }
+
+    /// SAMME decision function (sklearn's `decision_function`).
     ///
-    /// For each sample, computes the weighted vote for every class and
-    /// normalizes so that the probabilities sum to 1.
-    /// Returns an `Array2` of shape `(n_samples, n_classes)`.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    /// Every estimator votes `w` for its predicted class and `-w / (K - 1)`
+    /// for every other class; the sum is divided by the total estimator
+    /// weight. For binary problems the result has a single column
+    /// (`score[class_1] - score[class_0]`, positive => `classes[1]`),
+    /// otherwise shape `(n_samples, n_classes)`.
+    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -293,72 +271,203 @@ impl<F: Float> FittedAdaBoostClassifier<F> {
                 x.ncols()
             )));
         }
-
         let n_samples = x.nrows();
         let n_classes = self.classes.len();
-        let eps = F::from_f64(1e-9).unwrap();
+        let km1 = F::from_usize(n_classes - 1).unwrap();
+        let mut scores = Array2::<F>::zeros((n_samples, n_classes));
+        let mut w_total = F::zero();
 
-        let mut proba = Array2::<F>::zeros((n_samples, n_classes));
-
-        for i in 0..n_samples {
-            let row = x.row(i);
-            let row_arr = row.to_owned().insert_axis(ndarray::Axis(0));
-
-            for (tree, &alpha) in self.estimators.iter().zip(self.estimator_weights.iter()) {
-                let pred = tree.predict(&row_arr)?;
-                let pred_val = pred[0];
-                for (k, &cls) in self.classes.iter().enumerate() {
-                    if (pred_val - cls).abs() < eps {
-                        proba[[i, k]] = proba[[i, k]] + alpha;
-                        break;
-                    }
-                }
-            }
-
-            // Normalize row to sum to 1.
-            let row_sum: F = (0..n_classes)
-                .map(|k| proba[[i, k]])
-                .fold(F::zero(), |a, b| a + b);
-            if row_sum > F::zero() {
+        for (tree, &w) in self.estimators.iter().zip(self.estimator_weights.iter()) {
+            w_total += w;
+            let preds = tree.predict(x)?;
+            let other = -w / km1;
+            for (i, &p) in preds.iter().enumerate() {
+                let c = class_index(&self.classes, p);
                 for k in 0..n_classes {
-                    proba[[i, k]] = proba[[i, k]] / row_sum;
+                    scores[[i, k]] += if Some(k) == c { w } else { other };
                 }
             }
         }
+        if w_total > F::zero() {
+            scores.mapv_inplace(|v| v / w_total);
+        }
 
+        if n_classes == 2 {
+            let mut out = Array2::<F>::zeros((n_samples, 1));
+            for i in 0..n_samples {
+                out[[i, 0]] = scores[[i, 1]] - scores[[i, 0]];
+            }
+            Ok(out)
+        } else {
+            Ok(scores)
+        }
+    }
+
+    /// Predict class probabilities (sklearn's SAMME `predict_proba`):
+    /// `softmax(decision / (K - 1))`; for binary problems
+    /// `softmax([-d / 2, d / 2])`.
+    ///
+    /// Returns an `Array2` of shape `(n_samples, n_classes)`.
+    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        let dec = self.decision_function(x)?;
+        let n_samples = dec.nrows();
+        let n_classes = self.classes.len();
+        let mut proba = Array2::<F>::zeros((n_samples, n_classes));
+        let two = F::from_f64(2.0).unwrap();
+        let km1 = F::from_usize(n_classes - 1).unwrap();
+        for i in 0..n_samples {
+            if n_classes == 2 {
+                let d = dec[[i, 0]] / two;
+                proba[[i, 0]] = -d;
+                proba[[i, 1]] = d;
+            } else {
+                for k in 0..n_classes {
+                    proba[[i, k]] = dec[[i, k]] / km1;
+                }
+            }
+            let mut row = proba.row_mut(i);
+            let max = row.iter().copied().fold(F::neg_infinity(), F::max);
+            row.mapv_inplace(|v| (v - max).exp());
+            let sum = row.sum();
+            row.mapv_inplace(|v| v / sum);
+        }
         Ok(proba)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helper functions
-// ---------------------------------------------------------------------------
-
-/// Check approximate equality between two float values.
-#[inline]
-fn approx_eq<F: Float>(a: F, b: F, eps: F) -> bool {
-    (a - b).abs() < eps
-}
-
-/// Return sorted unique values from an array.
-fn unique_sorted<F: Float>(arr: &Array1<F>) -> Vec<F> {
-    let eps = F::from_f64(1e-9).unwrap();
-    let mut vals: Vec<F> = arr.to_vec();
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    vals.dedup_by(|a, b| (*a - *b).abs() < eps);
-    vals
-}
-
-/// Build a sub-matrix selecting specific rows from `x`.
-fn build_sub_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
-    x.select(ndarray::Axis(0), row_indices)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    /// numpy seed-0 data; expected values from sklearn 1.8.0
+    /// `AdaBoostClassifier(DecisionTreeClassifier(max_depth=1),
+    /// n_estimators=8, learning_rate=0.7, random_state=0)`.
+    fn sklearn_data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let x = array![
+            [0.195, 0.861],
+            [0.411, 0.18],
+            [-0.305, 0.584],
+            [-0.25, 1.567],
+            [1.855, -0.466],
+            [1.167, 0.116],
+            [0.272, 1.702],
+            [-1.716, -1.651],
+            [-1.919, 1.33],
+            [1.113, 1.48],
+            [1.914, 1.197],
+            [-0.154, 1.122],
+            [-1.527, 0.56],
+            [-1.427, 1.779],
+            [0.087, -0.341],
+            [-0.942, 1.097],
+            [-0.175, 0.274],
+            [-1.925, 0.471],
+            [0.448, 0.468],
+            [1.775, 0.727],
+            [-0.562, -0.252],
+            [0.791, -1.759],
+            [0.667, 0.683],
+            [-1.158, -1.484]
+        ];
+        let yb = array![
+            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0
+        ];
+        let ym = array![
+            1.0, 1.0, 0.0, 1.0, 2.0, 2.0, 1.0, 0.0, 0.0, 2.0, 2.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 1.0, 2.0, 1.0, 2.0, 2.0, 0.0
+        ];
+        (x, yb, ym)
+    }
+
+    fn sklearn_params() -> AdaBoostClassifier {
+        AdaBoostClassifier::new()
+            .with_n_estimators(8)
+            .with_learning_rate(0.7)
+            .with_max_depth(Some(1))
+    }
+
+    #[test]
+    fn test_binary_samme_matches_sklearn() {
+        let (x, yb, _) = sklearn_data();
+        let fitted: FittedAdaBoostClassifier<f64> = sklearn_params().fit(&x, &yb).unwrap();
+        let expected_w = [
+            1.126606538704,
+            1.035548457138,
+            0.642496518324,
+            0.750266726612,
+            0.799534569873,
+            0.491001544562,
+            0.739634426191,
+            0.60866724212,
+        ];
+        assert_eq!(fitted.n_estimators(), 8);
+        for (w, e) in fitted.estimator_weights().iter().zip(expected_w) {
+            assert_abs_diff_eq!(*w, e, epsilon = 1e-9);
+        }
+        let dec = fitted.decision_function(&x).unwrap();
+        let expected_dec = [
+            -0.055867026878,
+            -0.540398044091,
+            -1.515468982787,
+            0.421797526509,
+        ];
+        for (i, e) in expected_dec.iter().enumerate() {
+            assert_abs_diff_eq!(dec[[i, 0]], *e, epsilon = 1e-9);
+        }
+        let proba = fitted.predict_proba(&x).unwrap();
+        let expected_p0 = [
+            0.513963125187,
+            0.631905008077,
+            0.819870295974,
+            0.396086697941,
+        ];
+        for (i, e) in expected_p0.iter().enumerate() {
+            assert_abs_diff_eq!(proba[[i, 0]], *e, epsilon = 1e-9);
+        }
+        let expected_pred = [
+            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0,
+        ];
+        assert_eq!(fitted.predict(&x).unwrap().to_vec(), expected_pred.to_vec());
+    }
+
+    #[test]
+    fn test_multiclass_samme_matches_sklearn() {
+        let (x, _, ym) = sklearn_data();
+        let fitted: FittedAdaBoostClassifier<f64> = sklearn_params().fit(&x, &ym).unwrap();
+        let expected_w = [
+            0.970406052784,
+            1.389402312867,
+            1.47215778907,
+            1.42161121083,
+            1.321664154882,
+            1.49914525528,
+            1.228163874927,
+            1.262679716103,
+        ];
+        for (w, e) in fitted.estimator_weights().iter().zip(expected_w) {
+            assert_abs_diff_eq!(*w, e, epsilon = 1e-9);
+        }
+        let proba = fitted.predict_proba(&x).unwrap();
+        let expected = [
+            [0.312672951283, 0.434113756491, 0.253213292226],
+            [0.312672951283, 0.434113756491, 0.253213292226],
+            [0.381150754432, 0.363149329936, 0.255699915632],
+            [0.312672951283, 0.434113756491, 0.253213292226],
+        ];
+        for (i, row) in expected.iter().enumerate() {
+            for (k, e) in row.iter().enumerate() {
+                assert_abs_diff_eq!(proba[[i, k]], *e, epsilon = 1e-9);
+            }
+        }
+        let expected_pred = [
+            1.0, 1.0, 0.0, 1.0, 2.0, 2.0, 1.0, 0.0, 0.0, 2.0, 2.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 1.0, 2.0, 0.0, 2.0, 2.0, 0.0,
+        ];
+        assert_eq!(fitted.predict(&x).unwrap().to_vec(), expected_pred.to_vec());
+    }
 
     #[test]
     fn test_basic_binary_classification() {

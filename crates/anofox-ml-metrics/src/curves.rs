@@ -16,16 +16,29 @@ pub(crate) fn binary_clf_curve<F: Float>(
     y_true: &Array1<F>,
     y_score: &Array1<F>,
 ) -> Result<(Vec<F>, Vec<F>, Vec<F>)> {
+    // `y_true` was validated by `check_binary` (1e-9 tolerance).
+    let eps = F::from_f64(1e-9).unwrap();
+    let is_pos: Vec<bool> = y_true.iter().map(|&t| (t - F::one()).abs() < eps).collect();
+    let scores: Vec<F> = y_score.to_vec();
+    binary_clf_curve_weighted(&is_pos, &scores, None)
+}
+
+/// Weighted variant of [`binary_clf_curve`] on a boolean positive mask:
+/// `fps` / `tps` are cumulative sums of the sample weights (1 if `None`).
+pub(crate) fn binary_clf_curve_weighted<F: Float>(
+    is_pos: &[bool],
+    y_score: &[F],
+    sample_weight: Option<&[F]>,
+) -> Result<(Vec<F>, Vec<F>, Vec<F>)> {
     if y_score.iter().any(|v| v.is_nan()) {
         return Err(RustMlError::InvalidParameter(
             "y_score contains NaN values".into(),
         ));
     }
-    let eps = F::from_f64(1e-9).unwrap();
 
     // Sort indices by score descending. No NaNs remain, so the f64 total
     // order agrees with the numeric order (f32 -> f64 is order preserving).
-    let mut indices: Vec<usize> = (0..y_true.len()).collect();
+    let mut indices: Vec<usize> = (0..is_pos.len()).collect();
     indices.sort_by(|&a, &b| {
         let (sa, sb) = (y_score[a].to_f64().unwrap(), y_score[b].to_f64().unwrap());
         sb.total_cmp(&sa)
@@ -42,10 +55,12 @@ pub(crate) fn binary_clf_curve<F: Float>(
         let current = y_score[indices[i]];
         // `==` groups -0.0 with 0.0 and is exact otherwise (like sklearn).
         while i < indices.len() && y_score[indices[i]] == current {
-            if (y_true[indices[i]] - F::one()).abs() < eps {
-                tp += F::one();
+            let idx = indices[i];
+            let w = sample_weight.map_or(F::one(), |w| w[idx]);
+            if is_pos[idx] {
+                tp += w;
             } else {
-                fp += F::one();
+                fp += w;
             }
             i += 1;
         }
@@ -55,6 +70,35 @@ pub(crate) fn binary_clf_curve<F: Float>(
     }
 
     Ok((fps, tps, thresholds))
+}
+
+/// Trapezoidal ROC AUC of a (weighted) binary problem; errors if either class
+/// has zero total weight.
+pub(crate) fn binary_roc_auc<F: Float>(
+    is_pos: &[bool],
+    y_score: &[F],
+    sample_weight: Option<&[F]>,
+) -> Result<F> {
+    let (fps, tps, _) = binary_clf_curve_weighted(is_pos, y_score, sample_weight)?;
+    let total_pos = *tps.last().unwrap();
+    let total_neg = *fps.last().unwrap();
+    if total_pos <= F::zero() || total_neg <= F::zero() {
+        return Err(RustMlError::InvalidParameter(
+            "ROC AUC requires both positive and negative samples".into(),
+        ));
+    }
+    let two = F::from_f64(2.0).unwrap();
+    let mut auc = F::zero();
+    let mut prev_fpr = F::zero();
+    let mut prev_tpr = F::zero();
+    for (&fp, &tp) in fps.iter().zip(tps.iter()) {
+        let fpr = fp / total_neg;
+        let tpr = tp / total_pos;
+        auc += (fpr - prev_fpr) * (tpr + prev_tpr) / two;
+        prev_fpr = fpr;
+        prev_tpr = tpr;
+    }
+    Ok(auc)
 }
 
 /// Compute the Receiver Operating Characteristic (ROC) curve.
@@ -202,6 +246,32 @@ pub fn brier_score_loss<F: Float>(y_true: &Array1<F>, y_prob: &Array1<F>) -> Res
         .fold(F::zero(), |acc, v| acc + v);
 
     Ok(sum / n)
+}
+
+/// Brier score loss with optional `sample_weight`:
+/// `sum(w * (y_true - y_prob)^2) / sum(w)`.
+///
+/// Same conventions as [`brier_score_loss`] (`y_true` holds 0/1 labels).
+pub fn brier_score_loss_with<F: Float>(
+    y_true: &Array1<F>,
+    y_prob: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+) -> Result<F> {
+    check_lengths(y_true, y_prob)?;
+    crate::labels::check_sample_weight(sample_weight, y_true.len())?;
+    let mut num = F::zero();
+    let mut den = F::zero();
+    for (i, (&t, &p)) in y_true.iter().zip(y_prob.iter()).enumerate() {
+        let w = crate::labels::weight_at(sample_weight, i);
+        num += w * (t - p) * (t - p);
+        den += w;
+    }
+    if den == F::zero() {
+        return Err(RustMlError::InvalidParameter(
+            "sum of sample_weight is zero".into(),
+        ));
+    }
+    Ok(num / den)
 }
 
 fn check_lengths<F: Float>(a: &Array1<F>, b: &Array1<F>) -> Result<()> {

@@ -1,5 +1,5 @@
 use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2};
 
 /// Parameters for StandardScaler (unfitted state).
 ///
@@ -59,22 +59,51 @@ impl<F: Float> FitUnsupervised<F> for StandardScaler {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
 
-        let n = F::from_usize(x.nrows()).unwrap();
-        let mean = x.sum_axis(Axis(0)) / n;
-
-        let std = if self.with_std {
-            // Single-pass variance: no intermediate array allocations.
-            let mut s = Array1::<F>::zeros(x.ncols());
-            for row in x.rows() {
-                for (s_j, (&val, &m)) in s.iter_mut().zip(row.iter().zip(mean.iter())) {
-                    let d = val - m;
-                    *s_j += d * d;
+        // NaN-aware per-column mean / variance (sklearn ignores NaN at fit
+        // time and passes it through at transform time).
+        let ncols = x.ncols();
+        let mut mean = Array1::<F>::zeros(ncols);
+        let mut std = Array1::<F>::ones(ncols);
+        for j in 0..ncols {
+            let col = x.column(j);
+            let mut count = 0usize;
+            let mut sum = F::zero();
+            for &v in col.iter() {
+                if !v.is_nan() {
+                    count += 1;
+                    sum += v;
                 }
             }
-            s.mapv(|v| (v / n).sqrt())
-        } else {
-            Array1::ones(x.ncols())
-        };
+            if count == 0 {
+                mean[j] = F::nan();
+                if self.with_std {
+                    std[j] = F::nan();
+                }
+                continue;
+            }
+            let n = F::from_usize(count).unwrap();
+            let m = sum / n;
+            mean[j] = m;
+            if self.with_std {
+                // Two-pass variance with the same correction term as
+                // sklearn's `_incremental_mean_and_var`.
+                let mut sq = F::zero();
+                let mut corr = F::zero();
+                for &v in col.iter() {
+                    if !v.is_nan() {
+                        let d = v - m;
+                        sq += d * d;
+                        corr += d;
+                    }
+                }
+                let var = ((sq - corr * corr / n) / n).max(F::zero());
+                std[j] = if is_constant_feature(var, m, count) {
+                    F::one()
+                } else {
+                    var.sqrt()
+                };
+            }
+        }
 
         Ok(FittedStandardScaler {
             mean,
@@ -101,7 +130,7 @@ impl<F: Float> Transform<F> for FittedStandardScaler<F> {
                 if self.with_mean {
                     *val -= self.mean[j];
                 }
-                if self.with_std && self.std[j] > F::from_f64(1e-15).unwrap() {
+                if self.with_std && self.std[j] != F::zero() {
                     *val /= self.std[j];
                 }
             }
@@ -123,7 +152,7 @@ impl<F: Float> InverseTransform<F> for FittedStandardScaler<F> {
         let mut result = x.to_owned();
         for mut row in result.rows_mut() {
             for (j, val) in row.iter_mut().enumerate() {
-                if self.with_std && self.std[j] > F::from_f64(1e-15).unwrap() {
+                if self.with_std && self.std[j] != F::zero() {
                     *val *= self.std[j];
                 }
                 if self.with_mean {
@@ -135,11 +164,26 @@ impl<F: Float> InverseTransform<F> for FittedStandardScaler<F> {
     }
 }
 
+/// sklearn's `_is_constant_feature`: a feature is treated as constant when
+/// its variance is within the floating-point error bound of the variance
+/// computation, `var <= n·eps·var + (n·mean·eps)²`. Such features get a
+/// scale of 1 (`_handle_zeros_in_scale`), so they are only centred.
+pub(crate) fn is_constant_feature<F: Float>(var: F, mean: F, n_samples: usize) -> bool {
+    let eps = f64::EPSILON;
+    let var = var.to_f64().unwrap();
+    let mean = mean.to_f64().unwrap();
+    let n = n_samples as f64;
+    let upper = n * eps * var + (n * mean * eps).powi(2);
+    var <= upper
+}
+
 impl<F: Float> FittedStandardScaler<F> {
     pub fn mean(&self) -> &Array1<F> {
         &self.mean
     }
 
+    /// Per-feature scale (`scale_` in sklearn): the standard deviation, or
+    /// `1` for (numerically) constant features and when `with_std = false`.
     pub fn std(&self) -> &Array1<F> {
         &self.std
     }
@@ -150,6 +194,7 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+    use ndarray::Axis;
 
     #[test]
     fn test_fit_transform() {
@@ -258,6 +303,38 @@ mod tests {
                 v
             );
         }
+    }
+
+    #[test]
+    fn test_constant_feature_scale_is_one_like_sklearn() {
+        // sklearn: StandardScaler().fit([[1, 0.1], [2, 0.1], [3, 0.1]]).scale_
+        //   -> [0.81649658, 1.0]; a column of 0.1s has var ~1e-34 from
+        //   rounding, which `_is_constant_feature` treats as zero.
+        let x = array![[1.0, 0.1], [2.0, 0.1], [3.0, 0.1]];
+        let fitted = FitUnsupervised::<f64>::fit(&StandardScaler::new(), &x).unwrap();
+        assert_abs_diff_eq!(fitted.std()[0], 0.816_496_580_927_726, epsilon = 1e-12);
+        assert_eq!(fitted.std()[1], 1.0);
+        let t = fitted.transform(&x).unwrap();
+        for i in 0..3 {
+            assert!(t[[i, 1]].abs() < 1e-15);
+        }
+        // Large-offset constant column: rounding noise must not survive as
+        // a tiny positive scale.
+        let x = array![[1e8 + 0.1, 1.0], [1e8 + 0.1, 2.0], [1e8 + 0.1, 4.0]];
+        let fitted = FitUnsupervised::<f64>::fit(&StandardScaler::new(), &x).unwrap();
+        assert_eq!(fitted.std()[0], 1.0);
+    }
+
+    #[test]
+    fn test_nan_ignored_at_fit_and_passed_through() {
+        // sklearn: StandardScaler().fit([[1],[nan],[3]]) -> mean 2, scale 1
+        let x = array![[1.0], [f64::NAN], [3.0]];
+        let fitted = FitUnsupervised::<f64>::fit(&StandardScaler::new(), &x).unwrap();
+        assert_abs_diff_eq!(fitted.mean()[0], 2.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(fitted.std()[0], 1.0, epsilon = 1e-12);
+        let t = fitted.transform(&x).unwrap();
+        assert!(t[[1, 0]].is_nan());
+        assert_abs_diff_eq!(t[[0, 0]], -1.0, epsilon = 1e-12);
     }
 
     mod prop_tests {

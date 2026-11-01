@@ -1,5 +1,7 @@
 //! Conversion helpers between ndarray and faer types.
 
+use anofox_ml_core::{Result, RustMlError};
+use anofox_regression::solvers::RegressionError;
 use faer::{Col, Mat};
 use ndarray::{Array1, Array2};
 
@@ -17,6 +19,120 @@ pub fn ndarray_to_col(y: &Array1<f64>) -> Col<f64> {
 /// Convert a faer `Col<f64>` to an ndarray `Array1<f64>`.
 pub fn col_to_ndarray(c: &Col<f64>) -> Array1<f64> {
     Array1::from_vec((0..c.nrows()).map(|i| c[i]).collect())
+}
+
+/// Convert a faer `Mat<f64>` to an ndarray `Array2<f64>`.
+pub fn mat_to_ndarray(m: &Mat<f64>) -> Array2<f64> {
+    Array2::from_shape_fn((m.nrows(), m.ncols()), |(i, j)| m[(i, j)])
+}
+
+/// Map an upstream `anofox-regression` error into this crate's error type.
+pub fn upstream_err(e: RegressionError) -> RustMlError {
+    RustMlError::InvalidParameter(e.to_string())
+}
+
+/// Validate the `(X, y)` pair every regressor needs: matching rows, non-empty.
+pub fn check_xy(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+    if x.nrows() != y.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "X has {} rows but y has {} elements",
+            x.nrows(),
+            y.len()
+        )));
+    }
+    if x.is_empty() {
+        return Err(RustMlError::EmptyInput("training data is empty".into()));
+    }
+    Ok(())
+}
+
+/// Validate the feature count of a prediction matrix.
+pub fn check_n_features(x: &Array2<f64>, expected: usize) -> Result<()> {
+    if x.ncols() != expected {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "expected {expected} features, got {}",
+            x.ncols()
+        )));
+    }
+    Ok(())
+}
+
+/// `X·coef + intercept`, with the feature-count check.
+pub fn linear_predict(x: &Array2<f64>, coef: &Array1<f64>, intercept: f64) -> Result<Array1<f64>> {
+    check_n_features(x, coef.len())?;
+    Ok(x.dot(coef).mapv(|v| v + intercept))
+}
+
+/// Upstream reports aliased (collinear) coefficients as `NaN`; at the
+/// sklearn-shaped boundary they are dropped from the model (coefficient 0).
+pub fn coef_from_col(c: &Col<f64>) -> Array1<f64> {
+    Array1::from_shape_fn(c.nrows(), |i| if c[i].is_nan() { 0.0 } else { c[i] })
+}
+
+/// Validate optional sample weights (length `n`, finite, non-negative, not
+/// all zero) and return them, or a vector of ones when absent.
+pub(crate) fn resolve_sample_weight(
+    sample_weight: Option<&Array1<f64>>,
+    n: usize,
+) -> anofox_ml_core::Result<Array1<f64>> {
+    use anofox_ml_core::RustMlError;
+    match sample_weight {
+        None => Ok(Array1::ones(n)),
+        Some(w) => {
+            if w.len() != n {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "sample_weight has {} elements but X has {} rows",
+                    w.len(),
+                    n
+                )));
+            }
+            if w.iter().any(|v| !v.is_finite() || *v < 0.0) {
+                return Err(RustMlError::InvalidParameter(
+                    "sample_weight must be finite and non-negative".into(),
+                ));
+            }
+            if w.sum() <= 0.0 {
+                return Err(RustMlError::InvalidParameter(
+                    "sample_weight must not sum to zero".into(),
+                ));
+            }
+            Ok(w.clone())
+        }
+    }
+}
+
+/// Validate an optional per-row vector (offset / exposure) of length `n`.
+pub(crate) fn check_row_vector(
+    v: Option<&Array1<f64>>,
+    n: usize,
+    name: &str,
+) -> anofox_ml_core::Result<()> {
+    use anofox_ml_core::RustMlError;
+    if let Some(v) = v {
+        if v.len() != n {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "{name} has {} elements but X has {} rows",
+                v.len(),
+                n
+            )));
+        }
+        if v.iter().any(|x| !x.is_finite()) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "{name} must be finite"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `ln(exposure)` after checking that every exposure is positive.
+pub(crate) fn exposure_to_offset(exposure: &Array1<f64>) -> anofox_ml_core::Result<Array1<f64>> {
+    if exposure.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return Err(anofox_ml_core::RustMlError::InvalidParameter(
+            "exposure must be finite and strictly positive".into(),
+        ));
+    }
+    Ok(exposure.mapv(f64::ln))
 }
 
 #[cfg(test)]

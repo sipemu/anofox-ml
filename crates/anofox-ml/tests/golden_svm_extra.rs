@@ -27,7 +27,7 @@ fn test_golden_one_class_svm_inliers() {
 
     let model = OneClassSvm {
         nu: 0.3,
-        kernel: SvmKernel::Rbf { gamma: 1.0 },
+        kernel: SvmKernel::rbf(1.0),
         max_iter: 5000,
         tol: 1e-6,
     };

@@ -1,5 +1,5 @@
 use crate::quantile::{percentile_sorted, sorted_non_nan};
-use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
+use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 use ndarray::Array2;
 
 /// Strategy for computing bin edges.
@@ -9,6 +9,10 @@ pub enum BinStrategy {
     Uniform,
     /// All bins have approximately the same number of samples (quantile-based).
     Quantile,
+    /// Bin edges are midpoints between the centres of a 1-D k-means
+    /// clustering of the feature (sklearn `strategy="kmeans"`: Lloyd's
+    /// algorithm initialised at the uniform-bin midpoints).
+    KMeans,
 }
 
 /// Encoding strategy for transformed output.
@@ -16,15 +20,23 @@ pub enum BinStrategy {
 pub enum EncodeStrategy {
     /// Each value is replaced by its integer bin index (0-based).
     Ordinal,
-    /// Each feature is expanded into `n_bins` binary columns (one-hot encoding).
+    /// Each feature is expanded into `n_bins_[j]` binary columns (one-hot encoding).
     Onehot,
 }
 
 /// Parameters for KBinsDiscretizer (unfitted state).
 ///
-/// Bins continuous features into discrete intervals. Two binning strategies
-/// are supported: uniform-width and quantile-based. Output can be ordinal
-/// (bin indices) or one-hot encoded.
+/// Bins continuous features into discrete intervals, mirroring
+/// `sklearn.preprocessing.KBinsDiscretizer`:
+///
+/// * `Uniform`, `Quantile` (numpy "linear" percentiles) and `KMeans`
+///   strategies;
+/// * for `Quantile` / `KMeans`, bins narrower than `1e-8` (duplicate edges)
+///   are removed, so the number of bins can differ per feature
+///   ([`FittedKBinsDiscretizer::n_bins_per_feature`]);
+/// * constant features get a single bin `(-inf, inf)`;
+/// * values are assigned with `searchsorted(inner_edges, x, side="right")`;
+/// * [`InverseTransform`] maps bin indices back to bin centres.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KBinsDiscretizer {
     /// Number of bins per feature.
@@ -74,10 +86,100 @@ impl Default for KBinsDiscretizer {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedKBinsDiscretizer<F: Float> {
-    /// Bin edges per feature. Each inner vec has `n_bins + 1` values.
+    /// Bin edges per feature. Each inner vec has `n_bins_[j] + 1` values.
     bin_edges: Vec<Vec<F>>,
+    /// Requested number of bins.
     n_bins: usize,
     encode: EncodeStrategy,
+    /// Effective number of bins per feature (sklearn `n_bins_`).
+    #[serde(default)]
+    n_bins_per_feature: Vec<usize>,
+}
+
+/// `np.linspace(lo, hi, n + 1)`.
+fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
+    let step = (hi - lo) / n as f64;
+    let mut e: Vec<f64> = (0..=n).map(|i| lo + i as f64 * step).collect();
+    e[n] = hi;
+    e
+}
+
+/// 1-D k-means (Lloyd) as run by sklearn's KBinsDiscretizer: `n_init = 1`,
+/// `init` = midpoints of the uniform bins, `max_iter = 300`,
+/// `tol = 1e-4 * var(x)`, empty clusters relocated to the farthest points.
+/// Returns the sorted cluster centres.
+fn kmeans_1d(x: &[f64], k: usize, lo: f64, hi: f64) -> Vec<f64> {
+    let uniform = linspace(lo, hi, k);
+    let mut centers: Vec<f64> = (0..k)
+        .map(|i| (uniform[i + 1] + uniform[i]) * 0.5)
+        .collect();
+    let n = x.len();
+    let mean = x.iter().sum::<f64>() / n as f64;
+    let tol = 1e-4 * x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64;
+    let assign = |centers: &[f64], labels: &mut [usize]| {
+        for (i, &v) in x.iter().enumerate() {
+            let mut best = 0;
+            let mut best_d = f64::INFINITY;
+            for (c, &m) in centers.iter().enumerate() {
+                let d = (v - m) * (v - m);
+                if d < best_d {
+                    best_d = d;
+                    best = c;
+                }
+            }
+            labels[i] = best;
+        }
+    };
+    let mut labels = vec![0usize; n];
+    let mut labels_old = vec![usize::MAX; n];
+    for _ in 0..300 {
+        assign(&centers, &mut labels);
+        // M-step with empty-cluster relocation.
+        let mut sums = vec![0.0; k];
+        let mut counts = vec![0.0; k];
+        for (i, &l) in labels.iter().enumerate() {
+            sums[l] += x[i];
+            counts[l] += 1.0;
+        }
+        let empty: Vec<usize> = (0..k).filter(|&c| counts[c] == 0.0).collect();
+        if !empty.is_empty() {
+            let mut far: Vec<usize> = (0..n).collect();
+            let dist = |i: usize| (x[i] - centers[labels[i]]).powi(2);
+            far.sort_by(|&a, &b| dist(b).total_cmp(&dist(a)));
+            for (e, &c) in empty.iter().enumerate() {
+                let i = far[e];
+                let old = labels[i];
+                sums[old] -= x[i];
+                counts[old] -= 1.0;
+                sums[c] = x[i];
+                counts[c] = 1.0;
+            }
+        }
+        let new_centers: Vec<f64> = (0..k)
+            .map(|c| {
+                if counts[c] > 0.0 {
+                    sums[c] / counts[c]
+                } else {
+                    centers[c]
+                }
+            })
+            .collect();
+        let shift: f64 = centers
+            .iter()
+            .zip(&new_centers)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum();
+        centers = new_centers;
+        if labels == labels_old {
+            break;
+        }
+        if shift <= tol {
+            break;
+        }
+        labels_old.copy_from_slice(&labels);
+    }
+    centers.sort_by(f64::total_cmp);
+    centers
 }
 
 impl<F: Float> FitUnsupervised<F> for KBinsDiscretizer {
@@ -95,6 +197,7 @@ impl<F: Float> FitUnsupervised<F> for KBinsDiscretizer {
 
         let ncols = x.ncols();
         let mut bin_edges = Vec::with_capacity(ncols);
+        let mut n_bins_per_feature = Vec::with_capacity(ncols);
 
         for j in 0..ncols {
             // NaNs are ignored when computing the bin edges; at transform
@@ -105,67 +208,81 @@ impl<F: Float> FitUnsupervised<F> for KBinsDiscretizer {
                     "feature {j} contains only NaN values; cannot compute bin edges"
                 )));
             }
+            let min_val = col[0].to_f64().unwrap();
+            let max_val = col[col.len() - 1].to_f64().unwrap();
+            if min_val == max_val {
+                // sklearn: constant feature -> a single bin (-inf, inf).
+                bin_edges.push(vec![F::neg_infinity(), F::infinity()]);
+                n_bins_per_feature.push(1);
+                continue;
+            }
 
-            let edges = match self.strategy {
-                BinStrategy::Uniform => {
-                    let min_val = col[0];
-                    let max_val = col[col.len() - 1];
-                    let range = max_val - min_val;
-                    let step = range / F::from_usize(self.n_bins).unwrap();
-                    let mut e = Vec::with_capacity(self.n_bins + 1);
-                    for i in 0..=self.n_bins {
-                        e.push(min_val + step * F::from_usize(i).unwrap());
-                    }
-                    e
-                }
-                BinStrategy::Quantile => {
-                    let mut e = Vec::with_capacity(self.n_bins + 1);
-                    for i in 0..=self.n_bins {
+            let mut edges: Vec<f64> = match self.strategy {
+                BinStrategy::Uniform => linspace(min_val, max_val, self.n_bins),
+                BinStrategy::Quantile => (0..=self.n_bins)
+                    .map(|i| {
                         let p = i as f64 / self.n_bins as f64;
-                        e.push(percentile_sorted(&col, p));
+                        percentile_sorted(&col, p).to_f64().unwrap()
+                    })
+                    .collect(),
+                BinStrategy::KMeans => {
+                    let colf: Vec<f64> = col.iter().map(|v| v.to_f64().unwrap()).collect();
+                    let centers = kmeans_1d(&colf, self.n_bins, min_val, max_val);
+                    let mut e = Vec::with_capacity(self.n_bins + 1);
+                    e.push(min_val);
+                    for w in centers.windows(2) {
+                        e.push((w[1] + w[0]) * 0.5);
                     }
+                    e.push(max_val);
                     e
                 }
             };
 
-            bin_edges.push(edges);
+            // Remove bins whose width is too small (<= 1e-8), as sklearn
+            // does for the quantile and kmeans strategies.
+            if matches!(self.strategy, BinStrategy::Quantile | BinStrategy::KMeans) {
+                let mut kept = Vec::with_capacity(edges.len());
+                let mut prev = f64::NAN;
+                for (i, &e) in edges.iter().enumerate() {
+                    if i == 0 || e - prev > 1e-8 {
+                        kept.push(e);
+                    }
+                    prev = e;
+                }
+                edges = kept;
+            }
+
+            n_bins_per_feature.push(edges.len() - 1);
+            bin_edges.push(edges.into_iter().map(|e| F::from_f64(e).unwrap()).collect());
         }
 
         Ok(FittedKBinsDiscretizer {
             bin_edges,
             n_bins: self.n_bins,
             encode: self.encode,
+            n_bins_per_feature,
         })
     }
 }
 
-/// Find the bin index for a value given bin edges.
-/// Returns a 0-based bin index in [0, n_bins - 1].
-fn find_bin<F: Float>(val: F, edges: &[F], n_bins: usize) -> usize {
-    // Binary search: find the rightmost edge <= val
-    let mut lo = 0;
-    let mut hi = edges.len() - 1;
+/// Bin index of `val`: `np.searchsorted(edges[1:-1], val, side="right")`.
+fn find_bin<F: Float>(val: F, edges: &[F]) -> usize {
+    let inner = &edges[1..edges.len() - 1];
+    inner.partition_point(|&e| e <= val)
+}
 
-    // Clamp to first/last bin for out-of-range values
-    if val <= edges[0] {
-        return 0;
-    }
-    if val >= edges[edges.len() - 1] {
-        return n_bins - 1;
-    }
-
-    while lo + 1 < hi {
-        let mid = (lo + hi) / 2;
-        if edges[mid] <= val {
-            lo = mid;
+impl<F: Float> FittedKBinsDiscretizer<F> {
+    /// Effective number of bins per feature (sklearn `n_bins_`). May be
+    /// smaller than the requested `n_bins` when duplicate edges were removed
+    /// or the feature is constant.
+    pub fn n_bins_per_feature(&self) -> Vec<usize> {
+        if self.n_bins_per_feature.len() == self.bin_edges.len() {
+            self.n_bins_per_feature.clone()
         } else {
-            hi = mid;
+            // Models serialised before `n_bins_` existed.
+            self.bin_edges.iter().map(|e| e.len() - 1).collect()
         }
     }
-
-    // lo is the index of the left edge of the bin, bin index = lo
-    // Clamp to [0, n_bins - 1]
-    lo.min(n_bins - 1)
 }
 
 impl<F: Float> Transform<F> for FittedKBinsDiscretizer<F> {
@@ -189,14 +306,23 @@ impl<F: Float> Transform<F> for FittedKBinsDiscretizer<F> {
                             result[[i, j]] = F::nan();
                             continue;
                         }
-                        let bin = find_bin(v, &self.bin_edges[j], self.n_bins);
+                        let bin = find_bin(v, &self.bin_edges[j]);
                         result[[i, j]] = F::from_usize(bin).unwrap();
                     }
                 }
                 Ok(result)
             }
             EncodeStrategy::Onehot => {
-                let out_cols = expected_cols * self.n_bins;
+                let nb = self.n_bins_per_feature();
+                let offsets: Vec<usize> = nb
+                    .iter()
+                    .scan(0, |acc, &b| {
+                        let o = *acc;
+                        *acc += b;
+                        Some(o)
+                    })
+                    .collect();
+                let out_cols: usize = nb.iter().sum();
                 let mut result = Array2::<F>::zeros((x.nrows(), out_cols));
                 for i in 0..x.nrows() {
                     for j in 0..x.ncols() {
@@ -204,14 +330,82 @@ impl<F: Float> Transform<F> for FittedKBinsDiscretizer<F> {
                         if v.is_nan() {
                             continue;
                         }
-                        let bin = find_bin(v, &self.bin_edges[j], self.n_bins);
-                        let col_offset = j * self.n_bins + bin;
-                        result[[i, col_offset]] = F::one();
+                        let bin = find_bin(v, &self.bin_edges[j]);
+                        result[[i, offsets[j] + bin]] = F::one();
                     }
                 }
                 Ok(result)
             }
         }
+    }
+}
+
+impl<F: Float> InverseTransform<F> for FittedKBinsDiscretizer<F> {
+    /// Map bin indices (ordinal) or one-hot blocks back to the bin centres
+    /// (`(edge[k] + edge[k+1]) / 2`). Like sklearn, a constant feature's
+    /// single `(-inf, inf)` bin maps to NaN.
+    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        let nb = self.n_bins_per_feature();
+        let n_features = self.bin_edges.len();
+        let ordinal: Array2<F> = match self.encode {
+            EncodeStrategy::Ordinal => {
+                if x.ncols() != n_features {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "expected {} features, got {}",
+                        n_features,
+                        x.ncols()
+                    )));
+                }
+                x.to_owned()
+            }
+            EncodeStrategy::Onehot => {
+                let total: usize = nb.iter().sum();
+                if x.ncols() != total {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "expected {} one-hot columns, got {}",
+                        total,
+                        x.ncols()
+                    )));
+                }
+                let mut out = Array2::<F>::zeros((x.nrows(), n_features));
+                for i in 0..x.nrows() {
+                    let mut off = 0;
+                    for (j, &b) in nb.iter().enumerate() {
+                        let mut best = 0;
+                        for k in 1..b {
+                            if x[[i, off + k]] > x[[i, off + best]] {
+                                best = k;
+                            }
+                        }
+                        out[[i, j]] = F::from_usize(best).unwrap();
+                        off += b;
+                    }
+                }
+                out
+            }
+        };
+        let mut result = Array2::<F>::zeros(ordinal.raw_dim());
+        let two = F::from_f64(2.0).unwrap();
+        for i in 0..ordinal.nrows() {
+            for j in 0..n_features {
+                let v = ordinal[[i, j]];
+                if v.is_nan() {
+                    result[[i, j]] = F::nan();
+                    continue;
+                }
+                let k = v.to_f64().unwrap();
+                if k < 0.0 || k.fract() != 0.0 || k as usize >= nb[j] {
+                    return Err(RustMlError::InvalidParameter(format!(
+                        "bin index {k} out of range for feature {j} ({} bins)",
+                        nb[j]
+                    )));
+                }
+                let k = k as usize;
+                let e = &self.bin_edges[j];
+                result[[i, j]] = (e[k] + e[k + 1]) / two;
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -221,7 +415,9 @@ impl<F: Float> FittedKBinsDiscretizer<F> {
         &self.bin_edges
     }
 
-    /// Return the number of bins.
+    /// Return the requested number of bins (see
+    /// [`n_bins_per_feature`](Self::n_bins_per_feature) for the effective
+    /// per-feature count).
     pub fn n_bins(&self) -> usize {
         self.n_bins
     }
@@ -359,6 +555,154 @@ mod tests {
         }
     }
 
+    fn sk_x() -> Array2<f64> {
+        array![
+            [0.0, 1.0],
+            [0.0, 1.2],
+            [0.0, 1.1],
+            [0.0, 5.0],
+            [0.0, 5.3],
+            [1.0, 9.0],
+            [2.0, 9.4],
+            [0.0, 9.9],
+            [3.0, 20.0],
+            [0.0, 5.1],
+            [5.0, 1.05]
+        ]
+    }
+
+    fn check(
+        fitted: &FittedKBinsDiscretizer<f64>,
+        edges: &[&[f64]],
+        t: &[[f64; 2]],
+        inv: &[[f64; 2]],
+    ) {
+        for (j, e) in edges.iter().enumerate() {
+            assert_eq!(fitted.bin_edges()[j].len(), e.len(), "feature {j}");
+            for (a, b) in fitted.bin_edges()[j].iter().zip(e.iter()) {
+                assert_abs_diff_eq!(*a, *b, epsilon = 1e-10);
+            }
+        }
+        let x = sk_x();
+        let out = fitted.transform(&x).unwrap();
+        for (i, row) in t.iter().enumerate() {
+            assert_eq!(out[[i, 0]], row[0], "row {i}");
+            assert_eq!(out[[i, 1]], row[1], "row {i}");
+        }
+        let back = fitted
+            .inverse_transform(&array![[0.0, 0.0], [1.0, 3.0]])
+            .unwrap();
+        for (i, row) in inv.iter().enumerate() {
+            for j in 0..2 {
+                assert_abs_diff_eq!(back[[i, j]], row[j], epsilon = 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_quantile_duplicate_edges_removed_like_sklearn() {
+        // sklearn 1.8: KBinsDiscretizer(4, strategy="quantile",
+        //   quantile_method="linear", encode="ordinal").fit(X)
+        let kbd = KBinsDiscretizer::new()
+            .n_bins(4)
+            .strategy(BinStrategy::Quantile);
+        let fitted = FitUnsupervised::<f64>::fit(&kbd, &sk_x()).unwrap();
+        assert_eq!(fitted.n_bins_per_feature(), vec![2, 4]);
+        check(
+            &fitted,
+            &[&[0.0, 1.5, 5.0], &[1.0, 1.15, 5.1, 9.2, 20.0]],
+            &[
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 2.0],
+                [0.0, 2.0],
+                [1.0, 3.0],
+                [0.0, 3.0],
+                [1.0, 3.0],
+                [0.0, 2.0],
+                [1.0, 0.0],
+            ],
+            &[[0.75, 1.075], [3.25, 14.6]],
+        );
+        // One-hot output has sum(n_bins_) columns, no all-zero columns.
+        let oh = FitUnsupervised::<f64>::fit(&kbd.clone().encode(EncodeStrategy::Onehot), &sk_x())
+            .unwrap();
+        let t = oh.transform(&sk_x()).unwrap();
+        assert_eq!(t.ncols(), 6);
+        for c in 0..6 {
+            assert!(t.column(c).sum() > 0.0, "empty one-hot column {c}");
+        }
+        let back = oh.inverse_transform(&t).unwrap();
+        assert_abs_diff_eq!(back[[0, 1]], 1.075, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_kmeans_strategy_matches_sklearn() {
+        let kbd = KBinsDiscretizer::new()
+            .n_bins(4)
+            .strategy(BinStrategy::KMeans);
+        let fitted = FitUnsupervised::<f64>::fit(&kbd, &sk_x()).unwrap();
+        assert_eq!(fitted.n_bins_per_feature(), vec![4, 4]);
+        check(
+            &fitted,
+            &[
+                &[0.0, 1.0625, 2.5, 4.0, 5.0],
+                &[
+                    1.0,
+                    3.1104166666666666,
+                    7.283333333333333,
+                    14.716666666666667,
+                    20.0,
+                ],
+            ],
+            &[
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [0.0, 1.0],
+                [0.0, 2.0],
+                [1.0, 2.0],
+                [0.0, 2.0],
+                [2.0, 3.0],
+                [0.0, 1.0],
+                [3.0, 0.0],
+            ],
+            &[[0.53125, 2.0552083333333333], [1.78125, 17.358333333333334]],
+        );
+    }
+
+    #[test]
+    fn test_uniform_strategy_matches_sklearn() {
+        let kbd = KBinsDiscretizer::new()
+            .n_bins(4)
+            .strategy(BinStrategy::Uniform);
+        let fitted = FitUnsupervised::<f64>::fit(&kbd, &sk_x()).unwrap();
+        check(
+            &fitted,
+            &[
+                &[0.0, 1.25, 2.5, 3.75, 5.0],
+                &[1.0, 5.75, 10.5, 15.25, 20.0],
+            ],
+            &[
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+                [2.0, 3.0],
+                [0.0, 0.0],
+                [3.0, 0.0],
+            ],
+            &[[0.625, 3.375], [1.875, 17.625]],
+        );
+    }
+
     #[test]
     fn test_empty_input() {
         let x: Array2<f64> = Array2::zeros((0, 0));
@@ -411,10 +755,11 @@ mod tests {
         let fitted = FitUnsupervised::<f64>::fit(&kbd, &x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
-        // All values should map to the same bin (or at least be finite)
+        // sklearn: a constant feature gets a single bin, everything -> 0.
         for &v in transformed.iter() {
-            assert!(v.is_finite(), "constant feature produced non-finite: {}", v);
+            assert_eq!(v, 0.0);
         }
+        assert_eq!(fitted.n_bins_per_feature(), vec![1]);
     }
 
     #[test]

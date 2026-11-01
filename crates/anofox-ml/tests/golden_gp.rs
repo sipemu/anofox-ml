@@ -23,7 +23,8 @@ fn test_gp_mean_matches_sklearn() {
         length_scale,
         signal_var,
     })
-    .with_alpha(alpha);
+    .with_alpha(alpha)
+    .with_optimizer(false);
     let fitted = gp.fit(&x, &y).unwrap();
     let mean = fitted.predict(&xq).unwrap();
     let std = fitted.predict_std(&xq).unwrap();

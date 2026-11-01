@@ -1,30 +1,118 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2, Axis};
+use anofox_ml_core::{
+    Fit, FitWeighted, Float, PartialFit, Predict, PredictLogProba, PredictProba, Result,
+};
+use ndarray::{Array1, Array2};
+
+use crate::common::{
+    argmax_labels, check_alpha, check_n_features, class_log_prior, log_proba_from_jll,
+    proba_from_jll,
+};
+use crate::discrete::{accumulate, check_non_negative, Counts};
+
+fn default_true() -> bool {
+    true
+}
 
 /// Multinomial Naive Bayes classifier parameters (unfitted state).
 ///
 /// Suitable for count-based or TF-IDF feature representations where all
-/// feature values must be non-negative.  Uses Laplace (additive) smoothing
-/// controlled by the `alpha` parameter.
+/// feature values must be non-negative.  Uses Laplace / Lidstone (additive)
+/// smoothing controlled by the `alpha` parameter. Mirrors sklearn's
+/// `MultinomialNB`.
 ///
 /// Uses the type-state pattern: call [`Fit::fit`] to produce a
 /// [`FittedMultinomialNB`] that can make predictions.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MultinomialNB {
-    /// Additive (Laplace) smoothing parameter (>= 0).
+    /// Additive (Laplace/Lidstone) smoothing parameter (>= 0).
     pub alpha: f64,
+    /// If `false` and `alpha < 1e-10`, alpha is clamped to `1e-10` (sklearn's
+    /// `force_alpha`). Default `true`: alpha is used as given.
+    #[serde(default = "default_true")]
+    pub force_alpha: bool,
+    /// Whether to learn class priors from the data (`false`: uniform prior).
+    #[serde(default = "default_true")]
+    pub fit_prior: bool,
+    /// Fixed class prior probabilities (sorted class order); overrides
+    /// `fit_prior` when set.
+    #[serde(default)]
+    pub class_prior: Option<Vec<f64>>,
 }
 
 impl MultinomialNB {
     /// Create a new `MultinomialNB` with default parameters (`alpha = 1.0`).
     pub fn new() -> Self {
-        Self { alpha: 1.0 }
+        Self {
+            alpha: 1.0,
+            force_alpha: true,
+            fit_prior: true,
+            class_prior: None,
+        }
     }
 
     /// Set the additive smoothing parameter.
     pub fn with_alpha(mut self, alpha: f64) -> Self {
         self.alpha = alpha;
         self
+    }
+
+    /// Set `force_alpha` (see field docs).
+    pub fn with_force_alpha(mut self, force_alpha: bool) -> Self {
+        self.force_alpha = force_alpha;
+        self
+    }
+
+    /// Set whether class priors are learned.
+    pub fn with_fit_prior(mut self, fit_prior: bool) -> Self {
+        self.fit_prior = fit_prior;
+        self
+    }
+
+    /// Fix the class priors.
+    pub fn with_class_prior(mut self, class_prior: Option<Vec<f64>>) -> Self {
+        self.class_prior = class_prior;
+        self
+    }
+
+    fn finish<F: Float>(&self, counts: Counts<F>) -> Result<FittedMultinomialNB<F>> {
+        let alpha = F::from_f64(check_alpha(self.alpha, self.force_alpha)?).unwrap();
+        let log_class_prior = class_log_prior(
+            &counts.class_count,
+            self.fit_prior,
+            self.class_prior.as_deref(),
+        )?;
+        let smoothed = counts.feature_count.mapv(|c| c + alpha);
+        let mut log_feature_prob = smoothed.clone();
+        for (mut row, srow) in log_feature_prob.rows_mut().into_iter().zip(smoothed.rows()) {
+            let log_total = srow.sum().ln();
+            row.mapv_inplace(|v| v.ln() - log_total);
+        }
+        Ok(FittedMultinomialNB {
+            class_labels: counts.classes,
+            log_class_prior: log_class_prior.to_vec(),
+            log_feature_prob,
+            class_count: counts.class_count,
+            feature_count: counts.feature_count,
+        })
+    }
+
+    /// Incremental fit with optional per-sample weights (sklearn's
+    /// `partial_fit(X, y, classes, sample_weight)`).
+    pub fn partial_fit_weighted<F: Float>(
+        &self,
+        state: Option<FittedMultinomialNB<F>>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        classes: Option<&[F]>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedMultinomialNB<F>> {
+        check_alpha(self.alpha, self.force_alpha)?;
+        check_non_negative(x, "MultinomialNB")?;
+        let prev = state
+            .map(|s| Counts::from_parts(s.class_labels, s.class_count, s.feature_count))
+            .transpose()?;
+        let counts = accumulate(prev, x, y, classes, sample_weight)?;
+        self.finish(counts)
     }
 }
 
@@ -36,8 +124,8 @@ impl Default for MultinomialNB {
 
 /// Fitted Multinomial Naive Bayes classifier.
 ///
-/// Stores log class priors and log feature probabilities learned from
-/// training data.
+/// Stores log class priors and log feature probabilities, plus the raw
+/// (weighted) counts needed to continue training with `partial_fit`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedMultinomialNB<F: Float> {
@@ -47,6 +135,12 @@ pub struct FittedMultinomialNB<F: Float> {
     log_class_prior: Vec<F>,
     /// Log probability of each feature per class, shape `(n_classes, n_features)`.
     log_feature_prob: Array2<F>,
+    /// Weighted number of samples per class.
+    #[serde(default)]
+    class_count: Array1<F>,
+    /// Weighted feature totals per class, shape `(n_classes, n_features)`.
+    #[serde(default)]
+    feature_count: Array2<F>,
 }
 
 impl<F: Float> FittedMultinomialNB<F> {
@@ -65,52 +159,43 @@ impl<F: Float> FittedMultinomialNB<F> {
         &self.log_feature_prob
     }
 
+    /// Weighted number of samples per class (sklearn's `class_count_`).
+    pub fn class_count(&self) -> &Array1<F> {
+        &self.class_count
+    }
+
+    /// Weighted feature totals per class (sklearn's `feature_count_`).
+    pub fn feature_count(&self) -> &Array2<F> {
+        &self.feature_count
+    }
+
+    /// Joint log-likelihood `X · log_prob_ᵀ + log_prior`, shape
+    /// `(n_samples, n_classes)`.
+    pub fn joint_log_likelihood(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        check_n_features(x, self.log_feature_prob.ncols())?;
+        let prior = Array1::from(self.log_class_prior.clone());
+        Ok(x.dot(&self.log_feature_prob.t()) + &prior)
+    }
+
     /// Predict class probabilities for each sample in `x`.
     ///
     /// Returns an array of shape `(n_samples, n_classes)` where each row sums
     /// to 1.
     pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        if x.ncols() != self.log_feature_prob.ncols() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.log_feature_prob.ncols(),
-                x.ncols()
-            )));
-        }
+        Ok(proba_from_jll(self.joint_log_likelihood(x)?))
+    }
+}
 
-        let n_samples = x.nrows();
-        let n_classes = self.class_labels.len();
-        let mut proba = Array2::<F>::zeros((n_samples, n_classes));
+impl<F: Float> FitWeighted<F> for MultinomialNB {
+    type Fitted = FittedMultinomialNB<F>;
 
-        for (i, sample) in x.rows().into_iter().enumerate() {
-            // Compute log posteriors (unnormalized).
-            let mut log_posteriors = Vec::with_capacity(n_classes);
-            for ci in 0..n_classes {
-                let mut log_post = self.log_class_prior[ci];
-                for j in 0..x.ncols() {
-                    log_post = log_post + self.log_feature_prob[[ci, j]] * sample[j];
-                }
-                log_posteriors.push(log_post);
-            }
-
-            // Log-sum-exp for numerical stability.
-            let max_log = log_posteriors
-                .iter()
-                .copied()
-                .fold(F::neg_infinity(), |a, b| if a > b { a } else { b });
-
-            let sum_exp: F = log_posteriors
-                .iter()
-                .map(|&lp| (lp - max_log).exp())
-                .fold(F::zero(), |a, b| a + b);
-            let log_norm = max_log + sum_exp.ln();
-
-            for ci in 0..n_classes {
-                proba[[i, ci]] = (log_posteriors[ci] - log_norm).exp();
-            }
-        }
-
-        Ok(proba)
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.partial_fit_weighted(None, x, y, None, sample_weight)
     }
 }
 
@@ -118,118 +203,49 @@ impl<F: Float> Fit<F> for MultinomialNB {
     type Fitted = FittedMultinomialNB<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        if x.is_empty() || y.is_empty() {
-            return Err(RustMlError::EmptyInput(
-                "training data must not be empty".into(),
-            ));
-        }
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
+        self.partial_fit_weighted(None, x, y, None, None)
+    }
+}
 
-        // Validate all features are non-negative.
-        let zero = F::zero();
-        for val in x.iter() {
-            if *val < zero {
-                return Err(RustMlError::InvalidParameter(
-                    "MultinomialNB requires all feature values to be non-negative".into(),
-                ));
-            }
-        }
+impl<F: Float> PartialFit<F> for MultinomialNB {
+    type Fitted = FittedMultinomialNB<F>;
 
-        let alpha = F::from_f64(self.alpha).unwrap();
-        let n_samples = F::from_usize(x.nrows()).unwrap();
-        let n_features = x.ncols();
-        let n_features_f = F::from_usize(n_features).unwrap();
-
-        // Extract unique class labels and sort them.
-        let mut class_labels: Vec<F> = y.to_vec();
-        class_labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        class_labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
-
-        let n_classes = class_labels.len();
-        let mut log_class_prior = Vec::with_capacity(n_classes);
-        let mut log_feature_prob = Array2::<F>::zeros((n_classes, n_features));
-
-        for (ci, &label) in class_labels.iter().enumerate() {
-            // Gather row indices belonging to this class.
-            let mask: Vec<usize> = y
-                .iter()
-                .enumerate()
-                .filter(|(_, &val)| (val - label).abs() < F::from_f64(1e-12).unwrap())
-                .map(|(i, _)| i)
-                .collect();
-
-            let count = F::from_usize(mask.len()).unwrap();
-            log_class_prior.push((count / n_samples).ln());
-
-            // Build sub-matrix for this class.
-            let class_x = x.select(Axis(0), &mask);
-
-            // Sum of each feature across all samples in this class.
-            let feature_counts = class_x.sum_axis(Axis(0));
-
-            // Total count across all features for this class (with smoothing).
-            let total_count: F =
-                feature_counts.iter().copied().fold(F::zero(), |a, b| a + b) + alpha * n_features_f;
-
-            // Log probability with Laplace smoothing:
-            // log P(x_j | c) = log((count_j + alpha) / (total + alpha * n_features))
-            for j in 0..n_features {
-                log_feature_prob[[ci, j]] = ((feature_counts[j] + alpha) / total_count).ln();
-            }
-        }
-
-        Ok(FittedMultinomialNB {
-            class_labels,
-            log_class_prior,
-            log_feature_prob,
-        })
+    fn partial_fit(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        classes: Option<&[F]>,
+    ) -> Result<Self::Fitted> {
+        self.partial_fit_weighted(state, x, y, classes, None)
     }
 }
 
 impl<F: Float> Predict<F> for FittedMultinomialNB<F> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.log_feature_prob.ncols() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.log_feature_prob.ncols(),
-                x.ncols()
-            )));
-        }
-
-        let mut predictions = Array1::<F>::zeros(x.nrows());
-
-        for (i, sample) in x.rows().into_iter().enumerate() {
-            let mut best_class = self.class_labels[0];
-            let mut best_log_posterior = F::neg_infinity();
-
-            for (ci, &label) in self.class_labels.iter().enumerate() {
-                let mut log_posterior = self.log_class_prior[ci];
-                for j in 0..x.ncols() {
-                    log_posterior = log_posterior + self.log_feature_prob[[ci, j]] * sample[j];
-                }
-
-                if log_posterior > best_log_posterior {
-                    best_log_posterior = log_posterior;
-                    best_class = label;
-                }
-            }
-
-            predictions[i] = best_class;
-        }
-
-        Ok(predictions)
+        let jll = self.joint_log_likelihood(x)?;
+        Ok(argmax_labels(&jll, &self.class_labels))
     }
 }
+
+impl<F: Float> PredictProba<F> for FittedMultinomialNB<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Self::predict_proba(self, x)
+    }
+}
+
+impl<F: Float> PredictLogProba<F> for FittedMultinomialNB<F> {
+    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Ok(log_proba_from_jll(self.joint_log_likelihood(x)?))
+    }
+}
+
+impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedMultinomialNB<F> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anofox_ml_core::RustMlError;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
 
@@ -427,12 +443,184 @@ mod tests {
     }
 }
 
-impl<F: Float> PredictProba<F> for FittedMultinomialNB<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        Self::predict_proba(self, x)
+/// Reference values generated with scikit-learn 1.8.0.
+#[cfg(test)]
+mod sklearn_parity {
+    use super::*;
+    use crate::common::assert_close2;
+    use anofox_ml_core::RustMlError;
+    use ndarray::array;
+
+    fn data() -> (Array2<f64>, Array1<f64>, Array1<f64>, Array2<f64>) {
+        let x = array![
+            [3.0, 0.0, 1.0, 2.0],
+            [2.0, 1.0, 0.0, 4.0],
+            [0.0, 4.0, 2.0, 0.0],
+            [1.0, 3.0, 3.0, 1.0],
+            [0.0, 0.0, 5.0, 1.0],
+            [4.0, 1.0, 0.0, 0.0],
+            [1.0, 1.0, 4.0, 2.0]
+        ];
+        let y = array![0.0, 0.0, 1.0, 1.0, 2.0, 0.0, 2.0];
+        let w = array![1.0, 0.5, 2.0, 1.0, 1.5, 1.0, 0.25];
+        let t = array![
+            [1.0, 0.0, 0.0, 3.0],
+            [0.0, 2.0, 2.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0]
+        ];
+        (x, y, w, t)
+    }
+
+    #[test]
+    fn sample_weight_and_alpha() {
+        let (x, y, w, t) = data();
+        let m: FittedMultinomialNB<f64> = MultinomialNB::new()
+            .with_alpha(0.5)
+            .fit_weighted(&x, &y, Some(&w))
+            .unwrap();
+        assert_close2(
+            &m.predict_proba(&t).unwrap(),
+            &[
+                &[
+                    0.9709058805672579,
+                    0.0024094171668488915,
+                    0.02668470226589333,
+                ],
+                &[0.0116355354668712, 0.9129108750365533, 0.07545358949657562],
+                &[0.7138033400637324, 0.24526059881193704, 0.0409360611243308],
+            ],
+            1e-12,
+            "proba",
+        );
+        assert_close2(
+            &PredictLogProba::predict_log_proba(&m, &t).unwrap(),
+            &[
+                &[-0.02952574580363887, -6.028370400209244, -3.623664826616789],
+                &[
+                    -4.453691461209409,
+                    -0.09111702085575235,
+                    -2.5842375203926125,
+                ],
+                &[
+                    -0.3371477886658951,
+                    -1.4054339651119037,
+                    -3.1957439143123256,
+                ],
+            ],
+            1e-12,
+            "log_proba",
+        );
+    }
+
+    #[test]
+    fn fit_prior_false_and_class_prior() {
+        let (x, y, _, t) = data();
+        let m: FittedMultinomialNB<f64> = MultinomialNB::new()
+            .with_fit_prior(false)
+            .fit(&x, &y)
+            .unwrap();
+        assert_close2(
+            &m.predict_proba(&t).unwrap(),
+            &[
+                &[0.9143402300632678, 0.0095177522151925, 0.07614201772153988],
+                &[
+                    0.014664993219826554,
+                    0.7313826854450772,
+                    0.25395232133509654,
+                ],
+                &[0.3618827427585317, 0.37659379115889957, 0.2615234660825695],
+            ],
+            1e-12,
+            "uniform prior",
+        );
+        let m: FittedMultinomialNB<f64> = MultinomialNB::new()
+            .with_class_prior(Some(vec![0.1, 0.3, 0.6]))
+            .fit(&x, &y)
+            .unwrap();
+        assert_close2(
+            &m.predict_proba(&t).unwrap(),
+            &[
+                &[0.6532188667790225, 0.020398890189469304, 0.3263822430315087],
+                &[0.003928971795239665, 0.5878451969733006, 0.4082258312314593],
+                &[0.1182312342917941, 0.36911250657552735, 0.5126562591326775],
+            ],
+            1e-12,
+            "class prior",
+        );
+        let bad: Result<FittedMultinomialNB<f64>> = MultinomialNB::new()
+            .with_class_prior(Some(vec![0.5, 0.5]))
+            .fit(&x, &y);
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn weighted_partial_fit() {
+        let (x, y, w, t) = data();
+        let nb = MultinomialNB::new();
+        let m = nb
+            .partial_fit_weighted(
+                None,
+                &x.slice(ndarray::s![..3, ..]).to_owned(),
+                &y.slice(ndarray::s![..3]).to_owned(),
+                Some(&[0.0, 1.0, 2.0]),
+                Some(&w.slice(ndarray::s![..3]).to_owned()),
+            )
+            .unwrap();
+        let m = nb
+            .partial_fit_weighted(
+                Some(m),
+                &x.slice(ndarray::s![3.., ..]).to_owned(),
+                &y.slice(ndarray::s![3..]).to_owned(),
+                None,
+                Some(&w.slice(ndarray::s![3..]).to_owned()),
+            )
+            .unwrap();
+        let efc = array![
+            [8.0, 1.5, 1.0, 4.0],
+            [1.0, 11.0, 7.0, 1.0],
+            [0.25, 0.25, 8.5, 2.0]
+        ];
+        assert!((m.feature_count() - &efc).iter().all(|d| d.abs() < 1e-12));
+        assert_close2(
+            &m.predict_proba(&t).unwrap(),
+            &[
+                &[0.9482134859856537, 0.00571342828931442, 0.04607308572503148],
+                &[0.01788396035371436, 0.861211512331716, 0.12090452731456926],
+                &[0.6319241859333893, 0.2753135140619913, 0.09276230000462023],
+            ],
+            1e-12,
+            "partial_fit proba",
+        );
+        // Labels outside the declared classes are rejected.
+        let r = nb.partial_fit(Some(m), &x, &y.mapv(|v| v + 1.0), None);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn alpha_validation_and_force_alpha() {
+        let (x, y, _, t) = data();
+        let neg: Result<FittedMultinomialNB<f64>> =
+            MultinomialNB::new().with_alpha(-0.1).fit(&x, &y);
+        assert!(matches!(neg, Err(RustMlError::InvalidParameter(_))));
+        // force_alpha = false clamps alpha = 0 to 1e-10 (sklearn warns).
+        let m: FittedMultinomialNB<f64> = MultinomialNB::new()
+            .with_alpha(0.0)
+            .with_force_alpha(false)
+            .fit(&x, &y)
+            .unwrap();
+        assert_close2(
+            &m.predict_proba(&t).unwrap(),
+            &[
+                &[
+                    0.9744318181788123,
+                    0.0009131493509327974,
+                    0.024655032470254523,
+                ],
+                &[0.00693159631803491, 0.8286844649134135, 0.1643839387685514],
+                &[0.5452702615452873, 0.28507877666468817, 0.1696509617900249],
+            ],
+            1e-10,
+            "alpha clamp",
+        );
     }
 }
-
-impl<F: Float> anofox_ml_core::PredictLogProba<F> for FittedMultinomialNB<F> {}
-
-impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedMultinomialNB<F> {}

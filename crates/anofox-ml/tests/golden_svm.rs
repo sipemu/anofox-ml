@@ -83,7 +83,7 @@ fn test_golden_svc() {
             "linear" => SvmKernel::Linear,
             "rbf" => {
                 let gamma = case["gamma"].as_f64().unwrap();
-                SvmKernel::Rbf { gamma }
+                SvmKernel::rbf(gamma)
             }
             k => panic!("unknown kernel: {}", k),
         };

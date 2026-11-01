@@ -88,7 +88,14 @@ impl Fit<f64> for KernelRidge {
         }
 
         let n = x.nrows();
-        let mut k = build_gram(x, x, &self.kernel);
+        if self.kernel.is_precomputed() {
+            return Err(RustMlError::InvalidParameter(
+                "KernelRidge does not support the precomputed kernel".into(),
+            ));
+        }
+        // Resolve gamma = 'scale' / 'auto' against the training data.
+        let kernel = self.kernel.resolve(x);
+        let mut k = build_gram(x, x, &kernel);
         for i in 0..n {
             k[[i, i]] += self.alpha;
         }
@@ -105,7 +112,7 @@ impl Fit<f64> for KernelRidge {
         Ok(FittedKernelRidge {
             x_train: x.clone(),
             dual_coef: dual,
-            kernel: self.kernel.clone(),
+            kernel,
         })
     }
 }
@@ -152,7 +159,14 @@ impl FitWeighted<f64> for KernelRidge {
         }
 
         let n = x.nrows();
-        let mut k = build_gram(x, x, &self.kernel);
+        if self.kernel.is_precomputed() {
+            return Err(RustMlError::InvalidParameter(
+                "KernelRidge does not support the precomputed kernel".into(),
+            ));
+        }
+        // Resolve gamma = 'scale' / 'auto' against the training data.
+        let kernel = self.kernel.resolve(x);
+        let mut k = build_gram(x, x, &kernel);
         // sklearn KernelRidge with sample_weight w solves (K W + α I) α = W y.
         // Use the symmetric reformulation: K' = √W K √W, y' = √W y, then
         // solve (K' + α I) α' = y' and back-transform α_dual = √W α'.
@@ -184,7 +198,7 @@ impl FitWeighted<f64> for KernelRidge {
         Ok(FittedKernelRidge {
             x_train: x.clone(),
             dual_coef: dual,
-            kernel: self.kernel.clone(),
+            kernel,
         })
     }
 }
@@ -236,7 +250,7 @@ mod tests {
         let y = array![1.0, -1.0, 0.5, 2.0, -0.5];
         let fitted = KernelRidge::new()
             .with_alpha(1e-10)
-            .with_kernel(SvmKernel::Rbf { gamma: 1.0 })
+            .with_kernel(SvmKernel::rbf(1.0))
             .fit(&x, &y)
             .unwrap();
         let pred = fitted.predict(&x).unwrap();
@@ -260,7 +274,7 @@ mod tests {
         let y = array![1.0, 2.0, 3.0, 4.0];
         let kr = KernelRidge::new()
             .with_alpha(0.5)
-            .with_kernel(SvmKernel::Rbf { gamma: 0.5 });
+            .with_kernel(SvmKernel::rbf(0.5));
         let unw = kr.fit(&x, &y).unwrap();
         let ones = Array1::<f64>::ones(4);
         let w = kr.fit_weighted(&x, &y, Some(&ones)).unwrap();
@@ -278,7 +292,7 @@ mod tests {
         let y = array![0.0, 0.5, 0.5, 0.0, 0.0, 100.0];
         let kr = KernelRidge::new()
             .with_alpha(1e-3)
-            .with_kernel(SvmKernel::Rbf { gamma: 0.5 });
+            .with_kernel(SvmKernel::rbf(0.5));
         let w = array![1.0, 1.0, 1.0, 1.0, 1.0, 1e6];
         let fitted = kr.fit_weighted(&x, &y, Some(&w)).unwrap();
         let p = fitted.predict(&array![[10.0]]).unwrap();

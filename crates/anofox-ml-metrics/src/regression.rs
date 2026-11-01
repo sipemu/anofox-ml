@@ -26,6 +26,9 @@ pub fn mae<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
 }
 
 /// R² (coefficient of determination): `1 - SS_res / SS_tot`.
+///
+/// For a constant `y_true` (`SS_tot == 0`) this returns 1.0 for a perfect
+/// prediction and 0.0 otherwise, like sklearn's `force_finite=True`.
 pub fn r2_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
     check_lengths(y_true, y_pred)?;
     let n = F::from_usize(y_true.len()).unwrap();
@@ -43,7 +46,11 @@ pub fn r2_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
         .fold(F::zero(), |acc, v| acc + v);
 
     if ss_tot == F::zero() {
-        return Ok(F::zero());
+        return Ok(if ss_res == F::zero() {
+            F::one()
+        } else {
+            F::zero()
+        });
     }
 
     Ok(F::one() - ss_res / ss_tot)
@@ -93,6 +100,14 @@ mod tests {
         let y_true = array![1.0, 2.0, 3.0];
         let y_pred = array![1.5, 2.5, 3.5];
         assert_abs_diff_eq!(mae(&y_true, &y_pred).unwrap(), 0.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_r2_constant_y_force_finite() {
+        // sklearn: r2_score([3,3,3], [3,3,3]) == 1.0, r2_score([3,3,3], [3,3,4]) == 0.0
+        let y = array![3.0, 3.0, 3.0];
+        assert_eq!(r2_score(&y, &y).unwrap(), 1.0);
+        assert_eq!(r2_score(&y, &array![3.0, 3.0, 4.0]).unwrap(), 0.0);
     }
 
     #[test]

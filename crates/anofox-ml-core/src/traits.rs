@@ -135,16 +135,20 @@ pub trait RegressorScore<F: Float>: Predict<F> {
         let mut tss = F::zero();
         for (a, b) in y.iter().zip(pred.iter()) {
             let r = *a - *b;
-            rss = rss + r * r;
+            rss += r * r;
             let t = *a - y_mean;
-            tss = tss + t * t;
+            tss += t * t;
         }
-        let tss_safe = if tss == F::zero() {
-            F::from_f64(1e-12).unwrap()
-        } else {
-            tss
-        };
-        Ok(F::one() - rss / tss_safe)
+        if tss == F::zero() {
+            // Constant y: sklearn (force_finite=True) gives 1.0 for a perfect
+            // prediction and 0.0 otherwise instead of dividing by ~0.
+            return Ok(if rss == F::zero() {
+                F::one()
+            } else {
+                F::zero()
+            });
+        }
+        Ok(F::one() - rss / tss)
     }
 }
 
@@ -169,5 +173,33 @@ pub trait ClassifierScore<F: Float>: Predict<F> {
             .filter(|(a, b)| (**a - **b).abs() < eps)
             .count();
         Ok(F::from_usize(correct).unwrap() / F::from_usize(n).unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
+
+    /// Predicts a fixed vector regardless of `x`.
+    struct Fixed(Array1<f64>);
+    impl Predict<f64> for Fixed {
+        fn predict(&self, _x: &Array2<f64>) -> Result<Array1<f64>> {
+            Ok(self.0.clone())
+        }
+    }
+    impl RegressorScore<f64> for Fixed {}
+
+    #[test]
+    fn regressor_score_constant_y_force_finite() {
+        // sklearn r2_score: constant y -> 1.0 if perfect, else 0.0 (not -1e12).
+        let x = Array2::<f64>::zeros((3, 1));
+        let y = array![2.0, 2.0, 2.0];
+        assert_eq!(Fixed(y.clone()).score(&x, &y).unwrap(), 1.0);
+        assert_eq!(Fixed(array![2.0, 2.0, 2.5]).score(&x, &y).unwrap(), 0.0);
+        // Non-constant y is unchanged: 1 - 0.25 / 2 = 0.875.
+        let y2 = array![1.0, 2.0, 3.0];
+        let s = Fixed(array![1.0, 2.0, 3.5]).score(&x, &y2).unwrap();
+        assert!((s - 0.875).abs() < 1e-12);
     }
 }

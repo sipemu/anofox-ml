@@ -1,5 +1,5 @@
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2};
 
 /// Parameters for `VarianceThreshold` feature selector (unfitted state).
 ///
@@ -105,20 +105,47 @@ impl<F: Float> FitUnsupervised<F> for VarianceThreshold {
             ));
         }
 
-        let n = F::from_usize(n_samples).unwrap();
-
-        // Compute per-feature mean.
-        let mean = x.sum_axis(Axis(0)) / n;
-
-        // Compute per-feature variance: Var(X) = E[(X - mean)^2].
+        // NaN-aware variance (`np.nanvar`). A column whose peak-to-peak
+        // range is exactly zero has variance 0 even if the two-pass formula
+        // leaves rounding noise (e.g. a column of 0.1s); with threshold 0,
+        // sklearn reports `min(var, ptp)`.
         let mut variances = Array1::<F>::zeros(n_features);
-        for row in x.rows() {
-            for (j, (&val, &m)) in row.iter().zip(mean.iter()).enumerate() {
-                let diff = val - m;
-                variances[j] += diff * diff;
+        for j in 0..n_features {
+            let col = x.column(j);
+            let mut count = 0usize;
+            let mut sum = F::zero();
+            let mut lo = F::infinity();
+            let mut hi = F::neg_infinity();
+            for &v in col.iter() {
+                if !v.is_nan() {
+                    count += 1;
+                    sum += v;
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
             }
+            if count == 0 {
+                variances[j] = F::nan();
+                continue;
+            }
+            let n = F::from_usize(count).unwrap();
+            let m = sum / n;
+            let mut sq = F::zero();
+            for &v in col.iter() {
+                if !v.is_nan() {
+                    let d = v - m;
+                    sq += d * d;
+                }
+            }
+            let mut var = sq / n;
+            let ptp = hi - lo;
+            if ptp == F::zero() {
+                var = F::zero();
+            } else if self.threshold == 0.0 && ptp < var {
+                var = ptp;
+            }
+            variances[j] = var;
         }
-        variances.mapv_inplace(|v| v / n);
 
         // Select features whose variance exceeds the threshold.
         let threshold_f = F::from_f64(self.threshold).unwrap();
@@ -170,6 +197,18 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_constant_column_with_rounding_noise_is_removed() {
+        // sklearn: VarianceThreshold().fit([[0.1, 1], [0.1, 2], [0.1, 3]])
+        //   .variances_ -> [0., 0.66666667]; the naive two-pass variance of
+        //   the 0.1 column is a tiny positive number, which used to survive.
+        let x = array![[0.1, 1.0], [0.1, 2.0], [0.1, 3.0]];
+        let fitted = FitUnsupervised::<f64>::fit(&VarianceThreshold::new(0.0), &x).unwrap();
+        assert_eq!(fitted.variances()[0], 0.0);
+        assert_abs_diff_eq!(fitted.variances()[1], 2.0 / 3.0, epsilon = 1e-12);
+        assert_eq!(fitted.selected_indices(), &[1]);
+    }
 
     #[test]
     fn test_removes_constant_features() {

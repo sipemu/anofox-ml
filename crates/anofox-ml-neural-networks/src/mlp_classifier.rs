@@ -1,15 +1,17 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
-use rand::rngs::StdRng;
-use rand::SeedableRng;
+use anofox_ml_core::{Fit, Float, PartialFit, Predict, Result, RustMlError};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 use crate::activation::Activation;
-use crate::network::{adam_update, backward_pass, forward_pass, sgd_update, DenseLayer};
-use crate::solver::{AdamState, Solver};
-use crate::utils::{cross_entropy_loss, one_hot_encode, select_rows, shuffle_indices, softmax};
+use crate::network::{predict_output, DenseLayer, OutputKind};
+use crate::solver::{LearningRateSchedule, Solver, StochasticOptimizer};
+use crate::trainer::{initialize, rng_for, train, TrainConfig, TrainState};
 
-/// Multi-layer perceptron classifier (unfitted).
+/// Multi-layer perceptron classifier (unfitted). Mirrors
+/// `sklearn.neural_network.MLPClassifier`: binary problems use a single
+/// logistic output unit, multi-class problems a softmax layer; the loss is
+/// the log-loss computed from the logits plus `alpha/(2·n_batch)·Σ||W||²`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct MlpClassifier {
     /// Sizes of hidden layers, e.g. `vec![100]` for one hidden layer of 100 units.
     pub hidden_layer_sizes: Vec<usize>,
@@ -17,18 +19,50 @@ pub struct MlpClassifier {
     pub activation: Activation,
     /// Optimization solver.
     pub solver: Solver,
-    /// Learning rate.
+    /// Initial learning rate (sklearn `learning_rate_init`; sgd/adam).
     pub learning_rate: f64,
-    /// Maximum number of epochs.
+    /// Maximum number of epochs (sgd/adam) or iterations (lbfgs).
     pub max_iter: usize,
-    /// Tolerance for early stopping based on loss improvement.
+    /// Optimisation tolerance: minimum loss (or validation score)
+    /// improvement per epoch; projected-gradient tolerance for lbfgs.
     pub tol: f64,
-    /// Random seed for weight initialization and shuffling.
+    /// Random seed for weight initialization, shuffling and the
+    /// early-stopping split.
     pub seed: u64,
     /// Mini-batch size. `None` means full batch.
     pub batch_size: Option<usize>,
-    /// L2 regularization strength.
+    /// L2 regularization strength (scaled by `1/n_batch` like sklearn).
     pub alpha: f64,
+    /// Learning-rate schedule for `Solver::Sgd` (sklearn `learning_rate`).
+    pub learning_rate_schedule: LearningRateSchedule,
+    /// Exponent of the `InvScaling` schedule.
+    pub power_t: f64,
+    /// Momentum for `Solver::Sgd`, in `[0, 1]`.
+    pub momentum: f64,
+    /// Use Nesterov momentum (`Solver::Sgd`).
+    pub nesterovs_momentum: bool,
+    /// Adam first-moment decay.
+    pub beta_1: f64,
+    /// Adam second-moment decay.
+    pub beta_2: f64,
+    /// Adam numerical-stability constant.
+    pub epsilon: f64,
+    /// Shuffle samples every epoch (sgd/adam).
+    pub shuffle: bool,
+    /// Epochs without `tol` improvement before stopping (or, for the
+    /// adaptive schedule, before dividing the learning rate by 5).
+    pub n_iter_no_change: usize,
+    /// Hold out `validation_fraction` of the data (stratified) and stop when
+    /// the validation accuracy stops improving; the best weights are kept.
+    pub early_stopping: bool,
+    /// Fraction of training data used for early stopping, in `(0, 1)`.
+    pub validation_fraction: f64,
+    /// Maximum number of loss evaluations (lbfgs).
+    pub max_fun: usize,
+    /// Explicit initial `(W, b)` per layer instead of random initialisation
+    /// (used to reproduce sklearn trajectories in tests).
+    #[doc(hidden)]
+    pub initial_weights: Option<Vec<(Array2<f64>, Array1<f64>)>>,
 }
 
 impl Default for MlpClassifier {
@@ -43,9 +77,205 @@ impl Default for MlpClassifier {
             seed: 0,
             batch_size: Some(200),
             alpha: 1e-4,
+            learning_rate_schedule: LearningRateSchedule::Constant,
+            power_t: 0.5,
+            momentum: 0.9,
+            nesterovs_momentum: true,
+            beta_1: 0.9,
+            beta_2: 0.999,
+            epsilon: 1e-8,
+            shuffle: true,
+            n_iter_no_change: 10,
+            early_stopping: false,
+            validation_fraction: 0.1,
+            max_fun: 15000,
+            initial_weights: None,
         }
     }
 }
+
+macro_rules! mlp_builders {
+    ($t:ty) => {
+        impl $t {
+            pub fn with_hidden_layer_sizes(mut self, v: Vec<usize>) -> Self {
+                self.hidden_layer_sizes = v;
+                self
+            }
+            pub fn with_activation(mut self, v: Activation) -> Self {
+                self.activation = v;
+                self
+            }
+            pub fn with_solver(mut self, v: Solver) -> Self {
+                self.solver = v;
+                self
+            }
+            pub fn with_learning_rate(mut self, v: f64) -> Self {
+                self.learning_rate = v;
+                self
+            }
+            pub fn with_learning_rate_schedule(mut self, v: LearningRateSchedule) -> Self {
+                self.learning_rate_schedule = v;
+                self
+            }
+            pub fn with_power_t(mut self, v: f64) -> Self {
+                self.power_t = v;
+                self
+            }
+            pub fn with_max_iter(mut self, v: usize) -> Self {
+                self.max_iter = v;
+                self
+            }
+            pub fn with_tol(mut self, v: f64) -> Self {
+                self.tol = v;
+                self
+            }
+            pub fn with_seed(mut self, v: u64) -> Self {
+                self.seed = v;
+                self
+            }
+            pub fn with_batch_size(mut self, v: Option<usize>) -> Self {
+                self.batch_size = v;
+                self
+            }
+            pub fn with_alpha(mut self, v: f64) -> Self {
+                self.alpha = v;
+                self
+            }
+            pub fn with_momentum(mut self, v: f64) -> Self {
+                self.momentum = v;
+                self
+            }
+            pub fn with_nesterovs_momentum(mut self, v: bool) -> Self {
+                self.nesterovs_momentum = v;
+                self
+            }
+            pub fn with_shuffle(mut self, v: bool) -> Self {
+                self.shuffle = v;
+                self
+            }
+            pub fn with_n_iter_no_change(mut self, v: usize) -> Self {
+                self.n_iter_no_change = v;
+                self
+            }
+            pub fn with_early_stopping(mut self, v: bool) -> Self {
+                self.early_stopping = v;
+                self
+            }
+            pub fn with_validation_fraction(mut self, v: f64) -> Self {
+                self.validation_fraction = v;
+                self
+            }
+            pub fn with_max_fun(mut self, v: usize) -> Self {
+                self.max_fun = v;
+                self
+            }
+            /// Start from explicit `(W_i, b_i)` per layer (`W_i` has shape
+            /// `(n_in, n_out)`) instead of random initialisation — e.g. the
+            /// `coefs_` / `intercepts_` of a sklearn model.
+            #[doc(hidden)]
+            pub fn with_initial_weights(mut self, v: Vec<(Array2<f64>, Array1<f64>)>) -> Self {
+                self.initial_weights = Some(v);
+                self
+            }
+
+            pub(crate) fn train_config(&self) -> TrainConfig {
+                TrainConfig {
+                    hidden_layer_sizes: self.hidden_layer_sizes.clone(),
+                    activation: self.activation,
+                    solver: self.solver,
+                    learning_rate: self.learning_rate,
+                    learning_rate_schedule: self.learning_rate_schedule,
+                    power_t: self.power_t,
+                    momentum: self.momentum,
+                    nesterovs_momentum: self.nesterovs_momentum,
+                    beta_1: self.beta_1,
+                    beta_2: self.beta_2,
+                    epsilon: self.epsilon,
+                    alpha: self.alpha,
+                    batch_size: self.batch_size,
+                    max_iter: self.max_iter,
+                    tol: self.tol,
+                    n_iter_no_change: self.n_iter_no_change,
+                    early_stopping: self.early_stopping,
+                    validation_fraction: self.validation_fraction,
+                    shuffle: self.shuffle,
+                    max_fun: self.max_fun,
+                    initial_weights: self.initial_weights.clone(),
+                }
+            }
+        }
+    };
+}
+pub(crate) use mlp_builders;
+
+mlp_builders!(MlpClassifier);
+
+/// Training diagnostics shared by both fitted MLPs (sklearn's trailing
+/// underscore attributes) plus the resumable optimiser state.
+macro_rules! fitted_accessors {
+    ($t:ident) => {
+        impl<F: Float> $t<F> {
+            /// Training loss per epoch (sgd/adam; empty for lbfgs), sklearn
+            /// `loss_curve_`. Accumulates across `partial_fit` / warm starts.
+            pub fn loss_curve(&self) -> &[f64] {
+                &self.loss_curve
+            }
+            /// Epochs (sgd/adam) or iterations (lbfgs) run by the last
+            /// `fit` / `partial_fit` call (sklearn `n_iter_`).
+            pub fn n_iter(&self) -> usize {
+                self.n_iter
+            }
+            /// Final training loss (sklearn `loss_`).
+            pub fn loss(&self) -> f64 {
+                self.loss
+            }
+            /// Lowest epoch loss seen (sklearn `best_loss_`; `None` with
+            /// early stopping or lbfgs).
+            pub fn best_loss(&self) -> Option<f64> {
+                self.best_loss
+            }
+            /// Validation scores per epoch with early stopping.
+            pub fn validation_scores(&self) -> &[f64] {
+                &self.validation_scores
+            }
+            /// Best validation score with early stopping.
+            pub fn best_validation_score(&self) -> Option<f64> {
+                self.best_validation_score
+            }
+            /// Samples seen by the stochastic solver (sklearn `t_`).
+            pub fn t(&self) -> usize {
+                self.t
+            }
+            /// Weight matrices per layer (sklearn `coefs_`).
+            pub fn coefs(&self) -> Vec<&Array2<F>> {
+                self.layers.iter().map(|l| &l.weights).collect()
+            }
+            /// Bias vectors per layer (sklearn `intercepts_`).
+            pub fn intercepts(&self) -> Vec<Array1<F>> {
+                self.layers
+                    .iter()
+                    .map(|l| l.biases.row(0).to_owned())
+                    .collect()
+            }
+
+            fn into_state(self) -> TrainState<F> {
+                TrainState {
+                    layers: self.layers,
+                    loss_curve: self.loss_curve,
+                    loss: self.loss,
+                    n_iter: self.n_iter,
+                    t: self.t,
+                    best_loss: self.best_loss,
+                    no_improvement_count: self.no_improvement_count,
+                    validation_scores: self.validation_scores,
+                    best_validation_score: self.best_validation_score,
+                    optimizer: self.optimizer,
+                }
+            }
+        }
+    };
+}
+pub(crate) use fitted_accessors;
 
 /// Fitted multi-layer perceptron classifier.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -55,10 +285,66 @@ pub struct FittedMlpClassifier<F: Float> {
     activation: Activation,
     class_labels: Vec<F>,
     n_features: usize,
+    #[serde(default)]
+    loss_curve: Vec<f64>,
+    #[serde(default)]
+    n_iter: usize,
+    #[serde(default)]
+    loss: f64,
+    #[serde(default)]
+    best_loss: Option<f64>,
+    #[serde(default)]
+    validation_scores: Vec<f64>,
+    #[serde(default)]
+    best_validation_score: Option<f64>,
+    #[serde(default)]
+    t: usize,
+    #[serde(default)]
+    no_improvement_count: usize,
+    #[serde(skip)]
+    optimizer: Option<StochasticOptimizer<F>>,
+}
+
+fitted_accessors!(FittedMlpClassifier);
+
+fn output_kind<F: Float>(layers: &[DenseLayer<F>]) -> OutputKind {
+    if layers.last().map_or(0, |l| l.weights.ncols()) == 1 {
+        OutputKind::Logistic
+    } else {
+        OutputKind::Softmax
+    }
+}
+
+/// Fraction of rows whose predicted class equals the target class.
+fn accuracy_from_output<F: Float>(kind: OutputKind, out: &Array2<F>, y: ArrayView2<F>) -> f64 {
+    let n = out.nrows();
+    if out.iter().any(|v| !v.is_finite()) {
+        return f64::NAN;
+    }
+    let half = F::from_f64(0.5).unwrap();
+    let correct = (0..n)
+        .filter(|&i| match kind {
+            OutputKind::Logistic => (out[[i, 0]] > half) == (y[[i, 0]] > half),
+            _ => argmax(out.row(i).iter()) == argmax(y.row(i).iter()),
+        })
+        .count();
+    correct as f64 / n as f64
+}
+
+fn argmax<'a, F: Float + 'a>(it: impl Iterator<Item = &'a F>) -> usize {
+    let mut best = 0;
+    let mut best_v = F::neg_infinity();
+    for (i, &v) in it.enumerate() {
+        if v > best_v {
+            best_v = v;
+            best = i;
+        }
+    }
+    best
 }
 
 impl<F: Float> FittedMlpClassifier<F> {
-    /// Return class probability estimates (softmax output).
+    /// Return class probability estimates.
     pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -67,15 +353,42 @@ impl<F: Float> FittedMlpClassifier<F> {
                 x.ncols()
             )));
         }
-        let (logits, _) = forward_pass(&self.layers, self.activation, x);
-        Ok(softmax(logits))
+        let kind = output_kind(&self.layers);
+        let out = predict_output(&self.layers, self.activation, kind, x.view());
+        Ok(match kind {
+            OutputKind::Logistic => {
+                let mut p = Array2::zeros((out.nrows(), 2));
+                for i in 0..out.nrows() {
+                    p[[i, 0]] = F::one() - out[[i, 0]];
+                    p[[i, 1]] = out[[i, 0]];
+                }
+                p
+            }
+            _ => out,
+        })
+    }
+
+    /// Class labels in sorted order (sklearn `classes_`).
+    pub fn classes(&self) -> &[F] {
+        &self.class_labels
     }
 }
 
-impl<F: Float> Fit<F> for MlpClassifier {
-    type Fitted = FittedMlpClassifier<F>;
+fn label_index<F: Float>(labels: &[F], v: F) -> Option<usize> {
+    labels
+        .iter()
+        .position(|&c| (c - v).abs() < F::from_f64(1e-10).unwrap())
+}
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+impl MlpClassifier {
+    fn fit_impl<F: Float>(
+        &self,
+        prev: Option<FittedMlpClassifier<F>>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        incremental: bool,
+        classes: Option<&[F]>,
+    ) -> Result<FittedMlpClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -86,147 +399,164 @@ impl<F: Float> Fit<F> for MlpClassifier {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
-        if self.hidden_layer_sizes.is_empty() {
-            return Err(RustMlError::InvalidParameter(
-                "hidden_layer_sizes must not be empty".into(),
-            ));
-        }
-        for (i, &s) in self.hidden_layer_sizes.iter().enumerate() {
-            if s == 0 {
-                return Err(RustMlError::InvalidParameter(format!(
-                    "hidden_layer_sizes[{i}] must be > 0"
-                )));
-            }
-        }
+        let cfg = self.train_config();
+        cfg.validate()?;
 
-        let n_features = x.ncols();
-        let n_samples = x.nrows();
-
-        // Discover unique class labels
-        let mut class_labels: Vec<F> = {
-            let mut seen = std::collections::BTreeMap::new();
-            for &v in y.iter() {
-                let key = v.to_f64().unwrap().to_bits();
-                seen.entry(key).or_insert(v);
+        let class_labels: Vec<F> = match (&prev, classes) {
+            (Some(p), _) => {
+                if p.n_features != x.ncols() {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "expected {} features, got {}",
+                        p.n_features,
+                        x.ncols()
+                    )));
+                }
+                p.class_labels.clone()
             }
-            seen.into_values().collect()
+            (None, Some(c)) => {
+                let mut c = c.to_vec();
+                c.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                c.dedup();
+                c
+            }
+            (None, None) => {
+                let mut seen = std::collections::BTreeMap::new();
+                for &v in y.iter() {
+                    seen.entry(v.to_f64().unwrap().to_bits()).or_insert(v);
+                }
+                let mut c: Vec<F> = seen.into_values().collect();
+                c.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                c
+            }
         };
-        class_labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n_classes = class_labels.len();
-
         if n_classes < 2 {
             return Err(RustMlError::InvalidParameter(
                 "need at least 2 classes for classification".into(),
             ));
         }
-
-        // Build layer sizes: [n_features, hidden..., n_classes]
-        let mut layer_sizes = Vec::with_capacity(self.hidden_layer_sizes.len() + 2);
-        layer_sizes.push(n_features);
-        layer_sizes.extend_from_slice(&self.hidden_layer_sizes);
-        layer_sizes.push(n_classes);
-
-        let mut rng = StdRng::seed_from_u64(self.seed);
-
-        // Initialize layers
-        let mut layers: Vec<DenseLayer<F>> = Vec::with_capacity(layer_sizes.len() - 1);
-        for i in 0..layer_sizes.len() - 1 {
-            layers.push(DenseLayer::new(
-                layer_sizes[i],
-                layer_sizes[i + 1],
-                self.activation,
-                &mut rng,
-            ));
+        let n_out = if n_classes == 2 { 1 } else { n_classes };
+        let mut strata = Vec::with_capacity(y.len());
+        let mut targets = Array2::<F>::zeros((y.len(), n_out));
+        for (i, &v) in y.iter().enumerate() {
+            let c = label_index(&class_labels, v).ok_or_else(|| {
+                RustMlError::InvalidParameter(format!(
+                    "label {} is not one of the known classes",
+                    v.to_f64().unwrap()
+                ))
+            })?;
+            strata.push(c);
+            if n_out == 1 {
+                targets[[i, 0]] = if c == 1 { F::one() } else { F::zero() };
+            } else {
+                targets[[i, c]] = F::one();
+            }
         }
 
-        // Adam optimizer state
-        let mut w_states: Vec<AdamState<F>> = layers
-            .iter()
-            .map(|l| AdamState::new(l.weights.nrows(), l.weights.ncols()))
-            .collect();
-        let mut b_states: Vec<AdamState<F>> = layers
-            .iter()
-            .map(|l| AdamState::new(1, l.biases.ncols()))
-            .collect();
-
-        let lr = F::from_f64(self.learning_rate).unwrap();
-        let alpha = F::from_f64(self.alpha).unwrap();
-        let tol = F::from_f64(self.tol).unwrap();
-        let batch_size = self.batch_size.unwrap_or(n_samples).min(n_samples);
-        let full_batch = batch_size >= n_samples;
-
-        let y_onehot = one_hot_encode(y, &class_labels);
-        let mut indices: Vec<usize> = (0..n_samples).collect();
-        let mut prev_loss = F::infinity();
-
-        for _epoch in 0..self.max_iter {
-            shuffle_indices(&mut indices, &mut rng);
-
-            let mut epoch_loss = F::zero();
-            let mut n_batches = 0;
-
-            for chunk in indices.chunks(batch_size) {
-                // When the batch covers the full dataset, avoid copying.
-                let (x_batch_owned, y_batch_owned);
-                let (x_b, y_b) = if full_batch {
-                    (x, &y_onehot)
-                } else {
-                    x_batch_owned = select_rows(x, chunk);
-                    y_batch_owned = select_rows(&y_onehot, chunk);
-                    (&x_batch_owned, &y_batch_owned)
-                };
-
-                // Forward
-                let (logits, caches) = forward_pass(&layers, self.activation, x_b);
-                let probs = softmax(logits);
-
-                // Loss
-                epoch_loss += cross_entropy_loss(&probs, y_b);
-                n_batches += 1;
-
-                // Backward: output delta = probs - y_onehot
-                let output_delta = &probs - y_b;
-                let gradients =
-                    backward_pass(&layers, &caches, self.activation, output_delta, alpha);
-
-                // Update
-                match self.solver {
-                    Solver::Sgd => sgd_update(&mut layers, &gradients, lr),
-                    Solver::Adam => {
-                        adam_update(&mut layers, &gradients, &mut w_states, &mut b_states, lr)
-                    }
+        let mut rng = rng_for(self.seed);
+        let mut state = match prev {
+            Some(p) => {
+                let n_out_prev = p.layers.last().map_or(0, |l| l.weights.ncols());
+                if n_out_prev != n_out {
+                    return Err(RustMlError::InvalidParameter(
+                        "previous model has an incompatible output layer".into(),
+                    ));
                 }
+                p.into_state()
             }
-
-            let avg_loss = epoch_loss / F::from_usize(n_batches).unwrap();
-            if (prev_loss - avg_loss).abs() < tol {
-                break;
-            }
-            prev_loss = avg_loss;
-        }
-
+            None => initialize(&cfg, x.ncols(), n_out, &mut rng)?,
+        };
+        let kind = if n_out == 1 {
+            OutputKind::Logistic
+        } else {
+            OutputKind::Softmax
+        };
+        let activation = self.activation;
+        let scorer = move |layers: &[DenseLayer<F>], xv: ArrayView2<F>, yv: ArrayView2<F>| {
+            let out = predict_output(layers, activation, kind, xv);
+            accuracy_from_output(kind, &out, yv)
+        };
+        train(
+            &cfg,
+            &mut state,
+            kind,
+            x,
+            &targets,
+            &mut rng,
+            incremental,
+            Some(&strata),
+            &scorer,
+        )?;
         Ok(FittedMlpClassifier {
-            layers,
+            layers: state.layers,
             activation: self.activation,
             class_labels,
-            n_features,
+            n_features: x.ncols(),
+            loss_curve: state.loss_curve,
+            n_iter: state.n_iter,
+            loss: state.loss,
+            best_loss: state.best_loss,
+            validation_scores: state.validation_scores,
+            best_validation_score: state.best_validation_score,
+            t: state.t,
+            no_improvement_count: state.no_improvement_count,
+            optimizer: state.optimizer,
         })
+    }
+
+    /// Continue training from `previous` (sklearn `warm_start=True`):
+    /// weights, `loss_curve` and `best_loss` carry over, the optimiser is
+    /// re-initialised and up to `max_iter` further epochs run.
+    pub fn fit_warm_start<F: Float>(
+        &self,
+        previous: FittedMlpClassifier<F>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+    ) -> Result<FittedMlpClassifier<F>> {
+        self.fit_impl(Some(previous), x, y, false, None)
+    }
+}
+
+impl<F: Float> Fit<F> for MlpClassifier {
+    type Fitted = FittedMlpClassifier<F>;
+
+    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(None, x, y, false, None)
+    }
+}
+
+/// One epoch over `(x, y)` (sklearn `partial_fit`). On the first call pass
+/// all `classes` (inferred from `y` if `None`); the optimiser state is kept
+/// between calls in memory.
+impl<F: Float> PartialFit<F> for MlpClassifier {
+    type Fitted = FittedMlpClassifier<F>;
+
+    fn partial_fit(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        classes: Option<&[F]>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(state, x, y, true, classes)
     }
 }
 
 impl<F: Float> Predict<F> for FittedMlpClassifier<F> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
         let probs = self.predict_proba(x)?;
-        let mut predictions = Vec::with_capacity(x.nrows());
-        for row in probs.rows() {
-            let (max_idx, _) = row
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .unwrap();
-            predictions.push(self.class_labels[max_idx]);
-        }
-        Ok(Array1::from_vec(predictions))
+        let half = F::from_f64(0.5).unwrap();
+        Ok(probs
+            .axis_iter(Axis(0))
+            .map(|row| {
+                if row.len() == 2 {
+                    // sklearn LabelBinarizer threshold: p(class 1) > 0.5
+                    self.class_labels[usize::from(row[1] > half)]
+                } else {
+                    self.class_labels[argmax(row.iter())]
+                }
+            })
+            .collect())
     }
 }
 
@@ -252,6 +582,7 @@ mod tests {
             seed: 42,
             batch_size: None, // full batch
             alpha: 0.0,
+            ..Default::default()
         };
 
         let fitted: FittedMlpClassifier<f64> = mlp.fit(&x, &y).unwrap();
@@ -289,8 +620,6 @@ mod tests {
 
         let fitted: FittedMlpClassifier<f64> = mlp.fit(&x, &y).unwrap();
         let preds = fitted.predict(&x).unwrap();
-
-        // Should get most training samples correct
         let correct: usize = preds
             .iter()
             .zip(y.iter())
@@ -312,19 +641,20 @@ mod tests {
         };
         let fitted: FittedMlpClassifier<f64> = mlp.fit(&x, &y).unwrap();
         let proba = fitted.predict_proba(&x).unwrap();
-
+        assert_eq!(proba.ncols(), 2);
         for row in proba.rows() {
             assert_abs_diff_eq!(row.sum(), 1.0, epsilon = 1e-6);
         }
+        // Binary → single logistic output unit, as in sklearn.
+        assert_eq!(fitted.coefs().last().unwrap().ncols(), 1);
     }
 
     #[test]
     fn shape_mismatch_error() {
         let x = array![[1.0, 2.0]];
         let y = array![0.0, 1.0];
-
-        let mlp = MlpClassifier::default();
-        let result: std::result::Result<FittedMlpClassifier<f64>, _> = mlp.fit(&x, &y);
+        let result: std::result::Result<FittedMlpClassifier<f64>, _> =
+            MlpClassifier::default().fit(&x, &y);
         assert!(result.is_err());
     }
 
@@ -332,9 +662,8 @@ mod tests {
     fn empty_input_error() {
         let x: Array2<f64> = Array2::zeros((0, 2));
         let y: Array1<f64> = Array1::zeros(0);
-
-        let mlp = MlpClassifier::default();
-        let result: std::result::Result<FittedMlpClassifier<f64>, _> = mlp.fit(&x, &y);
+        let result: std::result::Result<FittedMlpClassifier<f64>, _> =
+            MlpClassifier::default().fit(&x, &y);
         assert!(result.is_err());
     }
 
@@ -342,9 +671,8 @@ mod tests {
     fn single_class_error() {
         let x = array![[1.0], [2.0], [3.0]];
         let y = array![0.0, 0.0, 0.0];
-
-        let mlp = MlpClassifier::default();
-        let result: std::result::Result<FittedMlpClassifier<f64>, _> = mlp.fit(&x, &y);
+        let result: std::result::Result<FittedMlpClassifier<f64>, _> =
+            MlpClassifier::default().fit(&x, &y);
         assert!(result.is_err());
     }
 
@@ -352,24 +680,19 @@ mod tests {
     fn predict_wrong_features_error() {
         let x = array![[1.0, 2.0], [3.0, 4.0]];
         let y = array![0.0, 1.0];
-
         let mlp = MlpClassifier {
             hidden_layer_sizes: vec![5],
             max_iter: 5,
-            seed: 0,
             ..Default::default()
         };
         let fitted: FittedMlpClassifier<f64> = mlp.fit(&x, &y).unwrap();
-
-        let x_bad = array![[1.0]];
-        assert!(fitted.predict(&x_bad).is_err());
+        assert!(fitted.predict(&array![[1.0]]).is_err());
     }
 
     #[test]
     fn reproducibility() {
         let x = array![[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
         let y = array![0.0, 1.0, 1.0, 0.0];
-
         let mlp = MlpClassifier {
             hidden_layer_sizes: vec![10],
             max_iter: 50,
@@ -377,13 +700,8 @@ mod tests {
             batch_size: None,
             ..Default::default()
         };
-
-        let fitted1: FittedMlpClassifier<f64> = mlp.fit(&x, &y).unwrap();
-        let fitted2: FittedMlpClassifier<f64> = mlp.fit(&x, &y).unwrap();
-
-        let p1 = fitted1.predict_proba(&x).unwrap();
-        let p2 = fitted2.predict_proba(&x).unwrap();
-
+        let p1 = mlp.fit(&x, &y).unwrap().predict_proba(&x).unwrap();
+        let p2 = mlp.fit(&x, &y).unwrap().predict_proba(&x).unwrap();
         for (a, b) in p1.iter().zip(p2.iter()) {
             assert_abs_diff_eq!(*a, *b, epsilon = 1e-12);
         }

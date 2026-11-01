@@ -32,7 +32,8 @@ pub fn mean_absolute_percentage_error<F: Float>(
 /// Explained Variance Score: `1 - Var(y_true - y_pred) / Var(y_true)`.
 ///
 /// The variance is computed as the population variance (dividing by N, not N-1).
-/// If `Var(y_true)` is zero (constant input), returns zero.
+/// If `Var(y_true)` is zero (constant input), returns 1.0 when the residual
+/// variance is also zero and 0.0 otherwise (sklearn's `force_finite=True`).
 pub fn explained_variance_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -> Result<F> {
     check_lengths(y_true, y_pred)?;
 
@@ -61,7 +62,11 @@ pub fn explained_variance_score<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>
         / n;
 
     if var_y == F::zero() {
-        return Ok(F::zero());
+        return Ok(if var_res == F::zero() {
+            F::one()
+        } else {
+            F::zero()
+        });
     }
 
     Ok(F::one() - var_res / var_y)
@@ -208,7 +213,8 @@ mod tests {
 
     #[test]
     fn test_evs_constant_y_true() {
-        // Var(y_true) = 0 -> returns 0
+        // Var(y_true) = 0 -> 0.0 unless the residuals are constant too
+        // (sklearn force_finite=True).
         let y_true = array![5.0, 5.0, 5.0];
         let y_pred = array![4.0, 5.0, 6.0];
         assert_abs_diff_eq!(
@@ -216,6 +222,8 @@ mod tests {
             0.0,
             epsilon = 1e-10
         );
+        // sklearn: explained_variance_score([5,5,5], [5,5,5]) == 1.0
+        assert_eq!(explained_variance_score(&y_true, &y_true).unwrap(), 1.0);
     }
 
     #[test]

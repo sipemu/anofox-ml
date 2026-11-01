@@ -1,6 +1,9 @@
 //! Ridge (L2-regularized) regression wrapper.
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
+use crate::summary::{
+    interval_from, summary_from_result, IntervalKind, PredictionInterval, RegressionSummary,
+};
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use anofox_regression::solvers::{FittedRidge, RidgeRegressor as InnerRidge};
 use anofox_regression::{FittedRegressor as _, Regressor as _};
@@ -15,6 +18,8 @@ use ndarray::{Array1, Array2};
 pub struct RidgeRegressor {
     lambda: f64,
     with_intercept: bool,
+    inference: bool,
+    confidence_level: f64,
 }
 
 impl RidgeRegressor {
@@ -22,7 +27,27 @@ impl RidgeRegressor {
         Self {
             lambda: 1.0,
             with_intercept: true,
+            inference: false,
+            confidence_level: 0.95,
         }
+    }
+
+    /// Compute (ridge) standard errors / t / p / CIs and enable
+    /// `predict_interval` on the unweighted fit. Default false.
+    ///
+    /// Standard errors are the upstream sandwich `σ² A XᵀX A`,
+    /// `A = (XᵀX + λP)⁻¹`, conditional on `lambda`. For `lambda > 0` the
+    /// t statistics, p-values and coefficient CIs are reported as `NaN`
+    /// (a test centred on a shrunken, biased estimate is not valid).
+    pub fn with_inference(mut self, inference: bool) -> Self {
+        self.inference = inference;
+        self
+    }
+
+    /// Confidence level of the summary intervals. Default 0.95.
+    pub fn with_confidence_level(mut self, level: f64) -> Self {
+        self.confidence_level = level;
+        self
     }
 
     pub fn with_lambda(mut self, lambda: f64) -> Self {
@@ -47,6 +72,7 @@ impl Default for RidgeRegressor {
 pub struct FittedRidgeRegressor {
     inner: FittedRidge,
     n_features: usize,
+    inference: bool,
 }
 
 impl FittedRidgeRegressor {
@@ -60,6 +86,32 @@ impl FittedRidgeRegressor {
 
     pub fn r_squared(&self) -> f64 {
         self.inner.r_squared()
+    }
+
+    /// Coefficient table (requires `with_inference(true)`).
+    pub fn summary(&self) -> Result<RegressionSummary> {
+        summary_from_result(self.inner.result())
+    }
+
+    /// Confidence / prediction intervals at `level` (requires
+    /// `with_inference(true)`).
+    pub fn predict_interval(
+        &self,
+        x: &Array2<f64>,
+        kind: IntervalKind,
+        level: f64,
+    ) -> Result<PredictionInterval> {
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+        if !self.inference {
+            return Err(crate::summary::not_computed());
+        }
+        interval_from(&self.inner, &ndarray_to_mat(x), kind, level)
     }
 }
 
@@ -86,9 +138,12 @@ impl Fit<f64> for RidgeRegressor {
         let x_mat = ndarray_to_mat(x);
         let y_col = ndarray_to_col(y);
 
+        crate::summary::validate_level(self.confidence_level)?;
         let inner_model = InnerRidge::builder()
             .with_intercept(self.with_intercept)
             .lambda(self.lambda)
+            .compute_inference(self.inference)
+            .confidence_level(self.confidence_level)
             .build();
 
         let fitted = inner_model
@@ -98,6 +153,7 @@ impl Fit<f64> for RidgeRegressor {
         Ok(FittedRidgeRegressor {
             inner: fitted,
             n_features: x.ncols(),
+            inference: self.inference,
         })
     }
 }
@@ -283,6 +339,36 @@ mod tests {
             fitted_small.coefficients()[0],
             fitted_large.coefficients()[0]
         );
+    }
+
+    #[test]
+    fn test_ridge_inference_opt_in_and_tiny_lambda_matches_ols() {
+        let x = Array2::from_shape_vec((8, 1), (0..8).map(|i| i as f64).collect()).unwrap();
+        let y = array![1.2, 2.9, 5.3, 6.8, 9.4, 10.6, 13.3, 14.9];
+        let plain = RidgeRegressor::new().fit(&x, &y).unwrap();
+        assert!(plain.summary().is_err());
+        assert!(plain
+            .predict_interval(&x, IntervalKind::Confidence, 0.95)
+            .is_err());
+
+        // lambda -> 0: ridge inference reduces to OLS (statsmodels values).
+        let f = RidgeRegressor::new()
+            .with_lambda(1e-10)
+            .with_inference(true)
+            .fit(&x, &y)
+            .unwrap();
+        let s = f.summary().unwrap();
+        assert!((s.std_errors[0] - 0.04734045489525958).abs() < 1e-6);
+        let xn = Array2::from_shape_vec((1, 1), vec![10.0]).unwrap();
+        let ci = f
+            .predict_interval(&xn, IntervalKind::Confidence, 0.95)
+            .unwrap();
+        assert!((ci.lower[0] - 20.127832707040625).abs() < 1e-5);
+        assert!((ci.upper[0] - 21.724548245340316).abs() < 1e-5);
+        let pi = f
+            .predict_interval(&xn, IntervalKind::Prediction, 0.95)
+            .unwrap();
+        assert!(pi.lower[0] < ci.lower[0] && pi.upper[0] > ci.upper[0]);
     }
 
     #[test]

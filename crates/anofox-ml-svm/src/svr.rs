@@ -33,7 +33,7 @@ impl Svr {
         Self {
             c: 1.0,
             epsilon: 0.1,
-            kernel: SvmKernel::Rbf { gamma: 1.0 },
+            kernel: SvmKernel::default(),
             max_iter: 1000,
             tol: 1e-4,
         }
@@ -81,19 +81,7 @@ impl Svr {
         if self.tol <= 0.0 {
             return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
-        match &self.kernel {
-            SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "gamma must be positive for RBF kernel".into(),
-                ));
-            }
-            SvmKernel::Polynomial { degree, .. } if *degree == 0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "degree must be at least 1 for polynomial kernel".into(),
-                ));
-            }
-            _ => {}
-        }
+        self.kernel.validate(false)?;
         Ok(())
     }
 }
@@ -379,6 +367,7 @@ impl<F: Float> Fit<F> for Svr {
 
         let c = F::from_f64(self.c).unwrap();
         let epsilon = F::from_f64(self.epsilon).unwrap();
+        let kernel = self.kernel.resolve(x);
         let tol = F::from_f64(self.tol).unwrap();
 
         // Center targets for better convergence (standard SVM practice)
@@ -387,7 +376,7 @@ impl<F: Float> Fit<F> for Svr {
         let y_centered = y.mapv(|v| v - y_mean);
 
         let (coefs, bias_centered) =
-            fista_svr_dual(x, &y_centered, &self.kernel, c, epsilon, self.max_iter, tol);
+            fista_svr_dual(x, &y_centered, &kernel, c, epsilon, self.max_iter, tol);
         let bias = bias_centered + y_mean;
 
         // Extract support vectors (non-zero coefficients)
@@ -403,7 +392,7 @@ impl<F: Float> Fit<F> for Svr {
                 support_vectors: x.to_owned(),
                 dual_coefs,
                 bias,
-                kernel: self.kernel.clone(),
+                kernel: kernel.clone(),
                 n_features: x.ncols(),
             });
         }
@@ -422,7 +411,7 @@ impl<F: Float> Fit<F> for Svr {
             support_vectors,
             dual_coefs,
             bias,
-            kernel: self.kernel.clone(),
+            kernel: kernel.clone(),
             n_features,
         })
     }
@@ -468,7 +457,7 @@ mod tests {
     #[test]
     fn test_dual_is_feasible() {
         let (x, y) = parity_data();
-        let kernel = SvmKernel::Rbf { gamma: 0.5 };
+        let kernel = SvmKernel::rbf(0.5);
         for &(c, max_iter) in &[(1.0, 50usize), (1.0, 20_000), (0.05, 2_000)] {
             let (w, _b) = fista_svr_dual(&x, &y, &kernel, c, 0.1, max_iter, 1e-12);
             let sum: f64 = w.iter().sum();
@@ -508,7 +497,7 @@ mod tests {
         let sk_bias = -0.158313369367737;
         let (x, y) = parity_data();
         let fitted: FittedSvr<f64> = Svr::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+            .with_kernel(SvmKernel::rbf(0.5))
             .with_c(1.0)
             .with_epsilon(0.1)
             .with_max_iter(100_000)
@@ -562,7 +551,7 @@ mod tests {
         let y = array![1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0];
 
         let svr = Svr::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 0.1 })
+            .with_kernel(SvmKernel::rbf(0.1))
             .with_c(100.0)
             .with_epsilon(1.0)
             .with_max_iter(5000);

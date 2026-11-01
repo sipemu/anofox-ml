@@ -10,13 +10,12 @@ fn kernel_for(case: &serde_json::Value) -> SvmKernel {
     let name = case["kernel"].as_str().unwrap();
     match name {
         "linear" => SvmKernel::Linear,
-        "rbf" => SvmKernel::Rbf {
-            gamma: case["gamma"].as_f64().unwrap(),
-        },
-        "polynomial" => SvmKernel::Polynomial {
-            degree: case["degree"].as_u64().unwrap() as usize,
-            coef0: case["coef0"].as_f64().unwrap(),
-        },
+        "rbf" => SvmKernel::rbf(case["gamma"].as_f64().unwrap()),
+        "polynomial" => SvmKernel::poly(
+            case["degree"].as_u64().unwrap() as usize,
+            1.0,
+            case["coef0"].as_f64().unwrap(),
+        ),
         _ => panic!("unknown kernel: {name}"),
     }
 }

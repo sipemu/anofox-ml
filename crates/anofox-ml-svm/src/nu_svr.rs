@@ -50,7 +50,7 @@ impl NuSvr {
         Self {
             nu: 0.5,
             c: 1.0,
-            kernel: SvmKernel::Rbf { gamma: 1.0 },
+            kernel: SvmKernel::default(),
             max_iter: 10000,
             tol: 1e-6,
         }
@@ -96,19 +96,7 @@ impl NuSvr {
         if self.tol <= 0.0 {
             return Err(RustMlError::InvalidParameter("tol must be positive".into()));
         }
-        match &self.kernel {
-            SvmKernel::Rbf { gamma } if *gamma <= 0.0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "gamma must be positive for RBF kernel".into(),
-                ));
-            }
-            SvmKernel::Polynomial { degree, .. } if *degree == 0 => {
-                return Err(RustMlError::InvalidParameter(
-                    "degree must be at least 1 for polynomial kernel".into(),
-                ));
-            }
-            _ => {}
-        }
+        self.kernel.validate(false)?;
         Ok(())
     }
 }
@@ -616,8 +604,8 @@ impl<F: Float> Fit<F> for NuSvr {
             )));
         }
 
-        let (w, bias) =
-            solve_nu_svr::<F>(x, y, &self.kernel, self.c, self.nu, self.max_iter, self.tol);
+        let kernel = self.kernel.resolve(x);
+        let (w, bias) = solve_nu_svr::<F>(x, y, &kernel, self.c, self.nu, self.max_iter, self.tol);
 
         // Extract support vectors (non-zero w).
         let sv_threshold = self.c * 1e-8;
@@ -642,7 +630,7 @@ impl<F: Float> Fit<F> for NuSvr {
             sv_matrix,
             dual_coefs,
             F::from_f64(bias).unwrap(),
-            self.kernel.clone(),
+            kernel.clone(),
             n_features,
         );
 
@@ -690,7 +678,7 @@ mod tests {
         let y = array![1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0];
 
         let model = NuSvr::new()
-            .with_kernel(SvmKernel::Rbf { gamma: 0.1 })
+            .with_kernel(SvmKernel::rbf(0.1))
             .with_c(100.0)
             .with_nu(0.5);
         let fitted: FittedNuSvr<f64> = model.fit(&x, &y).unwrap();
