@@ -119,6 +119,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   alias pointed to classical (Torgerson) MDS, but sklearn's `MDS` is the
   iterative SMACOF algorithm, so the name promised a different method.
   **Breaking:** use `ClassicalMDS`.
+- **IsotonicRegressor predicts like sklearn.** Predictions interpolate
+  linearly between the fitted points (sklearn's `X_thresholds_` /
+  `y_thresholds_`); before, they were a step function. New
+  `out_of_bounds` (`Nan` default / `Clip` / `Raise`); before, inputs
+  outside the range were always clipped.
 
 ### Algorithms — new
 

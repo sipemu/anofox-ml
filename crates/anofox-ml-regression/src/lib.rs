@@ -44,7 +44,7 @@ pub use glm::{
     PoissonRegressor,
 };
 pub use huber::{FittedHuberRegressor, HuberRegressor};
-pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor};
+pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor, OutOfBounds};
 pub use kernel_ridge::{FittedKernelRidge, KernelRidge};
 pub use lars::{FittedLars, FittedLassoLarsIC, IcCriterion, Lars, LassoLarsIC};
 pub use lasso::{FittedLassoRegressor, LassoRegressor};
