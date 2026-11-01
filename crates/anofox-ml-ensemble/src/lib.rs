@@ -46,6 +46,7 @@ pub mod adaboost_classifier;
 pub mod adaboost_regressor;
 pub mod bagging_classifier;
 mod bagging_common;
+mod bagging_generic;
 pub mod bagging_regressor;
 pub mod calibrated_classifier;
 pub mod extra_trees_classifier;
@@ -67,6 +68,9 @@ pub mod voting_regressor;
 pub use adaboost_classifier::{AdaBoostClassifier, FittedAdaBoostClassifier};
 pub use adaboost_regressor::{AdaBoostLoss, AdaBoostRegressor, FittedAdaBoostRegressor};
 pub use bagging_classifier::{BaggingClassifier, FittedBaggingClassifier};
+pub use bagging_generic::{
+    FittedGenericBagging, GenericBaggingClassifier, GenericBaggingRegressor,
+};
 pub use bagging_regressor::{BaggingRegressor, FittedBaggingRegressor};
 pub use calibrated_classifier::{CalibratedClassifierCV, CalibrationMethod};
 pub use extra_trees_classifier::{ExtraTreesClassifier, FittedExtraTreesClassifier};

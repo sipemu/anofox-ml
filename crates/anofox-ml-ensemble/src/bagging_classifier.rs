@@ -94,7 +94,7 @@ impl BaggingClassifier {
         self
     }
 
-    fn sampling(&self) -> BagSampling {
+    pub(crate) fn sampling(&self) -> BagSampling {
         BagSampling {
             n_estimators: self.n_estimators,
             max_samples: self.max_samples,

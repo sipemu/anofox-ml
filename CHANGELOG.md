@@ -720,6 +720,15 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - `KnnImputer` breaks exact distance ties by training-row order. sklearn
     leaves the order unspecified (`argpartition`), so tied cases can differ.
 
+- **Bagging with any base estimator (#50):** `BaggingRegressor::with_estimator(e)`
+  and `BaggingClassifier::with_estimator(e)` bag any `Fit` + `Predict`
+  estimator, like sklearn's `estimator=` parameter. They keep the sampling
+  options (rows, `max_features`, `bootstrap_features`, OOB score).
+  - Each estimator is fitted on its drawn rows and columns.
+    `fit_weighted` passes the drawn weights on to `FitWeighted` bases.
+  - The classifier votes; `predict_proba` is the vote fraction, as sklearn
+    does for bases without `predict_proba`.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

@@ -24,4 +24,6 @@ serde = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }
+anofox-ml-neighbors = { workspace = true }
+anofox-ml-regression = { workspace = true }
 proptest = { workspace = true }

@@ -103,6 +103,8 @@ name = "anofox-ml-ensemble"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-neighbors",
+ "anofox-ml-regression",
  "anofox-ml-trees",
  "approx",
  "ndarray",
