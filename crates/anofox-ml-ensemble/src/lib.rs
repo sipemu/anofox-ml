@@ -87,7 +87,7 @@ pub use hist_gradient_boosting::{
 };
 pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{
-    BoostingType, CategoricalSplitParams, FittedLgbmClassifier, FittedLgbmRegressor,
+    BinningMethod, BoostingType, CategoricalSplitParams, FittedLgbmClassifier, FittedLgbmRegressor,
     LgbmClassWeight, LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor,
 };
 pub use random_forest_classifier::{FittedRandomForestClassifier, RandomForestClassifier};

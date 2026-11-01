@@ -30,6 +30,54 @@ const MISSING_BIN: u8 = 255;
 // Binning
 // ============================================================
 
+/// How numeric features are binned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum BinningMethod {
+    /// LightGBM's greedy binning with `min_data_in_bin`.
+    #[default]
+    LightGbm,
+    /// sklearn's `_BinMapper`: midpoints between consecutive distinct values
+    /// when there are at most `max_bins` of them, otherwise the
+    /// `method="midpoint"` percentiles at `max_bins` equal steps (from a
+    /// subsample of 200 000 rows on larger data).
+    Sklearn,
+}
+
+/// sklearn's `_find_binning_thresholds` for one column (non-NaN values,
+/// sorted).
+fn sklearn_thresholds(sorted: &[f64], max_bins: usize) -> Vec<f64> {
+    let mut distinct = sorted.to_vec();
+    distinct.dedup();
+    if distinct.len() <= max_bins {
+        return distinct.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
+    }
+    // np.percentile(col, linspace(0, 100, max_bins + 1)[1:-1], method="midpoint")
+    let n = sorted.len();
+    (1..max_bins)
+        .map(|k| {
+            let q = k as f64 / max_bins as f64;
+            let idx = q * (n - 1) as f64;
+            let below = idx.floor();
+            let lo = sorted[below as usize];
+            let v = if idx == below {
+                lo
+            } else {
+                0.5 * (lo + sorted[(below as usize + 1).min(n - 1)])
+            };
+            v.min(f64::MAX)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn sklearn_thresholds_for_test(sorted: &[f64], max_bins: usize) -> Vec<f64> {
+    sklearn_thresholds(sorted, max_bins)
+}
+
+/// Rows used to place sklearn's bin thresholds: all of them up to 200 000,
+/// else a random subset of that size (sklearn's `subsample`).
+const SKLEARN_BIN_SUBSAMPLE: usize = 200_000;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct FeatureBins {
     /// Sorted bin edges. For non-NaN values.
@@ -49,8 +97,15 @@ fn compute_bins(
     max_bins: usize,
     categorical_features: &[usize],
     min_data_in_bin: usize,
+    method: BinningMethod,
+    seed: u64,
 ) -> (Array2<u8>, Vec<FeatureBins>) {
     let n = x.nrows();
+    let subsample: Option<Vec<usize>> =
+        (method == BinningMethod::Sklearn && n > SKLEARN_BIN_SUBSAMPLE).then(|| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            rand::seq::index::sample(&mut rng, n, SKLEARN_BIN_SUBSAMPLE).into_vec()
+        });
     let p = x.ncols();
     // Column-major: histograms read one feature at a time.
     let mut binned = Array2::zeros((n, p).f());
@@ -65,6 +120,16 @@ fn compute_bins(
 
         if is_categorical {
             edges = categorical_edges(x.column(j), max_bins, min_data_in_bin);
+        } else if method == BinningMethod::Sklearn {
+            let mut raw: Vec<f64> = match &subsample {
+                Some(rows) => rows.iter().map(|&i| x[[i, j]]).collect(),
+                None => x.column(j).to_vec(),
+            };
+            raw.retain(|v| !v.is_nan());
+            raw.sort_by(f64::total_cmp);
+            if !raw.is_empty() {
+                edges = sklearn_thresholds(&raw, max_bins);
+            }
         } else {
             // Greedy binning matching LightGBM: collect distinct values with
             // sample counts, then greedily fill bins so each has at least
@@ -1261,6 +1326,9 @@ pub struct LgbmRegressor {
     /// samples are merged with their neighbours, reducing the effective split
     /// resolution.  Matches LightGBM's `min_data_in_bin` (default: 3).
     pub min_data_in_bin: usize,
+    /// Numeric binning: LightGBM's (default) or sklearn's.
+    #[serde(default)]
+    pub binning: BinningMethod,
     pub boosting_type: BoostingType,
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
@@ -1294,6 +1362,7 @@ impl LgbmRegressor {
             colsample_bytree: 1.0,
             max_bins: DEFAULT_MAX_BINS,
             min_data_in_bin: 3,
+            binning: BinningMethod::LightGbm,
             boosting_type: BoostingType::Gbdt,
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
@@ -1359,6 +1428,11 @@ impl LgbmRegressor {
     }
     pub fn with_min_data_in_bin(mut self, n: usize) -> Self {
         self.min_data_in_bin = n;
+        self
+    }
+    /// Numeric binning method (LightGBM's by default).
+    pub fn with_binning(mut self, method: BinningMethod) -> Self {
+        self.binning = method;
         self
     }
     pub fn with_boosting_type(mut self, b: BoostingType) -> Self {
@@ -1728,6 +1802,8 @@ impl LgbmRegressor {
             self.max_bins,
             &self.categorical_features,
             self.min_data_in_bin,
+            self.binning,
+            self.seed,
         );
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
@@ -2012,6 +2088,9 @@ pub struct LgbmClassifier {
     pub colsample_bytree: f64,
     pub max_bins: usize,
     pub min_data_in_bin: usize,
+    /// Numeric binning: LightGBM's (default) or sklearn's.
+    #[serde(default)]
+    pub binning: BinningMethod,
     pub boosting_type: BoostingType,
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
@@ -2049,6 +2128,7 @@ impl LgbmClassifier {
             colsample_bytree: 1.0,
             max_bins: DEFAULT_MAX_BINS,
             min_data_in_bin: 3,
+            binning: BinningMethod::LightGbm,
             boosting_type: BoostingType::Gbdt,
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
@@ -2109,6 +2189,11 @@ impl LgbmClassifier {
     }
     pub fn with_min_data_in_bin(mut self, n: usize) -> Self {
         self.min_data_in_bin = n;
+        self
+    }
+    /// Numeric binning method (LightGBM's by default).
+    pub fn with_binning(mut self, method: BinningMethod) -> Self {
+        self.binning = method;
         self
     }
     pub fn with_boosting_type(mut self, b: BoostingType) -> Self {
@@ -2311,6 +2396,8 @@ impl LgbmClassifier {
             self.max_bins,
             &self.categorical_features,
             self.min_data_in_bin,
+            self.binning,
+            self.seed,
         );
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
@@ -4328,7 +4415,7 @@ mod early_stopping_regression_tests {
     #[test]
     fn eval_rows_use_training_bins() {
         let (x, _) = reg_data(200, 1, 0.0);
-        let (binned, bins) = compute_bins(&x, DEFAULT_MAX_BINS, &[], 3);
+        let (binned, bins) = compute_bins(&x, DEFAULT_MAX_BINS, &[], 3, BinningMethod::LightGbm, 0);
         // A subset (e.g. an eval split) has a different distribution; with
         // its own edges its bins would not match the training bins.
         let rows: Vec<usize> = (0..200).filter(|&i| x[[i, 0]] > 0.5).collect();
@@ -4337,7 +4424,7 @@ mod early_stopping_regression_tests {
         for (k, &i) in rows.iter().enumerate() {
             assert_eq!(eb.row(k), binned.row(i));
         }
-        let (own, _) = compute_bins(&sub, DEFAULT_MAX_BINS, &[], 3);
+        let (own, _) = compute_bins(&sub, DEFAULT_MAX_BINS, &[], 3, BinningMethod::LightGbm, 0);
         assert_ne!(own, eb, "sanity: own-edge binning differs");
     }
 

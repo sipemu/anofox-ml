@@ -6,6 +6,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Correctness parity with sklearn (round 2)
+
+- **HistGradientBoosting bins like sklearn.** The engine gets
+  `BinningMethod::{LightGbm, Sklearn}`, and the HGB facades use sklearn's
+  `_BinMapper` thresholds: midpoints between distinct values, or
+  percentile midpoints, with a 200 000-row subsample. Before, they used
+  LightGBM's greedy bins, so even a single split differed from sklearn.
+  - The regressor now matches sklearn to about 1e-7 (sklearn keeps
+    gradients in float32).
+  - The classifier matches up to exact-gain ties, which sklearn breaks by
+    float32 summation order.
+  - `LgbmRegressor` / `LgbmClassifier` keep LightGBM's binning.
+
 ### Algorithms — new
 
 - **HDBSCAN** (`anofox-ml-cluster`) with stability-based flat extraction that
