@@ -3,7 +3,7 @@ use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 
 /// Gradient boosting regressor parameters (unfitted state).
 ///
@@ -358,6 +358,10 @@ impl GradientBoostingRegressor {
             ..DecisionTreeRegressor::new()
         };
 
+        // Per-tree seeds for feature sampling, from a stream of their own so
+        // the subsample draws do not depend on `max_features`.
+        let mut tree_seeds =
+            StdRng::seed_from_u64(self.seed ^ crate::gradient_boosting_classifier::TREE_SEED_SALT);
         let mut trees = Vec::with_capacity(self.n_estimators);
         let n_train = train_rows.len();
         let subsample_size = ((self.subsample * n_train as f64).round() as usize).max(1);
@@ -411,14 +415,15 @@ impl GradientBoostingRegressor {
             } else {
                 train_rows.clone()
             };
+            let round_params;
+            let params = if self.max_features.is_some() {
+                round_params = tree_params.clone().with_seed(tree_seeds.gen());
+                &round_params
+            } else {
+                &tree_params
+            };
             let mut fitted_tree: FittedDecisionTreeRegressor<F> =
-                crate::forest_common::fit_tree_on_rows(
-                    &tree_params,
-                    x,
-                    &grad,
-                    &in_bag,
-                    sample_weight,
-                )?;
+                crate::forest_common::fit_tree_on_rows(params, x, &grad, &in_bag, sample_weight)?;
 
             // Terminal-region update (sklearn's line search) for the
             // non-squared losses: the leaf's loss-minimising constant of the

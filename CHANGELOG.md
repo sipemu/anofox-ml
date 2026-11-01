@@ -461,6 +461,11 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - GradientBoostingRegressor: `AbsoluteError`, `Huber` and `Quantile`
     losses with sklearn's terminal-region updates, early stopping
     (`n_iter_no_change`, `validation_fraction`, `tol`) and `max_features`.
+  - GradientBoostingClassifier gets the same early stopping (on a
+    stratified hold-out, scored by the binomial / multinomial log loss) and
+    `max_features`. In both estimators each round's tree now draws its
+    features with its own seed. Before, every round reused one seed, so all
+    trees drew the same feature sequence.
 
 - **LGBM parity, part 2 (#50):** checked against LightGBM 4.7.
   - The L1 objective starts from the (weighted) median and refits every

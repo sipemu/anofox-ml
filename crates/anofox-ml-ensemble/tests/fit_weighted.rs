@@ -345,3 +345,58 @@ fn gradient_boosting_early_stopping_stops() {
     let f = Fit::fit(&gb, &x, &yr).unwrap();
     assert!(f.n_estimators() < 500, "{}", f.n_estimators());
 }
+
+#[test]
+fn gradient_boosting_classifier_early_stopping_stops() {
+    use anofox_ml_ensemble::GradientBoostingClassifier;
+    let (x, _, yb, yc, w) = gb_data();
+    for y in [&yb, &yc] {
+        let gb = GradientBoostingClassifier {
+            n_estimators: 500,
+            learning_rate: 0.5,
+            ..Default::default()
+        }
+        .with_early_stopping(Some(3), 0.2, 1e-4);
+        let f = FitWeighted::fit_weighted(&gb, &x, y, Some(&w)).unwrap();
+        assert!(f.n_estimators() < 500, "{}", f.n_estimators());
+        // Deterministic per seed.
+        let g = FitWeighted::fit_weighted(&gb, &x, y, Some(&w)).unwrap();
+        assert_eq!(f.n_estimators(), g.n_estimators());
+        assert_eq!(f.predict_proba(&x).unwrap(), g.predict_proba(&x).unwrap());
+    }
+}
+
+#[test]
+fn gradient_boosting_max_features_draws_per_round() {
+    use anofox_ml_ensemble::{GradientBoostingClassifier, GradientBoostingRegressor};
+    use anofox_ml_trees::MaxFeatures;
+    let (x, yr, yb, _, _) = gb_data();
+    // With one feature per split, every round must draw its own features:
+    // a fixed per-tree seed would make all rounds' stumps split on the same
+    // feature.
+    let stump_features = |imp: Array1<f64>| imp.iter().filter(|&&v| v > 0.0).count();
+    let reg = GradientBoostingRegressor {
+        n_estimators: 30,
+        max_depth: Some(1),
+        ..Default::default()
+    }
+    .with_max_features(Some(MaxFeatures::Fixed(1)));
+    let fr = Fit::fit(&reg, &x, &yr).unwrap();
+    assert!(stump_features(fr.feature_importances()) >= 2);
+    let clf = GradientBoostingClassifier {
+        n_estimators: 30,
+        max_depth: Some(1),
+        ..Default::default()
+    }
+    .with_max_features(Some(MaxFeatures::Fixed(1)));
+    let fc = Fit::fit(&clf, &x, &yb).unwrap();
+    assert!(stump_features(fc.feature_importances()) >= 2);
+    let acc = fc
+        .predict(&x)
+        .unwrap()
+        .iter()
+        .zip(&yb)
+        .filter(|(p, t)| p == t)
+        .count();
+    assert!(acc >= 24, "{acc}/30");
+}
