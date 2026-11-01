@@ -680,6 +680,7 @@ registry! {
         fitted: pre::FittedFastIca,
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
+        inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
     }
     Nmf {
         config: pre::Nmf = pre::Nmf::new(2),

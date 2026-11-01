@@ -1683,16 +1683,49 @@ class TruncatedSVD(TransformerMixin, BaseEstimator):
 class FastICA(TransformerMixin, BaseEstimator):
     _kind = "FastIca"
 
-    def __init__(self, n_components=None, max_iter=200, tol=1e-4, random_state=None):
+    def __init__(self, n_components=None, *, algorithm="parallel", whiten="unit-variance",
+                 fun="logcosh", fun_args=None, max_iter=200, tol=1e-4, w_init=None,
+                 whiten_solver="svd", random_state=None):
         self.n_components = n_components
+        self.algorithm = algorithm
+        self.whiten = whiten
+        self.fun = fun
+        self.fun_args = fun_args
         self.max_iter = max_iter
         self.tol = tol
+        self.w_init = w_init
+        self.whiten_solver = whiten_solver
         self.random_state = random_state
 
     def _rust_params(self, X, y):
-        n = X.shape[1] if self.n_components is None else int(self.n_components)
-        return {"n_components": n, "max_iter": self.max_iter, "tol": self.tol,
+        fun = _choice(self.fun, {"logcosh": "Logcosh", "exp": "Exp", "cube": "Cube"}, "fun")
+        if fun == "Logcosh":
+            fun = {"Logcosh": {"alpha": float((self.fun_args or {}).get("alpha", 1.0))}}
+        whiten = {"unit-variance": "UnitVariance", "arbitrary-variance": "ArbitraryVariance",
+                  False: "None"}
+        w_init = None if self.w_init is None else np.asarray(self.w_init, dtype=float)
+        return {"n_components": None if self.n_components is None else int(self.n_components),
+                "algorithm": _choice(self.algorithm, {"parallel": "Parallel",
+                                                      "deflation": "Deflation"}, "algorithm"),
+                "whiten": _choice(self.whiten, whiten, "whiten"), "fun": fun,
+                "max_iter": self.max_iter, "tol": self.tol,
+                "w_init": None if w_init is None else {"v": 1, "dim": list(w_init.shape),
+                                                       "data": w_init.ravel().tolist()},
+                "whiten_solver": _choice(self.whiten_solver, {"svd": "Svd", "eigh": "Eigh"},
+                                         "whiten_solver"),
                 "seed": _seed(self.random_state)}
+
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+    @property
+    def mixing_(self):
+        return _nd(self._fitted_state()["mixing"])
+
+    @property
+    def mean_(self):
+        return _nd(self._fitted_state()["mean"])
 
 
 class NMF(TransformerMixin, BaseEstimator):

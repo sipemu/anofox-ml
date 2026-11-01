@@ -28,6 +28,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   - The default fit matches sklearn to 1e-13.
   - Python `NMF` gains `init`, `components_` and `reconstruction_err_`.
   - **Breaking:** the default init changes from `Nndsvd` to `Auto`.
+- **FastICA is a port of sklearn's `_fastica`.**
+  - Default `Parallel` algorithm with symmetric decorrelation, plus
+    `Deflation`.
+  - `logcosh(alpha)` / `exp` / `cube` contrasts.
+  - `whiten` = unit-variance (default) / arbitrary-variance / none, and
+    `svd` / `eigh` whitening solvers.
+  - sklearn's `u *= sign(u[0])` eigenvector signs, `w_init` (default
+    `N(0,1)`), `mixing_` and `inverse_transform`.
+  - Given the same `w_init`, every variant matches sklearn to 1e-8.
+  - Before, it ran deflation from a uniform start and scaled sources with
+    ddof = 1.
+  - **Breaking:** `n_components` is an `Option`, and the fitted fields are
+    now `components`, `mixing`, `mean`, `whitening`, `n_iter`.
 
 ### Algorithms — new
 
