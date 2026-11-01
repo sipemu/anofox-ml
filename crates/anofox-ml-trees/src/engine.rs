@@ -210,17 +210,25 @@ impl<F: Float> Grower<'_, F> {
             && impurity >= F::from_f64(1e-15).unwrap()
             && node_weight >= min_weight_leaf + min_weight_leaf
         {
+            // Features are visited in a random order per node, as sklearn's
+            // splitter does, so splits of equal improvement go to a random
+            // feature rather than always the lowest index (which made forest
+            // trees needlessly alike).
+            let mut order_rng = crate::split::SplitMixRng::new(seed ^ FEATURE_ORDER_SALT);
             let found = match p.max_features_k {
                 Some(k) if k < p.n_features => {
-                    let subset = select_feature_subset(p.n_features, k, seed);
+                    let mut subset = select_feature_subset(p.n_features, k, seed);
+                    shuffle(&mut subset, &mut order_rng);
                     self.best_split(start, end, &indices, impurity, &subset)
                         .or_else(|| {
-                            let rest = complement_features(p.n_features, &subset);
+                            let mut rest = complement_features(p.n_features, &subset);
+                            shuffle(&mut rest, &mut order_rng);
                             self.best_split(start, end, &indices, impurity, &rest)
                         })
                 }
                 _ => {
-                    let all: Vec<usize> = (0..p.n_features).collect();
+                    let mut all: Vec<usize> = (0..p.n_features).collect();
+                    shuffle(&mut all, &mut order_rng);
                     self.best_split(start, end, &indices, impurity, &all)
                 }
             };
@@ -621,5 +629,17 @@ impl<F: Float> SplitAccumulator<F> for EncodedClassAccumulator<'_, F> {
 
     fn n_right(&self) -> usize {
         self.n_right
+    }
+}
+
+/// Salt of the per-node feature-order stream (independent of the feature
+/// subset drawn from the same node seed).
+const FEATURE_ORDER_SALT: u64 = 0x5DEE_CE66_D1A4_F00D;
+
+/// Fisher–Yates shuffle.
+fn shuffle(v: &mut [usize], rng: &mut crate::split::SplitMixRng) {
+    for i in (1..v.len()).rev() {
+        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+        v.swap(i, j);
     }
 }

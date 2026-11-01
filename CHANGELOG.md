@@ -79,6 +79,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   - Scores agree with sklearn within seed noise.
   - Python gets `max_samples='auto'` / float and `contamination='auto'`.
   - **Breaking:** the default contamination changed.
+- **Trees visit features in a random order at every node,** as sklearn's
+  splitter does. Splits of equal improvement now go to a random feature
+  instead of always the lowest index.
+  - The fixed order made forest trees needlessly alike. RandomForest's
+    held-out R² on diabetes trailed sklearn by 0.017 (3.6 SE); it now
+    agrees within noise.
+  - Gradient-boosting rounds each get their own tree seed.
+  - Results without ties are unchanged; tie-breaks differ from before.
 
 ### Algorithms — new
 
