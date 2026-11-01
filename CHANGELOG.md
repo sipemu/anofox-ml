@@ -241,6 +241,35 @@ Each item below is checked against hardcoded scikit-learn 1.8 reference values.
   - SGD momentum/Nesterov with learning-rate schedules.
   - Early stopping, `partial_fit` / warm start and multi-output regression.
 
+### Cross-validation designs (#74–#79)
+
+New `anofox_ml_core::splitters` and `anofox_ml_core::validation` modules.
+Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
+
+- **Group splitters (#74):**
+  - `group_k_fold` now balances folds like sklearn (largest group to the
+    lightest fold). **Breaking:** fold assignment changed.
+  - New `group_k_fold_shuffled`, `stratified_group_k_fold`,
+    `leave_one_group_out`, `leave_p_groups_out` and `group_shuffle_split`.
+  - Unshuffled splits match sklearn 1.8.
+- **Purged CV (#75):** `purged_k_fold` and `combinatorial_purged_cv` (López de
+  Prado) for labels spanning a time interval, with purging and embargo. CPCV
+  also returns the backtest paths.
+- **Spatial CV (#76):** `spatial_block_k_fold` (grid blocks), `spatial_buffer`
+  for any splits, and `buffered_leave_one_out`, with Euclidean or haversine
+  distance.
+- **`permutation_test_score` (#77):** p-value of a CV score against label
+  permutations, optionally within groups.
+- **Bootstrap validation (#78):** `bootstrap_splits` (+ stratified) and
+  `bootstrap_validate`, which returns the apparent, out-of-bag, .632, .632+
+  and optimism-corrected errors.
+- **From the sister crates (#79):**
+  - `time_series_split_with(TimeSeriesSplitOptions { test_size, gap,
+    max_train_size, min_train_size })`, matching sklearn.
+  - `group_time_series_split` and `quantile_strata` /
+    `stratified_k_fold_continuous` for continuous targets.
+  - `nested_cross_validate`.
+
 ### Algorithms — performance
 
 - **Agglomerative Ward** now uses Müllner's O(n²) nn-chain algorithm by
