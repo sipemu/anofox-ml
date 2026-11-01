@@ -18,6 +18,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   - The classifier matches up to exact-gain ties, which sklearn breaks by
     float32 summation order.
   - `LgbmRegressor` / `LgbmClassifier` keep LightGBM's binning.
+- **NMF initialisation follows sklearn.**
+  - The default is sklearn's `init=None`: `nndsvda`, or `random` when
+    `n_components > min(n_samples, n_features)` (which is now allowed with
+    a random init). New `NndsvdA` and `NndsvdAr`.
+  - The first NNDSVD component uses `|U₀|`, `|V₀|`. Before, a negatively
+    signed leading singular vector would have zeroed it.
+  - Random init draws `|N(0,1)|·sqrt(mean(X)/k)`, sklearn's distribution.
+  - The default fit matches sklearn to 1e-13.
+  - Python `NMF` gains `init`, `components_` and `reconstruction_err_`.
+  - **Breaking:** the default init changes from `Nndsvd` to `Auto`.
 
 ### Algorithms — new
 

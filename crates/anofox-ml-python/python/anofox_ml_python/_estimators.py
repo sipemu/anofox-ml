@@ -1698,9 +1698,19 @@ class FastICA(TransformerMixin, BaseEstimator):
 class NMF(TransformerMixin, BaseEstimator):
     _kind = "Nmf"
 
-    def __init__(self, n_components=None, solver="cd", beta_loss="frobenius", tol=1e-4,
-                 max_iter=200, random_state=None, alpha_W=0.0, alpha_H="same", l1_ratio=0.0):
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+    @property
+    def reconstruction_err_(self):
+        return self._fitted_state()["reconstruction_err"]
+
+    def __init__(self, n_components=None, init=None, solver="cd", beta_loss="frobenius",
+                 tol=1e-4, max_iter=200, random_state=None, alpha_W=0.0, alpha_H="same",
+                 l1_ratio=0.0):
         self.n_components = n_components
+        self.init = init
         self.solver = solver
         self.beta_loss = beta_loss
         self.tol = tol
@@ -1718,6 +1728,9 @@ class NMF(TransformerMixin, BaseEstimator):
                                                       "kullback-leibler": "KullbackLeibler",
                                                       "itakura-saito": "ItakuraSaito"},
                                      "beta_loss"),
+                "init": _choice(self.init, {None: "Auto", "random": "Random",
+                                            "nndsvd": "Nndsvd", "nndsvda": "NndsvdA",
+                                            "nndsvdar": "NndsvdAr"}, "init"),
                 "tol": self.tol, "max_iter": self.max_iter, "seed": _seed(self.random_state),
                 "alpha_w": float(self.alpha_W),
                 "alpha_h": None if self.alpha_H == "same" else float(self.alpha_H),
