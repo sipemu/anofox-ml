@@ -35,6 +35,11 @@ impl DistanceMetric {
         }
     }
 
+    /// Whether this is the Euclidean metric (also as `Minkowski(2)`).
+    pub fn canonical_is_euclidean(self) -> bool {
+        self.canonical() == DistanceMetric::Euclidean
+    }
+
     /// Reject parameters that do not define a metric.
     pub(crate) fn validate(self) -> anofox_ml_core::Result<()> {
         if let DistanceMetric::Minkowski(p) = self {

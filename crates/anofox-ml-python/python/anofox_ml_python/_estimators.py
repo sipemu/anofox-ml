@@ -1961,8 +1961,10 @@ class MDS(_Embedding):
 
     _kind = "ClassicalMds"
 
-    def __init__(self, n_components=2):
+    def __init__(self, n_components=2, *, metric="euclidean"):
         self.n_components = n_components
+        self.metric = metric
 
     def _rust_params(self, X, y):
-        return {"n_components": self.n_components}
+        return {"n_components": self.n_components,
+                "metric": _choice(self.metric, _METRIC, "metric")}

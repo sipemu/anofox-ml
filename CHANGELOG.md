@@ -599,6 +599,13 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - Children, distances and labels match sklearn exactly for all four
     linkages.
 
+- **ClassicalMds (#61)** follows sklearn 1.8's `ClassicalMDS`. It gains a
+  `metric`, including `Precomputed` dissimilarity matrices, its main use.
+  It uses sklearn's sign convention. With Euclidean features it solves the
+  `d × d` covariance eigenproblem (O(n·d²)) instead of an n×n one (O(n³)).
+  It matches sklearn for Euclidean, Manhattan and precomputed input; Python
+  adds `metric` and a `ClassicalMDS` alias.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

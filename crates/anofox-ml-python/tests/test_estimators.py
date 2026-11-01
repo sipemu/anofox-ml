@@ -245,3 +245,12 @@ def test_agglomerative_matches_sklearn():
     ours = am.AgglomerativeClustering(None, linkage="average", distance_threshold=2.0).fit(X)
     ref = skc.AgglomerativeClustering(None, linkage="average", distance_threshold=2.0).fit(X)
     assert list(ours.labels_) == list(ref.labels_)
+
+
+def test_classical_mds_matches_sklearn():
+    from sklearn.manifold import ClassicalMDS
+
+    for metric in ["euclidean", "manhattan"]:
+        ours = am.ClassicalMDS(3, metric=metric).fit_transform(X)
+        ref = ClassicalMDS(n_components=3, metric=metric).fit_transform(X)
+        np.testing.assert_allclose(ours, ref, atol=1e-9)
