@@ -691,6 +691,23 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   at the RMS quantiles or explicit knots, `norm` options, rms-style
   column names. sklearn has no counterpart.
 
+- **IterativeImputer (#56):** a port of sklearn's `IterativeImputer`.
+  - Chained per-feature regressions; BayesianRidge by default, or any
+    `ImputationEstimator` (`AnyRegressor` adapts a `Fit` + `Predict`
+    regressor).
+  - sklearn's early stopping, imputation orders, `skip_complete`, bounds,
+    `n_nearest_features`, `add_indicator` and `keep_empty_features`.
+  - `sample_posterior` draws from the truncated predictive normal.
+  - `transform` replays the fitted sequence.
+  - With `sample_posterior = false` it matches sklearn 1.8 (BayesianRidge
+    to 1e-8, LinearRegression to 1e-9). Random draws use this crate's
+    generator, so they differ from sklearn's. BayesianRidge's
+    `predict_std` still has the centring deviation recorded in #72.
+  - anofox-ml-preprocessing now depends on anofox-ml-regression.
+- **AregImputer (#56):** multiple imputation through
+  `anofox_regression::imputation::areg_impute` (`Hmisc::aregImpute`). It
+  returns `n_impute` completed data sets to pool with Rubin's rules.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

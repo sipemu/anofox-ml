@@ -29,10 +29,12 @@
 //! assert!(col0_mean.abs() < 1e-10);
 //! ```
 
+pub mod areg_imputer;
 pub mod binarizer;
 pub mod cca;
 pub mod fast_ica;
 pub mod incremental_pca;
+pub mod iterative_imputer;
 pub mod kbins_discretizer;
 pub mod kernel_pca;
 pub mod knn_imputer;
@@ -63,10 +65,15 @@ pub mod target_encoder;
 pub mod truncated_svd;
 pub mod variance_threshold;
 
+pub use areg_imputer::{AregImputer, AregMatch, AregVariable, MultipleImputation};
 pub use binarizer::{Binarizer, FittedBinarizer};
 pub use cca::{Cca, FittedCca};
 pub use fast_ica::{FastIca, FittedFastIca};
 pub use incremental_pca::{FittedIncrementalPca, IncrementalPca};
+pub use iterative_imputer::{
+    AnyModel, AnyRegressor, FittedIterativeImputer, ImputationEstimator, ImputationModel,
+    ImputationOrder, ImputationStep, IterativeImputer,
+};
 pub use kbins_discretizer::{
     BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
 };

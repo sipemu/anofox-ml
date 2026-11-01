@@ -221,6 +221,7 @@ name = "anofox-ml-preprocessing"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-regression",
  "anofox-regression",
  "approx",
  "faer",
