@@ -81,8 +81,8 @@ pub use splitters::{
 };
 pub use traits::{
     ClassifierScore, DecisionFunction, Fit, FitUnsupervised, FitUnsupervisedWeighted, FitWeighted,
-    InverseTransform, PartialFit, Predict, PredictLogProba, PredictProba, RegressorScore,
-    Transform,
+    InverseTransform, PartialFit, PartialFitUnsupervised, Predict, PredictLogProba, PredictProba,
+    RegressorScore, Transform,
 };
 pub use utils::{
     cross_val_predict, cross_val_predict_with_splits, cross_val_score, cross_val_score_stratified,

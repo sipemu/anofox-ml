@@ -638,6 +638,18 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     ties, but the partition is the same.
   - **Breaking:** the `seed` field is gone.
 
+- **Incremental preprocessing (#56):** new core trait
+  `PartialFitUnsupervised` (`partial_fit(state, X)`, plus
+  `partial_fit_weighted`).
+  - `StandardScaler` merges batches with sklearn's
+    `_incremental_mean_and_var`, per feature and ignoring NaN. It takes
+    `sample_weight` through `FitUnsupervisedWeighted` and
+    `partial_fit_weighted`, and exposes `var()` and `n_samples_seen()`.
+  - `MinMaxScaler` and `MaxAbsScaler` implement `partial_fit`.
+  - New `IncrementalPca`, a port of sklearn's `IncrementalPCA`: batch SVD
+    with mean correction; `fit` runs in batches of `batch_size` rows.
+  - Scalers and IncrementalPCA match sklearn 1.8 to 1e-10.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
