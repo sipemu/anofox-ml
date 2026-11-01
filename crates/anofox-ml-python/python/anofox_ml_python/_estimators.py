@@ -1770,14 +1770,24 @@ class AgglomerativeClustering(ClusterMixin, BaseEstimator):
 class SpectralClustering(ClusterMixin, BaseEstimator):
     _kind = "SpectralClustering"
 
-    def __init__(self, n_clusters=8, gamma=1.0, random_state=None):
+    def __init__(self, n_clusters=8, *, n_init=10, gamma=1.0, affinity="rbf",
+                 n_neighbors=10, random_state=None):
         self.n_clusters = n_clusters
+        self.n_init = n_init
         self.gamma = gamma
+        self.affinity = affinity
+        self.n_neighbors = n_neighbors
         self.random_state = random_state
 
     def _rust_params(self, X, y):
-        return {"n_clusters": self.n_clusters, "affinity": {"Rbf": float(self.gamma)},
-                "seed": _seed(self.random_state)}
+        if self.affinity == "rbf":
+            affinity = {"Rbf": float(self.gamma)}
+        elif self.affinity == "nearest_neighbors":
+            affinity = {"KNearest": int(self.n_neighbors)}
+        else:
+            raise ValueError(f"unsupported affinity {self.affinity!r}")
+        return {"n_clusters": self.n_clusters, "affinity": affinity,
+                "n_init": int(self.n_init), "seed": _seed(self.random_state)}
 
 
 class AffinityPropagation(ClusterMixin, BaseEstimator):

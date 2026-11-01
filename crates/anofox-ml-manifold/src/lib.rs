@@ -14,10 +14,13 @@
 
 pub mod isomap;
 pub mod lle;
+pub mod sparse_eigen;
+pub mod spectral_embedding;
 pub mod tsne;
 
 pub use isomap::{FittedIsomap, Isomap};
 pub use lle::{FittedLocallyLinearEmbedding, LocallyLinearEmbedding};
+pub use spectral_embedding::spectral_embedding;
 pub use tsne::{FittedTSne, TSne, TSneInit, TSneMethod};
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};

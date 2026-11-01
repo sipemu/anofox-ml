@@ -568,6 +568,24 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     rate, 1000 iterations). Perplexity must be below `n_samples`; it was
     silently clamped before.
 
+- **LLE and spectral clustering (#61):**
+  - New `sparse_eigen::smallest_eigenpairs` (manifold crate). It uses a
+    dense eigendecomposition up to n = 500, and above that shift-invert
+    Lanczos (faer's thick-restart Lanczos on `(M + εI)⁻¹` through a sparse
+    Cholesky factorisation, like sklearn's ARPACK with `sigma`).
+  - LLE regularises with sklearn's `reg · trace(G)`; it was
+    `reg · trace / k`, k times weaker. It builds the sparse
+    `(I − W)ᵀ(I − W)` in O(n·k²) instead of a dense O(n³) product, uses the
+    new eigensolver, and reports `reconstruction_error`. Embeddings match
+    sklearn for n = 100 and n = 800.
+  - New `spectral_embedding` (sklearn's `manifold.spectral_embedding`).
+  - SpectralClustering now follows sklearn. The k-NN affinity is
+    `0.5·(C + Cᵀ)` with self loops, replacing an OR of the two directions.
+    The embedding is divided by √degree, with sklearn's deterministic sign
+    flip, instead of being row-normalised. k-means gets `n_init` restarts
+    (default 10). Large k-NN graphs use the sparse eigensolver. Python
+    gains `affinity="nearest_neighbors"`, `n_neighbors` and `n_init`.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
