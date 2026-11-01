@@ -115,6 +115,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   - With `shuffle=False` it matches sklearn to 1e-12 for PA-I and PA-II.
   - **Breaking:** `coef` is an `Array2`, `intercept` an `Array1`, `classes`
     a `Vec`.
+- **Python: classical MDS is exported only as `ClassicalMDS`.** The `MDS`
+  alias pointed to classical (Torgerson) MDS, but sklearn's `MDS` is the
+  iterative SMACOF algorithm, so the name promised a different method.
+  **Breaking:** use `ClassicalMDS`.
 
 ### Algorithms — new
 

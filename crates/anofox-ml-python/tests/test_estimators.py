@@ -92,7 +92,7 @@ def test_fit_predict_pickle_clone(name):
         out = est.fit_predict(Xd)
         assert set(np.unique(out)) <= {-1, 1}
     elif hasattr(est, "embedding_") or name in ("TSNE", "Isomap", "LocallyLinearEmbedding",
-                                                 "MDS"):
+                                                 "ClassicalMDS"):
         out = est.fit_transform(Xd)
         assert out.shape == (len(Xd), 2)
         return

@@ -2192,8 +2192,10 @@ class LocallyLinearEmbedding(_Embedding):
                 "reg": self.reg}
 
 
-class MDS(_Embedding):
-    """Classical (metric, Torgerson) multidimensional scaling."""
+class ClassicalMDS(_Embedding):
+    """Classical (Torgerson) multidimensional scaling, sklearn's
+    ``ClassicalMDS``. (sklearn's ``MDS`` is the iterative SMACOF algorithm,
+    which this package does not provide.)"""
 
     _kind = "ClassicalMds"
 
