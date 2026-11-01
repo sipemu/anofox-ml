@@ -542,6 +542,32 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     sparse graph (sklearn's `path_method="D"`) instead of O(n³)
     Floyd–Warshall, and its embedding matches sklearn.
 
+- **t-SNE (#61)** follows sklearn's `TSNE`:
+  - The optimiser uses per-coordinate gains (+0.2 / ×0.8, minimum 0.01).
+    It runs 250 exploration iterations with momentum 0.5 and exaggerated P,
+    then momentum 0.8. KL is checked every 50 iterations, with
+    `n_iter_without_progress` and `min_grad_norm` stopping. Before, there
+    were no gains, exaggeration lasted `n_iter / 4` iterations, and the
+    momentum switch was fixed at 250.
+  - `learning_rate: Option<f64>` (`None` = `"auto"`), `max_iter`
+    (default 1000; `n_iter` still deserialises), and `init`: `TSneInit::Pca`
+    by default, or `Random` / `Array`.
+  - Perplexities are searched over single-precision squared distances, as
+    sklearn does.
+  - Barnes–Hut is the default. It uses a sparse P from the
+    `⌊3·perplexity + 1⌋` nearest neighbours (no more dense n×n P or
+    distance matrix) and a port of sklearn's space-partitioning tree, so
+    it works for 1–3 output dimensions instead of silently falling back to
+    exact. It runs in parallel.
+  - The affinities, the first objective and the first optimiser steps
+    match sklearn to rounding; full runs match its iteration counts and
+    mean KL. On 3,000 points Barnes–Hut takes 2.8 s (sklearn: 4.2 s) and
+    reaches the same KL.
+  - **Breaking:** `learning_rate` is an `Option`, `n_iter` is `max_iter`,
+    and the defaults change (Barnes–Hut, PCA init, automatic learning
+    rate, 1000 iterations). Perplexity must be below `n_samples`; it was
+    silently clamped before.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

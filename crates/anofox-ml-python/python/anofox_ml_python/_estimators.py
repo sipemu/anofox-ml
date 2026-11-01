@@ -1884,25 +1884,37 @@ class _Embedding(BaseEstimator):
 class TSNE(_Embedding):
     _kind = "TSne"
 
-    def __init__(self, n_components=2, perplexity=30.0, early_exaggeration=12.0,
-                 learning_rate=200.0, max_iter=500, method="exact", angle=0.5,
+    def __init__(self, n_components=2, *, perplexity=30.0, early_exaggeration=12.0,
+                 learning_rate="auto", max_iter=1000, n_iter_without_progress=300,
+                 min_grad_norm=1e-7, init="pca", method="barnes_hut", angle=0.5,
                  random_state=None):
         self.n_components = n_components
         self.perplexity = perplexity
         self.early_exaggeration = early_exaggeration
         self.learning_rate = learning_rate
         self.max_iter = max_iter
+        self.n_iter_without_progress = n_iter_without_progress
+        self.min_grad_norm = min_grad_norm
+        self.init = init
         self.method = method
         self.angle = angle
         self.random_state = random_state
 
     def _rust_params(self, X, y):
-        return {"n_components": self.n_components, "perplexity": self.perplexity,
-                "early_exaggeration": self.early_exaggeration,
-                "learning_rate": float(self.learning_rate), "n_iter": self.max_iter,
+        if isinstance(self.init, str):
+            init = _choice(self.init, {"pca": "Pca", "random": "Random"}, "init")
+        else:
+            arr = np.ascontiguousarray(self.init, dtype=np.float64)
+            init = {"Array": {"v": 1, "dim": list(arr.shape), "data": arr.ravel().tolist()}}
+        lr = None if self.learning_rate == "auto" else float(self.learning_rate)
+        return {"n_components": self.n_components, "perplexity": float(self.perplexity),
+                "early_exaggeration": float(self.early_exaggeration),
+                "learning_rate": lr, "max_iter": int(self.max_iter),
+                "n_iter_without_progress": int(self.n_iter_without_progress),
+                "min_grad_norm": float(self.min_grad_norm), "init": init,
                 "method": _choice(self.method, {"exact": "Exact", "barnes_hut": "BarnesHut"},
                                   "method"),
-                "theta": self.angle, "seed": _seed(self.random_state)}
+                "theta": float(self.angle), "seed": _seed(self.random_state)}
 
 
 class Isomap(_Embedding):

@@ -18,7 +18,7 @@ pub mod tsne;
 
 pub use isomap::{FittedIsomap, Isomap};
 pub use lle::{FittedLocallyLinearEmbedding, LocallyLinearEmbedding};
-pub use tsne::{FittedTSne, TSne, TSneMethod};
+pub use tsne::{FittedTSne, TSne, TSneInit, TSneMethod};
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use faer::linalg::solvers::SelfAdjointEigen;

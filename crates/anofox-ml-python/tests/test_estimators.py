@@ -226,3 +226,10 @@ def test_neighbors_match_sklearn():
     ours = am.RadiusNeighborsRegressor(radius=1.5).fit(X, y_reg)
     ref = skn.RadiusNeighborsRegressor(radius=1.5).fit(X, y_reg)
     np.testing.assert_allclose(ours.predict(Xq), ref.predict(Xq), atol=1e-12)
+
+
+def test_tsne_array_init_and_defaults():
+    init = np.linspace(-1e-4, 1e-4, 160).reshape(80, 2)
+    emb = am.TSNE(perplexity=10.0, init=init, method="exact", max_iter=300).fit_transform(X)
+    assert emb.shape == (80, 2) and np.isfinite(emb).all()
+    assert am.TSNE().get_params()["learning_rate"] == "auto"
