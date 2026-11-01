@@ -4,24 +4,12 @@
 //! the IEEE total order for sorting — no epsilon matching. One pass sorts the
 //! distinct labels, a binary search encodes each sample in `O(log C)`.
 
-use std::cmp::Ordering;
-
 use anofox_ml_core::{Float, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 /// Canonical representation of a label: maps `-0.0` to `+0.0`.
-#[inline]
-pub(crate) fn canon<F: Float>(v: F) -> F {
-    v + F::zero()
-}
+pub(crate) use anofox_ml_core::labels::canonical_label as canon;
 
-#[inline]
-pub(crate) fn label_cmp<F: Float>(a: &F, b: &F) -> Ordering {
-    // f32 -> f64 is exact and order-preserving.
-    a.to_f64().unwrap().total_cmp(&b.to_f64().unwrap())
-}
-
-/// Reject NaN labels (sklearn raises on them, and they cannot be matched).
 pub(crate) fn check_labels_finite<F: Float>(arr: &Array1<F>, name: &str) -> Result<()> {
     if arr.iter().any(|v| v.is_nan()) {
         return Err(RustMlError::InvalidParameter(format!(
@@ -34,23 +22,13 @@ pub(crate) fn check_labels_finite<F: Float>(arr: &Array1<F>, name: &str) -> Resu
 
 /// Sorted distinct labels of all `values`, canonicalised.
 pub(crate) fn sorted_unique<F: Float>(values: impl Iterator<Item = F>) -> Result<Vec<F>> {
-    let mut vals: Vec<F> = Vec::new();
-    for v in values {
-        if v.is_nan() {
-            return Err(RustMlError::InvalidParameter("labels contain NaN".into()));
-        }
-        vals.push(canon(v));
-    }
-    vals.sort_by(label_cmp);
-    vals.dedup_by(|a, b| label_cmp(a, b) == Ordering::Equal);
-    Ok(vals)
+    anofox_ml_core::labels::sorted_unique_labels(values)
 }
 
 /// Position of `v` in the sorted label list, if present.
 #[inline]
 pub(crate) fn encode<F: Float>(classes: &[F], v: F) -> Option<usize> {
-    let v = canon(v);
-    classes.binary_search_by(|c| label_cmp(c, &v)).ok()
+    anofox_ml_core::labels::label_index(classes, v)
 }
 
 /// Validate an optional `sample_weight` vector (length + finiteness).

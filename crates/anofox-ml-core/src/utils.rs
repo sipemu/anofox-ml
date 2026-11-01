@@ -54,12 +54,7 @@ pub fn train_test_split<F: Float>(
 
 /// Select rows from a 2D array by indices.
 fn select_rows<F: Float>(x: &Array2<F>, indices: &[usize]) -> Array2<F> {
-    let ncols = x.ncols();
-    let mut result = Array2::<F>::zeros((indices.len(), ncols));
-    for (i, &idx) in indices.iter().enumerate() {
-        result.row_mut(i).assign(&x.row(idx));
-    }
-    result
+    x.select(ndarray::Axis(0), indices)
 }
 
 /// Select elements from a 1D array by indices.
@@ -442,6 +437,65 @@ pub fn cross_val_score_with_splits<F: Float>(
         .iter()
         .map(|(train, test)| evaluate_fold(x, y, train, test, &fit_predict, &scorer))
         .collect()
+}
+
+/// Parallel [`cross_val_score_with_splits`]: folds are evaluated with rayon
+/// (the closures must be `Sync`). Results are in split order and identical
+/// to the sequential version.
+pub fn cross_val_score_with_splits_par<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>> + Sync,
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F> + Sync,
+) -> Result<Vec<F>> {
+    use rayon::prelude::*;
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
+    splits
+        .par_iter()
+        .map(|(train, test)| evaluate_fold(x, y, train, test, &fit_predict, &scorer))
+        .collect()
+}
+
+/// Parallel [`grid_search_cv_with_splits`]: every (configuration, fold)
+/// pair is evaluated with rayon (the closures must be `Sync`). Results are
+/// identical to the sequential version.
+pub fn grid_search_cv_with_splits_par<F: Float, P>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    param_configs: &[P],
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F> + Sync,
+) -> Result<GridSearchResult<F>>
+where
+    P: Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>> + Sync,
+{
+    use rayon::prelude::*;
+    if param_configs.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "param_configs must not be empty".into(),
+        ));
+    }
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
+    let k = splits.len();
+    let flat: Vec<F> = (0..param_configs.len() * k)
+        .into_par_iter()
+        .map(|t| {
+            let (train, test) = &splits[t % k];
+            evaluate_fold(x, y, train, test, &param_configs[t / k], &scorer)
+        })
+        .collect::<Result<Vec<F>>>()?;
+    let cv_scores: Vec<Vec<F>> = flat.chunks(k).map(|c| c.to_vec()).collect();
+    let mean_scores: Vec<F> = cv_scores.iter().map(|s| mean_of(s)).collect();
+    let (best_params_index, best_score) = argmax(&mean_scores);
+    Ok(GridSearchResult {
+        best_score,
+        best_params_index,
+        cv_scores,
+        mean_scores,
+    })
 }
 
 /// Stratified k-fold cross-validation score.
@@ -1184,6 +1238,85 @@ pub fn cross_validate_with_splits<F: Float>(
         fit_times,
         score_times,
     })
+}
+
+/// Scorer that also receives the test fold's sample weights:
+/// `(y_true, y_pred, sample_weight) -> score`.
+pub type WeightedScorerFn<'a, F> =
+    dyn Fn(&Array1<F>, &Array1<F>, Option<&Array1<F>>) -> Result<F> + 'a;
+
+/// [`cross_validate_with_splits`] with per-sample weights, as sklearn's
+/// `cross_validate(..., params={"sample_weight": w})` with weighted
+/// scoring: `fit_predict(X_train, y_train, w_train, X_test)` receives the
+/// training fold's weights and every scorer the test fold's weights.
+/// `sample_weight = None` passes `None` to both. Combine with the group
+/// splitters (e.g. [`group_k_fold`](crate::group_k_fold)) for grouped CV.
+pub fn cross_validate_weighted_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, Option<&Array1<F>>, &Array2<F>) -> Result<Array1<F>>,
+    scorers: &[&WeightedScorerFn<'_, F>],
+) -> Result<CrossValidateResult<F>> {
+    if scorers.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "need at least one scorer".into(),
+        ));
+    }
+    check_xy(x, y)?;
+    if let Some(w) = sample_weight {
+        crate::class_weight::check_sample_weight(w, y.len())?;
+    }
+    validate_splits(splits, x.nrows(), false)?;
+    let n_metrics = scorers.len();
+    let n_splits = splits.len();
+
+    let mut all_scores: Vec<Vec<F>> = vec![Vec::with_capacity(n_splits); n_metrics];
+    let mut fit_times = Vec::with_capacity(n_splits);
+    let mut score_times = Vec::with_capacity(n_splits);
+
+    for (train_indices, test_indices) in splits {
+        let x_train = select_rows(x, train_indices);
+        let y_train = select_elements(y, train_indices);
+        let x_test = select_rows(x, test_indices);
+        let y_test = select_elements(y, test_indices);
+        let w_train = sample_weight.map(|w| select_elements(w, train_indices));
+        let w_test = sample_weight.map(|w| select_elements(w, test_indices));
+
+        let fit_start = std::time::Instant::now();
+        let y_pred = fit_predict(&x_train, &y_train, w_train.as_ref(), &x_test)?;
+        fit_times.push(fit_start.elapsed().as_secs_f64());
+
+        let score_start = std::time::Instant::now();
+        for (m, scorer) in scorers.iter().enumerate() {
+            all_scores[m].push(scorer(&y_test, &y_pred, w_test.as_ref())?);
+        }
+        score_times.push(score_start.elapsed().as_secs_f64());
+    }
+
+    let mean_scores: Vec<F> = all_scores.iter().map(|s| mean_of(s)).collect();
+    Ok(CrossValidateResult {
+        scores: all_scores,
+        mean_scores,
+        fit_times,
+        score_times,
+    })
+}
+
+/// Single-metric [`cross_validate_weighted_with_splits`]: per-fold scores.
+pub fn cross_val_score_weighted_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    sample_weight: Option<&Array1<F>>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, Option<&Array1<F>>, &Array2<F>) -> Result<Array1<F>>,
+    scorer: impl Fn(&Array1<F>, &Array1<F>, Option<&Array1<F>>) -> Result<F>,
+) -> Result<Vec<F>> {
+    let scorer: &WeightedScorerFn<'_, F> = &scorer;
+    let res =
+        cross_validate_weighted_with_splits(x, y, sample_weight, splits, fit_predict, &[scorer])?;
+    Ok(res.scores.into_iter().next().unwrap_or_default())
 }
 
 /// Generate a learning curve: scores as a function of training set size.
@@ -2710,5 +2843,29 @@ mod tests {
                 assert!(a <= b);
             }
         }
+    }
+
+    #[test]
+    fn test_parallel_search_matches_sequential() {
+        let x = Array2::from_shape_fn((30, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(30, |i| 2.0 * i as f64 + ((i * 7) % 3) as f64);
+        let splits = shuffled_k_fold(30, 5, 3).unwrap();
+        let configs: Vec<_> = (0..4)
+            .map(|c| {
+                move |_: &Array2<f64>, _: &Array1<f64>, xs: &Array2<f64>| -> Result<Array1<f64>> {
+                    Ok(xs.column(0).mapv(|v| c as f64 * v))
+                }
+            })
+            .collect();
+        let neg_mse = |t: &Array1<f64>, p: &Array1<f64>| -> Result<f64> {
+            Ok(-t.iter().zip(p).map(|(a, b)| (a - b) * (a - b)).sum::<f64>())
+        };
+        let seq = grid_search_cv_with_splits(&x, &y, &splits, &configs, neg_mse).unwrap();
+        let par = grid_search_cv_with_splits_par(&x, &y, &splits, &configs, neg_mse).unwrap();
+        assert_eq!(seq.cv_scores, par.cv_scores);
+        assert_eq!(seq.best_params_index, par.best_params_index);
+        let a = cross_val_score_with_splits(&x, &y, &splits, &configs[2], neg_mse).unwrap();
+        let b = cross_val_score_with_splits_par(&x, &y, &splits, &configs[2], neg_mse).unwrap();
+        assert_eq!(a, b);
     }
 }

@@ -1,5 +1,8 @@
-use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2, Axis};
+use anofox_ml_core::{
+    FitUnsupervised, Float, InverseTransform, PartialFitUnsupervised, Result, RustMlError,
+    Transform,
+};
+use ndarray::{Array1, Array2};
 
 /// Parameters for MinMaxScaler (unfitted state).
 ///
@@ -49,6 +52,16 @@ impl<F: Float> FitUnsupervised<F> for MinMaxScaler<F> {
     type Fitted = FittedMinMaxScaler<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        self.partial_fit(None, x)
+    }
+}
+
+impl<F: Float> PartialFitUnsupervised<F> for MinMaxScaler<F> {
+    type Fitted = FittedMinMaxScaler<F>;
+
+    /// sklearn's `MinMaxScaler.partial_fit`: the running per-feature min and
+    /// max are widened by each batch (NaN ignored).
+    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -57,9 +70,32 @@ impl<F: Float> FitUnsupervised<F> for MinMaxScaler<F> {
                 "feature_min must be less than feature_max".into(),
             ));
         }
-
-        let data_min = x.fold_axis(Axis(0), F::infinity(), |&a, &b| a.min(b));
-        let data_max = x.fold_axis(Axis(0), F::neg_infinity(), |&a, &b| a.max(b));
+        let (init_min, init_max) = match state {
+            Some(prev) => {
+                if prev.data_min.len() != x.ncols() {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "expected {} features, got {}",
+                        prev.data_min.len(),
+                        x.ncols()
+                    )));
+                }
+                (prev.data_min, prev.data_max)
+            }
+            None => (
+                Array1::from_elem(x.ncols(), F::infinity()),
+                Array1::from_elem(x.ncols(), F::neg_infinity()),
+            ),
+        };
+        let mut data_min = init_min;
+        let mut data_max = init_max;
+        for row in x.rows() {
+            for (j, &v) in row.iter().enumerate() {
+                if !v.is_nan() {
+                    data_min[j] = data_min[j].min(v);
+                    data_max[j] = data_max[j].max(v);
+                }
+            }
+        }
 
         Ok(FittedMinMaxScaler {
             data_min,
@@ -217,5 +253,27 @@ mod tests {
         for &v in transformed.iter() {
             assert!(v.is_finite(), "constant column produced non-finite: {}", v);
         }
+    }
+
+    #[test]
+    fn test_partial_fit_matches_sklearn() {
+        // sklearn 1.8: MinMaxScaler().partial_fit(X[:2]).partial_fit(X[2:])
+        let x = array![
+            [1.0, -2.0, 5.0],
+            [3.0, f64::NAN, 5.0],
+            [4.5, 0.5, 5.0],
+            [-1.0, 7.0, 5.0],
+            [2.0, 3.0, 5.0],
+            [10.0, -4.0, 5.0]
+        ];
+        let s = MinMaxScaler::<f64>::new();
+        let st = s
+            .partial_fit(None, &x.slice(ndarray::s![..2, ..]).to_owned())
+            .unwrap();
+        let f = s
+            .partial_fit(Some(st), &x.slice(ndarray::s![2.., ..]).to_owned())
+            .unwrap();
+        assert_eq!(f.data_min().to_vec(), vec![-1.0, -4.0, 5.0]);
+        assert_eq!(f.data_max().to_vec(), vec![10.0, 7.0, 5.0]);
     }
 }

@@ -84,8 +84,25 @@ impl Gamma {
     }
 }
 
+/// Representation in non-self-describing formats (bincode), which cannot
+/// decode the number-or-string form.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum GammaBin {
+    Value(f64),
+    Scale,
+    Auto,
+}
+
 impl serde::Serialize for Gamma {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        if !s.is_human_readable() {
+            let bin = match self {
+                Gamma::Value(v) => GammaBin::Value(*v),
+                Gamma::Scale => GammaBin::Scale,
+                Gamma::Auto => GammaBin::Auto,
+            };
+            return serde::Serialize::serialize(&bin, s);
+        }
         match self {
             Gamma::Value(v) => s.serialize_f64(*v),
             Gamma::Scale => s.serialize_str("scale"),
@@ -96,13 +113,20 @@ impl serde::Serialize for Gamma {
 
 impl<'de> serde::Deserialize<'de> for Gamma {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        if !d.is_human_readable() {
+            return Ok(match <GammaBin as serde::Deserialize>::deserialize(d)? {
+                GammaBin::Value(v) => Gamma::Value(v),
+                GammaBin::Scale => Gamma::Scale,
+                GammaBin::Auto => Gamma::Auto,
+            });
+        }
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum Repr {
             Num(f64),
             Str(String),
         }
-        match Repr::deserialize(d)? {
+        match <Repr as serde::Deserialize>::deserialize(d)? {
             Repr::Num(v) => Ok(Gamma::Value(v)),
             Repr::Str(s) => match s.as_str() {
                 "scale" => Ok(Gamma::Scale),
@@ -296,30 +320,84 @@ pub(crate) fn kernel_matrix<F: Float>(
     if kernel.is_precomputed() {
         return a.to_owned();
     }
-    let mut k = Array2::<F>::zeros((a.nrows(), b.nrows()));
-    for (i, ai) in a.rows().into_iter().enumerate() {
-        for (j, bj) in b.rows().into_iter().enumerate() {
-            k[[i, j]] = kernel.compute(&ai, &bj);
-        }
-    }
-    k
+    kernel.matrix(a, b)
 }
 
-/// Symmetric training Gram matrix (or the precomputed matrix itself).
-pub(crate) fn gram_matrix<F: Float>(x: &Array2<F>, kernel: &SvmKernel) -> Array2<F> {
-    if kernel.is_precomputed() {
-        return x.to_owned();
+impl SvmKernel {
+    /// Kernel matrix `K[i, j] = k(a_i, b_j)` built from one GEMM `A Bᵀ`
+    /// (RBF via `‖a‖² + ‖b‖² − 2 a·b`, clamped at 0, as sklearn does).
+    ///
+    /// # Panics
+    ///
+    /// Same conditions as [`compute`](Self::compute).
+    pub fn matrix<F: Float>(&self, a: &Array2<F>, b: &Array2<F>) -> Array2<F> {
+        self.matrix_impl(a, b, false)
     }
-    let n = x.nrows();
-    let mut k = Array2::<F>::zeros((n, n));
-    for i in 0..n {
-        for j in i..n {
-            let v = kernel.compute(&x.row(i), &x.row(j));
-            k[[i, j]] = v;
-            k[[j, i]] = v;
+
+    /// Symmetric Gram matrix `k(X, X)`. The RBF diagonal is exactly 1.
+    ///
+    /// # Panics
+    ///
+    /// Same conditions as [`compute`](Self::compute).
+    pub fn gram<F: Float>(&self, x: &Array2<F>) -> Array2<F> {
+        self.matrix_impl(x, x, true)
+    }
+
+    fn matrix_impl<F: Float>(&self, a: &Array2<F>, b: &Array2<F>, same: bool) -> Array2<F> {
+        let g = |gamma: &Gamma| -> F {
+            let v = match gamma {
+                Gamma::Value(v) => *v,
+                Gamma::Auto => 1.0 / a.ncols().max(1) as f64,
+                Gamma::Scale => panic!(
+                    "SvmKernel::matrix called with unresolved gamma='scale'; \
+                     call SvmKernel::resolve(&x_train) first"
+                ),
+            };
+            F::from_f64(v).unwrap()
+        };
+        if self.is_precomputed() {
+            panic!(
+                "SvmKernel::matrix is undefined for the precomputed kernel; \
+                 pass the Gram matrix as X instead"
+            );
         }
+        let mut k = a.dot(&b.t());
+        match self {
+            SvmKernel::Linear | SvmKernel::Precomputed => {}
+            SvmKernel::Rbf { gamma } => {
+                let gamma = g(gamma);
+                let na: Vec<F> = a.rows().into_iter().map(|r| r.dot(&r)).collect();
+                let nb: Vec<F> = if same {
+                    na.clone()
+                } else {
+                    b.rows().into_iter().map(|r| r.dot(&r)).collect()
+                };
+                let two = F::from_f64(2.0).unwrap();
+                for ((i, j), v) in k.indexed_iter_mut() {
+                    let d = if same && i == j {
+                        F::zero()
+                    } else {
+                        (na[i] + nb[j] - two * *v).max(F::zero())
+                    };
+                    *v = (-gamma * d).exp();
+                }
+            }
+            SvmKernel::Polynomial {
+                degree,
+                gamma,
+                coef0,
+            } => {
+                let (gamma, coef0) = (g(gamma), F::from_f64(*coef0).unwrap());
+                let degree = i32::try_from(*degree).unwrap_or(i32::MAX);
+                k.mapv_inplace(|v| (gamma * v + coef0).powi(degree));
+            }
+            SvmKernel::Sigmoid { gamma, coef0 } => {
+                let (gamma, coef0) = (g(gamma), F::from_f64(*coef0).unwrap());
+                k.mapv_inplace(|v| (gamma * v + coef0).tanh());
+            }
+        }
+        k
     }
-    k
 }
 
 #[cfg(test)]
@@ -327,6 +405,44 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn gamma_roundtrips_through_bincode_and_json() {
+        for g in [Gamma::Value(0.25), Gamma::Scale, Gamma::Auto] {
+            let k = SvmKernel::Rbf { gamma: g };
+            let bytes = bincode::serialize(&k).unwrap();
+            assert_eq!(bincode::deserialize::<SvmKernel>(&bytes).unwrap(), k);
+            let json = serde_json::to_string(&k).unwrap();
+            assert_eq!(serde_json::from_str::<SvmKernel>(&json).unwrap(), k);
+        }
+    }
+
+    #[test]
+    fn test_matrix_matches_pointwise() {
+        let a = array![[0.3, -1.2, 2.0], [1.5, 0.1, -0.7], [0.0, 0.4, 0.9]];
+        let b = array![[1.0, 1.0, -1.0], [0.2, -0.3, 0.5]];
+        for kernel in [
+            SvmKernel::Linear,
+            SvmKernel::rbf(0.4),
+            SvmKernel::Rbf { gamma: Gamma::Auto },
+            SvmKernel::poly(3, 0.5, 1.0),
+            SvmKernel::sigmoid(0.2, -0.1),
+        ] {
+            let k = kernel.matrix(&a, &b);
+            let g = kernel.gram(&a);
+            for i in 0..3 {
+                for j in 0..2 {
+                    let e: f64 = kernel.compute(&a.row(i), &b.row(j));
+                    assert_abs_diff_eq!(k[[i, j]], e, epsilon = 1e-12);
+                }
+                for j in 0..3 {
+                    let e: f64 = kernel.compute(&a.row(i), &a.row(j));
+                    assert_abs_diff_eq!(g[[i, j]], e, epsilon = 1e-12);
+                    assert_eq!(g[[i, j]], g[[j, i]]);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_linear_kernel() {

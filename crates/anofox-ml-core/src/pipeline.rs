@@ -4,11 +4,19 @@ use ndarray::{Array1, Array2};
 
 use crate::error::{Result, RustMlError};
 use crate::float::Float;
-use crate::traits::{Fit, Predict, Transform};
+use crate::traits::{Fit, Predict, PredictProba, Transform};
 
 /// A transformer that can be fit on data and then transform it.
+///
+/// `y` is the pipeline's target; unsupervised transformers ignore it and
+/// supervised ones (feature selection — see
+/// [`Supervised`]) require it.
 pub trait FitTransform<F: Float>: Send + Sync {
-    fn fit_transform(&self, x: &Array2<F>) -> Result<(Box<dyn TransformStep<F>>, Array2<F>)>;
+    fn fit_transform(
+        &self,
+        x: &Array2<F>,
+        y: Option<&Array1<F>>,
+    ) -> Result<(Box<dyn TransformStep<F>>, Array2<F>)>;
 }
 
 /// A fitted transformer step that can transform new data.
@@ -26,6 +34,16 @@ pub trait FitPredict<F: Float>: Send + Sync {
 pub trait PredictStep<F: Float>: Send + Sync {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>>;
     fn as_any(&self) -> &dyn Any;
+
+    /// Class probabilities; only estimators added with
+    /// [`Pipeline::set_classifier`] provide them.
+    fn predict_proba(&self, _x: &Array2<F>) -> Result<Array2<F>> {
+        Err(RustMlError::InvalidParameter(
+            "the pipeline's final estimator does not provide predict_proba \
+             (add it with Pipeline::set_classifier)"
+                .into(),
+        ))
+    }
 }
 
 // --- Blanket implementations ---
@@ -37,18 +55,21 @@ where
     T: crate::traits::FitUnsupervised<F> + Send + Sync,
     T::Fitted: Transform<F> + Send + Sync + 'static,
 {
-    fn fit_transform(&self, x: &Array2<F>) -> Result<(Box<dyn TransformStep<F>>, Array2<F>)> {
-        let fitted = crate::traits::FitUnsupervised::fit(self, x)?;
-        let transformed = fitted.transform(x)?;
+    fn fit_transform(
+        &self,
+        x: &Array2<F>,
+        y: Option<&Array1<F>>,
+    ) -> Result<(Box<dyn TransformStep<F>>, Array2<F>)> {
+        let (fitted, out) = crate::traits::FitUnsupervised::fit_with_target(self, x, y)?;
+        let transformed = match out {
+            Some(t) => t,
+            None => fitted.transform(x)?,
+        };
         Ok((Box::new(FittedTransformWrapper(fitted)), transformed))
     }
 }
 
 struct FittedTransformWrapper<T>(T);
-
-// Safety: T is already Send + Sync via trait bounds
-unsafe impl<T: Send> Send for FittedTransformWrapper<T> {}
-unsafe impl<T: Sync> Sync for FittedTransformWrapper<T> {}
 
 impl<F: Float, T: Transform<F> + Send + Sync + 'static> TransformStep<F>
     for FittedTransformWrapper<T>
@@ -58,6 +79,41 @@ impl<F: Float, T: Transform<F> + Send + Sync + 'static> TransformStep<F>
     }
     fn as_any(&self) -> &dyn Any {
         &self.0
+    }
+}
+
+/// Adapter that puts a supervised transformer — one fitted with [`Fit`] on
+/// `(X, y)` whose fitted type implements [`Transform`] (e.g. `SelectKBest`,
+/// `Rfe`, `Rfecv`, `MutualInformationSelector`) — into a [`Pipeline`], [`FeatureUnion`] or
+/// [`ColumnTransformer`]. Fitting it without a target is an error.
+///
+/// [`FeatureUnion`]: crate::FeatureUnion
+/// [`ColumnTransformer`]: crate::ColumnTransformer
+#[derive(Debug, Clone)]
+pub struct Supervised<T>(pub T);
+
+impl<F, T> crate::traits::FitUnsupervised<F> for Supervised<T>
+where
+    F: Float,
+    T: Fit<F>,
+{
+    type Fitted = T::Fitted;
+
+    fn fit(&self, _x: &Array2<F>) -> Result<T::Fitted> {
+        Err(RustMlError::InvalidParameter(
+            "a supervised transformer needs the target y".into(),
+        ))
+    }
+
+    fn fit_with_target(
+        &self,
+        x: &Array2<F>,
+        y: Option<&Array1<F>>,
+    ) -> Result<(T::Fitted, Option<Array2<F>>)> {
+        match y {
+            Some(y) => self.0.fit_transform_supervised(x, y),
+            None => crate::traits::FitUnsupervised::<F>::fit(self, x).map(|f| (f, None)),
+        }
     }
 }
 
@@ -76,9 +132,6 @@ where
 
 struct FittedPredictWrapper<T>(T);
 
-unsafe impl<T: Send> Send for FittedPredictWrapper<T> {}
-unsafe impl<T: Sync> Sync for FittedPredictWrapper<T> {}
-
 impl<F: Float, T: Predict<F> + Send + Sync + 'static> PredictStep<F> for FittedPredictWrapper<T> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
         self.0.predict(x)
@@ -88,10 +141,64 @@ impl<F: Float, T: Predict<F> + Send + Sync + 'static> PredictStep<F> for FittedP
     }
 }
 
+/// Final estimator whose fitted model also provides `predict_proba`
+/// (a separate trait from [`FitPredict`] so the blanket impls cannot
+/// overlap).
+trait FitPredictProba<F: Float>: Send + Sync {
+    fn fit_proba_step(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictStep<F>>>;
+}
+
+impl<F, T> FitPredictProba<F> for T
+where
+    F: Float,
+    T: Fit<F> + Send + Sync,
+    T::Fitted: Predict<F> + PredictProba<F> + Send + Sync + 'static,
+{
+    fn fit_proba_step(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictStep<F>>> {
+        Ok(Box::new(FittedProbaWrapper(self.fit(x, y)?)))
+    }
+}
+
+struct FittedProbaWrapper<T>(T);
+
+impl<F, T> PredictStep<F> for FittedProbaWrapper<T>
+where
+    F: Float,
+    T: Predict<F> + PredictProba<F> + Send + Sync + 'static,
+{
+    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+        self.0.predict(x)
+    }
+    fn as_any(&self) -> &dyn Any {
+        &self.0
+    }
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.0.predict_proba(x)
+    }
+}
+
+/// The pipeline's final estimator.
+enum FinalEstimator<F: Float> {
+    Plain(Box<dyn FitPredict<F>>),
+    Proba(Box<dyn FitPredictProba<F>>),
+}
+
+impl<F: Float> FinalEstimator<F> {
+    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredictStep<F>>> {
+        match self {
+            FinalEstimator::Plain(e) => e.fit_predict_step(x, y),
+            FinalEstimator::Proba(e) => e.fit_proba_step(x, y),
+        }
+    }
+}
+
 /// An unfitted pipeline that chains transformers and a final estimator.
 ///
 /// Follows sklearn's Pipeline pattern: chain transformers in sequence,
-/// then optionally fit/predict with a final estimator.
+/// then optionally fit/predict with a final estimator. `fit` borrows the
+/// pipeline, so one pipeline can be refitted (e.g. once per CV fold), and
+/// `Pipeline` implements [`Fit`], so it can be passed to the CV and search
+/// helpers like any estimator.
 ///
 /// # Example
 /// ```ignore
@@ -99,14 +206,16 @@ impl<F: Float, T: Predict<F> + Send + Sync + 'static> PredictStep<F> for FittedP
 ///
 /// let pipeline = Pipeline::new()
 ///     .push_transformer("scaler", StandardScaler::new())
-///     .set_estimator("knn", KnnClassifier::new(5));
+///     .push_transformer("select", Supervised(SelectKBest::new(5)))
+///     .set_classifier("knn", KnnClassifier::new(5));
 ///
 /// let fitted = pipeline.fit(&x_train, &y_train)?;
 /// let preds = fitted.predict(&x_test)?;
+/// let proba = fitted.predict_proba(&x_test)?;
 /// ```
 pub struct Pipeline<F: Float> {
     transformers: Vec<(String, Box<dyn FitTransform<F>>)>,
-    estimator: Option<(String, Box<dyn FitPredict<F>>)>,
+    estimator: Option<(String, FinalEstimator<F>)>,
 }
 
 impl<F: Float> Pipeline<F> {
@@ -118,7 +227,8 @@ impl<F: Float> Pipeline<F> {
         }
     }
 
-    /// Add a transformer step to the pipeline.
+    /// Add a transformer step to the pipeline. Wrap supervised transformers
+    /// in [`Supervised`].
     pub fn push_transformer(
         mut self,
         name: impl Into<String>,
@@ -134,29 +244,45 @@ impl<F: Float> Pipeline<F> {
         name: impl Into<String>,
         estimator: impl FitPredict<F> + 'static,
     ) -> Self {
-        self.estimator = Some((name.into(), Box::new(estimator)));
+        self.estimator = Some((name.into(), FinalEstimator::Plain(Box::new(estimator))));
         self
     }
 
-    /// Fit the pipeline: fit each transformer sequentially, transforming
-    /// X at each step, then fit the final estimator on the transformed X.
-    pub fn fit(self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedPipeline<F>> {
+    /// Set a final classifier whose fitted model implements
+    /// [`PredictProba`]; the fitted pipeline then forwards `predict_proba`.
+    pub fn set_classifier<T>(mut self, name: impl Into<String>, classifier: T) -> Self
+    where
+        T: Fit<F> + Send + Sync + 'static,
+        T::Fitted: Predict<F> + PredictProba<F> + Send + Sync + 'static,
+    {
+        self.estimator = Some((name.into(), FinalEstimator::Proba(Box::new(classifier))));
+        self
+    }
+
+    /// Fit the pipeline: fit each transformer sequentially (passing `y` to
+    /// supervised ones), transforming X at each step, then fit the final
+    /// estimator on the transformed X.
+    pub fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedPipeline<F>> {
+        if x.nrows() != y.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "X has {} rows but y has {} elements",
+                x.nrows(),
+                y.len()
+            )));
+        }
         let mut current_x_owned: Option<Array2<F>> = None;
         let mut fitted_transformers = Vec::with_capacity(self.transformers.len());
 
-        for (name, transformer) in self.transformers {
+        for (name, transformer) in &self.transformers {
             let x_ref = current_x_owned.as_ref().unwrap_or(x);
-            let (fitted, transformed) = transformer.fit_transform(x_ref)?;
-            fitted_transformers.push((name, fitted));
+            let (fitted, transformed) = transformer.fit_transform(x_ref, Some(y))?;
+            fitted_transformers.push((name.clone(), fitted));
             current_x_owned = Some(transformed);
         }
 
         let x_final = current_x_owned.as_ref().unwrap_or(x);
-        let fitted_estimator = match self.estimator {
-            Some((name, estimator)) => {
-                let fitted = estimator.fit_predict_step(x_final, y)?;
-                Some((name, fitted))
-            }
+        let fitted_estimator = match &self.estimator {
+            Some((name, estimator)) => Some((name.clone(), estimator.fit(x_final, y)?)),
             None => None,
         };
 
@@ -170,6 +296,14 @@ impl<F: Float> Pipeline<F> {
 impl<F: Float> Default for Pipeline<F> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<F: Float> Fit<F> for Pipeline<F> {
+    type Fitted = FittedPipeline<F>;
+
+    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedPipeline<F>> {
+        Pipeline::fit(self, x, y)
     }
 }
 
@@ -190,15 +324,24 @@ impl<F: Float> FittedPipeline<F> {
         Ok(current_x_owned.unwrap_or_else(|| x.clone()))
     }
 
+    fn final_estimator(&self) -> Result<&dyn PredictStep<F>> {
+        self.estimator
+            .as_ref()
+            .map(|(_, e)| e.as_ref())
+            .ok_or_else(|| RustMlError::NotFitted("Pipeline has no estimator set".into()))
+    }
+
     /// Transform new data through all steps, then predict with the final estimator.
     pub fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        let transformed = self.transform(x)?;
-        match &self.estimator {
-            Some((_, estimator)) => estimator.predict(&transformed),
-            None => Err(RustMlError::NotFitted(
-                "Pipeline has no estimator set".into(),
-            )),
-        }
+        let estimator = self.final_estimator()?;
+        estimator.predict(&self.transform(x)?)
+    }
+
+    /// Transform new data, then return the final classifier's class
+    /// probabilities (requires [`Pipeline::set_classifier`]).
+    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        let estimator = self.final_estimator()?;
+        estimator.predict_proba(&self.transform(x)?)
     }
 
     /// Downcast a named transformer step to its concrete fitted type.
@@ -240,6 +383,24 @@ impl<F: Float> FittedPipeline<F> {
     }
 }
 
+impl<F: Float> Predict<F> for FittedPipeline<F> {
+    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+        FittedPipeline::predict(self, x)
+    }
+}
+
+impl<F: Float> PredictProba<F> for FittedPipeline<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        FittedPipeline::predict_proba(self, x)
+    }
+}
+
+impl<F: Float> Transform<F> for FittedPipeline<F> {
+    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        FittedPipeline::transform(self, x)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +414,7 @@ mod tests {
         fn fit_transform(
             &self,
             x: &Array2<f64>,
+            _y: Option<&Array1<f64>>,
         ) -> Result<(Box<dyn TransformStep<f64>>, Array2<f64>)> {
             let transformed = x.mapv(|v| v * 2.0);
             Ok((Box::new(FittedDoubler), transformed))

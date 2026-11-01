@@ -29,9 +29,9 @@ pub struct NuSvc {
     pub nu: f64,
     /// Kernel function to use.
     pub kernel: SvmKernel,
-    /// Maximum number of iterations for the SMO solver.
+    /// Maximum number of SMO iterations per class pair.
     pub max_iter: usize,
-    /// Tolerance for the stopping criterion.
+    /// Tolerance of the stopping criterion (default 1e-3).
     pub tol: f64,
     /// Random seed for reproducibility.
     pub seed: u64,
@@ -52,8 +52,8 @@ impl NuSvc {
         Self {
             nu: 0.5,
             kernel: SvmKernel::default(),
-            max_iter: 1000,
-            tol: 1e-4,
+            max_iter: 10_000_000,
+            tol: 1e-3,
             seed: 0,
             probability: false,
             decision_function_shape: DecisionFunctionShape::Ovr,
@@ -135,8 +135,8 @@ impl Default for NuSvc {
 
 /// Fitted Nu-Support Vector Classifier.
 ///
-/// Wraps a [`FittedSvc`](crate::FittedSvc) internally, since NuSVC converts
-/// nu to an equivalent C and delegates to the standard SVC solver.
+/// Wraps a [`FittedSvc`](crate::FittedSvc): the one-vs-one sub-models come
+/// from libsvm's ν-SVC dual (two equality constraints, ν solver).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedNuSvc<F: Float> {
@@ -197,76 +197,9 @@ impl<F: Float> Predict<F> for FittedNuSvc<F> {
 /// Extract unique sorted class labels from y.
 fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
     let mut labels: Vec<F> = y.to_vec();
-    labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    labels.sort_by(anofox_ml_core::labels::label_cmp);
     labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
     labels
-}
-
-/// Bisect C until the C-SVC solution has a fraction of support vectors
-/// approximately equal to nu.
-///
-/// For nu-SVC, `nu` is both an upper bound on the fraction of margin errors
-/// and a lower bound on the fraction of support vectors. At the optimum these
-/// coincide. Since our C-SVC solver uses SMO and returns an SV count via
-/// `FittedSvc::n_support()`, we bisect C until that ratio matches nu. Large
-/// C produces tight margins (few SVs), small C produces loose margins
-/// (many SVs), so the count is monotonic in C and bisection converges.
-fn bisect_c_for_nu<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
-    nu: f64,
-    template: &crate::Svc,
-) -> Result<(svc::FittedSvc<F>, f64)> {
-    let n = x.nrows();
-    let target_svs = (nu * n as f64).round() as usize;
-    let target_svs = target_svs.clamp(1, n);
-
-    let mut c_lo = 1e-4f64;
-    let mut c_hi = 1e4f64;
-
-    let mut best_fitted: Option<(svc::FittedSvc<F>, f64)> = None;
-    let mut best_diff = usize::MAX;
-
-    for _iter in 0..40 {
-        // Bisect in log-space since C spans several orders of magnitude.
-        let c = (c_lo.ln() * 0.5 + c_hi.ln() * 0.5).exp();
-
-        let svc_model = template.clone().with_c(c);
-
-        let fitted: svc::FittedSvc<F> = svc_model.fit(x, y)?;
-        let n_sv = fitted.n_support();
-
-        let diff = if n_sv > target_svs {
-            n_sv - target_svs
-        } else {
-            target_svs - n_sv
-        };
-
-        if diff < best_diff {
-            best_diff = diff;
-            best_fitted = Some((fitted, c));
-        }
-
-        if diff == 0 {
-            break;
-        }
-
-        // More SVs than target => need larger C (tighter margin).
-        // Fewer SVs => need smaller C (looser margin).
-        if n_sv > target_svs {
-            c_lo = c;
-        } else {
-            c_hi = c;
-        }
-
-        if (c_hi.ln() - c_lo.ln()) < 1e-10 {
-            break;
-        }
-    }
-
-    best_fitted.ok_or_else(|| {
-        RustMlError::InvalidParameter("nu-SVC bisection failed to produce a fit".into())
-    })
 }
 
 impl<F: Float> Fit<F> for NuSvc {
@@ -315,20 +248,16 @@ impl<F: Float> Fit<F> for NuSvc {
             }
         }
 
-        // Bisect C so the resulting C-SVC has a fraction of support vectors
-        // approximately equal to nu (an approximation of the nu-SVC dual;
-        // libsvm solves the nu dual directly).
+        // libsvm's ν-SVC dual for every one-vs-one pair.
         let template = crate::Svc::new()
             .with_kernel(self.kernel.clone())
             .with_max_iter(self.max_iter)
             .with_tol(self.tol)
             .with_seed(self.seed)
+            .with_probability(self.probability)
             .with_decision_function_shape(self.decision_function_shape)
             .with_break_ties(self.break_ties);
-        let (mut inner, best_c) = bisect_c_for_nu(x, y, self.nu, &template)?;
-        if self.probability {
-            inner = template.with_c(best_c).with_probability(true).fit(x, y)?;
-        }
+        let inner = template.fit_nu(x, y, self.nu)?;
         Ok(FittedNuSvc { inner })
     }
 }
@@ -429,9 +358,15 @@ mod tests {
     #[test]
     fn test_large_nu() {
         let (x, y) = well_separated_data();
-        // nu = 1.0 => softest margin (max nu for balanced classes is 1.0)
-        let nu_svc = NuSvc::new()
+        // nu = 1.0 makes libsvm's nu dual degenerate (r = 0): sklearn raises
+        // "dual coefficients ... not finite", and so do we.
+        assert!(NuSvc::new()
             .with_nu(1.0)
+            .with_kernel(SvmKernel::rbf(0.5))
+            .fit(&x, &y)
+            .is_err());
+        let nu_svc = NuSvc::new()
+            .with_nu(0.9)
             .with_kernel(SvmKernel::rbf(0.5))
             .with_max_iter(5000);
         let fitted: FittedNuSvc<f64> = nu_svc.fit(&x, &y).unwrap();
@@ -616,7 +551,7 @@ mod tests {
 
         let default = NuSvc::default();
         assert_eq!(default.nu, 0.5);
-        assert_eq!(default.max_iter, 1000);
+        assert_eq!(default.max_iter, 10_000_000);
     }
 
     #[test]
@@ -636,5 +571,54 @@ mod tests {
             n_sv <= x.nrows(),
             "cannot have more SVs than training samples"
         );
+    }
+
+    #[test]
+    fn test_nu_dual_matches_sklearn() {
+        // sklearn 1.8 NuSVC(nu=0.4, kernel='rbf', gamma=0.7, tol=1e-8) on
+        // round(RandomState(0).randn(40, 2), 4), y = x0 + 0.5 noise > 0.
+        let xv = [
+            1.7641, 0.4002, 0.9787, 2.2409, 1.8676, -0.9773, 0.9501, -0.1514, -0.1032, 0.4106,
+            0.144, 1.4543, 0.761, 0.1217, 0.4439, 0.3337, 1.4941, -0.2052, 0.3131, -0.8541, -2.553,
+            0.6536, 0.8644, -0.7422, 2.2698, -1.4544, 0.0458, -0.1872, 1.5328, 1.4694, 0.1549,
+            0.3782, -0.8878, -1.9808, -0.3479, 0.1563, 1.2303, 1.2024, -0.3873, -0.3023, -1.0486,
+            -1.42, -1.7063, 1.9508, -0.5097, -0.4381, -1.2528, 0.7775, -1.6139, -0.2127, -0.8955,
+            0.3869, -0.5108, -1.1806, -0.0282, 0.4283, 0.0665, 0.3025, -0.6343, -0.3627, -0.6725,
+            -0.3596, -0.8131, -1.7263, 0.1774, -0.4018, -1.6302, 0.4628, -0.9073, 0.0519, 0.7291,
+            0.129, 1.1394, -1.2348, 0.4023, -0.6848, -0.8708, -0.5788, -0.3116, 0.0562,
+        ];
+        let yv = [
+            1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 0., 1., 1., 1., 1., 1., 0., 1., 1., 0., 0., 0.,
+            0., 0., 0., 1., 0., 0., 1., 1., 1., 0., 0., 0., 0., 1., 1., 1., 0., 1.,
+        ];
+        let x = Array2::from_shape_vec((40, 2), xv.to_vec()).unwrap();
+        let y = Array1::from_vec(yv.to_vec());
+        let f: FittedNuSvc<f64> = NuSvc::new()
+            .with_nu(0.4)
+            .with_kernel(SvmKernel::rbf(0.7))
+            .with_tol(1e-8)
+            .fit(&x, &y)
+            .unwrap();
+        let sk = [
+            0.9999999803120584,
+            0.9999999886807078,
+            1.1131058242079421,
+            1.1298730763518703,
+            1.1429350344296836,
+        ];
+        let d = anofox_ml_core::DecisionFunction::decision_function(
+            &f,
+            &x.slice(ndarray::s![..5, ..]).to_owned(),
+        )
+        .unwrap();
+        let sign = if d[[0, 0]] * sk[0] > 0.0 { 1.0 } else { -1.0 };
+        for i in 0..5 {
+            assert!(
+                (sign * d[[i, 0]] - sk[i]).abs() < 1e-6,
+                "[{i}] {} vs {}",
+                d[[i, 0]],
+                sk[i]
+            );
+        }
     }
 }

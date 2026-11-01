@@ -30,6 +30,7 @@ fn test_golden_one_class_svm_inliers() {
         kernel: SvmKernel::rbf(1.0),
         max_iter: 5000,
         tol: 1e-6,
+        ..OneClassSvm::new()
     };
     let fitted = FitUnsupervised::fit(&model, &x_train).unwrap();
 

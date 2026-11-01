@@ -1,12 +1,10 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
+use crate::classifier::{check_rows, check_xy};
+use crate::engine::{grow, GrowParams};
 use crate::node::TreeNode;
-use crate::split::{
-    child_seed, complement_features, compute_impurity, compute_weighted_impurity,
-    find_best_split_weighted, find_best_split_with_features, leaf_value, select_feature_subset,
-    weighted_leaf_value, BestSplit, MaxFeatures, SplitCriterion,
-};
+use crate::split::{MaxFeatures, SplitCriterion};
 
 /// Decision tree regressor parameters (unfitted state).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -21,6 +19,20 @@ pub struct DecisionTreeRegressor {
     pub sample_weight: Option<Array1<f64>>,
     /// Seed for the per-split feature subsampling RNG (only used when
     /// `max_features` is set). Different seeds give different trees.
+    /// Minimum weighted impurity decrease required to split a node
+    /// (sklearn's `min_impurity_decrease`).
+    #[serde(default)]
+    pub min_impurity_decrease: f64,
+    /// Minimum fraction of the total sample weight in each leaf.
+    #[serde(default)]
+    pub min_weight_fraction_leaf: f64,
+    /// Grow best-first with at most this many leaves (`None` = unlimited,
+    /// depth-first).
+    #[serde(default)]
+    pub max_leaf_nodes: Option<usize>,
+    /// Cost-complexity pruning strength (sklearn's `ccp_alpha`, 0 = none).
+    #[serde(default)]
+    pub ccp_alpha: f64,
     #[serde(default)]
     pub seed: u64,
 }
@@ -35,7 +47,34 @@ impl DecisionTreeRegressor {
             max_features: None,
             sample_weight: None,
             seed: 0,
+            min_impurity_decrease: 0.0,
+            min_weight_fraction_leaf: 0.0,
+            max_leaf_nodes: None,
+            ccp_alpha: 0.0,
         }
+    }
+    /// Minimum weighted impurity decrease of a split.
+    pub fn with_min_impurity_decrease(mut self, v: f64) -> Self {
+        self.min_impurity_decrease = v;
+        self
+    }
+
+    /// Minimum fraction of the total sample weight per leaf.
+    pub fn with_min_weight_fraction_leaf(mut self, v: f64) -> Self {
+        self.min_weight_fraction_leaf = v;
+        self
+    }
+
+    /// Best-first growth with at most `n` leaves.
+    pub fn with_max_leaf_nodes(mut self, n: Option<usize>) -> Self {
+        self.max_leaf_nodes = n;
+        self
+    }
+
+    /// Minimal cost-complexity pruning strength.
+    pub fn with_ccp_alpha(mut self, alpha: f64) -> Self {
+        self.ccp_alpha = alpha;
+        self
     }
 
     /// Set the maximum depth of the tree.
@@ -92,49 +131,100 @@ pub struct FittedDecisionTreeRegressor<F: Float> {
 impl<F: Float> Fit<F> for DecisionTreeRegressor {
     type Fitted = FittedDecisionTreeRegressor<F>;
 
+    /// Fits with the configured `sample_weight` (if any).
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
+        let sw = self
+            .sample_weight
+            .as_ref()
+            .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
+        self.fit_impl(x, y, sw.as_ref())
+    }
+}
 
-        if let Some(sw) = &self.sample_weight {
+impl<F: Float> FitWeighted<F> for DecisionTreeRegressor {
+    type Fitted = FittedDecisionTreeRegressor<F>;
+
+    /// `sample_weight` replaces the configured one.
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        match sample_weight {
+            Some(sw) => self.fit_impl(x, y, Some(sw)),
+            None => Fit::fit(self, x, y),
+        }
+    }
+}
+
+impl DecisionTreeRegressor {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedDecisionTreeRegressor<F>> {
+        check_xy(x, y)?;
+        if let Some(sw) = sample_weight {
+            anofox_ml_core::check_sample_weight(sw, y.len())?;
+        }
+        let rows: Vec<usize> = (0..x.nrows()).collect();
+        self.fit_on_rows(x, y, &rows, sample_weight)
+    }
+
+    /// Fit on the sample `rows` of `(x, y)` without copying `X`. Rows may
+    /// repeat (a bootstrap draw counts each copy as a sample, exactly as if
+    /// the rows had been copied). `sample_weight` is indexed by row of `x`.
+    pub fn fit_on_rows<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        rows: &[usize],
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedDecisionTreeRegressor<F>> {
+        check_xy(x, y)?;
+        check_rows(rows, x.nrows())?;
+        if let Some(sw) = sample_weight {
             if sw.len() != y.len() {
                 return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight has {} entries but y has {}",
+                    "sample_weight has {} elements but X has {} rows",
                     sw.len(),
                     y.len()
                 )));
             }
+            let drawn = Array1::from_iter(rows.iter().map(|&r| sw[r]));
+            anofox_ml_core::check_sample_weight(&drawn, drawn.len())?;
         }
-
-        let indices: Vec<usize> = (0..x.nrows()).collect();
         let n_features = x.ncols();
-        let max_features_k = self.max_features.map(|mf| mf.resolve(n_features));
-        let effective_weights: Option<Array1<F>> = self
-            .sample_weight
-            .as_ref()
-            .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
-        let tree = build_tree(
-            x,
-            y,
-            &indices,
-            0,
-            self.max_depth,
-            self.min_samples_split,
-            self.min_samples_leaf,
-            max_features_k,
+        let params = GrowParams {
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            min_samples_leaf: self.min_samples_leaf,
+            criterion: SplitCriterion::Mse,
+            max_features_k: self.max_features.map(|mf| mf.resolve(n_features)),
             n_features,
-            self.seed,
-            effective_weights.as_ref(),
-        );
-
+            min_impurity_decrease: self.min_impurity_decrease,
+            min_weight_fraction_leaf: self.min_weight_fraction_leaf,
+            max_leaf_nodes: self.max_leaf_nodes,
+        };
+        if !(0.0..=0.5).contains(&self.min_weight_fraction_leaf) {
+            return Err(RustMlError::InvalidParameter(
+                "min_weight_fraction_leaf must be in [0, 0.5]".into(),
+            ));
+        }
+        if self.max_leaf_nodes.is_some_and(|n| n < 2) {
+            return Err(RustMlError::InvalidParameter(
+                "max_leaf_nodes must be at least 2".into(),
+            ));
+        }
+        if self.min_impurity_decrease < 0.0 || self.ccp_alpha < 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "min_impurity_decrease and ccp_alpha must be non-negative".into(),
+            ));
+        }
+        let tree = grow(x, y, rows, sample_weight, &params, self.seed);
+        let tree = crate::node::prune_ccp(tree, self.ccp_alpha, false);
         Ok(FittedDecisionTreeRegressor { tree, n_features })
     }
 }
@@ -215,128 +305,6 @@ impl<F: Float> FittedDecisionTreeRegressor<F> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_tree<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
-    indices: &[usize],
-    depth: usize,
-    max_depth: Option<usize>,
-    min_samples_split: usize,
-    min_samples_leaf: usize,
-    max_features_k: Option<usize>,
-    n_features: usize,
-    node_seed: u64,
-    weights: Option<&Array1<F>>,
-) -> TreeNode<F> {
-    let n_samples = indices.len();
-    let impurity = match weights {
-        Some(w) => compute_weighted_impurity(y, indices, w, SplitCriterion::Mse),
-        None => compute_impurity(y, indices, SplitCriterion::Mse),
-    };
-
-    let should_stop = n_samples < min_samples_split
-        || max_depth.is_some_and(|d| depth >= d)
-        || impurity < F::from_f64(1e-15).unwrap();
-
-    if should_stop {
-        let value = match weights {
-            Some(w) => weighted_leaf_value(y, indices, w, SplitCriterion::Mse),
-            None => leaf_value(y, indices, SplitCriterion::Mse),
-        };
-        return TreeNode::Leaf {
-            value,
-            n_samples,
-            class_counts: None,
-        };
-    }
-
-    let find = |features: &[usize]| -> Option<BestSplit<F>> {
-        match weights {
-            Some(w) => find_best_split_weighted(
-                x,
-                y,
-                indices,
-                w,
-                SplitCriterion::Mse,
-                min_samples_leaf,
-                features,
-            ),
-            None => find_best_split_with_features(
-                x,
-                y,
-                indices,
-                SplitCriterion::Mse,
-                min_samples_leaf,
-                features,
-            ),
-        }
-    };
-
-    // Per-split feature subsampling: fresh subset at every node; fall back
-    // to the remaining features if the drawn ones admit no valid split.
-    let split_result = match max_features_k {
-        Some(k) if k < n_features => {
-            let subset = select_feature_subset(n_features, k, node_seed);
-            find(&subset).or_else(|| find(&complement_features(n_features, &subset)))
-        }
-        _ => {
-            let all: Vec<usize> = (0..n_features).collect();
-            find(&all)
-        }
-    };
-
-    match split_result {
-        Some(split) => {
-            let left = build_tree(
-                x,
-                y,
-                &split.left_indices,
-                depth + 1,
-                max_depth,
-                min_samples_split,
-                min_samples_leaf,
-                max_features_k,
-                n_features,
-                child_seed(node_seed, 0),
-                weights,
-            );
-            let right = build_tree(
-                x,
-                y,
-                &split.right_indices,
-                depth + 1,
-                max_depth,
-                min_samples_split,
-                min_samples_leaf,
-                max_features_k,
-                n_features,
-                child_seed(node_seed, 1),
-                weights,
-            );
-
-            TreeNode::Split {
-                feature_index: split.feature_index,
-                threshold: split.threshold,
-                left: Box::new(left),
-                right: Box::new(right),
-                n_samples,
-                impurity,
-            }
-        }
-        None => {
-            let value = match weights {
-                Some(w) => weighted_leaf_value(y, indices, w, SplitCriterion::Mse),
-                None => leaf_value(y, indices, SplitCriterion::Mse),
-            };
-            TreeNode::Leaf {
-                value,
-                n_samples,
-                class_counts: None,
-            }
-        }
-    }
-}
-
 fn tree_n_samples<F: Float>(node: &TreeNode<F>) -> usize {
     match node {
         TreeNode::Leaf { n_samples, .. } => *n_samples,
@@ -349,6 +317,22 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn fit_weighted_integer_weights_equal_duplicated_rows() {
+        let x = array![[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]];
+        let y = array![1.0, 1.5, 3.0, 2.0, 7.0, 6.5];
+        let w = array![1.0, 3.0, 1.0, 2.0, 1.0, 1.0];
+        let idx: Vec<usize> = vec![0, 1, 1, 1, 2, 3, 3, 4, 5];
+        let xd = x.select(ndarray::Axis(0), &idx);
+        let yd = y.select(ndarray::Axis(0), &idx);
+        let tree = DecisionTreeRegressor::new().with_max_depth(Some(2));
+        let fw = tree.fit_weighted(&x, &y, Some(&w)).unwrap();
+        let fd = Fit::fit(&tree, &xd, &yd).unwrap();
+        let q = array![[0.2], [1.1], [2.6], [3.4], [4.9]];
+        assert_eq!(fw.predict(&q).unwrap(), fd.predict(&q).unwrap());
+        assert!(tree.fit_weighted(&x, &y, Some(&array![1.0])).is_err());
+    }
 
     #[test]
     fn test_simple_regression() {

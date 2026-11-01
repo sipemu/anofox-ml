@@ -20,3 +20,6 @@ __pycache__/
 *.swp
 *.swo
 .claude/
+
+# maturin develop build output
+crates/anofox-ml-python/python/anofox_ml_python/*.so

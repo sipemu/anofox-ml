@@ -7,14 +7,15 @@
 //! where `K = k(X, X)` is the kernel matrix and `α` is the regularisation
 //! strength. Predictions are `K_test α_dual` with `K_test = k(X_test, X)`.
 
+use crate::convert::{ndarray_to_col, ndarray_to_mat};
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use anofox_ml_svm::SvmKernel;
 use faer::linalg::solvers::Solve;
-use faer::{Mat, Side};
-use ndarray::{Array1, Array2};
+use faer::Side;
+use ndarray::{Array1, Array2, Axis};
 
 /// Kernel ridge regression estimator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KernelRidge {
     pub alpha: f64,
     pub kernel: SvmKernel,
@@ -53,67 +54,11 @@ pub struct FittedKernelRidge {
     pub kernel: SvmKernel,
 }
 
-fn build_gram(x_a: &Array2<f64>, x_b: &Array2<f64>, kernel: &SvmKernel) -> Array2<f64> {
-    let na = x_a.nrows();
-    let nb = x_b.nrows();
-    let mut k = Array2::<f64>::zeros((na, nb));
-    for i in 0..na {
-        let ri = x_a.row(i);
-        for j in 0..nb {
-            let rj = x_b.row(j);
-            k[[i, j]] = kernel.compute(&ri, &rj);
-        }
-    }
-    k
-}
-
 impl Fit<f64> for KernelRidge {
     type Fitted = FittedKernelRidge;
 
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
-        if self.alpha < 0.0 {
-            return Err(RustMlError::InvalidParameter(
-                "alpha must be non-negative".into(),
-            ));
-        }
-
-        let n = x.nrows();
-        if self.kernel.is_precomputed() {
-            return Err(RustMlError::InvalidParameter(
-                "KernelRidge does not support the precomputed kernel".into(),
-            ));
-        }
-        // Resolve gamma = 'scale' / 'auto' against the training data.
-        let kernel = self.kernel.resolve(x);
-        let mut k = build_gram(x, x, &kernel);
-        for i in 0..n {
-            k[[i, i]] += self.alpha;
-        }
-
-        // Cholesky solve via faer.
-        let k_mat = Mat::from_fn(n, n, |i, j| k[[i, j]]);
-        let llt = faer::linalg::solvers::Llt::new(k_mat.as_ref(), Side::Lower)
-            .map_err(|e| RustMlError::InvalidParameter(format!("Cholesky failed: {e:?}")))?;
-        let y_mat = Mat::from_fn(n, 1, |i, _| y[i]);
-        let sol = llt.solve(&y_mat);
-
-        let dual = Array1::from_vec((0..n).map(|i| sol[(i, 0)]).collect());
-
-        Ok(FittedKernelRidge {
-            x_train: x.clone(),
-            dual_coef: dual,
-            kernel,
-        })
+        self.fit_weighted(x, y, None)
     }
 }
 
@@ -126,74 +71,49 @@ impl FitWeighted<f64> for KernelRidge {
         y: &Array1<f64>,
         sample_weight: Option<&Array1<f64>>,
     ) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
+        crate::convert::check_xy(x, y)?;
         if self.alpha < 0.0 {
             return Err(RustMlError::InvalidParameter(
                 "alpha must be non-negative".into(),
             ));
         }
-        if let Some(w) = sample_weight {
-            if w.len() != y.len() {
-                return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight len {} != y len {}",
-                    w.len(),
-                    y.len()
-                )));
-            }
-            for &wi in w.iter() {
-                if !wi.is_finite() || wi < 0.0 {
-                    return Err(RustMlError::InvalidParameter(
-                        "sample_weight must be non-negative finite".into(),
-                    ));
-                }
-            }
-        }
-
-        let n = x.nrows();
         if self.kernel.is_precomputed() {
             return Err(RustMlError::InvalidParameter(
                 "KernelRidge does not support the precomputed kernel".into(),
             ));
         }
+        self.kernel.validate(false)?;
+        let sqrt_w = match sample_weight {
+            Some(w) => {
+                Some(crate::convert::resolve_sample_weight(Some(w), y.len())?.mapv(f64::sqrt))
+            }
+            None => None,
+        };
+
+        let n = x.nrows();
         // Resolve gamma = 'scale' / 'auto' against the training data.
         let kernel = self.kernel.resolve(x);
-        let mut k = build_gram(x, x, &kernel);
+        let mut k = kernel.gram(x);
         // sklearn KernelRidge with sample_weight w solves (K W + α I) α = W y.
         // Use the symmetric reformulation: K' = √W K √W, y' = √W y, then
         // solve (K' + α I) α' = y' and back-transform α_dual = √W α'.
-        if let Some(w) = sample_weight {
-            let sqrtw: Vec<f64> = w.iter().map(|v| v.sqrt()).collect();
-            for i in 0..n {
-                for j in 0..n {
-                    k[[i, j]] *= sqrtw[i] * sqrtw[j];
-                }
-            }
+        let mut rhs = y.clone();
+        if let Some(sw) = &sqrt_w {
+            k *= &sw.view().insert_axis(Axis(1));
+            k *= &sw.view().insert_axis(Axis(0));
+            rhs *= sw;
         }
-        for i in 0..n {
-            k[[i, i]] += self.alpha;
-        }
-        let k_mat = Mat::from_fn(n, n, |i, j| k[[i, j]]);
+        k.diag_mut().mapv_inplace(|v| v + self.alpha);
+
+        // Only the lower triangle is read by the Cholesky factorisation.
+        let k_mat = ndarray_to_mat(&k);
         let llt = faer::linalg::solvers::Llt::new(k_mat.as_ref(), Side::Lower)
             .map_err(|e| RustMlError::InvalidParameter(format!("Cholesky failed: {e:?}")))?;
-        let rhs: Vec<f64> = match sample_weight {
-            Some(w) => (0..n).map(|i| w[i].sqrt() * y[i]).collect(),
-            None => y.iter().copied().collect(),
-        };
-        let y_mat = Mat::from_fn(n, 1, |i, _| rhs[i]);
-        let sol = llt.solve(&y_mat);
-        let dual = match sample_weight {
-            Some(w) => Array1::from_vec((0..n).map(|i| w[i].sqrt() * sol[(i, 0)]).collect()),
-            None => Array1::from_vec((0..n).map(|i| sol[(i, 0)]).collect()),
-        };
+        let sol = llt.solve(ndarray_to_col(&rhs));
+        let mut dual = Array1::from_shape_fn(n, |i| sol[i]);
+        if let Some(sw) = &sqrt_w {
+            dual *= sw;
+        }
 
         Ok(FittedKernelRidge {
             x_train: x.clone(),
@@ -212,8 +132,7 @@ impl Predict<f64> for FittedKernelRidge {
                 x.ncols()
             )));
         }
-        let k_test = build_gram(x, &self.x_train, &self.kernel);
-        Ok(k_test.dot(&self.dual_coef))
+        Ok(self.kernel.matrix(x, &self.x_train).dot(&self.dual_coef))
     }
 }
 

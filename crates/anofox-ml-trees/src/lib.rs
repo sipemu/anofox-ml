@@ -24,6 +24,7 @@
 //! ```
 
 pub mod classifier;
+mod engine;
 pub mod node;
 pub mod regressor;
 pub mod split;

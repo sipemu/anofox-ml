@@ -10,12 +10,38 @@ use crate::float::Float;
 pub trait Fit<F: Float> {
     type Fitted;
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted>;
+
+    /// Pipeline hook for supervised transformers: fit and optionally return
+    /// the transformed training data. The default calls [`fit`](Self::fit)
+    /// and returns `None` (the pipeline then calls `transform`). Transformers
+    /// whose training output differs from `fit(X, y).transform(X)` override
+    /// it — e.g. `TargetEncoder`, whose `fit_transform` is cross-fitted.
+    fn fit_transform_supervised(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+    ) -> Result<(Self::Fitted, Option<Array2<F>>)> {
+        Ok((self.fit(x, y)?, None))
+    }
 }
 
 /// Unsupervised learning: fit on X only (e.g., scalers, PCA).
 pub trait FitUnsupervised<F: Float> {
     type Fitted;
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted>;
+
+    /// Pipeline hook: fit with the pipeline's target (if any), optionally
+    /// returning the transformed training data so it need not be
+    /// recomputed. The default ignores `y`, calls [`fit`](Self::fit) and
+    /// returns `None`. Composite transformers override it to forward `y` to
+    /// supervised branches and to transform in a single pass.
+    fn fit_with_target(
+        &self,
+        x: &Array2<F>,
+        _y: Option<&Array1<F>>,
+    ) -> Result<(Self::Fitted, Option<Array2<F>>)> {
+        Ok((self.fit(x)?, None))
+    }
 }
 
 /// Predict target values from input features.
@@ -78,6 +104,33 @@ pub trait PartialFit<F: Float> {
         y: &Array1<F>,
         classes: Option<&[F]>,
     ) -> Result<Self::Fitted>;
+}
+
+/// Incremental / online fit for unsupervised estimators (scalers,
+/// `IncrementalPca`).
+///
+/// Mirrors sklearn's `partial_fit(X)`. `state = None` starts from scratch;
+/// `state = Some(prev)` folds the batch into `prev`. Feeding the batches of a
+/// data set one after another gives the same model as one `fit` on all of it.
+pub trait PartialFitUnsupervised<F: Float> {
+    type Fitted;
+    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted>;
+
+    /// `partial_fit(X, sample_weight=...)`. The default accepts only
+    /// `sample_weight = None`; estimators with weighted statistics override it.
+    fn partial_fit_weighted(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        match sample_weight {
+            None => self.partial_fit(state, x),
+            Some(_) => Err(crate::error::RustMlError::InvalidParameter(
+                "this estimator does not support sample_weight in partial_fit".into(),
+            )),
+        }
+    }
 }
 
 /// Unsupervised fit with optional per-sample weights.

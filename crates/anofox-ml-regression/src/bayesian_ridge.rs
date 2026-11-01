@@ -35,7 +35,7 @@ use ndarray::{Array1, Array2};
 // BayesianRidge
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BayesianRidge {
     pub max_iter: usize,
     pub tol: f64,
@@ -154,7 +154,7 @@ impl Predict<f64> for FittedBayesianRidge {
 // ARDRegression (per-feature lambda; sparsity-inducing)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ARDRegression {
     pub max_iter: usize,
     pub tol: f64,

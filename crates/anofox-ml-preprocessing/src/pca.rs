@@ -56,23 +56,23 @@ impl Pca {
 pub struct FittedPca<F: Float> {
     /// Principal component directions, shape (n_components, n_features).
     /// Each row is a unit eigenvector of the covariance matrix.
-    components: Array2<F>,
+    pub(crate) components: Array2<F>,
     /// Variance explained by each component (eigenvalues), length n_components.
-    explained_variance: Array1<F>,
+    pub(crate) explained_variance: Array1<F>,
     /// Fraction of the total variance explained by each component.
     #[serde(default)]
-    explained_variance_ratio: Array1<F>,
+    pub(crate) explained_variance_ratio: Array1<F>,
     /// Singular values of the centred data for each component.
     #[serde(default)]
-    singular_values: Array1<F>,
+    pub(crate) singular_values: Array1<F>,
     /// Mean of the discarded eigenvalues (probabilistic-PCA noise variance).
     #[serde(default)]
-    noise_variance: F,
+    pub(crate) noise_variance: F,
     /// Per-feature mean used for centering, length n_features.
-    mean: Array1<F>,
+    pub(crate) mean: Array1<F>,
     /// Whether `transform` whitens its output.
     #[serde(default)]
-    whiten: bool,
+    pub(crate) whiten: bool,
 }
 
 /// Use the covariance eigendecomposition when the data is this many times

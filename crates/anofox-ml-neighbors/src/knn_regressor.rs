@@ -1,10 +1,9 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, Float, Predict, Result};
 use ndarray::{Array1, Array2};
-use rayon::prelude::*;
 
-use crate::distance::{compute_distances_batch, DistanceMetric};
-use crate::kdtree::KdTree;
-use crate::knn_classifier::WeightFunction;
+use crate::distance::DistanceMetric;
+use crate::index::{NeighborAlgorithm, NeighborIndex};
+use crate::knn_classifier::{check_knn_fit, neighbor_weights, WeightFunction};
 
 /// KNN regressor parameters (unfitted state).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -12,6 +11,9 @@ pub struct KnnRegressor {
     pub n_neighbors: usize,
     pub metric: DistanceMetric,
     pub weights: WeightFunction,
+    /// Neighbour search algorithm (sklearn's `algorithm`).
+    #[serde(default)]
+    pub algorithm: NeighborAlgorithm,
 }
 
 impl KnnRegressor {
@@ -21,6 +23,7 @@ impl KnnRegressor {
             n_neighbors: k,
             metric: DistanceMetric::default(),
             weights: WeightFunction::default(),
+            algorithm: NeighborAlgorithm::default(),
         }
     }
 
@@ -35,6 +38,12 @@ impl KnnRegressor {
         self.metric = metric;
         self
     }
+
+    /// Set the neighbour search algorithm.
+    pub fn with_algorithm(mut self, algorithm: NeighborAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
 }
 
 impl Default for KnnRegressor {
@@ -43,17 +52,14 @@ impl Default for KnnRegressor {
     }
 }
 
-/// Fitted KNN regressor — stores training data (lazy learner).
-///
-/// Uses a KD-tree for Euclidean distance and brute-force for other metrics.
+/// Fitted KNN regressor — stores training data (lazy learner) in a
+/// [`NeighborIndex`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 pub struct FittedKnnRegressor<F: Float> {
-    x_train: Array2<F>,
+    index: NeighborIndex<F>,
     y_train: Array1<F>,
-    kdtree: Option<KdTree<F>>,
     n_neighbors: usize,
-    metric: DistanceMetric,
     weights: WeightFunction,
 }
 
@@ -61,136 +67,63 @@ impl<F: Float> Fit<F> for KnnRegressor {
     type Fitted = FittedKnnRegressor<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
-        if self.n_neighbors == 0 {
-            return Err(RustMlError::InvalidParameter(
-                "n_neighbors must be > 0".into(),
-            ));
-        }
-        if self.n_neighbors > x.nrows() {
-            return Err(RustMlError::InvalidParameter(format!(
-                "n_neighbors ({}) > number of training samples ({})",
-                self.n_neighbors,
-                x.nrows()
-            )));
-        }
-
-        let kdtree = if self.metric == DistanceMetric::Euclidean {
-            let points: Vec<(Vec<F>, usize)> = x
-                .rows()
-                .into_iter()
-                .enumerate()
-                .map(|(i, row)| (row.to_vec(), i))
-                .collect();
-            Some(KdTree::build(&points, x.ncols()))
-        } else {
-            None
-        };
-
+        check_knn_fit(x, y, self.n_neighbors)?;
         Ok(FittedKnnRegressor {
-            // Stored C-contiguous so the brute-force path can use row slices.
-            x_train: x.as_standard_layout().into_owned(),
+            index: NeighborIndex::new(x, self.metric, self.algorithm, Some(self.n_neighbors))?,
             y_train: y.to_owned(),
-            kdtree,
             n_neighbors: self.n_neighbors,
-            metric: self.metric,
             weights: self.weights,
         })
     }
 }
 
+/// Weighted mean of the targets `y[idx]`.
+pub(crate) fn weighted_mean<F: Float>(
+    y: &Array1<F>,
+    idx: impl Iterator<Item = usize>,
+    dists: &[F],
+    weights: WeightFunction,
+) -> F {
+    let w = neighbor_weights(dists, weights);
+    let (num, den) = idx
+        .zip(&w)
+        .fold((F::zero(), F::zero()), |(n, d), (j, &wj)| {
+            (n + wj * y[j], d + wj)
+        });
+    num / den
+}
+
 impl<F: Float + Send + Sync> Predict<F> for FittedKnnRegressor<F> {
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.x_train.ncols() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.x_train.ncols(),
-                x.ncols()
-            )));
-        }
-
-        // Iterate ndarray rows directly — avoid unnecessary to_vec()
-        let x_std = crate::standard_layout(x);
-        let x: &Array2<F> = &x_std;
-        let predictions: Vec<F> = (0..x.nrows())
-            .into_par_iter()
-            .map(|i| {
-                let row = x.row(i);
-                let row_slice = row.as_slice().expect("standard layout");
-                let neighbors = self.find_neighbors(row_slice);
-                weighted_mean(&neighbors, self.weights)
-            })
-            .collect();
-
-        Ok(Array1::from_vec(predictions))
+        let (dist, idx) = self.index.kneighbors(x, self.n_neighbors)?;
+        Ok(Array1::from_shape_fn(x.nrows(), |i| {
+            let d = dist.row(i).to_vec();
+            weighted_mean(&self.y_train, idx.row(i).iter().copied(), &d, self.weights)
+        }))
     }
 }
 
 impl<F: Float> FittedKnnRegressor<F> {
-    fn find_neighbors(&self, query: &[F]) -> Vec<(F, F)> {
-        if let Some(ref kdtree) = self.kdtree {
-            kdtree
-                .query_k_nearest(query, self.n_neighbors)
-                .into_iter()
-                .map(|(dist, idx)| (dist, self.y_train[idx]))
-                .collect()
-        } else {
-            // Brute-force path — batch distance is faster than per-row calls.
-            let query_view = ndarray::ArrayView1::from(query);
-            let dists = compute_distances_batch(&query_view, &self.x_train, self.metric);
-            let mut distances: Vec<(F, F)> = dists
-                .into_iter()
-                .zip(self.y_train.iter().copied())
-                .collect();
-            // Stable sort: equal distances keep training order (lower index first).
-            distances.sort_by(|a, b| crate::total_cmp(&a.0, &b.0));
-            distances.truncate(self.n_neighbors);
-            distances
-        }
+    /// The neighbour index.
+    pub fn index(&self) -> &NeighborIndex<F> {
+        &self.index
     }
-}
 
-/// Weighted mean of neighbor targets.
-fn weighted_mean<F: Float>(neighbors: &[(F, F)], weights: WeightFunction) -> F {
-    match weights {
-        WeightFunction::Uniform => {
-            let sum: F = neighbors
-                .iter()
-                .map(|&(_, y)| y)
-                .fold(F::zero(), |a, b| a + b);
-            sum / F::from_usize(neighbors.len()).unwrap()
-        }
-        WeightFunction::Distance => {
-            let mut weight_sum = F::zero();
-            let mut value_sum = F::zero();
-
-            for &(dist, y) in neighbors {
-                let w = if dist < F::from_f64(1e-15).unwrap() {
-                    F::from_f64(1e15).unwrap()
-                } else {
-                    F::one() / dist
-                };
-                weight_sum += w;
-                value_sum += w * y;
-            }
-
-            value_sum / weight_sum
-        }
+    /// Distances and training indices of the `k` (default `n_neighbors`)
+    /// nearest training samples of every row of `x`.
+    pub fn kneighbors(
+        &self,
+        x: &Array2<F>,
+        k: Option<usize>,
+    ) -> Result<(Array2<F>, Array2<usize>)> {
+        self.index.kneighbors(x, k.unwrap_or(self.n_neighbors))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anofox_ml_core::RustMlError;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
 

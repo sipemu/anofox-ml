@@ -12,7 +12,7 @@ use ndarray::{Array1, Array2};
 /// Set `quantile = 0.5` for median regression. Unpenalised (sklearn's
 /// `QuantileRegressor(alpha=0)`); [`FitWeighted`] minimises
 /// `Σ wᵢ ρ_τ(yᵢ - xᵢᵀβ)`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuantileRegressor {
     quantile: f64,
     with_intercept: bool,
@@ -37,6 +37,8 @@ impl QuantileRegressor {
 pub struct FittedQuantileRegressor {
     inner: FittedQuantile,
     n_features: usize,
+    coef: Array1<f64>,
+    intercept: f64,
 }
 
 impl FittedQuantileRegressor {
@@ -93,9 +95,12 @@ impl FitWeighted<f64> for QuantileRegressor {
             .fit(&x_mat, &y_col)
             .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
 
+        let (coef, intercept) = crate::convert::predict_params(fitted.result());
         Ok(FittedQuantileRegressor {
             inner: fitted,
             n_features: x.ncols(),
+            coef,
+            intercept,
         })
     }
 }
@@ -110,9 +115,7 @@ impl Predict<f64> for FittedQuantileRegressor {
             )));
         }
 
-        let x_mat = ndarray_to_mat(x);
-        let preds = self.inner.predict(&x_mat);
-        Ok(col_to_ndarray(&preds))
+        crate::convert::linear_predict(x, &self.coef, self.intercept)
     }
 }
 

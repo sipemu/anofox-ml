@@ -1,37 +1,17 @@
-mod cluster;
-mod ensemble;
+//! Python bindings for anofox-ml.
+//!
+//! The extension module `anofox_ml_python._native` exposes one generic
+//! estimator class (`Model`, backed by the registry in [`registry`]) plus
+//! metric functions. The sklearn-compatible classes live in the Python
+//! package `anofox_ml_python` on top of it.
+
 mod helpers;
-mod manifold;
 mod metrics;
-mod naive_bayes;
-mod neighbors;
-mod neural_net;
-mod preprocessing;
-mod svm;
-mod trees;
+mod model;
+mod native;
+mod registry;
 
 use pyo3::prelude::*;
-
-use cluster::{AffinityPropagation, BayesianGaussianMixture, Dbscan, Hdbscan, KMeans, MeanShift};
-use ensemble::{
-    GradientBoostingClassifier, GradientBoostingRegressor, RandomForestClassifier,
-    RandomForestRegressor,
-};
-use manifold::{Isomap, LocallyLinearEmbedding, TSne};
-use naive_bayes::GaussianNB;
-use neighbors::{KnnClassifier, KnnRegressor, LocalOutlierFactor};
-use neural_net::{MlpClassifier, MlpRegressor};
-use preprocessing::{
-    MinMaxScaler, MutualInformationSelector, Pca, StandardScaler, VarianceThreshold,
-};
-use svm::{LinearSvc, Svc};
-use trees::{DecisionTreeClassifier, DecisionTreeRegressor};
-
-macro_rules! register_classes {
-    ($m:expr, $($class:ty),* $(,)?) => {
-        $( $m.add_class::<$class>()?; )*
-    };
-}
 
 macro_rules! register_functions {
     ($m:expr, $($func:path),* $(,)?) => {
@@ -39,42 +19,10 @@ macro_rules! register_functions {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Module
-// ---------------------------------------------------------------------------
 #[pymodule]
-fn anofox_ml_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_classes!(
-        m,
-        StandardScaler,
-        MinMaxScaler,
-        Pca,
-        VarianceThreshold,
-        MutualInformationSelector,
-        KnnClassifier,
-        KnnRegressor,
-        LocalOutlierFactor,
-        DecisionTreeClassifier,
-        DecisionTreeRegressor,
-        RandomForestClassifier,
-        RandomForestRegressor,
-        GradientBoostingClassifier,
-        GradientBoostingRegressor,
-        KMeans,
-        Dbscan,
-        Hdbscan,
-        MeanShift,
-        AffinityPropagation,
-        BayesianGaussianMixture,
-        GaussianNB,
-        LinearSvc,
-        Svc,
-        MlpClassifier,
-        MlpRegressor,
-        TSne,
-        Isomap,
-        LocallyLinearEmbedding,
-    );
+#[pyo3(name = "_native")]
+fn native_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<native::PyModel>()?;
     register_functions!(
         m,
         metrics::accuracy_score,
@@ -84,6 +32,22 @@ fn anofox_ml_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         metrics::precision_score,
         metrics::recall_score,
         metrics::f1_score,
+        metrics::balanced_accuracy_score,
+        metrics::cohen_kappa_score,
+        metrics::explained_variance_score,
+        metrics::matthews_corrcoef,
+        metrics::max_error,
+        metrics::mean_absolute_percentage_error,
+        metrics::mean_squared_log_error,
+        metrics::median_absolute_error,
+        metrics::adjusted_rand_score,
+        metrics::normalized_mutual_info_score,
+        metrics::log_loss,
+        metrics::roc_auc_score,
+        metrics::average_precision_score,
+        metrics::brier_score_loss,
+        metrics::silhouette_score,
+        metrics::confusion_matrix,
     );
     Ok(())
 }

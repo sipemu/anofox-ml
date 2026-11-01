@@ -371,6 +371,31 @@ scripts/publish.sh           # dry-run, no uploads
 scripts/publish.sh --execute # requires `cargo login` against crates.io
 ```
 
+## Python
+
+`crates/anofox-ml-python` builds the `anofox_ml_python` package (PyO3 +
+maturin). It exposes 95 estimators with scikit-learn's API:
+constructor arguments are stored unchanged, so `get_params` / `set_params`,
+`sklearn.base.clone`, `GridSearchCV` and sklearn pipelines work; `fit`
+returns `self`; seeds are `random_state`; classifiers accept any label type;
+fitted models pickle (joblib / multiprocessing). Fitting and prediction run
+in Rust with the GIL released.
+
+```bash
+pip install maturin
+maturin develop --release -m crates/anofox-ml-python/Cargo.toml
+pytest crates/anofox-ml-python/tests
+```
+
+```python
+import anofox_ml_python as am
+from sklearn.model_selection import GridSearchCV
+
+clf = am.RandomForestClassifier(n_estimators=200, random_state=0).fit(X, y)
+proba = clf.predict_proba(X_test)
+search = GridSearchCV(am.SVC(), {"C": [0.1, 1, 10]}).fit(X, y)
+```
+
 ## License
 
 Licensed under either of

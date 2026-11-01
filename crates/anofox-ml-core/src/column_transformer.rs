@@ -109,15 +109,7 @@ fn resolve_columns(selector: &ColumnSelector, n_cols: usize) -> Vec<usize> {
 
 /// Select specific columns from a matrix, returning a new C-contiguous array.
 fn select_columns<F: Float>(x: &Array2<F>, cols: &[usize]) -> Array2<F> {
-    let n_rows = x.nrows();
-    let n_cols = cols.len();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for i in 0..n_rows {
-        for &c in cols {
-            data.push(x[[i, c]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
+    x.select(ndarray::Axis(1), cols)
 }
 
 /// Fitted ColumnTransformer.
@@ -133,10 +125,6 @@ struct FittedBranch<F: Float> {
     cols: Vec<usize>,
     fitted: Box<dyn TransformStep<F>>,
 }
-
-// Safety: all TransformStep<F> impls are already Send + Sync
-unsafe impl<F: Float> Send for FittedColumnTransformer<F> {}
-unsafe impl<F: Float> Sync for FittedColumnTransformer<F> {}
 
 impl<F: Float> Transform<F> for FittedColumnTransformer<F> {
     fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
@@ -169,14 +157,22 @@ impl<F: Float + 'static> FitUnsupervised<F> for ColumnTransformer<F> {
     type Fitted = FittedColumnTransformer<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        Ok(self.fit_with_target(x, None)?.0)
+    }
+
+    /// Forwards `y` to the branches (for [`Supervised`](crate::Supervised)
+    /// ones) and returns the training output computed during the fit.
+    fn fit_with_target(
+        &self,
+        x: &Array2<F>,
+        y: Option<&ndarray::Array1<F>>,
+    ) -> Result<(FittedColumnTransformer<F>, Option<Array2<F>>)> {
         let n_cols = x.ncols();
 
         let mut used_cols = std::collections::HashSet::new();
-        let mut fitted_branches = Vec::with_capacity(self.branches.len());
-
+        let mut branch_cols = Vec::with_capacity(self.branches.len());
         for branch in &self.branches {
             let cols = resolve_columns(&branch.selector, n_cols);
-
             for &c in &cols {
                 if c >= n_cols {
                     return Err(RustMlError::InvalidParameter(format!(
@@ -186,28 +182,48 @@ impl<F: Float + 'static> FitUnsupervised<F> for ColumnTransformer<F> {
                 }
                 used_cols.insert(c);
             }
-
-            let sub_x = select_columns(x, &cols);
-            let (fitted_step, _) = branch.transformer.fit_transform(&sub_x)?;
-
-            fitted_branches.push(FittedBranch {
-                name: branch.name.clone(),
-                cols,
-                fitted: fitted_step,
-            });
+            branch_cols.push(cols);
         }
+
+        // Branches are independent: fit them in parallel.
+        use rayon::prelude::*;
+        let fitted: Vec<(FittedBranch<F>, Array2<F>)> = self
+            .branches
+            .par_iter()
+            .zip(branch_cols.into_par_iter())
+            .map(|(branch, cols)| {
+                let sub_x = select_columns(x, &cols);
+                let (fitted_step, out) = branch.transformer.fit_transform(&sub_x, y)?;
+                Ok((
+                    FittedBranch {
+                        name: branch.name.clone(),
+                        cols,
+                        fitted: fitted_step,
+                    },
+                    out,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (fitted_branches, mut parts): (Vec<_>, Vec<_>) = fitted.into_iter().unzip();
 
         let passthrough_cols: Vec<usize> = if self.remainder == Remainder::Passthrough {
             (0..n_cols).filter(|c| !used_cols.contains(c)).collect()
         } else {
             Vec::new()
         };
+        if !passthrough_cols.is_empty() {
+            parts.push(select_columns(x, &passthrough_cols));
+        }
+        let out = concat_horizontal(x.nrows(), &parts)?;
 
-        Ok(FittedColumnTransformer {
-            fitted_branches,
-            passthrough_cols,
-            n_features_in: n_cols,
-        })
+        Ok((
+            FittedColumnTransformer {
+                fitted_branches,
+                passthrough_cols,
+                n_features_in: n_cols,
+            },
+            Some(out),
+        ))
     }
 }
 
@@ -302,7 +318,7 @@ mod tests {
                 IdentityTransformer,
             );
 
-        let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
+        let fitted = ct.fit(&x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
         assert_eq!(transformed, array![[2.0, 20.0, 100.0], [4.0, 40.0, 200.0]]);
@@ -316,7 +332,7 @@ mod tests {
             .push("double_0", ColumnSelector::Indices(vec![0]), DoubleScaler)
             .with_remainder(Remainder::Passthrough);
 
-        let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
+        let fitted = ct.fit(&x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
         assert_eq!(transformed.ncols(), 3);
@@ -335,7 +351,7 @@ mod tests {
             DoubleScaler,
         );
 
-        let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
+        let fitted = ct.fit(&x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
 
         assert_eq!(transformed.ncols(), 1);
@@ -350,7 +366,7 @@ mod tests {
         let ct =
             ColumnTransformer::<f64>::new().push("double_all", ColumnSelector::All, DoubleScaler);
 
-        let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
+        let fitted = ct.fit(&x).unwrap();
         let transformed = fitted.transform(&x).unwrap();
         assert_eq!(transformed, array![[2.0, 4.0], [6.0, 8.0]]);
     }
@@ -365,7 +381,7 @@ mod tests {
             IdentityTransformer,
         );
 
-        let fitted = FitUnsupervised::fit(&ct, &x).unwrap();
+        let fitted = ct.fit(&x).unwrap();
         let x_bad = array![[1.0, 2.0]];
         assert!(fitted.transform(&x_bad).is_err());
     }
@@ -380,6 +396,6 @@ mod tests {
             IdentityTransformer,
         );
 
-        assert!(FitUnsupervised::fit(&ct, &x).is_err());
+        assert!(ct.fit(&x).is_err());
     }
 }

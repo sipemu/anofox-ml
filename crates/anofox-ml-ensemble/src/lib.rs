@@ -45,6 +45,8 @@
 pub mod adaboost_classifier;
 pub mod adaboost_regressor;
 pub mod bagging_classifier;
+mod bagging_common;
+mod bagging_generic;
 pub mod bagging_regressor;
 pub mod calibrated_classifier;
 pub mod extra_trees_classifier;
@@ -59,12 +61,16 @@ pub mod random_forest_classifier;
 pub mod random_forest_regressor;
 pub mod stacking_classifier;
 pub mod stacking_regressor;
+mod util;
 pub mod voting_classifier;
 pub mod voting_regressor;
 
 pub use adaboost_classifier::{AdaBoostClassifier, FittedAdaBoostClassifier};
 pub use adaboost_regressor::{AdaBoostLoss, AdaBoostRegressor, FittedAdaBoostRegressor};
 pub use bagging_classifier::{BaggingClassifier, FittedBaggingClassifier};
+pub use bagging_generic::{
+    FittedGenericBagging, GenericBaggingClassifier, GenericBaggingRegressor,
+};
 pub use bagging_regressor::{BaggingRegressor, FittedBaggingRegressor};
 pub use calibrated_classifier::{CalibratedClassifierCV, CalibrationMethod};
 pub use extra_trees_classifier::{ExtraTreesClassifier, FittedExtraTreesClassifier};
@@ -72,15 +78,17 @@ pub use extra_trees_regressor::{ExtraTreesRegressor, FittedExtraTreesRegressor};
 pub use gradient_boosting_classifier::{
     FittedGradientBoostingClassifier, GradientBoostingClassifier,
 };
-pub use gradient_boosting_regressor::{FittedGradientBoostingRegressor, GradientBoostingRegressor};
+pub use gradient_boosting_regressor::{
+    FittedGradientBoostingRegressor, GbLoss, GradientBoostingRegressor,
+};
 pub use hist_gradient_boosting::{
     FittedHistGradientBoostingClassifier, FittedHistGradientBoostingRegressor,
     HistGradientBoostingClassifier, HistGradientBoostingRegressor,
 };
 pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{
-    BoostingType, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassWeight, LgbmClassifier,
-    LgbmFitOptions, LgbmObjective, LgbmRegressor,
+    BoostingType, CategoricalSplitParams, FittedLgbmClassifier, FittedLgbmRegressor,
+    LgbmClassWeight, LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor,
 };
 pub use random_forest_classifier::{FittedRandomForestClassifier, RandomForestClassifier};
 pub use random_forest_regressor::{FittedRandomForestRegressor, RandomForestRegressor};

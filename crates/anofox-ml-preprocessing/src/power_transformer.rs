@@ -295,7 +295,7 @@ impl<F: Float> FitUnsupervised<F> for PowerTransformer {
                     .fold(F::zero(), |a, &b| a + (b - mean) * (b - mean))
                     / n;
                 means[j] = mean;
-                stds[j] = if is_constant_feature(var, mean, t.len()) {
+                stds[j] = if is_constant_feature(var, mean, F::from_usize(t.len()).unwrap()) {
                     F::one()
                 } else {
                     var.sqrt()

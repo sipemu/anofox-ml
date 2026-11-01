@@ -415,7 +415,7 @@ impl MlpClassifier {
             }
             (None, Some(c)) => {
                 let mut c = c.to_vec();
-                c.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                c.sort_by(anofox_ml_core::labels::label_cmp);
                 c.dedup();
                 c
             }
@@ -425,7 +425,7 @@ impl MlpClassifier {
                     seen.entry(v.to_f64().unwrap().to_bits()).or_insert(v);
                 }
                 let mut c: Vec<F> = seen.into_values().collect();
-                c.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                c.sort_by(anofox_ml_core::labels::label_cmp);
                 c
             }
         };

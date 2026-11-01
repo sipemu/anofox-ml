@@ -1,4 +1,7 @@
-use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
+use anofox_ml_core::{
+    FitUnsupervised, FitUnsupervisedWeighted, Float, InverseTransform, PartialFitUnsupervised,
+    Result, RustMlError, Transform,
+};
 use ndarray::{Array1, Array2};
 
 /// Parameters for StandardScaler (unfitted state).
@@ -47,6 +50,12 @@ impl Default for StandardScaler {
 pub struct FittedStandardScaler<F: Float> {
     mean: Array1<F>,
     std: Array1<F>,
+    /// Population variance per feature (`var_`); needed to merge batches.
+    #[serde(default)]
+    var: Array1<F>,
+    /// Number (or total weight) of non-NaN samples seen per feature.
+    #[serde(default)]
+    n_samples_seen: Array1<F>,
     with_mean: bool,
     with_std: bool,
 }
@@ -55,59 +64,145 @@ impl<F: Float> FitUnsupervised<F> for StandardScaler {
     type Fitted = FittedStandardScaler<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        self.partial_fit_weighted(None, x, None)
+    }
+}
+
+impl<F: Float> FitUnsupervisedWeighted<F> for StandardScaler {
+    type Fitted = FittedStandardScaler<F>;
+
+    /// `fit(X, sample_weight=...)`: weighted mean and (population) variance,
+    /// as sklearn's `StandardScaler`.
+    fn fit_unsupervised_weighted(
+        &self,
+        x: &Array2<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.partial_fit_weighted(None, x, sample_weight)
+    }
+}
+
+impl<F: Float> PartialFitUnsupervised<F> for StandardScaler {
+    type Fitted = FittedStandardScaler<F>;
+
+    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted> {
+        self.partial_fit_weighted(state, x, None)
+    }
+
+    /// sklearn's `StandardScaler.partial_fit`: the batch statistics are merged
+    /// into the running ones with `_incremental_mean_and_var` (Chan et al.),
+    /// per feature and ignoring NaN.
+    fn partial_fit_weighted(
+        &self,
+        state: Option<Self::Fitted>,
+        x: &Array2<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
-
-        // NaN-aware per-column mean / variance (sklearn ignores NaN at fit
-        // time and passes it through at transform time).
+        if let Some(w) = sample_weight {
+            if w.len() != x.nrows() {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "sample_weight has {} entries, X has {} rows",
+                    w.len(),
+                    x.nrows()
+                )));
+            }
+            if w.iter().any(|&v| v < F::zero() || !v.is_finite()) {
+                return Err(RustMlError::InvalidParameter(
+                    "sample_weight must be finite and non-negative".into(),
+                ));
+            }
+        }
         let ncols = x.ncols();
-        let mut mean = Array1::<F>::zeros(ncols);
-        let mut std = Array1::<F>::ones(ncols);
+        let (mut mean, mut var, mut count) = match state {
+            Some(prev) => {
+                if prev.mean.len() != ncols {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "expected {} features, got {ncols}",
+                        prev.mean.len()
+                    )));
+                }
+                if prev.n_samples_seen.len() != ncols || prev.var.len() != ncols {
+                    return Err(RustMlError::InvalidParameter(
+                        "fitted scaler has no running statistics (saved by an older version); \
+                         refit it before calling partial_fit"
+                            .into(),
+                    ));
+                }
+                (prev.mean, prev.var, prev.n_samples_seen)
+            }
+            None => (
+                Array1::<F>::zeros(ncols),
+                Array1::<F>::zeros(ncols),
+                Array1::<F>::zeros(ncols),
+            ),
+        };
+
+        let weight = |i: usize| sample_weight.map_or(F::one(), |w| w[i]);
         for j in 0..ncols {
             let col = x.column(j);
-            let mut count = 0usize;
-            let mut sum = F::zero();
-            for &v in col.iter() {
+            // Batch sum and count (total weight) of the non-NaN entries.
+            let mut new_sum = F::zero();
+            let mut new_count = F::zero();
+            for (i, &v) in col.iter().enumerate() {
                 if !v.is_nan() {
-                    count += 1;
-                    sum += v;
+                    new_sum += v * weight(i);
+                    new_count += weight(i);
                 }
             }
-            if count == 0 {
+            if new_count == F::zero() {
+                continue;
+            }
+            // Batch unnormalised variance about the batch mean, with the
+            // rounding correction term of `_incremental_mean_and_var`.
+            let t = new_sum / new_count;
+            let mut sq = F::zero();
+            let mut corr = F::zero();
+            for (i, &v) in col.iter().enumerate() {
+                if !v.is_nan() {
+                    let d = v - t;
+                    sq += d * d * weight(i);
+                    corr += d * weight(i);
+                }
+            }
+            let new_unnorm = sq - corr * corr / new_count;
+
+            let last_count = count[j];
+            let updated_count = last_count + new_count;
+            let last_sum = mean[j] * last_count;
+            let updated_unnorm = if last_count == F::zero() {
+                new_unnorm
+            } else {
+                let last_over_new = last_count / new_count;
+                let d = last_sum / last_over_new - new_sum;
+                var[j] * last_count + new_unnorm + last_over_new / updated_count * d * d
+            };
+            mean[j] = (last_sum + new_sum) / updated_count;
+            var[j] = (updated_unnorm / updated_count).max(F::zero());
+            count[j] = updated_count;
+        }
+
+        let mut std = Array1::<F>::ones(ncols);
+        for j in 0..ncols {
+            if count[j] == F::zero() {
+                // All-NaN feature so far.
                 mean[j] = F::nan();
+                var[j] = F::nan();
                 if self.with_std {
                     std[j] = F::nan();
                 }
-                continue;
-            }
-            let n = F::from_usize(count).unwrap();
-            let m = sum / n;
-            mean[j] = m;
-            if self.with_std {
-                // Two-pass variance with the same correction term as
-                // sklearn's `_incremental_mean_and_var`.
-                let mut sq = F::zero();
-                let mut corr = F::zero();
-                for &v in col.iter() {
-                    if !v.is_nan() {
-                        let d = v - m;
-                        sq += d * d;
-                        corr += d;
-                    }
-                }
-                let var = ((sq - corr * corr / n) / n).max(F::zero());
-                std[j] = if is_constant_feature(var, m, count) {
-                    F::one()
-                } else {
-                    var.sqrt()
-                };
+            } else if self.with_std && !is_constant_feature(var[j], mean[j], count[j]) {
+                std[j] = var[j].sqrt();
             }
         }
 
         Ok(FittedStandardScaler {
             mean,
             std,
+            var,
+            n_samples_seen: count,
             with_mean: self.with_mean,
             with_std: self.with_std,
         })
@@ -168,11 +263,11 @@ impl<F: Float> InverseTransform<F> for FittedStandardScaler<F> {
 /// its variance is within the floating-point error bound of the variance
 /// computation, `var <= n·eps·var + (n·mean·eps)²`. Such features get a
 /// scale of 1 (`_handle_zeros_in_scale`), so they are only centred.
-pub(crate) fn is_constant_feature<F: Float>(var: F, mean: F, n_samples: usize) -> bool {
+pub(crate) fn is_constant_feature<F: Float>(var: F, mean: F, n_samples: F) -> bool {
     let eps = f64::EPSILON;
     let var = var.to_f64().unwrap();
     let mean = mean.to_f64().unwrap();
-    let n = n_samples as f64;
+    let n = n_samples.to_f64().unwrap();
     let upper = n * eps * var + (n * mean * eps).powi(2);
     var <= upper
 }
@@ -186,6 +281,17 @@ impl<F: Float> FittedStandardScaler<F> {
     /// `1` for (numerically) constant features and when `with_std = false`.
     pub fn std(&self) -> &Array1<F> {
         &self.std
+    }
+
+    /// Per-feature population variance (`var_` in sklearn).
+    pub fn var(&self) -> &Array1<F> {
+        &self.var
+    }
+
+    /// Number of non-NaN samples (total sample weight when weighted) seen
+    /// per feature (`n_samples_seen_`).
+    pub fn n_samples_seen(&self) -> &Array1<F> {
+        &self.n_samples_seen
     }
 }
 
@@ -335,6 +441,83 @@ mod tests {
         let t = fitted.transform(&x).unwrap();
         assert!(t[[1, 0]].is_nan());
         assert_abs_diff_eq!(t[[0, 0]], -1.0, epsilon = 1e-12);
+    }
+
+    fn batches_data() -> (Array2<f64>, Array1<f64>) {
+        let x = array![
+            [1.0, -2.0, 5.0],
+            [3.0, f64::NAN, 5.0],
+            [4.5, 0.5, 5.0],
+            [-1.0, 7.0, 5.0],
+            [2.0, 3.0, 5.0],
+            [10.0, -4.0, 5.0]
+        ];
+        (x, array![0.5, 2.0, 1.0, 0.0, 3.0, 1.5])
+    }
+
+    fn assert_close(a: &Array1<f64>, b: &[f64]) {
+        assert_eq!(a.len(), b.len());
+        for (u, v) in a.iter().zip(b) {
+            assert_abs_diff_eq!(*u, *v, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_partial_fit_matches_sklearn() {
+        // sklearn 1.8: StandardScaler().partial_fit(X[:2]).partial_fit(X[2:5])
+        //   .partial_fit(X[5:])
+        let (x, _) = batches_data();
+        let s = StandardScaler::new();
+        let mut st = None;
+        for (a, b) in [(0, 2), (2, 5), (5, 6)] {
+            st = Some(
+                s.partial_fit(st, &x.slice(ndarray::s![a..b, ..]).to_owned())
+                    .unwrap(),
+            );
+        }
+        let f: FittedStandardScaler<f64> = st.unwrap();
+        assert_close(f.mean(), &[3.25, 0.9, 5.0]);
+        assert_close(f.var(), &[11.979166666666666, 14.84, 0.0]);
+        assert_close(f.std(), &[3.4610932762158644, 3.8522720568516444, 1.0]);
+        assert_close(f.n_samples_seen(), &[6.0, 5.0, 6.0]);
+        // Same as one fit on everything.
+        let full = FitUnsupervised::<f64>::fit(&s, &x).unwrap();
+        assert_close(full.mean(), &[3.25, 0.9, 5.0]);
+        assert_close(full.std(), &[3.4610932762158644, 3.8522720568516444, 1.0]);
+    }
+
+    #[test]
+    fn test_sample_weight_matches_sklearn() {
+        // sklearn 1.8: StandardScaler().fit(X, sample_weight=w), and the same
+        // through partial_fit(X[:3], w[:3]).partial_fit(X[3:], w[3:]).
+        let (x, w) = batches_data();
+        let s = StandardScaler::new();
+        let full = s.fit_unsupervised_weighted(&x, Some(&w)).unwrap();
+        let st = s
+            .partial_fit_weighted(
+                None,
+                &x.slice(ndarray::s![..3, ..]).to_owned(),
+                Some(&w.slice(ndarray::s![..3]).to_owned()),
+            )
+            .unwrap();
+        let inc = s
+            .partial_fit_weighted(
+                Some(st),
+                &x.slice(ndarray::s![3.., ..]).to_owned(),
+                Some(&w.slice(ndarray::s![3..]).to_owned()),
+            )
+            .unwrap();
+        for f in [full, inc] {
+            assert_close(f.mean(), &[4.0, 0.4166666666666667, 5.0]);
+            assert_close(f.var(), &[9.09375, 8.701388888888891, 0.0]);
+            assert_close(f.std(), &[3.0155845204537046, 2.94981167007131, 1.0]);
+            assert_close(f.n_samples_seen(), &[8.0, 6.0, 8.0]);
+        }
+        // Unit weights reproduce the unweighted fit.
+        let ones = Array1::ones(6);
+        let a = s.fit_unsupervised_weighted(&x, Some(&ones)).unwrap();
+        let b = FitUnsupervised::<f64>::fit(&s, &x).unwrap();
+        assert_close(a.std(), b.std().as_slice().unwrap());
     }
 
     mod prop_tests {

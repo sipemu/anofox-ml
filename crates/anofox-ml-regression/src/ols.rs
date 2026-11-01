@@ -35,7 +35,7 @@ use ndarray::{Array1, Array2};
 /// let table = fitted.summary().unwrap();
 /// let pi = fitted.predict_interval(&x, IntervalKind::Prediction, 0.95).unwrap();
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OlsRegressor {
     with_intercept: bool,
     confidence_level: f64,
@@ -89,6 +89,8 @@ pub struct FittedOlsRegressor {
     inner: OlsInner,
     n_features: usize,
     inference: bool,
+    coef: Array1<f64>,
+    intercept: f64,
 }
 
 impl FittedOlsRegressor {
@@ -170,10 +172,13 @@ impl Fit<f64> for OlsRegressor {
             .fit(&x_mat, &y_col)
             .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
 
+        let (coef, intercept) = crate::convert::predict_params(fitted.result());
         Ok(FittedOlsRegressor {
             inner: OlsInner::Ols(fitted),
             n_features: x.ncols(),
             inference: self.inference,
+            coef,
+            intercept,
         })
     }
 }
@@ -202,10 +207,13 @@ impl FitWeighted<f64> for OlsRegressor {
             .build()
             .fit(&ndarray_to_mat(x), &ndarray_to_col(y))
             .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
+        let (coef, intercept) = crate::convert::predict_params(fitted.result());
         Ok(FittedOlsRegressor {
             inner: OlsInner::Wls(fitted),
             n_features: x.ncols(),
             inference: self.inference,
+            coef,
+            intercept,
         })
     }
 }
@@ -213,12 +221,7 @@ impl FitWeighted<f64> for OlsRegressor {
 impl Predict<f64> for FittedOlsRegressor {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         self.check_features(x)?;
-        let x_mat = ndarray_to_mat(x);
-        let preds = match &self.inner {
-            OlsInner::Ols(m) => m.predict(&x_mat),
-            OlsInner::Wls(m) => m.predict(&x_mat),
-        };
-        Ok(col_to_ndarray(&preds))
+        crate::convert::linear_predict(x, &self.coef, self.intercept)
     }
 }
 

@@ -98,9 +98,10 @@ pub mod prelude {
         leave_p_out, purged_k_fold, randomized_search_cv, repeated_k_fold,
         repeated_stratified_k_fold, shuffle_split, stratified_group_k_fold, stratified_k_fold,
         stratified_shuffle_split, time_series_split, train_test_split, validation_curve,
-        ColumnSelector, ColumnTransformer, CrossValidateResult, FeatureUnion, Fit, FitUnsupervised,
-        FittedPipeline, Float, FunctionTransformer, GridSearchResult, InverseTransform, Pipeline,
-        Predict, Remainder, Transform,
+        ClassWeight, ColumnSelector, ColumnTransformer, CrossValidateResult, FeatureUnion, Fit,
+        FitUnsupervised, FitUnsupervisedWeighted, FitWeighted, FittedPipeline, Float,
+        FunctionTransformer, GridSearchResult, InverseTransform, PartialFitUnsupervised, Pipeline,
+        Predict, PredictProba, Remainder, Supervised, Transform,
     };
 
     pub use anofox_ml_metrics::{
@@ -113,30 +114,33 @@ pub mod prelude {
     };
 
     pub use anofox_ml_preprocessing::{
-        BinStrategy, Binarizer, EncodeStrategy, ImputeStrategy, KBinsDiscretizer, KernelPca,
-        KpcaKernel, LabelEncoder, MaxAbsScaler, MinMaxScaler, MutualInformationSelector, Nmf,
-        NormType, Normalizer, OneHotEncoder, OrdinalEncoder, OutputDistribution, Pca,
-        PolynomialFeatures, PowerTransformer, QuantileTransformer, Rfe, RobustScaler,
-        SelectFromModel, SelectKBest, SequentialFeatureSelector, SimpleImputer, StandardScaler,
-        TruncatedSvd, VarianceThreshold,
+        AregImputer, BinStrategy, Binarizer, EncodeStrategy, ImputationOrder, ImputeStrategy,
+        IncrementalPca, IterativeImputer, KBinsDiscretizer, KernelPca, KnnImputeWeights,
+        KnnImputer, KpcaKernel, LabelEncoder, MaxAbsScaler, MinMaxScaler, MissingFeatures,
+        MissingIndicator, MutualInformationSelector, Nmf, NormType, Normalizer, OneHotEncoder,
+        OrdinalEncoder, OutputDistribution, Pca, PolynomialFeatures, PowerTransformer,
+        QuantileTransformer, RcsTransformer, Rfe, RobustScaler, SelectFromModel, SelectKBest,
+        SequentialFeatureSelector, SimpleImputer, StandardScaler, TargetEncoder, TargetSmooth,
+        TargetType, TruncatedSvd, VarianceThreshold,
     };
 
     pub use anofox_ml_neighbors::{
-        DistanceMetric, KnnClassifier, KnnRegressor, LocalOutlierFactor, WeightFunction,
+        DistanceMetric, KnnClassifier, KnnRegressor, LocalOutlierFactor, NeighborAlgorithm,
+        NeighborIndex, RadiusNeighborsClassifier, RadiusNeighborsRegressor, WeightFunction,
     };
 
     pub use anofox_ml_trees::{
-        ClassWeight, DecisionTreeClassifier, DecisionTreeRegressor, MaxFeatures, SplitCriterion,
+        DecisionTreeClassifier, DecisionTreeRegressor, MaxFeatures, SplitCriterion,
     };
 
     pub use anofox_ml_ensemble::{
         AdaBoostClassifier, AdaBoostRegressor, BaggingClassifier, BaggingRegressor, BoostingType,
-        CalibratedClassifierCV, CalibrationMethod, ExtraTreesClassifier, ExtraTreesRegressor,
-        GradientBoostingClassifier, GradientBoostingRegressor, HistGradientBoostingClassifier,
-        HistGradientBoostingRegressor, IsolationForest, LgbmClassWeight, LgbmClassifier,
-        LgbmFitOptions, LgbmObjective, LgbmRegressor, RandomForestClassifier,
-        RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier,
-        VotingRegressor,
+        CalibratedClassifierCV, CalibrationMethod, CategoricalSplitParams, ExtraTreesClassifier,
+        ExtraTreesRegressor, GradientBoostingClassifier, GradientBoostingRegressor,
+        HistGradientBoostingClassifier, HistGradientBoostingRegressor, IsolationForest,
+        LgbmClassWeight, LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor,
+        RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor,
+        VotingClassifier, VotingRegressor,
     };
 
     pub use anofox_ml_cluster::{

@@ -1,14 +1,9 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
+use crate::engine::{grow, GrowParams};
 use crate::node::TreeNode;
-use crate::split::{
-    child_seed, cmp_nan_last, complement_features, compute_impurity,
-    compute_sample_weights_from_class_weight, compute_weighted_impurity, count_classes,
-    find_best_split_weighted, find_best_split_with_features, leaf_value, select_feature_subset,
-    weighted_count_classes, weighted_leaf_value, BestSplit, ClassWeight, MaxFeatures,
-    SplitCriterion,
-};
+use crate::split::{cmp_nan_last, ClassWeight, MaxFeatures, SplitCriterion};
 
 /// Decision tree classifier parameters (unfitted state).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -26,6 +21,20 @@ pub struct DecisionTreeClassifier {
     pub class_weight: Option<ClassWeight>,
     /// Seed for the per-split feature subsampling RNG (only used when
     /// `max_features` is set). Different seeds give different trees.
+    /// Minimum weighted impurity decrease required to split a node
+    /// (sklearn's `min_impurity_decrease`).
+    #[serde(default)]
+    pub min_impurity_decrease: f64,
+    /// Minimum fraction of the total sample weight in each leaf.
+    #[serde(default)]
+    pub min_weight_fraction_leaf: f64,
+    /// Grow best-first with at most this many leaves (`None` = unlimited,
+    /// depth-first).
+    #[serde(default)]
+    pub max_leaf_nodes: Option<usize>,
+    /// Cost-complexity pruning strength (sklearn's `ccp_alpha`, 0 = none).
+    #[serde(default)]
+    pub ccp_alpha: f64,
     #[serde(default)]
     pub seed: u64,
 }
@@ -42,7 +51,34 @@ impl DecisionTreeClassifier {
             sample_weight: None,
             class_weight: None,
             seed: 0,
+            min_impurity_decrease: 0.0,
+            min_weight_fraction_leaf: 0.0,
+            max_leaf_nodes: None,
+            ccp_alpha: 0.0,
         }
+    }
+    /// Minimum weighted impurity decrease of a split.
+    pub fn with_min_impurity_decrease(mut self, v: f64) -> Self {
+        self.min_impurity_decrease = v;
+        self
+    }
+
+    /// Minimum fraction of the total sample weight per leaf.
+    pub fn with_min_weight_fraction_leaf(mut self, v: f64) -> Self {
+        self.min_weight_fraction_leaf = v;
+        self
+    }
+
+    /// Best-first growth with at most `n` leaves.
+    pub fn with_max_leaf_nodes(mut self, n: Option<usize>) -> Self {
+        self.max_leaf_nodes = n;
+        self
+    }
+
+    /// Minimal cost-complexity pruning strength.
+    pub fn with_ccp_alpha(mut self, alpha: f64) -> Self {
+        self.ccp_alpha = alpha;
+        self
     }
 
     /// Set the maximum depth of the tree.
@@ -111,73 +147,151 @@ pub struct FittedDecisionTreeClassifier<F: Float> {
 impl<F: Float> Fit<F> for DecisionTreeClassifier {
     type Fitted = FittedDecisionTreeClassifier<F>;
 
+    /// Fits with the configured `sample_weight` (if any).
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        if x.nrows() != y.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but y has {} elements",
-                x.nrows(),
-                y.len()
-            )));
-        }
-        if x.is_empty() {
-            return Err(RustMlError::EmptyInput("training data is empty".into()));
-        }
+        let sw = self
+            .sample_weight
+            .as_ref()
+            .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
+        self.fit_impl(x, y, sw.as_ref())
+    }
+}
 
-        if let Some(sw) = &self.sample_weight {
+impl<F: Float> FitWeighted<F> for DecisionTreeClassifier {
+    type Fitted = FittedDecisionTreeClassifier<F>;
+
+    /// `sample_weight` replaces the configured one; it is multiplied by the
+    /// `class_weight`, as in sklearn.
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        match sample_weight {
+            Some(sw) => self.fit_impl(x, y, Some(sw)),
+            None => Fit::fit(self, x, y),
+        }
+    }
+}
+
+impl DecisionTreeClassifier {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedDecisionTreeClassifier<F>> {
+        check_xy(x, y)?;
+        let rows: Vec<usize> = (0..x.nrows()).collect();
+        self.fit_on_rows(x, y, &rows, sample_weight)
+    }
+
+    /// Fit on the sample `rows` of `(x, y)` without copying `X`. Rows may
+    /// repeat (a bootstrap draw counts each copy as a sample, exactly as if
+    /// the rows had been copied). `sample_weight` is indexed by row of `x`;
+    /// `class_weight` is computed over the drawn samples.
+    pub fn fit_on_rows<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        rows: &[usize],
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedDecisionTreeClassifier<F>> {
+        check_xy(x, y)?;
+        check_rows(rows, x.nrows())?;
+        if let Some(sw) = sample_weight {
             if sw.len() != y.len() {
                 return Err(RustMlError::ShapeMismatch(format!(
-                    "sample_weight has {} entries but y has {}",
+                    "sample_weight has {} elements but X has {} rows",
                     sw.len(),
                     y.len()
                 )));
             }
         }
-
-        let indices: Vec<usize> = (0..x.nrows()).collect();
-        let n_features = x.ncols();
-        let max_features_k = self.max_features.map(|mf| mf.resolve(n_features));
-
-        // Compute effective sample weights (merge class_weight and sample_weight)
-        let effective_weights: Option<Array1<F>> = {
-            let class_w = self
-                .class_weight
-                .as_ref()
-                .map(|cw| compute_sample_weights_from_class_weight(y, cw));
-            let sample_w = self
-                .sample_weight
-                .as_ref()
-                .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
-            match (class_w, sample_w) {
-                (Some(cw), Some(sw)) => Some(cw * sw),
-                (Some(cw), None) => Some(cw),
-                (None, Some(sw)) => Some(sw),
-                (None, None) => None,
+        // Effective sample weights: sample_weight × class_weight, per row.
+        let effective_weights = match &self.class_weight {
+            None => {
+                if let Some(sw) = sample_weight {
+                    let drawn = Array1::from_iter(rows.iter().map(|&r| sw[r]));
+                    anofox_ml_core::check_sample_weight(&drawn, drawn.len())?;
+                }
+                sample_weight.cloned()
+            }
+            Some(cw) => {
+                let y_drawn = Array1::from_iter(rows.iter().map(|&r| y[r]));
+                let w_drawn =
+                    sample_weight.map(|sw| Array1::from_iter(rows.iter().map(|&r| sw[r])));
+                let eff =
+                    anofox_ml_core::effective_sample_weight(&y_drawn, w_drawn.as_ref(), Some(cw))?
+                        .expect("class_weight is set");
+                let mut per_row = Array1::<F>::zeros(y.len());
+                for (&r, &w) in rows.iter().zip(eff.iter()) {
+                    per_row[r] = w;
+                }
+                Some(per_row)
             }
         };
 
-        let params = TreeBuildParams {
+        let n_features = x.ncols();
+        let params = GrowParams {
             max_depth: self.max_depth,
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
             criterion: self.criterion,
-            max_features_k,
+            max_features_k: self.max_features.map(|mf| mf.resolve(n_features)),
             n_features,
+            min_impurity_decrease: self.min_impurity_decrease,
+            min_weight_fraction_leaf: self.min_weight_fraction_leaf,
+            max_leaf_nodes: self.max_leaf_nodes,
         };
-        let tree = build_tree(
-            x,
-            y,
-            &indices,
-            0,
-            &params,
-            self.seed,
-            effective_weights.as_ref(),
-        );
-
-        Ok(FittedDecisionTreeClassifier {
-            tree,
-            n_features: x.ncols(),
-        })
+        if !(0.0..=0.5).contains(&self.min_weight_fraction_leaf) {
+            return Err(RustMlError::InvalidParameter(
+                "min_weight_fraction_leaf must be in [0, 0.5]".into(),
+            ));
+        }
+        if self.max_leaf_nodes.is_some_and(|n| n < 2) {
+            return Err(RustMlError::InvalidParameter(
+                "max_leaf_nodes must be at least 2".into(),
+            ));
+        }
+        if self.min_impurity_decrease < 0.0 || self.ccp_alpha < 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "min_impurity_decrease and ccp_alpha must be non-negative".into(),
+            ));
+        }
+        let tree = grow(x, y, rows, effective_weights.as_ref(), &params, self.seed);
+        let tree = crate::node::prune_ccp(tree, self.ccp_alpha, true);
+        Ok(FittedDecisionTreeClassifier { tree, n_features })
     }
+}
+
+/// Matching row counts and non-empty data.
+pub(crate) fn check_xy<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<()> {
+    if x.nrows() != y.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "X has {} rows but y has {} elements",
+            x.nrows(),
+            y.len()
+        )));
+    }
+    if x.is_empty() {
+        return Err(RustMlError::EmptyInput("training data is empty".into()));
+    }
+    Ok(())
+}
+
+/// Non-empty and in range.
+pub(crate) fn check_rows(rows: &[usize], n: usize) -> Result<()> {
+    if rows.is_empty() {
+        return Err(RustMlError::EmptyInput("no sample rows".into()));
+    }
+    if let Some(&r) = rows.iter().find(|&&r| r >= n) {
+        return Err(RustMlError::InvalidParameter(format!(
+            "sample row {r} out of range for {n} rows"
+        )));
+    }
+    Ok(())
 }
 
 impl<F: Float> Predict<F> for FittedDecisionTreeClassifier<F> {
@@ -239,19 +353,18 @@ impl<F: Float> FittedDecisionTreeClassifier<F> {
 
         for (i, row) in x.rows().into_iter().enumerate() {
             let leaf = self.tree.leaf_for_view(row);
-            if let TreeNode::Leaf {
-                class_counts: Some(counts),
-                ..
-            } = leaf
-            {
-                let total: usize = counts.iter().map(|&(_, c)| c).sum();
-                let total_f = F::from_usize(total).unwrap();
-                for &(class_val, count) in counts {
+            if let Some(dist) = leaf.class_distribution() {
+                let total = dist.iter().fold(F::zero(), |a, &(_, m)| a + m);
+                for &(class_val, mass) in &dist {
                     if let Some(ci) = classes
                         .iter()
                         .position(|&c| (c - class_val).abs() < F::from_f64(1e-9).unwrap())
                     {
-                        proba[[i, ci]] = F::from_usize(count).unwrap() / total_f;
+                        proba[[i, ci]] = if total > F::zero() {
+                            mass / total
+                        } else {
+                            F::zero()
+                        };
                     }
                 }
             } else {
@@ -284,148 +397,6 @@ impl<F: Float> PredictProba<F> for FittedDecisionTreeClassifier<F> {
     fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
         // Delegate to the inherent method.
         Self::predict_proba(self, x)
-    }
-}
-
-/// Bundled parameters for recursive tree building (avoids too many function args).
-struct TreeBuildParams {
-    max_depth: Option<usize>,
-    min_samples_split: usize,
-    min_samples_leaf: usize,
-    criterion: SplitCriterion,
-    /// Resolved max features count per split (None = use all).
-    max_features_k: Option<usize>,
-    /// Total number of features in the dataset.
-    n_features: usize,
-}
-
-fn build_tree<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
-    indices: &[usize],
-    depth: usize,
-    params: &TreeBuildParams,
-    node_seed: u64,
-    weights: Option<&Array1<F>>,
-) -> TreeNode<F> {
-    let n_samples = indices.len();
-    let impurity = match weights {
-        Some(w) => compute_weighted_impurity(y, indices, w, params.criterion),
-        None => compute_impurity(y, indices, params.criterion),
-    };
-
-    // Check stopping criteria
-    let should_stop = n_samples < params.min_samples_split
-        || params.max_depth.is_some_and(|d| depth >= d)
-        || impurity < F::from_f64(1e-15).unwrap();
-
-    if should_stop {
-        return make_leaf(y, indices, params.criterion, weights);
-    }
-
-    let find = |features: &[usize]| -> Option<BestSplit<F>> {
-        match weights {
-            Some(w) => find_best_split_weighted(
-                x,
-                y,
-                indices,
-                w,
-                params.criterion,
-                params.min_samples_leaf,
-                features,
-            ),
-            None => find_best_split_with_features(
-                x,
-                y,
-                indices,
-                params.criterion,
-                params.min_samples_leaf,
-                features,
-            ),
-        }
-    };
-
-    // Per-split feature subsampling (`max_features`): draw a fresh subset at
-    // every node. Like sklearn, if none of the drawn features admits a valid
-    // split (e.g. they are all constant here), keep searching the remaining
-    // features instead of turning the node into a leaf.
-    let split_result = match params.max_features_k {
-        Some(k) if k < params.n_features => {
-            let subset = select_feature_subset(params.n_features, k, node_seed);
-            find(&subset).or_else(|| find(&complement_features(params.n_features, &subset)))
-        }
-        _ => {
-            let all: Vec<usize> = (0..params.n_features).collect();
-            find(&all)
-        }
-    };
-
-    match split_result {
-        Some(split) => {
-            let left = build_tree(
-                x,
-                y,
-                &split.left_indices,
-                depth + 1,
-                params,
-                child_seed(node_seed, 0),
-                weights,
-            );
-            let right = build_tree(
-                x,
-                y,
-                &split.right_indices,
-                depth + 1,
-                params,
-                child_seed(node_seed, 1),
-                weights,
-            );
-
-            TreeNode::Split {
-                feature_index: split.feature_index,
-                threshold: split.threshold,
-                left: Box::new(left),
-                right: Box::new(right),
-                n_samples,
-                impurity,
-            }
-        }
-        None => make_leaf(y, indices, params.criterion, weights),
-    }
-}
-
-fn make_leaf<F: Float>(
-    y: &Array1<F>,
-    indices: &[usize],
-    criterion: SplitCriterion,
-    weights: Option<&Array1<F>>,
-) -> TreeNode<F> {
-    let value = match weights {
-        Some(w) => weighted_leaf_value(y, indices, w, criterion),
-        None => leaf_value(y, indices, criterion),
-    };
-    let class_counts = match criterion {
-        SplitCriterion::Gini | SplitCriterion::Entropy => match weights {
-            Some(w) => {
-                // Store weighted counts as approximate integer counts for predict_proba compat
-                let wc = weighted_count_classes(y, indices, w);
-                Some(
-                    wc.into_iter()
-                        .map(|(class, weight)| {
-                            // Scale weight to integer-like count (multiply by 1000 for precision)
-                            (class, (weight.to_f64().unwrap() * 1000.0).round() as usize)
-                        })
-                        .collect(),
-                )
-            }
-            None => Some(count_classes(y, indices)),
-        },
-        SplitCriterion::Mse => None,
-    };
-    TreeNode::Leaf {
-        value,
-        n_samples: indices.len(),
-        class_counts,
     }
 }
 

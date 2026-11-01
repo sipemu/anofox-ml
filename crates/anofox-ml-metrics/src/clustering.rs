@@ -46,7 +46,7 @@ pub fn silhouette_score<F: Float>(x: &Array2<F>, labels: &Array1<F>) -> Result<F
 
     // Identify unique cluster labels
     let mut unique_labels: Vec<F> = labels.iter().copied().collect();
-    unique_labels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    unique_labels.sort_by(anofox_ml_core::labels::label_cmp);
     unique_labels.dedup_by(|a, b| (*a - *b).abs() < eps);
 
     if unique_labels.len() < 2 {

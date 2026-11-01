@@ -1,4 +1,4 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::node::TreeNode;
 use anofox_ml_trees::split::SplitCriterion;
 use anofox_ml_trees::MaxFeatures;
@@ -109,6 +109,31 @@ impl<F: Float> Fit<F> for ExtraTreesRegressor {
     type Fitted = FittedExtraTreesRegressor<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for ExtraTreesRegressor {
+    type Fitted = FittedExtraTreesRegressor<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl ExtraTreesRegressor {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedExtraTreesRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -125,6 +150,9 @@ impl<F: Float> Fit<F> for ExtraTreesRegressor {
             ));
         }
 
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, y.len())?;
+        }
         let n_features = x.ncols();
         let max_features_k = resolve_max_features(self.max_features, n_features)?;
 
@@ -146,7 +174,7 @@ impl<F: Float> Fit<F> for ExtraTreesRegressor {
         let trees: Vec<ExtraForestTree<F>> = tree_seeds
             .into_par_iter()
             .map(|tree_seed| ExtraForestTree {
-                tree: build_extra_tree(x, y, &indices, 0, &params, tree_seed),
+                tree: build_extra_tree(x, y, &indices, 0, &params, tree_seed, sample_weight),
                 feature_indices: (0..n_features).collect(),
                 n_features_tree: n_features,
             })

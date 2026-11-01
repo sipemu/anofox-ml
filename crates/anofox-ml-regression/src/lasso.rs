@@ -14,7 +14,7 @@ use ndarray::{Array1, Array2};
 /// Minimizes: `||y - Xβ||² + λ||β||₁`
 ///
 /// This is equivalent to Elastic Net with `alpha = 1.0`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LassoRegressor {
     lambda: f64,
     with_intercept: bool,

@@ -1,5 +1,8 @@
-use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2, Axis};
+use anofox_ml_core::{
+    FitUnsupervised, Float, InverseTransform, PartialFitUnsupervised, Result, RustMlError,
+    Transform,
+};
+use ndarray::{Array1, Array2};
 
 /// Parameters for MaxAbsScaler (unfitted state).
 ///
@@ -36,14 +39,39 @@ impl<F: Float> FitUnsupervised<F> for MaxAbsScaler {
     type Fitted = FittedMaxAbsScaler<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        self.partial_fit(None, x)
+    }
+}
+
+impl<F: Float> PartialFitUnsupervised<F> for MaxAbsScaler {
+    type Fitted = FittedMaxAbsScaler<F>;
+
+    /// sklearn's `MaxAbsScaler.partial_fit`: the running per-feature maximum
+    /// absolute value is updated with each batch (NaN ignored).
+    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
-
-        let max_abs = x
-            .mapv(|v| v.abs())
-            .fold_axis(Axis(0), F::zero(), |&a, &b| a.max(b));
-
+        let mut max_abs = match state {
+            Some(prev) => {
+                if prev.max_abs.len() != x.ncols() {
+                    return Err(RustMlError::ShapeMismatch(format!(
+                        "expected {} features, got {}",
+                        prev.max_abs.len(),
+                        x.ncols()
+                    )));
+                }
+                prev.max_abs
+            }
+            None => Array1::zeros(x.ncols()),
+        };
+        for row in x.rows() {
+            for (j, &v) in row.iter().enumerate() {
+                if !v.is_nan() {
+                    max_abs[j] = max_abs[j].max(v.abs());
+                }
+            }
+        }
         Ok(FittedMaxAbsScaler { max_abs })
     }
 }
@@ -205,5 +233,29 @@ mod tests {
         let x_wrong = array![[1.0, 2.0, 3.0]];
         assert!(fitted.transform(&x_wrong).is_err());
         assert!(fitted.inverse_transform(&x_wrong).is_err());
+    }
+
+    #[test]
+    fn test_partial_fit_matches_sklearn() {
+        // sklearn 1.8: MaxAbsScaler().partial_fit(X[:2]).partial_fit(X[2:])
+        let x = array![
+            [1.0, -2.0, 5.0],
+            [3.0, f64::NAN, 5.0],
+            [4.5, 0.5, 5.0],
+            [-1.0, 7.0, 5.0],
+            [2.0, 3.0, 5.0],
+            [10.0, -4.0, 5.0]
+        ];
+        let s = MaxAbsScaler::new();
+        let st = PartialFitUnsupervised::<f64>::partial_fit(
+            &s,
+            None,
+            &x.slice(ndarray::s![..2, ..]).to_owned(),
+        )
+        .unwrap();
+        let f = s
+            .partial_fit(Some(st), &x.slice(ndarray::s![2.., ..]).to_owned())
+            .unwrap();
+        assert_eq!(f.max_abs().to_vec(), vec![10.0, 7.0, 5.0]);
     }
 }

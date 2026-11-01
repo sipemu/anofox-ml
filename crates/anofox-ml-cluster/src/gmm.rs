@@ -16,6 +16,7 @@
 //!
 //! See the `mixture` module for the covariance storage layout.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
@@ -42,7 +43,7 @@ pub enum CovarianceType {
 }
 
 /// Gaussian mixture estimator (unfitted).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GaussianMixture {
     pub n_components: usize,
     pub covariance_type: CovarianceType,
@@ -153,10 +154,13 @@ pub struct FittedGaussianMixture {
     pub covariance_type: CovarianceType,
 }
 
-impl FitUnsupervised<f64> for GaussianMixture {
+impl<F: Float> FitUnsupervised<F> for GaussianMixture {
     type Fitted = FittedGaussianMixture;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let x_std = crate::standard_layout(x);
         let x: &Array2<f64> = &x_std;
         let n = x.nrows();
@@ -361,8 +365,8 @@ impl FittedGaussianMixture {
     }
 }
 
-impl Predict<f64> for FittedGaussianMixture {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+impl FittedGaussianMixture {
+    fn predict_f64(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let wlp = self.weighted_log_prob_checked(x)?;
         Ok(wlp
             .rows()
@@ -380,10 +384,26 @@ impl Predict<f64> for FittedGaussianMixture {
     }
 }
 
-impl PredictProba<f64> for FittedGaussianMixture {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+impl<F: Float> Predict<F> for FittedGaussianMixture {
+    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+        Ok(anofox_ml_core::from_f64(
+            self.predict_f64(&anofox_ml_core::as_f64(x))?,
+        ))
+    }
+}
+
+impl FittedGaussianMixture {
+    fn predict_proba_f64(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         let (_, log_resp) = log_prob_resp(self.weighted_log_prob_checked(x)?);
         Ok(log_resp.mapv(f64::exp))
+    }
+}
+
+impl<F: Float> PredictProba<F> for FittedGaussianMixture {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Ok(anofox_ml_core::from_f64(
+            self.predict_proba_f64(&anofox_ml_core::as_f64(x))?,
+        ))
     }
 }
 
@@ -443,6 +463,6 @@ mod tests {
     }
 }
 
-impl anofox_ml_core::ClassifierScore<f64> for FittedGaussianMixture {}
+impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedGaussianMixture {}
 
-impl anofox_ml_core::PredictLogProba<f64> for FittedGaussianMixture {}
+impl<F: Float> anofox_ml_core::PredictLogProba<F> for FittedGaussianMixture {}

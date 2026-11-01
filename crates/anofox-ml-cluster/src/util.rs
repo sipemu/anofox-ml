@@ -135,7 +135,13 @@ fn sq_dist_to_all<F: Float>(x: &Array2<F>, c: ArrayView1<F>) -> Vec<F> {
     (0..x.nrows())
         .into_par_iter()
         .with_min_len(CHUNK)
-        .map(|i| squared_euclidean(x.row(i).as_slice().unwrap(), cs))
+        .map(|i| {
+            let r = x.row(i);
+            match r.as_slice() {
+                Some(rs) => squared_euclidean(rs, cs),
+                None => squared_euclidean(&r.to_vec(), cs),
+            }
+        })
         .collect()
 }
 

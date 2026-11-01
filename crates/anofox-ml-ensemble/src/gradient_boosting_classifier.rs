@@ -1,11 +1,11 @@
-use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 
-use crate::forest_common::{argmax_first, class_index, select_rows, sorted_classes};
+use crate::forest_common::{argmax_first, class_index, sorted_classes};
 
 /// Gradient boosting classifier parameters (unfitted state).
 ///
@@ -24,6 +24,11 @@ use crate::forest_common::{argmax_first, class_index, select_rows, sorted_classe
 /// With `subsample < 1` one in-bag sample (`max(1, floor(subsample * n))`
 /// rows, drawn without replacement) is drawn per round and shared by all K
 /// trees; leaf values are estimated from in-bag rows only.
+///
+/// With `n_iter_no_change`, a stratified `validation_fraction` of the data
+/// is held out and boosting stops once the validation log loss has not
+/// improved by `tol` within the last `n_iter_no_change` rounds (sklearn's
+/// rule).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GradientBoostingClassifier {
     /// Number of boosting rounds (each round adds K trees for K > 2 classes).
@@ -40,6 +45,19 @@ pub struct GradientBoostingClassifier {
     pub subsample: f64,
     /// Random seed for reproducibility.
     pub seed: u64,
+    /// Features drawn per split of every tree (`None` = all).
+    #[serde(default)]
+    pub max_features: Option<anofox_ml_trees::MaxFeatures>,
+    /// Early stopping: stop when the validation loss has not improved by
+    /// `tol` for this many rounds (`None` = off).
+    #[serde(default)]
+    pub n_iter_no_change: Option<usize>,
+    /// Fraction of the training data held out for early stopping.
+    #[serde(default = "crate::gradient_boosting_regressor::default_validation_fraction")]
+    pub validation_fraction: f64,
+    /// Minimum validation-loss improvement for early stopping.
+    #[serde(default = "crate::gradient_boosting_regressor::default_tol")]
+    pub tol: f64,
 }
 
 impl GradientBoostingClassifier {
@@ -53,7 +71,30 @@ impl GradientBoostingClassifier {
             min_samples_leaf: 1,
             subsample: 1.0,
             seed: 0,
+            max_features: None,
+            n_iter_no_change: None,
+            validation_fraction: 0.1,
+            tol: 1e-4,
         }
+    }
+
+    /// Features drawn per split.
+    pub fn with_max_features(mut self, mf: Option<anofox_ml_trees::MaxFeatures>) -> Self {
+        self.max_features = mf;
+        self
+    }
+
+    /// Enable early stopping on a held-out (stratified) `validation_fraction`.
+    pub fn with_early_stopping(
+        mut self,
+        n_iter_no_change: Option<usize>,
+        validation_fraction: f64,
+        tol: f64,
+    ) -> Self {
+        self.n_iter_no_change = n_iter_no_change;
+        self.validation_fraction = validation_fraction;
+        self.tol = tol;
+        self
     }
 
     /// Set the number of boosting rounds.
@@ -99,6 +140,28 @@ impl GradientBoostingClassifier {
     }
 }
 
+/// Salt of the per-tree seed stream (see `fit_impl`).
+pub(crate) const TREE_SEED_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// sklearn's half binomial / half multinomial loss of one row of raw
+/// scores: `log(1 + e^r) - y r` (one column) or `logsumexp(r) - r_y`.
+fn raw_log_loss<F: Float>(raw: ndarray::ArrayView1<'_, F>, label: usize) -> F {
+    if raw.len() == 1 {
+        let r = raw[0];
+        // log(1 + e^r), stable for large |r|.
+        let softplus = r.max(F::zero()) + (-r.abs()).exp().ln_1p();
+        softplus - if label == 1 { r } else { F::zero() }
+    } else {
+        let m = raw.iter().copied().fold(F::neg_infinity(), F::max);
+        let lse = m + raw
+            .iter()
+            .map(|&r| (r - m).exp())
+            .fold(F::zero(), |a, b| a + b)
+            .ln();
+        lse - raw[label]
+    }
+}
+
 impl Default for GradientBoostingClassifier {
     fn default() -> Self {
         Self::new()
@@ -127,6 +190,48 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
     type Fitted = FittedGradientBoostingClassifier<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for GradientBoostingClassifier {
+    type Fitted = FittedGradientBoostingClassifier<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight, None)
+    }
+}
+
+impl GradientBoostingClassifier {
+    /// sklearn's `warm_start=True`: keep the rounds of `prev` and add more
+    /// until there are `n_estimators`, fitted on the same `(X, y)`. The
+    /// random draws of the earlier rounds are replayed, so without early
+    /// stopping the result equals a single fit with `n_estimators` rounds.
+    /// The early-stopping history restarts, as in sklearn. Asking for fewer
+    /// rounds than `prev` has is an error; as many returns `prev` unchanged.
+    pub fn fit_warm_start<F: Float>(
+        &self,
+        prev: FittedGradientBoostingClassifier<F>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedGradientBoostingClassifier<F>> {
+        self.fit_impl(x, y, sample_weight, Some(prev))
+    }
+
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+        prev: Option<FittedGradientBoostingClassifier<F>>,
+    ) -> Result<FittedGradientBoostingClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -167,6 +272,28 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
         // Binary: one tree per round on the log-odds. Multiclass: K trees per
         // round, one per class, on the multinomial deviance.
         let n_trees_per_round = if n_classes == 2 { 1 } else { n_classes };
+        if let Some(p) = &prev {
+            if p.n_features != n_features || p.classes != classes {
+                return Err(RustMlError::ShapeMismatch(
+                    "warm start needs the features and classes of the previous fit".into(),
+                ));
+            }
+            if p.learning_rate != lr {
+                return Err(RustMlError::InvalidParameter(
+                    "warm start needs the learning_rate of the previous fit".into(),
+                ));
+            }
+            let done = p.tree_sets[0].len();
+            if done > self.n_estimators {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "warm start: n_estimators={} is less than the {done} rounds already fitted",
+                    self.n_estimators
+                )));
+            }
+            if done == self.n_estimators {
+                return Ok(p.clone());
+            }
+        }
 
         // Encoded labels 0..K-1.
         let y_idx: Vec<usize> = y
@@ -174,20 +301,52 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
             .map(|&v| class_index(&classes, v).expect("label is in the class list"))
             .collect();
 
-        // Initial raw prediction (sklearn's `init='prior'` / DummyClassifier):
-        // binary = log-odds of the positive class; multiclass = log priors,
-        // centred so they sum to zero (symmetric multinomial logit link).
-        let eps = F::epsilon();
-        let n_f = F::from_usize(n_samples).unwrap();
-        let mut counts = vec![0usize; n_classes];
-        for &k in &y_idx {
-            counts[k] += 1;
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, n_samples)?;
         }
+        let weight = |i: usize| sample_weight.map_or(F::one(), |w| w[i]);
+
+        // Early stopping: hold out a stratified validation split.
+        let (train_rows, val_rows): (Vec<usize>, Vec<usize>) = match self.n_iter_no_change {
+            Some(_) => {
+                if !(self.validation_fraction > 0.0 && self.validation_fraction < 1.0) {
+                    return Err(RustMlError::InvalidParameter(
+                        "validation_fraction must be in (0, 1)".into(),
+                    ));
+                }
+                let (mut train, mut val) = anofox_ml_core::stratified_shuffle_split(
+                    x,
+                    y,
+                    1,
+                    self.validation_fraction,
+                    self.seed,
+                )?
+                .remove(0);
+                train.sort_unstable();
+                val.sort_unstable();
+                (train, val)
+            }
+            None => ((0..n_samples).collect(), Vec::new()),
+        };
+        let n_train = train_rows.len();
+
+        // Initial raw prediction (sklearn's `init='prior'` / DummyClassifier)
+        // from the training rows: binary = log-odds of the positive class;
+        // multiclass = log priors, centred so they sum to zero (symmetric
+        // multinomial logit link).
+        let eps = F::epsilon();
+        let mut counts = vec![F::zero(); n_classes];
+        for &i in &train_rows {
+            counts[y_idx[i]] += weight(i);
+        }
+        let n_f = counts.iter().fold(F::zero(), |a, &b| a + b);
         let priors: Vec<F> = counts
             .iter()
-            .map(|&c| clamp(F::from_usize(c).unwrap() / n_f, eps, F::one() - eps))
+            .map(|&c| clamp(c / n_f, eps, F::one() - eps))
             .collect();
-        let initial_values: Vec<F> = if n_classes == 2 {
+        let initial_values: Vec<F> = if let Some(p) = &prev {
+            p.initial_values.clone()
+        } else if n_classes == 2 {
             vec![(priors[1] / (F::one() - priors[1])).ln()]
         } else {
             let logs: Vec<F> = priors.iter().map(|p| p.ln()).collect();
@@ -200,9 +359,10 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
             max_depth: self.max_depth,
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
-            max_features: None,
+            max_features: self.max_features,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
         // Leaf update factor: 1 for binary, (K-1)/K for multinomial (Friedman).
@@ -218,35 +378,52 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
         }
 
         let mut rng = StdRng::seed_from_u64(self.seed);
+        // Per-tree seeds for feature sampling, from a stream of their own so
+        // the in-bag draws do not depend on `max_features`.
+        let mut tree_seeds = StdRng::seed_from_u64(self.seed ^ TREE_SEED_SALT);
         // Same in-bag size as sklearn: max(1, int(subsample * n)).
-        let n_inbag = ((self.subsample * n_samples as f64) as usize).max(1);
-        let use_subsample = n_inbag < n_samples;
+        let n_inbag = ((self.subsample * n_train as f64) as usize).max(1);
+        let use_subsample = n_inbag < n_train;
 
         let mut tree_sets: Vec<Vec<FittedDecisionTreeRegressor<F>>> = (0..n_trees_per_round)
             .map(|_| Vec::with_capacity(self.n_estimators))
             .collect();
         let mut probs = Array2::<F>::zeros((n_samples, n_trees_per_round));
         let mut neg_grad = Array1::<F>::zeros(n_samples);
-        let mut in_bag: Vec<usize> = (0..n_samples).collect();
+        let mut in_bag: Vec<usize> = train_rows.clone();
+        let mut loss_history = vec![F::infinity(); self.n_iter_no_change.unwrap_or(0)];
 
-        for _ in 0..self.n_estimators {
+        // Warm start: take over the previous rounds and replay their random
+        // draws so the streams continue where the previous fit stopped.
+        let mut begin = 0;
+        if let Some(p) = prev {
+            raw = p.raw_predictions(x)?;
+            begin = p.tree_sets[0].len();
+            for _ in 0..begin {
+                if use_subsample {
+                    train_rows.clone().shuffle(&mut rng);
+                }
+                if self.max_features.is_some() {
+                    for _ in 0..n_trees_per_round {
+                        let _: u64 = tree_seeds.gen();
+                    }
+                }
+            }
+            tree_sets = p.tree_sets;
+        }
+
+        for iteration in begin..self.n_estimators {
             // Probabilities from the raw predictions at the start of the
             // round (shared by all K trees of the round).
             compute_probs(&raw, &mut probs);
 
             // One in-bag sample per round, shared across classes.
             if use_subsample {
-                in_bag.clear();
-                in_bag.extend(0..n_samples);
+                in_bag.clone_from(&train_rows);
                 in_bag.shuffle(&mut rng);
                 in_bag.truncate(n_inbag);
                 in_bag.sort_unstable();
             }
-            let x_sub = if use_subsample {
-                Some(select_rows(x, &in_bag))
-            } else {
-                None
-            };
 
             for k in 0..n_trees_per_round {
                 // Class whose indicator is the target of this tree.
@@ -260,12 +437,23 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
                     neg_grad[i] = y_k - probs[[i, k]];
                 }
 
-                let mut tree: FittedDecisionTreeRegressor<F> = match &x_sub {
-                    Some(xs) => {
-                        let r_sub = Array1::from_iter(in_bag.iter().map(|&i| neg_grad[i]));
-                        tree_params.fit(xs, &r_sub)?
-                    }
-                    None => tree_params.fit(x, &neg_grad)?,
+                let round_params;
+                let params = if self.max_features.is_some() {
+                    round_params = tree_params.clone().with_seed(tree_seeds.gen());
+                    &round_params
+                } else {
+                    &tree_params
+                };
+                let mut tree: FittedDecisionTreeRegressor<F> = if in_bag.len() < n_samples {
+                    crate::forest_common::fit_tree_on_rows(
+                        params,
+                        x,
+                        &neg_grad,
+                        &in_bag,
+                        sample_weight,
+                    )?
+                } else {
+                    params.fit_weighted(x, &neg_grad, sample_weight)?
                 };
 
                 // Newton step per leaf over the in-bag samples:
@@ -276,8 +464,9 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
                 let mut den = vec![F::zero(); n_leaves];
                 for &i in &in_bag {
                     let p = probs[[i, k]];
-                    num[leaves[i]] += neg_grad[i];
-                    den[leaves[i]] += p * (F::one() - p);
+                    let w = weight(i);
+                    num[leaves[i]] += w * neg_grad[i];
+                    den[leaves[i]] += w * p * (F::one() - p);
                 }
                 let values: Vec<F> = num
                     .iter()
@@ -291,6 +480,22 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
                     raw[[i, k]] += lr * values[leaves[i]];
                 }
                 tree_sets[k].push(tree);
+            }
+
+            if let Some(n_no_change) = self.n_iter_no_change {
+                let (mut num, mut den) = (F::zero(), F::zero());
+                for &i in &val_rows {
+                    let w = weight(i);
+                    num += w * raw_log_loss(raw.row(i), y_idx[i]);
+                    den += w;
+                }
+                let val_loss = num / den;
+                let tol = F::from_f64(self.tol).unwrap();
+                if loss_history.iter().any(|&h| val_loss + tol < h) {
+                    loss_history[iteration % n_no_change] = val_loss;
+                } else {
+                    break;
+                }
             }
         }
 
@@ -480,6 +685,27 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_raw_log_loss() {
+        let ln2 = std::f64::consts::LN_2;
+        assert_abs_diff_eq!(raw_log_loss(array![0.0].view(), 1), ln2, epsilon = 1e-12);
+        // log(1 + e^2) - 2 for the positive class, log(1 + e^2) otherwise.
+        let sp = (1.0 + 2f64.exp()).ln();
+        assert_abs_diff_eq!(
+            raw_log_loss(array![2.0].view(), 1),
+            sp - 2.0,
+            epsilon = 1e-12
+        );
+        assert_abs_diff_eq!(raw_log_loss(array![2.0].view(), 0), sp, epsilon = 1e-12);
+        assert_abs_diff_eq!(raw_log_loss(array![800.0].view(), 0), 800.0, epsilon = 1e-9);
+        let k3 = 3f64.ln();
+        assert_abs_diff_eq!(
+            raw_log_loss(array![1.0, 1.0, 1.0].view(), 2),
+            k3,
+            epsilon = 1e-12
+        );
+    }
 
     /// Data generated with numpy (seed 0); expected values from
     /// `sklearn.ensemble.GradientBoostingClassifier(n_estimators=10,
@@ -929,6 +1155,41 @@ mod tests {
             correct_normal >= correct_tiny,
             "normal lr ({correct_normal} correct) should be >= tiny lr ({correct_tiny} correct)"
         );
+    }
+
+    #[test]
+    fn test_warm_start_equals_single_fit() {
+        let x = Array2::from_shape_fn((90, 3), |(i, j)| ((i * (j + 2)) as f64 * 0.41).sin());
+        for n_classes in [2usize, 3] {
+            let y = Array1::from_shape_fn(90, |i| {
+                let s = x[[i, 0]] + 0.5 * x[[i, 1]];
+                if n_classes == 2 {
+                    f64::from(u8::from(s > 0.0))
+                } else if s < -0.4 {
+                    0.0
+                } else if s < 0.4 {
+                    1.0
+                } else {
+                    2.0
+                }
+            });
+            let gb = |n| {
+                GradientBoostingClassifier::new()
+                    .with_n_estimators(n)
+                    .with_subsample(0.6)
+                    .with_max_depth(Some(2))
+                    .with_max_features(Some(anofox_ml_trees::MaxFeatures::Fixed(2)))
+                    .with_seed(9)
+            };
+            let full = gb(10).fit(&x, &y).unwrap();
+            let part = gb(4).fit(&x, &y).unwrap();
+            let warm = gb(10).fit_warm_start(part, &x, &y, None).unwrap();
+            assert_eq!(
+                warm.predict_proba(&x).unwrap(),
+                full.predict_proba(&x).unwrap()
+            );
+            assert!(gb(3).fit_warm_start(full, &x, &y, None).is_err());
+        }
     }
 }
 

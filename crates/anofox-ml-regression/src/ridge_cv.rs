@@ -22,7 +22,7 @@ use faer::Mat;
 use ndarray::{Array1, Array2, Axis};
 
 /// Ridge regression with cross-validated alpha selection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RidgeCrossValidated {
     alphas: Vec<f64>,
     cv_folds: Option<usize>,

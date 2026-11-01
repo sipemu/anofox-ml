@@ -14,7 +14,7 @@ pub fn median_absolute_error<F: Float>(y_true: &Array1<F>, y_pred: &Array1<F>) -
         .map(|(&t, &p)| (t - p).abs())
         .collect();
 
-    abs_errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    abs_errors.sort_by(anofox_ml_core::labels::label_cmp);
 
     let n = abs_errors.len();
     let median = if n % 2 == 0 {

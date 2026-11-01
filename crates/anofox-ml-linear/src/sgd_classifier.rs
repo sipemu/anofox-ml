@@ -11,7 +11,9 @@ use crate::sgd_common::{
     default_n_iter_no_change, default_t, default_validation_fraction, run_sgd, sigmoid, softplus,
     validation_split, LearningRate, Penalty, SgdConfig, SgdRun, SgdWeights, Stopping,
 };
-use anofox_ml_core::{Fit, Float, PartialFit, Predict, PredictProba, Result, RustMlError};
+use anofox_ml_core::{
+    ClassWeight, Fit, FitWeighted, Float, PartialFit, Predict, PredictProba, Result, RustMlError,
+};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -109,6 +111,11 @@ pub struct SgdClassifier {
     pub learning_rate: LearningRate,
     pub shuffle: bool,
     pub seed: u64,
+    /// Per-class weights (sklearn's `class_weight`): in each binary
+    /// sub-problem the positive class gets its weight and the negative side
+    /// the weight of the negative class (binary) or 1 (one-vs-rest).
+    #[serde(default)]
+    pub class_weight: Option<ClassWeight>,
 }
 
 impl SgdClassifier {
@@ -129,6 +136,7 @@ impl SgdClassifier {
             learning_rate: LearningRate::Optimal,
             shuffle: true,
             seed: 0,
+            class_weight: None,
         }
     }
 
@@ -192,6 +200,10 @@ impl SgdClassifier {
     }
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
+        self
+    }
+    pub fn with_class_weight(mut self, class_weight: Option<ClassWeight>) -> Self {
+        self.class_weight = class_weight;
         self
     }
 
@@ -353,6 +365,7 @@ impl SgdClassifier {
         &self,
         x: &Array2<f64>,
         y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
         classes: Vec<f64>,
         state: Option<FittedSgdClassifier<f64>>,
         partial: bool,
@@ -360,6 +373,48 @@ impl SgdClassifier {
         let p = x.ncols();
         let targets = binary_targets(y, &classes);
         let n_models = targets.len();
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, y.len())?;
+        }
+        // Per-sub-problem sample weights: sample_weight × (positive /
+        // negative) class weight, as sklearn's `_fit_binary` /
+        // `_fit_multiclass`.
+        let class_w: Option<Vec<f64>> = match &self.class_weight {
+            None => None,
+            Some(cw) => {
+                let per_sample = anofox_ml_core::compute_sample_weight(cw, y)?;
+                let mut per_class = vec![1.0; classes.len()];
+                for (i, &v) in y.iter().enumerate() {
+                    if let Some(k) = classes.iter().position(|&c| c == v) {
+                        per_class[k] = per_sample[i];
+                    }
+                }
+                Some(per_class)
+            }
+        };
+        let sub_weights: Vec<Option<Vec<f64>>> = targets
+            .iter()
+            .enumerate()
+            .map(|(m, yb)| {
+                if sample_weight.is_none() && class_w.is_none() {
+                    return None;
+                }
+                let (pos, neg) = match &class_w {
+                    None => (1.0, 1.0),
+                    Some(cw) if n_models == 1 => (cw[1], cw[0]),
+                    Some(cw) => (cw[m], 1.0),
+                };
+                Some(
+                    yb.iter()
+                        .enumerate()
+                        .map(|(i, &t)| {
+                            let c = if t > 0.0 { pos } else { neg };
+                            c * sample_weight.map_or(1.0, |w| w[i])
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
 
         let (mut models, t_start) = match state {
             Some(s) => {
@@ -413,6 +468,7 @@ impl SgdClassifier {
         let mut n_iter = 0;
         let mut t_end = t_start;
         for (c_idx, (model, yb)) in models.iter_mut().zip(targets.iter()).enumerate() {
+            let sw = sub_weights[c_idx].as_deref();
             let run: SgdRun = if partial {
                 let seed = self
                     .seed
@@ -423,6 +479,7 @@ impl SgdClassifier {
                 run_sgd(
                     x,
                     yb,
+                    sw,
                     &mut idx,
                     model,
                     &cfg,
@@ -438,14 +495,16 @@ impl SgdClassifier {
                 match &split {
                     Some((train_idx, val_idx)) => {
                         let score = |w: &Array1<f64>, b: f64| {
-                            let correct = val_idx
-                                .iter()
-                                .filter(|&&i| {
-                                    let z = b + x.row(i).dot(w);
-                                    (z > 0.0) == (yb[i] > 0.0)
-                                })
-                                .count();
-                            correct as f64 / val_idx.len() as f64
+                            let wt = |i: usize| sample_weight.map_or(1.0, |w| w[i]);
+                            let (mut correct, mut total) = (0.0, 0.0);
+                            for &i in val_idx {
+                                let z = b + x.row(i).dot(w);
+                                total += wt(i);
+                                if (z > 0.0) == (yb[i] > 0.0) {
+                                    correct += wt(i);
+                                }
+                            }
+                            correct / total
                         };
                         let stopping = Stopping {
                             tol: self.tol,
@@ -456,6 +515,7 @@ impl SgdClassifier {
                         run_sgd(
                             x,
                             yb,
+                            sw,
                             &mut idx,
                             model,
                             &cfg,
@@ -477,6 +537,7 @@ impl SgdClassifier {
                         run_sgd(
                             x,
                             yb,
+                            sw,
                             &mut idx,
                             model,
                             &cfg,
@@ -526,7 +587,29 @@ impl Fit<f64> for SgdClassifier {
                 "need at least 2 classes".into(),
             ));
         }
-        self.train(x, y, classes, None, false)
+        self.train(x, y, None, classes, None, false)
+    }
+}
+
+impl FitWeighted<f64> for SgdClassifier {
+    type Fitted = FittedSgdClassifier<f64>;
+
+    /// Each SGD update is scaled by the sample's weight times its class
+    /// weight (sklearn); the early-stopping accuracy is weighted too.
+    fn fit_weighted(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
+    ) -> Result<Self::Fitted> {
+        self.validate(x, y)?;
+        let classes = sorted_unique(&y.to_vec());
+        if classes.len() < 2 {
+            return Err(RustMlError::InvalidParameter(
+                "need at least 2 classes".into(),
+            ));
+        }
+        self.train(x, y, sample_weight, classes, None, false)
     }
 }
 
@@ -571,7 +654,14 @@ impl PartialFit<f64> for SgdClassifier {
             )));
         }
 
-        self.train(x, y, class_list, state, true)
+        if self.class_weight == Some(ClassWeight::Balanced) {
+            return Err(RustMlError::InvalidParameter(
+                "class_weight=Balanced is not supported by partial_fit (sklearn); \
+                 pass Manual weights computed on the full data"
+                    .into(),
+            ));
+        }
+        self.train(x, y, None, class_list, state, true)
     }
 }
 

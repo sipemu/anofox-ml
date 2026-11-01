@@ -1,7 +1,7 @@
 //! Isomap — non-linear dimensionality reduction via geodesic distances.
 //!
-//! Mirrors `sklearn.manifold.Isomap` with a brute-force k-NN graph and
-//! Floyd-Warshall all-pairs shortest paths:
+//! Mirrors `sklearn.manifold.Isomap` (k-NN graph from the shared neighbour
+//! index, Dijkstra shortest paths as `path_method="D"`):
 //!
 //! 1. Build the k-nearest-neighbor graph G(V, E), symmetrised as the
 //!    **union** of the directed k-NN relations (edge i–j if j is among i's
@@ -15,12 +15,17 @@
 //! for a larger `n_neighbors` (instead of silently treating unreachable pairs
 //! as distance 0, which collapsed unrelated points onto each other).
 
+use anofox_ml_core::Float;
+use std::collections::BinaryHeap;
+
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
+use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
+use rayon::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Isomap {
     pub n_components: usize,
     pub n_neighbors: usize,
@@ -41,18 +46,47 @@ pub struct FittedIsomap {
     pub eigenvalues: Array1<f64>,
 }
 
-fn euclid(a: &[f64], b: &[f64]) -> f64 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f64>()
-        .sqrt()
+/// Shortest-path distances from `source` (∞ for unreachable nodes).
+fn dijkstra(adj: &[Vec<(usize, f64)>], source: usize) -> Vec<f64> {
+    #[derive(PartialEq)]
+    struct Item(f64, usize);
+    impl Eq for Item {}
+    impl PartialOrd for Item {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Item {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            // Reversed: BinaryHeap pops the smallest distance first.
+            other.0.total_cmp(&self.0).then(other.1.cmp(&self.1))
+        }
+    }
+    let mut dist = vec![f64::INFINITY; adj.len()];
+    dist[source] = 0.0;
+    let mut heap = BinaryHeap::from([Item(0.0, source)]);
+    while let Some(Item(du, u)) = heap.pop() {
+        if du > dist[u] {
+            continue;
+        }
+        for &(v, w) in &adj[u] {
+            let alt = du + w;
+            if alt < dist[v] {
+                dist[v] = alt;
+                heap.push(Item(alt, v));
+            }
+        }
+    }
+    dist
 }
 
-impl FitUnsupervised<f64> for Isomap {
+impl<F: Float> FitUnsupervised<F> for Isomap {
     type Fitted = FittedIsomap;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -66,55 +100,27 @@ impl FitUnsupervised<f64> for Isomap {
             return Err(RustMlError::InvalidParameter("n_components >= 1".into()));
         }
 
-        // 1. Pairwise distances.
-        let mut pd = vec![vec![f64::INFINITY; n]; n];
+        // 1-2. k-NN graph, symmetrised as the union of both directions
+        //      (sklearn), as adjacency lists.
+        let index = NeighborIndex::new(
+            x,
+            DistanceMetric::Euclidean,
+            NeighborAlgorithm::Auto,
+            Some(k),
+        )?;
+        let (knn_d, knn_i) = index.kneighbors_self(k)?;
+        let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::with_capacity(2 * k); n];
         for i in 0..n {
-            let xi: Vec<f64> = x.row(i).iter().copied().collect();
-            pd[i][i] = 0.0;
-            for j in (i + 1)..n {
-                let xj: Vec<f64> = x.row(j).iter().copied().collect();
-                let d = euclid(&xi, &xj);
-                pd[i][j] = d;
-                pd[j][i] = d;
+            for c in 0..k {
+                let (j, w) = (knn_i[[i, c]], knn_d[[i, c]]);
+                adj[i].push((j, w));
+                adj[j].push((i, w));
             }
         }
 
-        // 2. Build k-NN graph: keep d(i,j) if j is in i's k-NN OR i is in j's
-        //    k-NN (union, as sklearn), and set others to INFINITY.
-        let mut g = vec![vec![f64::INFINITY; n]; n];
-        for i in 0..n {
-            let mut others: Vec<(usize, f64)> =
-                (0..n).filter(|&j| j != i).map(|j| (j, pd[i][j])).collect();
-            others.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-            for &(j, d) in others.iter().take(k) {
-                g[i][j] = d;
-            }
-            g[i][i] = 0.0;
-        }
-        // Symmetrize: take min of g[i][j] and g[j][i].
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let mn = g[i][j].min(g[j][i]);
-                g[i][j] = mn;
-                g[j][i] = mn;
-            }
-        }
-
-        // 3. Floyd-Warshall.
-        let mut d = g;
-        for kk in 0..n {
-            for i in 0..n {
-                if !d[i][kk].is_finite() {
-                    continue;
-                }
-                for j in 0..n {
-                    let alt = d[i][kk] + d[kk][j];
-                    if alt < d[i][j] {
-                        d[i][j] = alt;
-                    }
-                }
-            }
-        }
+        // 3. Geodesic distances: Dijkstra from every source over the sparse
+        //    graph (sklearn's `path_method="D"`), in parallel.
+        let d: Vec<Vec<f64>> = (0..n).into_par_iter().map(|s| dijkstra(&adj, s)).collect();
 
         // Disconnected k-NN graph: geodesics between components are infinite.
         if d.iter().any(|row| row.iter().any(|v| !v.is_finite())) {

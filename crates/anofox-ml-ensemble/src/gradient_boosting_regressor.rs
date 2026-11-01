@@ -1,9 +1,9 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 
 /// Gradient boosting regressor parameters (unfitted state).
 ///
@@ -27,6 +27,92 @@ pub struct GradientBoostingRegressor {
     pub subsample: f64,
     /// Random seed for reproducibility.
     pub seed: u64,
+    /// Loss to minimise (sklearn's `loss`).
+    #[serde(default)]
+    pub loss: GbLoss,
+    /// Quantile of `Quantile` and the Huber threshold quantile (sklearn's
+    /// `alpha`, default 0.9).
+    #[serde(default = "default_alpha")]
+    pub alpha: f64,
+    /// Features drawn per split of every tree (`None` = all).
+    #[serde(default)]
+    pub max_features: Option<anofox_ml_trees::MaxFeatures>,
+    /// Early stopping: stop when the validation loss has not improved by
+    /// `tol` for this many rounds (`None` = off).
+    #[serde(default)]
+    pub n_iter_no_change: Option<usize>,
+    /// Fraction of the training data held out for early stopping.
+    #[serde(default = "default_validation_fraction")]
+    pub validation_fraction: f64,
+    /// Minimum validation-loss improvement for early stopping.
+    #[serde(default = "default_tol")]
+    pub tol: f64,
+}
+
+/// Loss of [`GradientBoostingRegressor`] (sklearn's `loss`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum GbLoss {
+    /// Squared error; leaves are mean residuals.
+    #[default]
+    SquaredError,
+    /// Absolute error; leaves are median residuals.
+    AbsoluteError,
+    /// Huber loss with the threshold at the `alpha` quantile of |residual|.
+    Huber,
+    /// Pinball loss for the `alpha` quantile.
+    Quantile,
+}
+
+pub(crate) fn default_alpha() -> f64 {
+    0.9
+}
+pub(crate) fn default_validation_fraction() -> f64 {
+    0.1
+}
+pub(crate) fn default_tol() -> f64 {
+    1e-4
+}
+
+/// sklearn's `_weighted_percentile` (the lower weighted percentile) over
+/// `idx`; `None` means unit weights. sklearn's gradient boosting always
+/// passes (unit) sample weights, so this is also its unweighted rule.
+pub(crate) fn percentile<F: Float>(
+    values: &[F],
+    idx: &[usize],
+    weights: Option<&Array1<F>>,
+    q: f64,
+) -> F {
+    let mut order: Vec<usize> = idx.to_vec();
+    order.sort_by(|&a, &b| {
+        values[a]
+            .partial_cmp(&values[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let w_of = |i: usize| weights.map_or(F::one(), |w| w[i]);
+    {
+        {
+            let total = order.iter().fold(F::zero(), |a, &i| a + w_of(i));
+            let target = F::from_f64(q / 100.0).unwrap() * total;
+            let mut cum = F::zero();
+            for &i in &order {
+                cum += w_of(i);
+                if cum >= target {
+                    return values[i];
+                }
+            }
+            values[*order.last().unwrap()]
+        }
+    }
+}
+
+/// NumPy's linear-interpolation percentile over `idx` (sklearn's init
+/// without sample weights).
+pub(crate) fn percentile_interp<F: Float>(values: &[F], idx: &[usize], q: f64) -> F {
+    let mut v: Vec<F> = idx.iter().map(|&i| values[i]).collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pos = q / 100.0 * (v.len() - 1) as f64;
+    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+    v[lo] + (v[hi] - v[lo]) * F::from_f64(pos - lo as f64).unwrap()
 }
 
 impl GradientBoostingRegressor {
@@ -40,7 +126,44 @@ impl GradientBoostingRegressor {
             min_samples_leaf: 1,
             subsample: 1.0,
             seed: 0,
+            loss: GbLoss::SquaredError,
+            alpha: 0.9,
+            max_features: None,
+            n_iter_no_change: None,
+            validation_fraction: 0.1,
+            tol: 1e-4,
         }
+    }
+
+    /// Set the loss (`SquaredError`, `AbsoluteError`, `Huber`, `Quantile`).
+    pub fn with_loss(mut self, loss: GbLoss) -> Self {
+        self.loss = loss;
+        self
+    }
+
+    /// Quantile for `Quantile`, threshold quantile for `Huber`.
+    pub fn with_alpha(mut self, alpha: f64) -> Self {
+        self.alpha = alpha;
+        self
+    }
+
+    /// Features drawn per split.
+    pub fn with_max_features(mut self, mf: Option<anofox_ml_trees::MaxFeatures>) -> Self {
+        self.max_features = mf;
+        self
+    }
+
+    /// Enable early stopping on a held-out `validation_fraction`.
+    pub fn with_early_stopping(
+        mut self,
+        n_iter_no_change: Option<usize>,
+        validation_fraction: f64,
+        tol: f64,
+    ) -> Self {
+        self.n_iter_no_change = n_iter_no_change;
+        self.validation_fraction = validation_fraction;
+        self.tol = tol;
+        self
     }
 
     /// Set the number of boosting rounds.
@@ -110,6 +233,48 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
     type Fitted = FittedGradientBoostingRegressor<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for GradientBoostingRegressor {
+    type Fitted = FittedGradientBoostingRegressor<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight, None)
+    }
+}
+
+impl GradientBoostingRegressor {
+    /// sklearn's `warm_start=True`: keep the trees of `prev` and add more
+    /// until there are `n_estimators`, fitted on the same `(X, y)`. The
+    /// random draws of the earlier rounds are replayed, so without early
+    /// stopping the result equals a single fit with `n_estimators` trees.
+    /// The early-stopping history restarts, as in sklearn. Asking for fewer
+    /// trees than `prev` has is an error; as many returns `prev` unchanged.
+    pub fn fit_warm_start<F: Float>(
+        &self,
+        prev: FittedGradientBoostingRegressor<F>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedGradientBoostingRegressor<F>> {
+        self.fit_impl(x, y, sample_weight, Some(prev))
+    }
+
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+        prev: Option<FittedGradientBoostingRegressor<F>>,
+    ) -> Result<FittedGradientBoostingRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -140,8 +305,89 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
         let n_features = x.ncols();
         let lr = F::from_f64(self.learning_rate).unwrap();
 
-        // Step 1: Initialize with mean of y.
-        let initial_prediction = y.sum() / F::from_usize(n_samples).unwrap();
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, n_samples)?;
+        }
+
+        if !(0.0..1.0).contains(&self.alpha) || self.alpha <= 0.0 {
+            if matches!(self.loss, GbLoss::Huber | GbLoss::Quantile) {
+                return Err(RustMlError::InvalidParameter(
+                    "alpha must be in (0, 1)".into(),
+                ));
+            }
+        }
+        if let Some(p) = &prev {
+            if p.n_features != n_features {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "warm start: model has {} features, X has {n_features}",
+                    p.n_features
+                )));
+            }
+            if p.learning_rate != lr {
+                return Err(RustMlError::InvalidParameter(
+                    "warm start needs the learning_rate of the previous fit".into(),
+                ));
+            }
+            if p.trees.len() > self.n_estimators {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "warm start: n_estimators={} is less than the {} trees already fitted",
+                    self.n_estimators,
+                    p.trees.len()
+                )));
+            }
+        }
+        if let Some(p) = prev.as_ref().filter(|p| p.trees.len() == self.n_estimators) {
+            return Ok(p.clone());
+        }
+        let mut rng = StdRng::seed_from_u64(self.seed);
+
+        // Early stopping: hold out a validation split.
+        let (train_rows, val_rows): (Vec<usize>, Vec<usize>) = match self.n_iter_no_change {
+            Some(_) => {
+                if !(self.validation_fraction > 0.0 && self.validation_fraction < 1.0) {
+                    return Err(RustMlError::InvalidParameter(
+                        "validation_fraction must be in (0, 1)".into(),
+                    ));
+                }
+                let mut perm: Vec<usize> = (0..n_samples).collect();
+                perm.shuffle(&mut rng);
+                let n_val = ((self.validation_fraction * n_samples as f64).ceil() as usize)
+                    .clamp(1, n_samples - 1);
+                let mut val = perm[..n_val].to_vec();
+                let mut train = perm[n_val..].to_vec();
+                val.sort_unstable();
+                train.sort_unstable();
+                (train, val)
+            }
+            None => ((0..n_samples).collect(), Vec::new()),
+        };
+
+        let yv: Vec<F> = y.to_vec();
+        let q = self.alpha * 100.0;
+        // Step 1: the loss-minimising constant (sklearn's `init`).
+        let initial_prediction = match &prev {
+            Some(p) => p.initial_prediction,
+            None => match self.loss {
+                GbLoss::SquaredError => {
+                    let (num, den) =
+                        train_rows
+                            .iter()
+                            .fold((F::zero(), F::zero()), |(n, d), &i| {
+                                let wi = sample_weight.map_or(F::one(), |w| w[i]);
+                                (n + wi * y[i], d + wi)
+                            });
+                    num / den
+                }
+                GbLoss::AbsoluteError | GbLoss::Huber => match sample_weight {
+                    Some(_) => percentile(&yv, &train_rows, sample_weight, 50.0),
+                    None => percentile_interp(&yv, &train_rows, 50.0),
+                },
+                GbLoss::Quantile => match sample_weight {
+                    Some(_) => percentile(&yv, &train_rows, sample_weight, q),
+                    None => percentile_interp(&yv, &train_rows, q),
+                },
+            },
+        };
 
         // Current predictions for every training sample.
         let mut predictions = Array1::from_elem(n_samples, initial_prediction);
@@ -150,39 +396,175 @@ impl<F: Float> Fit<F> for GradientBoostingRegressor {
             max_depth: self.max_depth,
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
-            max_features: None,
+            max_features: self.max_features,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
-        let mut rng = StdRng::seed_from_u64(self.seed);
+        // Per-tree seeds for feature sampling, from a stream of their own so
+        // the subsample draws do not depend on `max_features`.
+        let mut tree_seeds =
+            StdRng::seed_from_u64(self.seed ^ crate::gradient_boosting_classifier::TREE_SEED_SALT);
         let mut trees = Vec::with_capacity(self.n_estimators);
+        let n_train = train_rows.len();
+        let subsample_size = ((self.subsample * n_train as f64).round() as usize).max(1);
+        // Warm start: take over the previous trees and replay their random
+        // draws so the streams continue where the previous fit stopped.
+        if let Some(p) = prev {
+            for tree in p.trees {
+                if subsample_size < n_train {
+                    train_rows.clone().shuffle(&mut rng);
+                }
+                if self.max_features.is_some() {
+                    let _: u64 = tree_seeds.gen();
+                }
+                predictions.scaled_add(lr, &tree.predict(x)?);
+                trees.push(tree);
+            }
+        }
+        let begin = trees.len();
+        let half = F::from_f64(0.5).unwrap();
+        let alpha = F::from_f64(self.alpha).unwrap();
+        let mut loss_history = vec![F::infinity(); self.n_iter_no_change.unwrap_or(0)];
 
-        let subsample_size = ((self.subsample * n_samples as f64).round() as usize).max(1);
-
-        for _ in 0..self.n_estimators {
-            // Step 2a: Compute residuals (negative gradient of squared error loss).
-            let residuals = y - &predictions;
-
-            // Step 2b+c: Fit a tree to (subsampled) residuals.
-            let fitted_tree: FittedDecisionTreeRegressor<F> = if subsample_size < n_samples {
-                let mut indices: Vec<usize> = (0..n_samples).collect();
-                indices.shuffle(&mut rng);
-                indices.truncate(subsample_size);
-                indices.sort_unstable();
-
-                let x_sub = build_sub_rows(x, &indices);
-                let r_sub = Array1::from_vec(indices.iter().map(|&i| residuals[i]).collect());
-                tree_params.fit(&x_sub, &r_sub)?
-            } else {
-                tree_params.fit(x, &residuals)?
+        for iteration in begin..self.n_estimators {
+            let diff = y - &predictions;
+            // Huber threshold: the alpha quantile of |residual| (in-bag).
+            let delta = match self.loss {
+                GbLoss::Huber => {
+                    let abs: Vec<F> = diff.iter().map(|d| d.abs()).collect();
+                    percentile(&abs, &train_rows, sample_weight, q)
+                }
+                _ => F::zero(),
             };
+            // Negative gradient.
+            let grad = diff.mapv(|d| match self.loss {
+                GbLoss::SquaredError => d,
+                // NumPy's sign: 0 at 0 (Rust's `signum` would give 1).
+                GbLoss::AbsoluteError => {
+                    if d == F::zero() {
+                        F::zero()
+                    } else {
+                        d.signum()
+                    }
+                }
+                GbLoss::Huber => {
+                    if d.abs() <= delta {
+                        d
+                    } else {
+                        delta * d.signum()
+                    }
+                }
+                GbLoss::Quantile => {
+                    if d >= F::zero() {
+                        alpha
+                    } else {
+                        alpha - F::one()
+                    }
+                }
+            });
 
-            // Step 2d: Update predictions on the full training set.
+            let in_bag: Vec<usize> = if subsample_size < n_train {
+                let mut rows = train_rows.clone();
+                rows.shuffle(&mut rng);
+                rows.truncate(subsample_size);
+                rows.sort_unstable();
+                rows
+            } else {
+                train_rows.clone()
+            };
+            let round_params;
+            let params = if self.max_features.is_some() {
+                round_params = tree_params.clone().with_seed(tree_seeds.gen());
+                &round_params
+            } else {
+                &tree_params
+            };
+            let mut fitted_tree: FittedDecisionTreeRegressor<F> =
+                crate::forest_common::fit_tree_on_rows(params, x, &grad, &in_bag, sample_weight)?;
+
+            // Terminal-region update (sklearn's line search) for the
+            // non-squared losses: the leaf's loss-minimising constant of the
+            // in-bag residuals.
+            if self.loss != GbLoss::SquaredError {
+                let leaves = fitted_tree.apply(x)?;
+                let mut members: Vec<Vec<usize>> = vec![Vec::new(); fitted_tree.n_leaves()];
+                for &i in &in_bag {
+                    members[leaves[i]].push(i);
+                }
+                let dv: Vec<F> = diff.to_vec();
+                let values: Vec<F> = members
+                    .iter()
+                    .map(|m| {
+                        if m.is_empty() {
+                            return F::zero();
+                        }
+                        match self.loss {
+                            GbLoss::AbsoluteError => percentile(&dv, m, sample_weight, 50.0),
+                            GbLoss::Quantile => percentile(&dv, m, sample_weight, q),
+                            GbLoss::Huber => {
+                                let median = percentile(&dv, m, sample_weight, 50.0);
+                                let (num, den) =
+                                    m.iter().fold((F::zero(), F::zero()), |(n, d), &i| {
+                                        let r = dv[i] - median;
+                                        let sign = if r == F::zero() {
+                                            F::zero()
+                                        } else {
+                                            r.signum()
+                                        };
+                                        let term = sign * r.abs().min(delta);
+                                        let wi = sample_weight.map_or(F::one(), |w| w[i]);
+                                        (n + wi * term, d + wi)
+                                    });
+                                median + num / den
+                            }
+                            GbLoss::SquaredError => unreachable!(),
+                        }
+                    })
+                    .collect();
+                fitted_tree.set_leaf_values(&values)?;
+            }
+
+            // Update predictions on all rows (training and validation).
             let tree_preds = fitted_tree.predict(x)?;
-            predictions += &(tree_preds * lr);
-
+            predictions.scaled_add(lr, &tree_preds);
             trees.push(fitted_tree);
+
+            if let Some(n_no_change) = self.n_iter_no_change {
+                let (mut num, mut den) = (F::zero(), F::zero());
+                for &i in &val_rows {
+                    let d = y[i] - predictions[i];
+                    let l = match self.loss {
+                        GbLoss::SquaredError => half * d * d,
+                        GbLoss::AbsoluteError => d.abs(),
+                        GbLoss::Huber => {
+                            if d.abs() <= delta {
+                                half * d * d
+                            } else {
+                                delta * (d.abs() - half * delta)
+                            }
+                        }
+                        GbLoss::Quantile => {
+                            if d > F::zero() {
+                                alpha * d
+                            } else {
+                                (alpha - F::one()) * d
+                            }
+                        }
+                    };
+                    let wi = sample_weight.map_or(F::one(), |w| w[i]);
+                    num += wi * l;
+                    den += wi;
+                }
+                let val_loss = num / den;
+                let tol = F::from_f64(self.tol).unwrap();
+                if loss_history.iter().any(|&h| val_loss + tol < h) {
+                    loss_history[iteration % n_no_change] = val_loss;
+                } else {
+                    break;
+                }
+            }
         }
 
         Ok(FittedGradientBoostingRegressor {
@@ -252,19 +634,6 @@ impl<F: Float> FittedGradientBoostingRegressor<F> {
             Array1::zeros(self.n_features)
         }
     }
-}
-
-/// Build a sub-matrix selecting specific rows from `x`.
-fn build_sub_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
-    let n_rows = row_indices.len();
-    let n_cols = x.ncols();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for &ri in row_indices {
-        for c in 0..n_cols {
-            data.push(x[[ri, c]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
 }
 
 #[cfg(test)]
@@ -521,5 +890,42 @@ mod tests {
         for &p in preds.iter() {
             assert!(p.is_finite());
         }
+    }
+
+    #[test]
+    fn test_warm_start_equals_single_fit() {
+        let x = Array2::from_shape_fn((80, 3), |(i, j)| ((i * (j + 2)) as f64 * 0.37).sin());
+        let y = x.column(0).mapv(|v| 3.0 * v) + x.column(1).mapv(|v| v * v);
+        for loss in [GbLoss::SquaredError, GbLoss::Huber, GbLoss::Quantile] {
+            let gb = |n| GradientBoostingRegressor {
+                n_estimators: n,
+                subsample: 0.7,
+                loss,
+                max_depth: Some(2),
+                max_features: Some(anofox_ml_trees::MaxFeatures::Fixed(2)),
+                seed: 5,
+                ..GradientBoostingRegressor::new()
+            };
+            let full = gb(12).fit(&x, &y).unwrap();
+            let part = gb(5).fit(&x, &y).unwrap();
+            let warm = gb(12).fit_warm_start(part, &x, &y, None).unwrap();
+            assert_eq!(warm.n_estimators(), 12);
+            assert_eq!(warm.predict(&x).unwrap(), full.predict(&x).unwrap());
+        }
+        let gb = GradientBoostingRegressor::new().with_seed(1);
+        let f = Fit::<f64>::fit(&gb, &x, &y).unwrap();
+        let n = f.n_estimators();
+        // Same size: unchanged; fewer trees: error.
+        assert_eq!(
+            gb.fit_warm_start(f.clone(), &x, &y, None)
+                .unwrap()
+                .n_estimators(),
+            n
+        );
+        let fewer = GradientBoostingRegressor {
+            n_estimators: n - 1,
+            ..gb.clone()
+        };
+        assert!(fewer.fit_warm_start(f, &x, &y, None).is_err());
     }
 }

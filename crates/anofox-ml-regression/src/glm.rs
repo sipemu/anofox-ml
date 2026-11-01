@@ -111,7 +111,7 @@ pub(crate) fn upstream_lambda(alpha: f64, weight_sum: f64) -> Result<f64> {
 /// with `d` the Poisson unit deviance. `alpha` defaults to 0 (unpenalised
 /// maximum likelihood, R's `glm(family = poisson)`); sklearn's default of
 /// 1.0 is blocked on anofox-regression (#72).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PoissonRegressor {
     alpha: f64,
     with_intercept: bool,
@@ -355,7 +355,7 @@ impl BinomialLink {
 /// `E[Y] = g⁻¹(Xβ + offset)` and a logit (default), probit or cloglog link.
 /// Optional ridge `alpha` with the same scaling as [`PoissonRegressor`]
 /// (default 0: unpenalised maximum likelihood).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BinomialRegressor {
     link: BinomialLink,
     alpha: f64,

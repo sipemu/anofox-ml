@@ -35,7 +35,7 @@ pub enum PaVariant {
 // ---------------------------------------------------------------------------
 
 /// Binary Passive-Aggressive classifier (hinge loss).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PassiveAggressiveClassifier {
     pub c: f64,
     pub variant: PaVariant,
@@ -83,7 +83,7 @@ impl Default for PassiveAggressiveClassifier {
 }
 
 /// Fitted binary PA classifier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedPassiveAggressiveClassifier {
     pub coef: Array1<f64>,
     pub intercept: f64,
@@ -107,7 +107,7 @@ impl Fit<f64> for PassiveAggressiveClassifier {
 
         // Find the two classes.
         let mut classes: Vec<f64> = y.iter().copied().collect();
-        classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        classes.sort_by(anofox_ml_core::labels::label_cmp);
         classes.dedup();
         if classes.len() != 2 {
             return Err(RustMlError::InvalidParameter(format!(
@@ -215,7 +215,7 @@ impl Predict<f64> for FittedPassiveAggressiveClassifier {
 // stops after 5 epochs without the epoch loss improving by `tol · n`.
 
 /// Passive-Aggressive regressor (sklearn `PassiveAggressiveRegressor`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PassiveAggressiveRegressor {
     pub c: f64,
     pub epsilon: f64,
@@ -311,7 +311,7 @@ impl Default for PassiveAggressiveRegressor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedPassiveAggressiveRegressor {
     pub coef: Array1<f64>,
     pub intercept: f64,

@@ -1,30 +1,42 @@
 //! Spectral clustering.
 //!
-//! Mirrors `sklearn.cluster.SpectralClustering`. Builds an affinity matrix
-//! (RBF or k-NN graph), forms the normalised Laplacian, takes the bottom-`k`
-//! eigenvectors, and runs KMeans on the resulting embedding.
+//! Mirrors `sklearn.cluster.SpectralClustering` with
+//! `assign_labels="kmeans"`: an affinity graph (RBF kernel, or the k-NN
+//! connectivity `0.5·(C + Cᵀ)` with each sample among its own neighbours),
+//! its spectral embedding (bottom eigenvectors of the normalised Laplacian
+//! divided by `√degree`, from a sparse eigensolver for large graphs), and
+//! k-means with `n_init` restarts on that embedding.
 
-use anofox_ml_core::{FitUnsupervised, Predict, Result, RustMlError};
-use faer::linalg::solvers::SelfAdjointEigen;
-use faer::{Mat, Side};
+use anofox_ml_core::Float;
+use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
+use anofox_ml_manifold::spectral_embedding;
+use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use ndarray::{Array1, Array2};
 
 use crate::kmeans::KMeans;
 
-/// How to build the n×n affinity matrix.
-#[derive(Debug, Clone, Copy)]
+/// How to build the affinity graph.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Affinity {
-    /// `exp(-γ ||x_i - x_j||²)` with the given gamma.
+    /// `exp(-γ ||x_i - x_j||²)` with the given gamma (dense).
     Rbf(f64),
-    /// Symmetric k-NN graph: A_{ij} = 1 if either i is in j's k-NN or vice versa.
+    /// k-NN connectivity including the sample itself, symmetrised as
+    /// `0.5·(C + Cᵀ)` (sparse).
     KNearest(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectralClustering {
     pub n_clusters: usize,
     pub affinity: Affinity,
     pub seed: u64,
+    /// k-means restarts on the embedding (sklearn's `n_init`, default 10).
+    #[serde(default = "default_n_init")]
+    pub n_init: usize,
+}
+
+fn default_n_init() -> usize {
+    10
 }
 
 impl SpectralClustering {
@@ -33,6 +45,7 @@ impl SpectralClustering {
             n_clusters,
             affinity: Affinity::Rbf(1.0),
             seed: 0,
+            n_init: 10,
         }
     }
     pub fn with_affinity(mut self, a: Affinity) -> Self {
@@ -43,6 +56,10 @@ impl SpectralClustering {
         self.seed = s;
         self
     }
+    pub fn with_n_init(mut self, n: usize) -> Self {
+        self.n_init = n;
+        self
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -50,69 +67,55 @@ pub struct FittedSpectralClustering {
     pub labels: Array1<f64>,
 }
 
-fn build_affinity(x: &Array2<f64>, affinity: &Affinity) -> Array2<f64> {
+/// Affinity graph entries `(i, j, w)` (both triangles).
+fn build_affinity(x: &Array2<f64>, affinity: &Affinity) -> Result<Vec<(usize, usize, f64)>> {
     let n = x.nrows();
-    let mut a = Array2::<f64>::zeros((n, n));
-    match affinity {
+    match *affinity {
         Affinity::Rbf(gamma) => {
-            for i in 0..n {
-                for j in i..n {
-                    let mut sd = 0.0;
-                    for k in 0..x.ncols() {
-                        let d = x[[i, k]] - x[[j, k]];
-                        sd += d * d;
-                    }
-                    let v = (-gamma * sd).exp();
-                    a[[i, j]] = v;
-                    a[[j, i]] = v;
-                }
-            }
-        }
-        Affinity::KNearest(k) => {
-            // Compute pairwise sq distances.
-            let mut d = vec![vec![0.0_f64; n]; n];
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let mut sd = 0.0;
-                    for c in 0..x.ncols() {
-                        let dv = x[[i, c]] - x[[j, c]];
-                        sd += dv * dv;
-                    }
-                    d[i][j] = sd;
-                    d[j][i] = sd;
-                }
-            }
-            for i in 0..n {
-                let mut others: Vec<(usize, f64)> =
-                    (0..n).filter(|&j| j != i).map(|j| (j, d[i][j])).collect();
-                others.sort_by(|x, y| x.1.total_cmp(&y.1));
-                let kk = (*k).min(others.len());
-                for &(j, _) in others.iter().take(kk) {
-                    a[[i, j]] = 1.0;
-                }
-            }
-            // Symmetrize.
+            let mut e = Vec::with_capacity(n * n);
             for i in 0..n {
                 for j in 0..n {
-                    if a[[i, j]] > 0.0 || a[[j, i]] > 0.0 {
-                        a[[i, j]] = 1.0;
-                        a[[j, i]] = 1.0;
-                    }
+                    let sd: f64 = x
+                        .row(i)
+                        .iter()
+                        .zip(x.row(j))
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum();
+                    e.push((i, j, (-gamma * sd).exp()));
                 }
             }
+            Ok(e)
+        }
+        Affinity::KNearest(k) => {
+            // kneighbors_graph(X, k, include_self=True): each sample's k
+            // nearest samples, itself first.
+            let k = k.clamp(1, n);
+            let index = NeighborIndex::new(
+                x,
+                DistanceMetric::Euclidean,
+                NeighborAlgorithm::Auto,
+                Some(k),
+            )?;
+            let (_, nbrs) = index.kneighbors(x, k)?;
+            let mut e = Vec::with_capacity(2 * n * k);
+            for (i, row) in nbrs.rows().into_iter().enumerate() {
+                for &j in row {
+                    e.push((i, j, 0.5));
+                    e.push((j, i, 0.5));
+                }
+            }
+            Ok(e)
         }
     }
-    // Zero out the diagonal — points are not their own neighbours.
-    for i in 0..n {
-        a[[i, i]] = 0.0;
-    }
-    a
 }
 
-impl FitUnsupervised<f64> for SpectralClustering {
+impl<F: Float> FitUnsupervised<F> for SpectralClustering {
     type Fitted = FittedSpectralClustering;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -120,59 +123,15 @@ impl FitUnsupervised<f64> for SpectralClustering {
         if self.n_clusters == 0 || self.n_clusters > n {
             return Err(RustMlError::InvalidParameter("invalid n_clusters".into()));
         }
-
-        let a = build_affinity(x, &self.affinity);
-        // Degree matrix D (diagonal). Normalised symmetric Laplacian:
-        //   L_sym = I - D^{-1/2} A D^{-1/2}
-        // The eigenvectors of L_sym corresponding to its smallest eigenvalues
-        // give the spectral embedding.
-        let mut d_sqrt_inv = vec![0.0_f64; n];
-        for i in 0..n {
-            let deg: f64 = (0..n).map(|j| a[[i, j]]).sum::<f64>().max(1e-12);
-            d_sqrt_inv[i] = 1.0 / deg.sqrt();
-        }
-        let mut l = Array2::<f64>::zeros((n, n));
-        for i in 0..n {
-            for j in 0..n {
-                let off = -d_sqrt_inv[i] * a[[i, j]] * d_sqrt_inv[j];
-                if i == j {
-                    l[[i, j]] = 1.0 + off;
-                } else {
-                    l[[i, j]] = off;
-                }
-            }
-        }
-        // Symmetric eigendecomposition.
-        let lm = Mat::from_fn(n, n, |i, j| l[[i, j]]);
-        let eig = SelfAdjointEigen::new(lm.as_ref(), Side::Lower)
-            .map_err(|e| RustMlError::InvalidParameter(format!("eigen failed: {e:?}")))?;
-        let s = eig.S();
-        let u = eig.U();
-        // Pick bottom-k eigenvectors. SelfAdjointEigen returns ascending.
-        let k = self.n_clusters;
-        let mut embedding = Array2::<f64>::zeros((n, k));
-        for c in 0..k {
-            for i in 0..n {
-                embedding[[i, c]] = u[(i, c)];
-            }
-        }
-        // Row-normalise the embedding (sklearn does this for `assign_labels='kmeans'`).
-        for i in 0..n {
-            let nrm: f64 = (0..k)
-                .map(|c| embedding[[i, c]].powi(2))
-                .sum::<f64>()
-                .sqrt()
-                .max(1e-12);
-            for c in 0..k {
-                embedding[[i, c]] /= nrm;
-            }
-        }
-        let _ = s; // unused
-                   // KMeans on the embedding.
-        let km = KMeans::new(k).with_seed(self.seed);
-        let fitted: crate::kmeans::FittedKMeans<f64> = FitUnsupervised::fit(&km, &embedding)?;
-        let labels = fitted.predict(&embedding)?;
-        Ok(FittedSpectralClustering { labels })
+        let graph = build_affinity(x, &self.affinity)?;
+        let maps = spectral_embedding(n, &graph, self.n_clusters, false)?;
+        let km = KMeans::new(self.n_clusters)
+            .with_seed(self.seed)
+            .with_n_init(self.n_init.max(1));
+        let fitted: crate::kmeans::FittedKMeans<f64> = FitUnsupervised::fit(&km, &maps)?;
+        Ok(FittedSpectralClustering {
+            labels: fitted.labels().clone(),
+        })
     }
 }
 

@@ -1,19 +1,30 @@
 //! Conversion helpers between ndarray and faer types.
 
 use anofox_ml_core::{Result, RustMlError};
+use anofox_regression::core::RegressionResult;
 use anofox_regression::solvers::RegressionError;
-use faer::{Col, Mat};
+use faer::{Col, Mat, MatRef};
 use ndarray::{Array1, Array2};
 
 /// Convert an ndarray `Array2<f64>` to a faer `Mat<f64>`.
+///
+/// Upstream solvers take an owned column-major `Mat`, so one copy is
+/// unavoidable; for a standard-layout (row-major) array it goes through a
+/// strided faer view instead of bounds-checked element indexing.
 pub fn ndarray_to_mat(x: &Array2<f64>) -> Mat<f64> {
     let (nrows, ncols) = x.dim();
-    Mat::from_fn(nrows, ncols, |i, j| x[[i, j]])
+    match x.as_slice() {
+        Some(s) => MatRef::from_row_major_slice(s, nrows, ncols).to_owned(),
+        None => Mat::from_fn(nrows, ncols, |i, j| x[[i, j]]),
+    }
 }
 
 /// Convert an ndarray `Array1<f64>` to a faer `Col<f64>`.
 pub fn ndarray_to_col(y: &Array1<f64>) -> Col<f64> {
-    Col::from_fn(y.len(), |i| y[i])
+    match y.as_slice() {
+        Some(s) => Col::from_fn(s.len(), |i| s[i]),
+        None => Col::from_fn(y.len(), |i| y[i]),
+    }
 }
 
 /// Convert a faer `Col<f64>` to an ndarray `Array1<f64>`.
@@ -67,6 +78,21 @@ pub fn linear_predict(x: &Array2<f64>, coef: &Array1<f64>, intercept: f64) -> Re
 /// sklearn-shaped boundary they are dropped from the model (coefficient 0).
 pub fn coef_from_col(c: &Col<f64>) -> Array1<f64> {
     Array1::from_shape_fn(c.nrows(), |i| if c[i].is_nan() { 0.0 } else { c[i] })
+}
+
+/// `(coef, intercept)` cached from an upstream result for prediction in
+/// ndarray: aliased or `NaN` coefficients contribute nothing, exactly as in
+/// upstream `predict`, and a missing intercept is 0.
+pub(crate) fn predict_params(r: &RegressionResult) -> (Array1<f64>, f64) {
+    let coef = Array1::from_shape_fn(r.coefficients.nrows(), |j| {
+        let c = r.coefficients[j];
+        if c.is_nan() || r.aliased.get(j).copied().unwrap_or(false) {
+            0.0
+        } else {
+            c
+        }
+    });
+    (coef, r.intercept.unwrap_or(0.0))
 }
 
 /// Validate optional sample weights (length `n`, finite, non-negative, not
@@ -149,6 +175,21 @@ mod tests {
         assert_eq!(mat.ncols(), 2);
         assert_abs_diff_eq!(mat[(0, 0)], 1.0);
         assert_abs_diff_eq!(mat[(2, 1)], 6.0);
+    }
+
+    #[test]
+    fn test_mat_from_non_standard_layout() {
+        use ndarray::ShapeBuilder;
+        let c = Array2::from_shape_vec((3, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let f = Array2::from_shape_vec((3, 2).f(), vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]).unwrap();
+        assert!(f.as_slice().is_none());
+        let (mc, mf) = (ndarray_to_mat(&c), ndarray_to_mat(&f));
+        for i in 0..3 {
+            for j in 0..2 {
+                assert_abs_diff_eq!(mc[(i, j)], c[[i, j]]);
+                assert_abs_diff_eq!(mf[(i, j)], c[[i, j]]);
+            }
+        }
     }
 
     #[test]

@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 /// Poisson-Gamma, `power=2` → Gamma, `power=3` → Inverse Gaussian
 /// (`0 < power < 1` is not a valid distribution and is rejected; sklearn's
 /// negative powers are not supported).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TweedieRegressor {
     power: f64,
     alpha: f64,
@@ -272,7 +272,7 @@ impl Predict<f64> for FittedTweedieRegressor {
 /// Gamma GLM regressor (Tweedie with power=2 and log link), mirroring
 /// `sklearn.linear_model.GammaRegressor` (`alpha` defaults to 0 here, see
 /// the module docs).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GammaRegressor {
     inner: TweedieRegressor,
 }

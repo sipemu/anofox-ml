@@ -16,7 +16,7 @@ use ndarray::{Array1, Array2, Axis};
 
 use crate::pca::svd_flip_rows;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TruncatedSvd {
     pub n_components: usize,
 }

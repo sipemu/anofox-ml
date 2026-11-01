@@ -1,6 +1,6 @@
 use crate::mutual_information::{mutual_info_classif, mutual_info_regression, DiscreteFeatures};
 use crate::special::{chi2_sf, f_sf};
-use anofox_ml_core::{Float, Result, RustMlError, Transform};
+use anofox_ml_core::{Fit, Float, Result, RustMlError, Transform};
 use ndarray::{Array1, Array2, Axis};
 use std::collections::HashMap;
 
@@ -199,6 +199,13 @@ impl<F: Float> FittedSelectKBest<F> {
     /// Indices of the selected features, sorted in ascending order.
     pub fn selected_indices(&self) -> &[usize] {
         &self.selected_indices
+    }
+}
+
+impl<F: Float> Fit<F> for SelectKBest {
+    type Fitted = FittedSelectKBest<F>;
+    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedSelectKBest<F>> {
+        SelectKBest::fit(self, x, y)
     }
 }
 

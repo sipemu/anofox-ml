@@ -25,6 +25,7 @@
 //! the number of components whose posterior Dirichlet parameter αₖ exceeds
 //! `2·α_0`.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2, Axis};
 use rand::rngs::StdRng;
@@ -36,7 +37,7 @@ use crate::mixture::{
     log_prob_resp, precision_cholesky, MixtureInit,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BayesianGaussianMixture {
     pub n_components: usize,
     pub covariance_type: CovarianceType,
@@ -464,10 +465,13 @@ impl BayesianGaussianMixture {
     }
 }
 
-impl FitUnsupervised<f64> for BayesianGaussianMixture {
+impl<F: Float> FitUnsupervised<F> for BayesianGaussianMixture {
     type Fitted = FittedBayesianGaussianMixture;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let x_std = crate::standard_layout(x);
         let x: &Array2<f64> = &x_std;
         let n = x.nrows();
@@ -561,8 +565,8 @@ impl FittedBayesianGaussianMixture {
     }
 }
 
-impl Predict<f64> for FittedBayesianGaussianMixture {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+impl FittedBayesianGaussianMixture {
+    fn predict_f64(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let wlp = self.weighted_log_prob_checked(x)?;
         Ok(wlp
             .rows()
@@ -580,14 +584,30 @@ impl Predict<f64> for FittedBayesianGaussianMixture {
     }
 }
 
-impl PredictProba<f64> for FittedBayesianGaussianMixture {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+impl<F: Float> Predict<F> for FittedBayesianGaussianMixture {
+    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+        Ok(anofox_ml_core::from_f64(
+            self.predict_f64(&anofox_ml_core::as_f64(x))?,
+        ))
+    }
+}
+
+impl FittedBayesianGaussianMixture {
+    fn predict_proba_f64(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         let (_, log_resp) = log_prob_resp(self.weighted_log_prob_checked(x)?);
         Ok(log_resp.mapv(f64::exp))
     }
 }
 
-impl anofox_ml_core::ClassifierScore<f64> for FittedBayesianGaussianMixture {}
+impl<F: Float> PredictProba<F> for FittedBayesianGaussianMixture {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        Ok(anofox_ml_core::from_f64(
+            self.predict_proba_f64(&anofox_ml_core::as_f64(x))?,
+        ))
+    }
+}
+
+impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedBayesianGaussianMixture {}
 
 #[cfg(test)]
 mod tests {

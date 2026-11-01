@@ -13,7 +13,7 @@ use ndarray::{Array1, Array2};
 /// - `alpha = 1.0` is pure Lasso (L1)
 /// - `alpha = 0.0` is pure Ridge (L2)
 /// - `0 < alpha < 1` is a mix of both
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ElasticNetRegressor {
     lambda: f64,
     alpha: f64,
@@ -57,6 +57,8 @@ impl Default for ElasticNetRegressor {
 pub struct FittedElasticNetRegressor {
     inner: FittedElasticNet,
     n_features: usize,
+    coef: Array1<f64>,
+    intercept: f64,
 }
 
 impl FittedElasticNetRegressor {
@@ -111,9 +113,12 @@ impl Fit<f64> for ElasticNetRegressor {
             .fit(&x_mat, &y_col)
             .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
 
+        let (coef, intercept) = crate::convert::predict_params(fitted.result());
         Ok(FittedElasticNetRegressor {
             inner: fitted,
             n_features: x.ncols(),
+            coef,
+            intercept,
         })
     }
 }
@@ -128,9 +133,7 @@ impl Predict<f64> for FittedElasticNetRegressor {
             )));
         }
 
-        let x_mat = ndarray_to_mat(x);
-        let preds = self.inner.predict(&x_mat);
-        Ok(col_to_ndarray(&preds))
+        crate::convert::linear_predict(x, &self.coef, self.intercept)
     }
 }
 

@@ -18,7 +18,7 @@ use ndarray::{Array1, Array2};
 ///
 /// The `epsilon` parameter (default 1.35) controls the transition point —
 /// observations with scaled residuals larger than epsilon are downweighted.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HuberRegressor {
     epsilon: f64,
     alpha: f64,

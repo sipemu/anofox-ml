@@ -1,4 +1,4 @@
-use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor, MaxFeatures};
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 use anofox_ml_trees::SplitCriterion;
 
-use crate::forest_common::{resolve_max_features, select_rows, tree_input};
+use crate::forest_common::{fit_tree_on_rows, resolve_max_features, select_rows, tree_input};
 
 /// Random forest regressor parameters (unfitted state).
 ///
@@ -129,6 +129,31 @@ impl<F: Float> Fit<F> for RandomForestRegressor {
     type Fitted = FittedRandomForestRegressor<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, None)
+    }
+}
+
+impl<F: Float> FitWeighted<F> for RandomForestRegressor {
+    type Fitted = FittedRandomForestRegressor<F>;
+
+    /// Per-sample weights (sklearn's `sample_weight`).
+    fn fit_weighted(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight)
+    }
+}
+
+impl RandomForestRegressor {
+    fn fit_impl<F: Float>(
+        &self,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedRandomForestRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -145,6 +170,9 @@ impl<F: Float> Fit<F> for RandomForestRegressor {
             ));
         }
 
+        if let Some(w) = sample_weight {
+            anofox_ml_core::check_sample_weight(w, y.len())?;
+        }
         let n_samples = x.nrows();
         let n_features = x.ncols();
         resolve_max_features(self.max_features, n_features)?;
@@ -169,6 +197,7 @@ impl<F: Float> Fit<F> for RandomForestRegressor {
             max_features: self.max_features,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
         // Pre-generate bootstrap rows and per-tree seeds sequentially so the
@@ -197,12 +226,13 @@ impl<F: Float> Fit<F> for RandomForestRegressor {
         let trees: Result<Vec<ForestTree<F>>> = sample_plans
             .into_par_iter()
             .map(|(row_indices, tree_seed)| {
-                let x_sub = select_rows(x, &row_indices);
-                let y_sub = Array1::from_vec(row_indices.iter().map(|&i| y[i]).collect::<Vec<F>>());
-                let fitted_tree: FittedDecisionTreeRegressor<F> = tree_params
-                    .clone()
-                    .with_seed(tree_seed)
-                    .fit(&x_sub, &y_sub)?;
+                let fitted_tree: FittedDecisionTreeRegressor<F> = fit_tree_on_rows(
+                    &tree_params.clone().with_seed(tree_seed),
+                    x,
+                    y,
+                    &row_indices,
+                    sample_weight,
+                )?;
                 Ok(ForestTree {
                     tree: fitted_tree,
                     feature_indices: (0..n_features).collect(),

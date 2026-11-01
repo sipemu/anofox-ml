@@ -6,17 +6,24 @@
 //! 1. For each `x_i`, find its `k` nearest neighbours.
 //! 2. Compute local reconstruction weights `W_{ij}` minimising
 //!    `||x_i - Σⱼ W_{ij} x_j||²` subject to `Σⱼ W_{ij} = 1`.
-//!    Solved by inverting the local Gram matrix.
-//! 3. Form `M = (I − W)ᵀ (I − W)` and take its bottom `n_components + 1`
-//!    eigenvectors, dropping the very smallest (corresponds to the constant
-//!    direction).
+//!    Solved from the local Gram matrix regularised by `reg · trace` (as
+//!    sklearn's `barycenter_weights`).
+//! 3. Form the sparse `M = (I − W)ᵀ (I − W)` (O(n·k²) entries) and take its
+//!    bottom `n_components + 1` eigenvectors (dense for small n, sparse
+//!    shift-invert Lanczos otherwise), dropping the very smallest (the
+//!    constant direction).
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
-use faer::linalg::solvers::{SelfAdjointEigen, Solve};
+use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
+use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
+use rayon::prelude::*;
 
-#[derive(Debug, Clone)]
+use crate::sparse_eigen::smallest_eigenpairs;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocallyLinearEmbedding {
     pub n_components: usize,
     pub n_neighbors: usize,
@@ -41,16 +48,18 @@ impl LocallyLinearEmbedding {
 pub struct FittedLocallyLinearEmbedding {
     pub embedding: Array2<f64>,
     pub eigenvalues: Array1<f64>,
+    /// Sum of the kept eigenvalues (sklearn's `reconstruction_error_`).
+    #[serde(default)]
+    pub reconstruction_error: f64,
 }
 
-fn euclid_sq(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
-}
-
-impl FitUnsupervised<f64> for LocallyLinearEmbedding {
+impl<F: Float> FitUnsupervised<F> for LocallyLinearEmbedding {
     type Fitted = FittedLocallyLinearEmbedding;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         let d = x.ncols();
         if n == 0 {
@@ -69,106 +78,79 @@ impl FitUnsupervised<f64> for LocallyLinearEmbedding {
             )));
         }
 
-        // 1. For each point find its k-NN.
-        let mut neighbours: Vec<Vec<usize>> = vec![Vec::with_capacity(k); n];
+        // 1. For each point find its k-NN (shared neighbour index).
+        let index = NeighborIndex::new(
+            x,
+            DistanceMetric::Euclidean,
+            NeighborAlgorithm::Auto,
+            Some(k),
+        )?;
+        let (_, knn) = index.kneighbors_self(k)?;
+        let neighbours: Vec<Vec<usize>> = knn.rows().into_iter().map(|r| r.to_vec()).collect();
+
+        // 2. Reconstruction weights (sklearn's `barycenter_weights`): solve
+        //    (G + R I) w = 1 with G_ab = (x_a - x_i)·(x_b - x_i) and
+        //    R = reg·trace(G) (reg if the trace is 0), then normalise.
+        let weights: Vec<Vec<f64>> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let nbrs = &neighbours[i];
+                let m = nbrs.len();
+                let diffs: Vec<Vec<f64>> = nbrs
+                    .iter()
+                    .map(|&j| (0..d).map(|q| x[[j, q]] - x[[i, q]]).collect())
+                    .collect();
+                let mut g = Mat::<f64>::from_fn(m, m, |a, b| {
+                    diffs[a].iter().zip(&diffs[b]).map(|(u, v)| u * v).sum()
+                });
+                let trace: f64 = (0..m).map(|q| g[(q, q)]).sum();
+                let r = if trace > 0.0 {
+                    self.reg * trace
+                } else {
+                    self.reg
+                };
+                for q in 0..m {
+                    g[(q, q)] += r;
+                }
+                let ones = Mat::<f64>::from_fn(m, 1, |_, _| 1.0);
+                let w = match faer::linalg::solvers::Llt::new(g.as_ref(), Side::Lower) {
+                    Ok(llt) => llt.solve(&ones),
+                    Err(_) => g.as_ref().full_piv_lu().solve(&ones),
+                };
+                let sum: f64 = (0..m).map(|q| w[(q, 0)]).sum();
+                (0..m).map(|q| w[(q, 0)] / sum).collect()
+            })
+            .collect();
+
+        // 3. M = (I − W)ᵀ (I − W) = Σ_i r_i r_iᵀ with r_i = e_i − W_iᵀ, each
+        //    with k + 1 non-zeros: O(n·k²) entries.
+        let mut entries: Vec<(usize, usize, f64)> = Vec::with_capacity(n * (k + 1) * (k + 1));
         for i in 0..n {
-            let xi: Vec<f64> = x.row(i).iter().copied().collect();
-            let mut others: Vec<(usize, f64)> = (0..n)
-                .filter(|&j| j != i)
-                .map(|j| {
-                    let xj: Vec<f64> = x.row(j).iter().copied().collect();
-                    (j, euclid_sq(&xi, &xj))
-                })
+            let row: Vec<(usize, f64)> = std::iter::once((i, 1.0))
+                .chain(
+                    neighbours[i]
+                        .iter()
+                        .zip(&weights[i])
+                        .map(|(&j, &w)| (j, -w)),
+                )
                 .collect();
-            others.sort_by(|a, b| a.1.total_cmp(&b.1));
-            for &(j, _) in others.iter().take(k) {
-                neighbours[i].push(j);
-            }
-        }
-
-        // 2. Reconstruction weights. Solve C w = 1 (then normalise), where
-        //    C_{ab} = (x_i - x_a) · (x_i - x_b) for a, b in N(i).
-        let mut weights = vec![vec![0.0_f64; n]; n];
-        for i in 0..n {
-            let nbrs = &neighbours[i];
-            let m = nbrs.len();
-            let xi: Vec<f64> = x.row(i).iter().copied().collect();
-            // Build C.
-            let mut c = Array2::<f64>::zeros((m, m));
-            let mut diffs: Vec<Vec<f64>> = Vec::with_capacity(m);
-            for &j in nbrs {
-                let xj: Vec<f64> = x.row(j).iter().copied().collect();
-                let dij: Vec<f64> = xi.iter().zip(xj.iter()).map(|(a, b)| a - b).collect();
-                diffs.push(dij);
-            }
-            for a in 0..m {
-                for b in 0..m {
-                    let mut s = 0.0;
-                    for q in 0..d {
-                        s += diffs[a][q] * diffs[b][q];
-                    }
-                    c[[a, b]] = s;
+            for &(a, va) in &row {
+                for &(b, vb) in &row {
+                    entries.push((a, b, va * vb));
                 }
             }
-            // Regularise diagonal: add reg * trace(C) / m.
-            let trace: f64 = (0..m).map(|q| c[[q, q]]).sum();
-            let lambda = self.reg * trace.max(1e-12) / m as f64;
-            for a in 0..m {
-                c[[a, a]] += lambda;
-            }
-            // Solve C w = 1.
-            let cm = Mat::<f64>::from_fn(m, m, |i, j| c[[i, j]]);
-            let llt = faer::linalg::solvers::Llt::new(cm.as_ref(), Side::Lower)
-                .map_err(|e| RustMlError::InvalidParameter(format!("Cholesky failed: {e:?}")))?;
-            let ones = Mat::<f64>::from_fn(m, 1, |_, _| 1.0);
-            let w_raw = llt.solve(&ones);
-            let sum: f64 = (0..m).map(|q| w_raw[(q, 0)]).sum();
-            let sum = sum.max(1e-12);
-            for (q, &j) in nbrs.iter().enumerate() {
-                weights[i][j] = w_raw[(q, 0)] / sum;
-            }
         }
 
-        // 3. Build M = (I − W)ᵀ (I − W). Compute directly as
-        //    M = I − W − Wᵀ + WᵀW.
-        let mut m = Array2::<f64>::zeros((n, n));
-        for i in 0..n {
-            m[[i, i]] += 1.0;
-            for j in 0..n {
-                m[[i, j]] -= weights[i][j];
-                m[[j, i]] -= weights[i][j];
-            }
-        }
-        // Add Wᵀ W.
-        for i in 0..n {
-            for j in 0..n {
-                let mut s = 0.0;
-                for q in 0..n {
-                    s += weights[q][i] * weights[q][j];
-                }
-                m[[i, j]] += s;
-            }
-        }
-
-        // 4. Bottom (n_components + 1) eigenvectors of M; drop the smallest.
-        let mat = Mat::<f64>::from_fn(n, n, |i, j| m[[i, j]]);
-        let eig = SelfAdjointEigen::new(mat.as_ref(), Side::Lower)
-            .map_err(|e| RustMlError::InvalidParameter(format!("eigen failed: {e:?}")))?;
-        let s = eig.S();
-        let v = eig.U();
-        // Ascending eigenvalues: skip the very smallest (constant direction).
-        let mut embedding = Array2::<f64>::zeros((n, self.n_components));
-        let mut eigenvalues = Array1::<f64>::zeros(self.n_components);
-        for c in 0..self.n_components {
-            let src = c + 1;
-            eigenvalues[c] = s.column_vector()[src];
-            for i in 0..n {
-                embedding[[i, c]] = v[(i, src)];
-            }
-        }
+        // 4. Bottom (n_components + 1) eigenvectors of M; drop the smallest
+        //    (the constant direction).
+        let (vals, vecs) = smallest_eigenpairs(n, &entries, self.n_components + 1)?;
+        let embedding = vecs.slice(ndarray::s![.., 1..]).to_owned();
+        let eigenvalues = vals.slice(ndarray::s![1..]).to_owned();
+        let reconstruction_error = eigenvalues.sum();
         Ok(FittedLocallyLinearEmbedding {
             embedding,
             eigenvalues,
+            reconstruction_error,
         })
     }
 }

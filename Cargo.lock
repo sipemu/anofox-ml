@@ -58,6 +58,8 @@ name = "anofox-ml-cluster"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-manifold",
+ "anofox-ml-neighbors",
  "approx",
  "faer",
  "ndarray",
@@ -101,6 +103,8 @@ name = "anofox-ml-ensemble"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-neighbors",
+ "anofox-ml-regression",
  "anofox-ml-trees",
  "approx",
  "ndarray",
@@ -156,10 +160,12 @@ name = "anofox-ml-manifold"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-neighbors",
  "approx",
  "faer",
  "ndarray",
  "rand 0.8.6",
+ "rayon",
  "serde",
 ]
 
@@ -217,6 +223,7 @@ name = "anofox-ml-preprocessing"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-regression",
  "anofox-regression",
  "approx",
  "faer",
@@ -224,6 +231,7 @@ dependencies = [
  "num-traits",
  "proptest",
  "rand 0.8.6",
+ "rayon",
  "serde",
 ]
 
@@ -236,18 +244,21 @@ dependencies = [
  "anofox-ml-discriminant",
  "anofox-ml-ensemble",
  "anofox-ml-gaussian-process",
+ "anofox-ml-linear",
  "anofox-ml-manifold",
  "anofox-ml-metrics",
  "anofox-ml-naive-bayes",
  "anofox-ml-neighbors",
  "anofox-ml-neural-networks",
  "anofox-ml-preprocessing",
+ "anofox-ml-regression",
  "anofox-ml-svm",
  "anofox-ml-trees",
  "bincode",
  "ndarray",
  "numpy",
  "pyo3",
+ "serde",
  "serde_json",
 ]
 
@@ -273,10 +284,12 @@ version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
+ "bincode",
  "ndarray",
  "num-traits",
  "proptest",
  "rand 0.8.6",
+ "rayon",
  "serde",
  "serde_json",
 ]
@@ -300,6 +313,7 @@ dependencies = [
  "num-traits",
  "proptest",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

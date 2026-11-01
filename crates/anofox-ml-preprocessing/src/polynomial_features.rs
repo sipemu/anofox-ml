@@ -3,9 +3,16 @@ use ndarray::Array2;
 
 /// Generates polynomial and interaction features.
 ///
-/// For a feature vector `[a, b]` and `degree=2`:
+/// Mirrors `sklearn.preprocessing.PolynomialFeatures` (sklearn 1.8). For a
+/// feature vector `[a, b]` and `degree=2`:
 /// - `interaction_only=false`: `[1, a, b, a^2, ab, b^2]`
 /// - `interaction_only=true`:  `[1, a, b, ab]`
+///
+/// Columns come in sklearn's order: the bias, then degree by degree the
+/// combinations (with replacement unless `interaction_only`) of feature
+/// indices in lexicographic order. Each column of degree `k` is computed as
+/// its degree-`k-1` prefix column times one feature, so `transform` costs one
+/// multiplication per output entry.
 ///
 /// Implements `FitUnsupervised` for pipeline compatibility. The fit step only
 /// records the number of input features; all computation happens in `transform`.
@@ -15,6 +22,16 @@ pub struct PolynomialFeatures {
     pub degree: usize,
     /// If true, only produce interaction features (no `x_i^k` for k > 1).
     pub interaction_only: bool,
+    /// Prepend the constant column (sklearn's `include_bias`, default true).
+    #[serde(default = "default_true")]
+    pub include_bias: bool,
+    /// Lowest degree of the non-bias terms (sklearn's `degree=(min, max)`).
+    #[serde(default)]
+    pub min_degree: usize,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl PolynomialFeatures {
@@ -23,6 +40,8 @@ impl PolynomialFeatures {
         Self {
             degree: 2,
             interaction_only: false,
+            include_bias: true,
+            min_degree: 0,
         }
     }
 
@@ -32,9 +51,22 @@ impl PolynomialFeatures {
         self
     }
 
+    /// Set the minimum and maximum degree (sklearn's `degree=(min, max)`).
+    pub fn with_degree_range(mut self, min_degree: usize, max_degree: usize) -> Self {
+        self.min_degree = min_degree;
+        self.degree = max_degree;
+        self
+    }
+
     /// Set whether to produce only interaction features.
     pub fn with_interaction_only(mut self, interaction_only: bool) -> Self {
         self.interaction_only = interaction_only;
+        self
+    }
+
+    /// Set whether to include the constant (bias) column.
+    pub fn with_include_bias(mut self, include_bias: bool) -> Self {
+        self.include_bias = include_bias;
         self
     }
 }
@@ -51,83 +83,50 @@ impl Default for PolynomialFeatures {
 pub struct FittedPolynomialFeatures<F: Float> {
     n_features: usize,
     degree: usize,
+    min_degree: usize,
     interaction_only: bool,
-    /// Pre-computed list of (exponents) for each output column.
-    /// Each entry is a Vec of (feature_index, power) pairs.
-    combinations: Vec<Vec<(usize, usize)>>,
+    include_bias: bool,
+    /// `terms[k - 1]` lists the degree-`k` terms as feature-index tuples
+    /// (non-decreasing), in output order.
+    terms: Vec<Vec<Vec<usize>>>,
+    /// `parent[k - 1][t]`: index in the degree-`k-1` list of the prefix of
+    /// term `t` (unused for degree 1).
+    parent: Vec<Vec<usize>>,
     _marker: std::marker::PhantomData<F>,
 }
 
-/// Enumerate all combinations of features with total degree up to `max_degree`.
-///
-/// Each combination is represented as a vec of `(feature_index, power)` pairs
-/// where power > 0. The bias term (degree 0) is an empty vec.
-///
-/// Combinations are ordered by total degree, then lexicographically by feature
-/// index, matching scikit-learn's convention:
-/// - degree 0: `[1]`
-/// - degree 1: `[a, b, c, ...]`
-/// - degree 2: `[a^2, ab, ac, ..., b^2, bc, ..., c^2, ...]`
-fn enumerate_combinations(
+/// Degree-by-degree terms and the prefix index of each term.
+#[allow(clippy::type_complexity)]
+fn enumerate_terms(
     n_features: usize,
     max_degree: usize,
     interaction_only: bool,
-) -> Vec<Vec<(usize, usize)>> {
-    let mut combos: Vec<Vec<(usize, usize)>> = Vec::new();
-    // Degree 0: bias term
-    combos.push(vec![]);
-
-    // Helper: enumerate all combinations with exactly `target_degree` total power,
-    // starting from feature `start_feature`.
-    fn recurse_exact(
-        start_feature: usize,
-        target_degree: usize,
-        n_features: usize,
-        interaction_only: bool,
-        current: &mut Vec<(usize, usize)>,
-        combos: &mut Vec<Vec<(usize, usize)>>,
-    ) {
-        if target_degree == 0 {
-            combos.push(current.clone());
-            return;
-        }
-        for feat in start_feature..n_features {
-            let max_power = if interaction_only { 1 } else { target_degree };
-            for power in (1..=max_power).rev() {
-                current.push((feat, power));
-                // Remaining degree allocated to features with index > feat
-                let remaining = target_degree - power;
-                if remaining == 0 {
-                    combos.push(current.clone());
-                } else {
-                    recurse_exact(
-                        feat + 1,
-                        remaining,
-                        n_features,
-                        interaction_only,
-                        current,
-                        combos,
-                    );
-                }
-                current.pop();
+) -> (Vec<Vec<Vec<usize>>>, Vec<Vec<usize>>) {
+    let mut terms: Vec<Vec<Vec<usize>>> = Vec::with_capacity(max_degree);
+    let mut parent: Vec<Vec<usize>> = Vec::with_capacity(max_degree);
+    if max_degree == 0 {
+        return (terms, parent);
+    }
+    terms.push((0..n_features).map(|j| vec![j]).collect());
+    parent.push(vec![0; n_features]);
+    for k in 2..=max_degree {
+        let prev = &terms[k - 2];
+        let mut cur = Vec::new();
+        let mut par = Vec::new();
+        for (p, t) in prev.iter().enumerate() {
+            let last = *t.last().expect("terms are non-empty");
+            let first = if interaction_only { last + 1 } else { last };
+            for j in first..n_features {
+                let mut child = t.clone();
+                child.push(j);
+                cur.push(child);
+                par.push(p);
             }
         }
+        terms.push(cur);
+        parent.push(par);
     }
-
-    // Generate degree by degree to ensure correct ordering
-    for d in 1..=max_degree {
-        let mut current = Vec::new();
-        recurse_exact(
-            0,
-            d,
-            n_features,
-            interaction_only,
-            &mut current,
-            &mut combos,
-        );
-    }
-
-    combos
+    (terms, parent)
 }
 
 impl<F: Float> FitUnsupervised<F> for PolynomialFeatures {
@@ -137,20 +136,29 @@ impl<F: Float> FitUnsupervised<F> for PolynomialFeatures {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
-        if self.degree == 0 {
+        if self.min_degree > self.degree {
+            return Err(RustMlError::InvalidParameter(format!(
+                "min_degree ({}) must be <= degree ({})",
+                self.min_degree, self.degree
+            )));
+        }
+        if self.degree == 0 && !self.include_bias {
             return Err(RustMlError::InvalidParameter(
-                "degree must be at least 1".into(),
+                "degree 0 with include_bias = false would give an empty output".into(),
             ));
         }
 
         let n_features = x.ncols();
-        let combinations = enumerate_combinations(n_features, self.degree, self.interaction_only);
+        let (terms, parent) = enumerate_terms(n_features, self.degree, self.interaction_only);
 
         Ok(FittedPolynomialFeatures {
             n_features,
             degree: self.degree,
+            min_degree: self.min_degree,
             interaction_only: self.interaction_only,
-            combinations,
+            include_bias: self.include_bias,
+            terms,
+            parent,
             _marker: std::marker::PhantomData,
         })
     }
@@ -167,26 +175,37 @@ impl<F: Float> Transform<F> for FittedPolynomialFeatures<F> {
         }
 
         let nrows = x.nrows();
-        let ncols_out = self.combinations.len();
-        let mut result = Array2::<F>::ones((nrows, ncols_out));
-
-        for (out_col, combo) in self.combinations.iter().enumerate() {
-            if combo.is_empty() {
-                // Bias term: already 1.0
-                continue;
-            }
-            for i in 0..nrows {
-                let mut val = F::one();
-                for &(feat, power) in combo {
-                    let base = x[[i, feat]];
-                    for _ in 0..power {
-                        val *= base;
-                    }
-                }
-                result[[i, out_col]] = val;
-            }
+        let mut result = Array2::<F>::zeros((nrows, self.n_output_features()));
+        let mut col = 0;
+        if self.include_bias {
+            result.column_mut(0).fill(F::one());
+            col = 1;
         }
-
+        // Degree-k block from the degree-(k-1) block: one product per entry.
+        let mut prev: Array2<F> = x.to_owned();
+        for k in 1..=self.degree {
+            let block = if k == 1 {
+                std::mem::take(&mut prev)
+            } else {
+                let terms = &self.terms[k - 1];
+                let mut b = Array2::<F>::zeros((nrows, terms.len()));
+                for (t, (term, &p)) in terms.iter().zip(&self.parent[k - 1]).enumerate() {
+                    let j = *term.last().expect("terms are non-empty");
+                    let mut bc = b.column_mut(t);
+                    bc.assign(&prev.column(p));
+                    bc *= &x.column(j);
+                }
+                b
+            };
+            if k >= self.min_degree {
+                let w = block.ncols();
+                result
+                    .slice_mut(ndarray::s![.., col..col + w])
+                    .assign(&block);
+                col += w;
+            }
+            prev = block;
+        }
         Ok(result)
     }
 }
@@ -199,7 +218,7 @@ impl<F: Float> FittedPolynomialFeatures<F> {
 
     /// Return the number of output features.
     pub fn n_output_features(&self) -> usize {
-        self.combinations.len()
+        self.included_terms().count() + usize::from(self.include_bias)
     }
 
     /// Return the degree.
@@ -210,6 +229,67 @@ impl<F: Float> FittedPolynomialFeatures<F> {
     /// Return whether only interactions are generated.
     pub fn interaction_only(&self) -> bool {
         self.interaction_only
+    }
+
+    fn included_terms(&self) -> impl Iterator<Item = &Vec<usize>> {
+        self.terms
+            .iter()
+            .enumerate()
+            .filter(move |(k, _)| k + 1 >= self.min_degree)
+            .flat_map(|(_, t)| t.iter())
+    }
+
+    /// Exponent of each input feature in each output column, shape
+    /// `(n_output_features, n_input_features)` (sklearn's `powers_`).
+    pub fn powers(&self) -> Array2<usize> {
+        let mut p = Array2::<usize>::zeros((self.n_output_features(), self.n_features));
+        let offset = usize::from(self.include_bias);
+        for (r, term) in self.included_terms().enumerate() {
+            for &j in term {
+                p[[r + offset, j]] += 1;
+            }
+        }
+        p
+    }
+
+    /// Output column names as sklearn's `get_feature_names_out`: `"1"`,
+    /// `"x0"`, `"x0^2"`, `"x0 x1"`, ... `input_names` replaces `x0, x1, ...`.
+    pub fn feature_names_out(&self, input_names: Option<&[String]>) -> Result<Vec<String>> {
+        let names: Vec<String> = match input_names {
+            Some(n) if n.len() != self.n_features => {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "expected {} input names, got {}",
+                    self.n_features,
+                    n.len()
+                )))
+            }
+            Some(n) => n.to_vec(),
+            None => (0..self.n_features).map(|j| format!("x{j}")).collect(),
+        };
+        Ok(self
+            .powers()
+            .rows()
+            .into_iter()
+            .map(|row| {
+                let parts: Vec<String> = row
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &e)| e > 0)
+                    .map(|(j, &e)| {
+                        if e == 1 {
+                            names[j].clone()
+                        } else {
+                            format!("{}^{e}", names[j])
+                        }
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    "1".to_string()
+                } else {
+                    parts.join(" ")
+                }
+            })
+            .collect())
     }
 }
 
@@ -281,11 +361,17 @@ mod tests {
     }
 
     #[test]
-    fn test_degree0_error() {
-        let x = array![[1.0, 2.0]];
-        let poly = PolynomialFeatures::new().with_degree(0);
-        let result = FitUnsupervised::<f64>::fit(&poly, &x);
-        assert!(result.is_err());
+    fn test_degree0_bias_only() {
+        // sklearn: PolynomialFeatures(0).fit_transform(X) -> a column of ones;
+        // degree 0 without a bias is an error.
+        let x = array![[2.0, 3.0], [4.0, 5.0]];
+        let fitted =
+            FitUnsupervised::<f64>::fit(&PolynomialFeatures::new().with_degree(0), &x).unwrap();
+        assert_eq!(fitted.transform(&x).unwrap(), array![[1.0], [1.0]]);
+        let poly = PolynomialFeatures::new()
+            .with_degree(0)
+            .with_include_bias(false);
+        assert!(FitUnsupervised::<f64>::fit(&poly, &x).is_err());
     }
 
     #[test]
@@ -473,5 +559,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_matches_sklearn_names_and_values() {
+        // sklearn 1.8 PolynomialFeatures(...).fit(X): get_feature_names_out()
+        // and transform(X).
+        let x = array![[2.0, 3.0, -1.0], [0.5, -2.0, 4.0]];
+        let check = |poly: PolynomialFeatures, names: &[&str], rows: [&[f64]; 2]| {
+            let f = FitUnsupervised::<f64>::fit(&poly, &x).unwrap();
+            assert_eq!(f.feature_names_out(None).unwrap(), names);
+            let t = f.transform(&x).unwrap();
+            assert_eq!(t.ncols(), names.len());
+            for (i, row) in rows.iter().enumerate() {
+                for (j, v) in row.iter().enumerate() {
+                    assert_abs_diff_eq!(t[[i, j]], *v, epsilon = 1e-12);
+                }
+            }
+        };
+        check(
+            PolynomialFeatures::new().with_degree(3),
+            &[
+                "1", "x0", "x1", "x2", "x0^2", "x0 x1", "x0 x2", "x1^2", "x1 x2", "x2^2", "x0^3",
+                "x0^2 x1", "x0^2 x2", "x0 x1^2", "x0 x1 x2", "x0 x2^2", "x1^3", "x1^2 x2",
+                "x1 x2^2", "x2^3",
+            ],
+            [
+                &[
+                    1.0, 2.0, 3.0, -1.0, 4.0, 6.0, -2.0, 9.0, -3.0, 1.0, 8.0, 12.0, -4.0, 18.0,
+                    -6.0, 2.0, 27.0, -9.0, 3.0, -1.0,
+                ],
+                &[
+                    1.0, 0.5, -2.0, 4.0, 0.25, -1.0, 2.0, 4.0, -8.0, 16.0, 0.125, -0.5, 1.0, 2.0,
+                    -4.0, 8.0, -8.0, 16.0, -32.0, 64.0,
+                ],
+            ],
+        );
+        check(
+            PolynomialFeatures::new()
+                .with_degree_range(2, 3)
+                .with_include_bias(false),
+            &[
+                "x0^2", "x0 x1", "x0 x2", "x1^2", "x1 x2", "x2^2", "x0^3", "x0^2 x1", "x0^2 x2",
+                "x0 x1^2", "x0 x1 x2", "x0 x2^2", "x1^3", "x1^2 x2", "x1 x2^2", "x2^3",
+            ],
+            [
+                &[
+                    4.0, 6.0, -2.0, 9.0, -3.0, 1.0, 8.0, 12.0, -4.0, 18.0, -6.0, 2.0, 27.0, -9.0,
+                    3.0, -1.0,
+                ],
+                &[
+                    0.25, -1.0, 2.0, 4.0, -8.0, 16.0, 0.125, -0.5, 1.0, 2.0, -4.0, 8.0, -8.0, 16.0,
+                    -32.0, 64.0,
+                ],
+            ],
+        );
+        check(
+            PolynomialFeatures::new()
+                .with_degree(3)
+                .with_interaction_only(true),
+            &["1", "x0", "x1", "x2", "x0 x1", "x0 x2", "x1 x2", "x0 x1 x2"],
+            [
+                &[1.0, 2.0, 3.0, -1.0, 6.0, -2.0, -3.0, -6.0],
+                &[1.0, 0.5, -2.0, 4.0, -1.0, 2.0, -8.0, -4.0],
+            ],
+        );
+        // degree=(2, 2) keeps the bias, as sklearn does.
+        check(
+            PolynomialFeatures::new()
+                .with_degree_range(2, 2)
+                .with_interaction_only(true),
+            &["1", "x0 x1", "x0 x2", "x1 x2"],
+            [&[1.0, 6.0, -2.0, -3.0], &[1.0, -1.0, 2.0, -8.0]],
+        );
+    }
+
+    #[test]
+    fn test_powers_and_custom_names() {
+        let x = array![[1.0, 2.0]];
+        let f = FitUnsupervised::<f64>::fit(&PolynomialFeatures::new(), &x).unwrap();
+        assert_eq!(
+            f.powers(),
+            array![[0, 0], [1, 0], [0, 1], [2, 0], [1, 1], [0, 2]]
+        );
+        let names = ["a".to_string(), "b".to_string()];
+        assert_eq!(
+            f.feature_names_out(Some(&names)).unwrap(),
+            ["1", "a", "b", "a^2", "a b", "b^2"]
+        );
     }
 }

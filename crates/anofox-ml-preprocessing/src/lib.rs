@@ -29,14 +29,19 @@
 //! assert!(col0_mean.abs() < 1e-10);
 //! ```
 
+pub mod areg_imputer;
 pub mod binarizer;
 pub mod cca;
 pub mod fast_ica;
+pub mod incremental_pca;
+pub mod iterative_imputer;
 pub mod kbins_discretizer;
 pub mod kernel_pca;
+pub mod knn_imputer;
 pub mod label_encoder;
 pub mod max_abs_scaler;
 pub mod minmax_scaler;
+pub mod missing_indicator;
 pub mod mutual_information;
 pub mod nmf;
 pub mod normalizer;
@@ -48,6 +53,7 @@ pub mod polynomial_features;
 pub mod power_transformer;
 pub(crate) mod quantile;
 pub mod quantile_transformer;
+pub mod rcs_transformer;
 pub mod rfe;
 pub mod robust_scaler;
 pub mod select_from_model;
@@ -55,19 +61,28 @@ pub mod select_k_best;
 pub mod simple_imputer;
 pub(crate) mod special;
 pub mod standard_scaler;
+pub mod target_encoder;
 pub mod truncated_svd;
 pub mod variance_threshold;
 
+pub use areg_imputer::{AregImputer, AregMatch, AregVariable, MultipleImputation};
 pub use binarizer::{Binarizer, FittedBinarizer};
 pub use cca::{Cca, FittedCca};
 pub use fast_ica::{FastIca, FittedFastIca};
+pub use incremental_pca::{FittedIncrementalPca, IncrementalPca};
+pub use iterative_imputer::{
+    AnyModel, AnyRegressor, FittedIterativeImputer, ImputationEstimator, ImputationModel,
+    ImputationOrder, ImputationStep, IterativeImputer,
+};
 pub use kbins_discretizer::{
     BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
 };
 pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
+pub use knn_imputer::{FittedKnnImputer, KnnImputeWeights, KnnImputer};
 pub use label_encoder::{FittedLabelEncoder, LabelEncoder};
 pub use max_abs_scaler::{FittedMaxAbsScaler, MaxAbsScaler};
 pub use minmax_scaler::{FittedMinMaxScaler, MinMaxScaler};
+pub use missing_indicator::{FittedMissingIndicator, MissingFeatures, MissingIndicator};
 pub use mutual_information::{
     mutual_info_classif, mutual_info_regression, DiscreteFeatures, FittedMutualInformationSelector,
     MiTarget, MutualInformationSelector,
@@ -85,6 +100,7 @@ pub use power_transformer::{FittedPowerTransformer, PowerMethod, PowerTransforme
 pub use quantile_transformer::{
     FittedQuantileTransformer, OutputDistribution, QuantileTransformer,
 };
+pub use rcs_transformer::{FittedRcsTransformer, RcsTransformer, SplineNorm};
 pub use rfe::{
     FittedRfe, FittedRfecv, FittedSequentialFeatureSelector, Rfe, Rfecv, SequentialFeatureSelector,
 };
@@ -93,5 +109,6 @@ pub use select_from_model::{FittedSelectFromModel, SelectFromModel, Threshold};
 pub use select_k_best::{FittedSelectKBest, SelectKBest};
 pub use simple_imputer::{FittedSimpleImputer, ImputeStrategy, SimpleImputer};
 pub use standard_scaler::{FittedStandardScaler, StandardScaler};
+pub use target_encoder::{FittedTargetEncoder, TargetEncoder, TargetSmooth, TargetType};
 pub use truncated_svd::{FittedTruncatedSvd, TruncatedSvd};
 pub use variance_threshold::{FittedVarianceThreshold, VarianceThreshold};

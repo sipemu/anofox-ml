@@ -59,15 +59,10 @@ pub enum MultiClass {
     OneVsRest,
 }
 
-/// Per-class weights (sklearn's `class_weight`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ClassWeight {
-    /// `Σw / (n_classes · Σ_{y=class} w)` (`n_samples / (n_classes ·
-    /// count(class))` without sample weights), as sklearn.
-    Balanced,
-    /// Explicit `(label, weight)` pairs; unlisted classes get weight 1.
-    Custom(Vec<(f64, f64)>),
-}
+/// Per-class weights (sklearn's `class_weight`). `Balanced` uses
+/// `Σw / (n_classes · Σ_{y=class} w)` (`n_samples / (n_classes ·
+/// count(class))` without sample weights), as sklearn's logistic regression.
+pub use anofox_ml_core::ClassWeight;
 
 /// Logistic regression classifier.
 ///
@@ -79,7 +74,7 @@ pub enum ClassWeight {
 /// multinomial loss (#72). Use [`LogisticRegressor::with_no_penalty`] for
 /// the unpenalised maximum-likelihood fit (e.g. together with
 /// `with_inference(true)` for classical Wald tests / odds-ratio CIs).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogisticRegressor {
     c: f64,
     l1_ratio: f64,
@@ -484,7 +479,7 @@ impl FitWeighted<f64> for LogisticRegressor {
                         .map(|&c| if c > 0.0 { total / (k as f64 * c) } else { 0.0 })
                         .collect()
                 }
-                ClassWeight::Custom(pairs) => {
+                ClassWeight::Manual(pairs) => {
                     let mut out = vec![1.0; k];
                     for &(label, weight) in pairs {
                         if !weight.is_finite() || weight < 0.0 {
@@ -710,7 +705,7 @@ mod tests {
             .unwrap();
         let y = array![0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0];
         let a = LogisticRegressor::new()
-            .with_class_weight(ClassWeight::Custom(vec![(1.0, 3.0)]))
+            .with_class_weight(ClassWeight::Manual(vec![(1.0, 3.0)]))
             .fit(&x, &y)
             .unwrap();
         let sw = y.mapv(|v| if v == 1.0 { 3.0 } else { 1.0 });
