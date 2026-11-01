@@ -618,6 +618,13 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - Centres, labels and `n_iter` match sklearn exactly.
   - **Breaking:** `bandwidth` is an `Option` and `tol` is gone.
 
+- **OPTICS ξ extraction (#61):** new `OpticsClusterMethod::Xi`
+  (`Optics::xi`), a port of sklearn's `cluster_optics_xi`. It covers steep
+  areas, `min_cluster_size` and predecessor correction, and exposes
+  `cluster_hierarchy`. Labels and hierarchy match sklearn exactly. DBSCAN
+  extraction stays the Rust default; the Python `OPTICS` now defaults to
+  ξ, like sklearn.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

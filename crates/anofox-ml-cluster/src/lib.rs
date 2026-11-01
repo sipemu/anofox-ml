@@ -60,7 +60,7 @@ pub use hdbscan::{ClusterSelectionMethod, FittedHdbscan, Hdbscan};
 pub use kmeans::{FittedKMeans, KMeans, KMeansInit};
 pub use mean_shift::{estimate_bandwidth, FittedMeanShift, MeanShift};
 pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchKMeans};
-pub use optics::{FittedOptics, Optics};
+pub use optics::{FittedOptics, Optics, OpticsClusterMethod};
 pub use spectral::{Affinity, FittedSpectralClustering, SpectralClustering};
 
 /// Return `x` in standard (C-contiguous, row-major) layout.

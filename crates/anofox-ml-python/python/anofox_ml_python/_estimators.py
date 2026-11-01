@@ -1712,17 +1712,33 @@ class HDBSCAN(ClusterMixin, BaseEstimator):
 class OPTICS(ClusterMixin, BaseEstimator):
     _kind = "Optics"
 
-    def __init__(self, min_samples=5, max_eps=np.inf, eps=None):
+    def __init__(self, *, min_samples=5, max_eps=np.inf, cluster_method="xi", eps=None,
+                 xi=0.05, predecessor_correction=True, min_cluster_size=None):
         self.min_samples = min_samples
         self.max_eps = max_eps
+        self.cluster_method = cluster_method
         self.eps = eps
+        self.xi = xi
+        self.predecessor_correction = predecessor_correction
+        self.min_cluster_size = min_cluster_size
 
     def _rust_params(self, X, y):
-        return {"min_samples": self.min_samples,
-                "eps_max": np.finfo(np.float64).max if np.isinf(self.max_eps)
-                else float(self.max_eps),
-                # f64::INFINITY does not survive JSON; use the largest float.
-                "eps": np.finfo(np.float64).max if self.eps is None else float(self.eps)}
+        # f64::INFINITY does not survive JSON; use the largest float.
+        big = np.finfo(np.float64).max
+        max_eps = big if np.isinf(self.max_eps) else float(self.max_eps)
+        if self.cluster_method == "xi":
+            method = {"Xi": {"xi": float(self.xi),
+                             "min_cluster_size": None if self.min_cluster_size is None
+                             else int(self.min_cluster_size),
+                             "predecessor_correction": bool(self.predecessor_correction)}}
+            eps = big
+        elif self.cluster_method == "dbscan":
+            method = "Dbscan"
+            eps = max_eps if self.eps is None else float(self.eps)
+        else:
+            raise ValueError(f"unsupported cluster_method {self.cluster_method!r}")
+        return {"min_samples": int(self.min_samples), "eps_max": max_eps, "eps": eps,
+                "cluster_method": method}
 
 
 class MeanShift(ClusterMixin, BaseEstimator):

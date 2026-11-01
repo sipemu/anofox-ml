@@ -265,3 +265,14 @@ def test_mean_shift_matches_sklearn():
         ref = skc.MeanShift(**kw).fit(Xb)
         np.testing.assert_allclose(ours.cluster_centers_, ref.cluster_centers_, atol=1e-10)
         assert list(ours.labels_) == list(ref.labels_)
+
+
+def test_optics_matches_sklearn():
+    from sklearn import cluster as skc
+
+    Xb = np.vstack([X[:, :2], X[:, :2] * 0.5 + 6.0])
+    for kw in [dict(), dict(xi=0.1, min_cluster_size=6),
+               dict(cluster_method="dbscan", eps=0.8)]:
+        ours = am.OPTICS(min_samples=5, **kw).fit(Xb)
+        ref = skc.OPTICS(min_samples=5, **kw).fit(Xb)
+        assert list(ours.labels_) == list(ref.labels_), kw
