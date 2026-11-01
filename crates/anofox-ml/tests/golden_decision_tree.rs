@@ -42,6 +42,7 @@ fn test_golden_decision_tree_classifier() {
             sample_weight: None,
             class_weight: None,
             seed: 0,
+            ..DecisionTreeClassifier::new()
         };
 
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();
@@ -92,6 +93,7 @@ fn test_golden_decision_tree_regressor() {
             max_features: None,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
         let fitted = Fit::fit(&tree, &x_train, &y_train).unwrap();

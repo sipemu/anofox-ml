@@ -232,6 +232,7 @@ impl GradientBoostingClassifier {
             max_features: None,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
         // Leaf update factor: 1 for binary, (K-1)/K for multinomial (Friedman).

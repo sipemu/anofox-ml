@@ -447,6 +447,21 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     `select_rows`, the boxed-estimator traits of voting / stacking); the
     tree classifier and regressor share one tree engine (#48).
 
+- **Tree / ensemble parity, part 1 (#50):**
+  - Decision trees gain `min_impurity_decrease`, `min_weight_fraction_leaf`,
+    `max_leaf_nodes` (best-first growth) and `ccp_alpha` (minimal
+    cost-complexity pruning); all match sklearn 1.8.
+  - Leaves store their impurity, weighted sample totals and exact
+    per-class weights (previously weighted counts were rounded to
+    `w·1000`); feature importances use weighted node sizes and leaf
+    impurities, as sklearn. Older saved trees still load.
+  - ExtraTrees: `criterion` (Gini / Entropy) and an `Array2`
+    `predict_proba` (plus the `PredictProba` trait). **Breaking:** the
+    inherent `predict_proba` returned `Vec<Vec<(F, F)>>`.
+  - GradientBoostingRegressor: `AbsoluteError`, `Huber` and `Quantile`
+    losses with sklearn's terminal-region updates, early stopping
+    (`n_iter_no_change`, `validation_fraction`, `tol`) and `max_features`.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

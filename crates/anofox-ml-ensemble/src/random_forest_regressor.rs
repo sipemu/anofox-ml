@@ -197,6 +197,7 @@ impl RandomForestRegressor {
             max_features: self.max_features,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
         // Pre-generate bootstrap rows and per-tree seeds sequentially so the

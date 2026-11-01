@@ -157,6 +157,7 @@ impl AdaBoostClassifier {
             sample_weight: None,
             class_weight: None,
             seed: self.seed,
+            ..DecisionTreeClassifier::new()
         };
 
         // Sample weights, kept normalized to sum to 1 (sklearn starts from

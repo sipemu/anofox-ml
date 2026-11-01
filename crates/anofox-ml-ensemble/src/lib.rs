@@ -73,7 +73,9 @@ pub use extra_trees_regressor::{ExtraTreesRegressor, FittedExtraTreesRegressor};
 pub use gradient_boosting_classifier::{
     FittedGradientBoostingClassifier, GradientBoostingClassifier,
 };
-pub use gradient_boosting_regressor::{FittedGradientBoostingRegressor, GradientBoostingRegressor};
+pub use gradient_boosting_regressor::{
+    FittedGradientBoostingRegressor, GbLoss, GradientBoostingRegressor,
+};
 pub use hist_gradient_boosting::{
     FittedHistGradientBoostingClassifier, FittedHistGradientBoostingRegressor,
     HistGradientBoostingClassifier, HistGradientBoostingRegressor,

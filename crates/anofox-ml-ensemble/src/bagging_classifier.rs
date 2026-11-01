@@ -118,6 +118,7 @@ impl<F: Float> Fit<F> for BaggingClassifier {
             sample_weight: None,
             class_weight: None,
             seed: 0,
+            ..DecisionTreeClassifier::new()
         };
 
         // Pre-generate bootstrap row indices for determinism

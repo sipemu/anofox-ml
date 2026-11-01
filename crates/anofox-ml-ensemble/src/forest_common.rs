@@ -242,6 +242,8 @@ pub(crate) fn build_extra_tree<F: Float>(
                 right: Box::new(right),
                 n_samples,
                 impurity,
+                weighted_n_samples: weights
+                    .map(|w| indices.iter().fold(F::zero(), |a, &i| a + w[i])),
             }
         }
         None => make_leaf(y, indices, params.criterion, weights),

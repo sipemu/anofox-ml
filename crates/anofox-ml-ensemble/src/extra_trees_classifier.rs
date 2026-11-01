@@ -35,6 +35,9 @@ pub struct ExtraTreesClassifier {
     /// Number of features to consider at each split. `None` = all features.
     /// Default: `Some(MaxFeatures::Sqrt)`.
     pub max_features: Option<MaxFeatures>,
+    /// Split criterion: `Gini` (default) or `Entropy`.
+    #[serde(default = "default_criterion")]
+    pub criterion: SplitCriterion,
     /// Random seed for reproducibility.
     pub seed: u64,
 }
@@ -48,8 +51,15 @@ impl ExtraTreesClassifier {
             min_samples_split: 2,
             min_samples_leaf: 1,
             max_features: Some(MaxFeatures::Sqrt),
+            criterion: SplitCriterion::Gini,
             seed: 0,
         }
+    }
+
+    /// Set the split criterion (`Gini` or `Entropy`).
+    pub fn with_criterion(mut self, criterion: SplitCriterion) -> Self {
+        self.criterion = criterion;
+        self
     }
 
     /// Set the maximum depth of each tree.
@@ -173,7 +183,7 @@ impl ExtraTreesClassifier {
             max_depth: self.max_depth,
             min_samples_split: self.min_samples_split,
             min_samples_leaf: self.min_samples_leaf,
-            criterion: SplitCriterion::Gini,
+            criterion: self.criterion,
             max_features_k,
             n_features,
         };
@@ -209,6 +219,16 @@ impl<F: Float> Predict<F> for FittedExtraTreesClassifier<F> {
                 .into_iter()
                 .map(|row| classes[argmax_first(row.iter().copied())]),
         ))
+    }
+}
+
+fn default_criterion() -> SplitCriterion {
+    SplitCriterion::Gini
+}
+
+impl<F: Float> anofox_ml_core::PredictProba<F> for FittedExtraTreesClassifier<F> {
+    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.proba_matrix(x)
     }
 }
 
@@ -275,25 +295,24 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
                 let sub_x = tree_input(x, &forest_tree.feature_indices);
                 let mut acc = Array2::<F>::zeros((n_samples, n_classes));
                 for (i, row) in sub_x.rows().into_iter().enumerate() {
-                    match forest_tree.tree.leaf_for_view(row) {
-                        TreeNode::Leaf {
-                            class_counts: Some(counts),
-                            ..
-                        } => {
-                            let total: usize = counts.iter().map(|&(_, c)| c).sum();
-                            let total_f = F::from_usize(total.max(1)).unwrap();
-                            for &(label, c) in counts {
-                                if let Some(ci) = class_index(&classes, label) {
-                                    acc[[i, ci]] += w * F::from_usize(c).unwrap() / total_f;
+                    let leaf = forest_tree.tree.leaf_for_view(row);
+                    match (leaf.class_distribution(), leaf) {
+                        (Some(dist), _) => {
+                            let total = dist.iter().fold(F::zero(), |a, &(_, m)| a + m);
+                            if total > F::zero() {
+                                for &(label, m) in &dist {
+                                    if let Some(ci) = class_index(&classes, label) {
+                                        acc[[i, ci]] += w * m / total;
+                                    }
                                 }
                             }
                         }
-                        TreeNode::Leaf { value, .. } => {
+                        (None, TreeNode::Leaf { value, .. }) => {
                             if let Some(ci) = class_index(&classes, *value) {
                                 acc[[i, ci]] += w;
                             }
                         }
-                        TreeNode::Split { .. } => unreachable!(),
+                        (None, TreeNode::Split { .. }) => unreachable!(),
                     }
                 }
                 acc
@@ -308,19 +327,10 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
         Ok(proba)
     }
 
-    /// Predict class probabilities for each sample (mean leaf probabilities).
-    ///
-    /// Returns a vector of vectors, where each inner vector contains
-    /// `(class_label, probability)` pairs for every training class, sorted by
-    /// class label.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Vec<Vec<(F, F)>>> {
-        let proba = self.proba_matrix(x)?;
-        let classes = self.classes();
-        Ok(proba
-            .rows()
-            .into_iter()
-            .map(|row| classes.iter().copied().zip(row.iter().copied()).collect())
-            .collect())
+    /// Class probabilities (mean leaf probabilities over the trees), shape
+    /// `(n_samples, n_classes)`; columns follow [`classes`](Self::classes).
+    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        self.proba_matrix(x)
     }
 
     /// Number of trees in the ensemble.
@@ -643,21 +653,16 @@ mod tests {
         let fitted: FittedExtraTreesClassifier<f64> = et.fit(&x, &y).unwrap();
 
         let proba = fitted.predict_proba(&x).unwrap();
-        assert_eq!(proba.len(), x.nrows());
+        assert_eq!(proba.dim(), (x.nrows(), 2));
 
         // Each sample's probabilities should sum to 1
-        for sample_probs in &proba {
-            let sum: f64 = sample_probs.iter().map(|&(_, p)| p).sum();
-            assert_abs_diff_eq!(sum, 1.0, epsilon = 1e-10);
+        for sample_probs in proba.rows() {
+            assert_abs_diff_eq!(sample_probs.sum(), 1.0, epsilon = 1e-10);
         }
 
         // For clearly separable data, class 0 samples should have high P(class=0)
-        for sample_probs in &proba[..3] {
-            let p_class0 = sample_probs
-                .iter()
-                .find(|&&(c, _)| (c - 0.0).abs() < 1e-10)
-                .map(|&(_, p)| p)
-                .unwrap_or(0.0);
+        for i in 0..3 {
+            let p_class0 = proba[[i, 0]];
             assert!(p_class0 > 0.5, "expected P(class=0) > 0.5, got {p_class0}");
         }
     }

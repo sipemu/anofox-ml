@@ -293,6 +293,13 @@ pub(crate) trait SplitAccumulator<F: Float> {
     fn n_left(&self) -> usize;
     /// Number of samples currently in the right partition.
     fn n_right(&self) -> usize;
+    /// (Weighted) mass of the left and right partitions.
+    fn masses(&self) -> (F, F) {
+        (
+            F::from_usize(self.n_left()).unwrap(),
+            F::from_usize(self.n_right()).unwrap(),
+        )
+    }
 }
 
 /// Classification accumulator using incremental class counts.
@@ -516,6 +523,10 @@ impl<F: Float> SplitAccumulator<F> for WeightedClassificationAccumulator<'_, F> 
         self.n_right -= 1;
     }
 
+    fn masses(&self) -> (F, F) {
+        (self.left_weight, self.right_weight)
+    }
+
     fn weighted_impurity(&self, _n: usize) -> F {
         let total = self.left_weight + self.right_weight;
         if total <= F::zero() {
@@ -594,6 +605,10 @@ impl<F: Float> SplitAccumulator<F> for WeightedRegressionAccumulator<'_, F> {
         }
         self.n_left += 1;
         self.n_right -= 1;
+    }
+
+    fn masses(&self) -> (F, F) {
+        (self.left[0], self.right[0])
     }
 
     fn weighted_impurity(&self, _n: usize) -> F {
@@ -1276,41 +1291,36 @@ pub fn find_best_split_weighted<F: Float>(
     }
 }
 
-/// Leaf node for `indices`: the (weighted) leaf value and, for
-/// classification, the class distribution. Weighted class counts are stored
-/// scaled by 1000 and rounded (the leaf format holds integer counts).
+/// Leaf node for `indices`: the (weighted) leaf value, its impurity and,
+/// for classification, the class counts (and per-class weights when
+/// weighted).
 pub fn make_leaf<F: Float>(
     y: &Array1<F>,
     indices: &[usize],
     criterion: SplitCriterion,
     weights: Option<&Array1<F>>,
 ) -> crate::node::TreeNode<F> {
-    let value = match weights {
-        Some(w) => weighted_leaf_value(y, indices, w, criterion),
-        None => leaf_value(y, indices, criterion),
+    let (value, impurity) = match weights {
+        Some(w) => (
+            weighted_leaf_value(y, indices, w, criterion),
+            compute_weighted_impurity(y, indices, w, criterion),
+        ),
+        None => (
+            leaf_value(y, indices, criterion),
+            compute_impurity(y, indices, criterion),
+        ),
     };
-    let class_counts = match criterion {
-        SplitCriterion::Gini | SplitCriterion::Entropy => match weights {
-            Some(w) => {
-                // Store weighted counts as approximate integer counts for predict_proba compat
-                let wc = weighted_count_classes(y, indices, w);
-                Some(
-                    wc.into_iter()
-                        .map(|(class, weight)| {
-                            // Scale weight to integer-like count (multiply by 1000 for precision)
-                            (class, (weight.to_f64().unwrap() * 1000.0).round() as usize)
-                        })
-                        .collect(),
-                )
-            }
-            None => Some(count_classes(y, indices)),
-        },
-        SplitCriterion::Mse => None,
-    };
+    let classification = !matches!(criterion, SplitCriterion::Mse);
     crate::node::TreeNode::Leaf {
         value,
         n_samples: indices.len(),
-        class_counts,
+        class_counts: classification.then(|| count_classes(y, indices)),
+        impurity,
+        weighted_n_samples: weights.map(|w| indices.iter().fold(F::zero(), |a, &i| a + w[i])),
+        class_weights: match weights {
+            Some(w) if classification => Some(weighted_count_classes(y, indices, w)),
+            _ => None,
+        },
     }
 }
 

@@ -211,6 +211,7 @@ impl RandomForestClassifier {
             sample_weight: None,
             class_weight: None,
             seed: 0,
+            ..DecisionTreeClassifier::new()
         };
 
         // Pre-generate bootstrap rows and per-tree seeds sequentially so the

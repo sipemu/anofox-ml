@@ -170,6 +170,7 @@ impl AdaBoostRegressor {
             max_features: None,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
         let mut rng = StdRng::seed_from_u64(self.seed);

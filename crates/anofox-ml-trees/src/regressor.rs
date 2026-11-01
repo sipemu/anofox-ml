@@ -19,6 +19,20 @@ pub struct DecisionTreeRegressor {
     pub sample_weight: Option<Array1<f64>>,
     /// Seed for the per-split feature subsampling RNG (only used when
     /// `max_features` is set). Different seeds give different trees.
+    /// Minimum weighted impurity decrease required to split a node
+    /// (sklearn's `min_impurity_decrease`).
+    #[serde(default)]
+    pub min_impurity_decrease: f64,
+    /// Minimum fraction of the total sample weight in each leaf.
+    #[serde(default)]
+    pub min_weight_fraction_leaf: f64,
+    /// Grow best-first with at most this many leaves (`None` = unlimited,
+    /// depth-first).
+    #[serde(default)]
+    pub max_leaf_nodes: Option<usize>,
+    /// Cost-complexity pruning strength (sklearn's `ccp_alpha`, 0 = none).
+    #[serde(default)]
+    pub ccp_alpha: f64,
     #[serde(default)]
     pub seed: u64,
 }
@@ -33,7 +47,34 @@ impl DecisionTreeRegressor {
             max_features: None,
             sample_weight: None,
             seed: 0,
+            min_impurity_decrease: 0.0,
+            min_weight_fraction_leaf: 0.0,
+            max_leaf_nodes: None,
+            ccp_alpha: 0.0,
         }
+    }
+    /// Minimum weighted impurity decrease of a split.
+    pub fn with_min_impurity_decrease(mut self, v: f64) -> Self {
+        self.min_impurity_decrease = v;
+        self
+    }
+
+    /// Minimum fraction of the total sample weight per leaf.
+    pub fn with_min_weight_fraction_leaf(mut self, v: f64) -> Self {
+        self.min_weight_fraction_leaf = v;
+        self
+    }
+
+    /// Best-first growth with at most `n` leaves.
+    pub fn with_max_leaf_nodes(mut self, n: Option<usize>) -> Self {
+        self.max_leaf_nodes = n;
+        self
+    }
+
+    /// Minimal cost-complexity pruning strength.
+    pub fn with_ccp_alpha(mut self, alpha: f64) -> Self {
+        self.ccp_alpha = alpha;
+        self
     }
 
     /// Set the maximum depth of the tree.
@@ -163,8 +204,27 @@ impl DecisionTreeRegressor {
             criterion: SplitCriterion::Mse,
             max_features_k: self.max_features.map(|mf| mf.resolve(n_features)),
             n_features,
+            min_impurity_decrease: self.min_impurity_decrease,
+            min_weight_fraction_leaf: self.min_weight_fraction_leaf,
+            max_leaf_nodes: self.max_leaf_nodes,
         };
+        if !(0.0..=0.5).contains(&self.min_weight_fraction_leaf) {
+            return Err(RustMlError::InvalidParameter(
+                "min_weight_fraction_leaf must be in [0, 0.5]".into(),
+            ));
+        }
+        if self.max_leaf_nodes.is_some_and(|n| n < 2) {
+            return Err(RustMlError::InvalidParameter(
+                "max_leaf_nodes must be at least 2".into(),
+            ));
+        }
+        if self.min_impurity_decrease < 0.0 || self.ccp_alpha < 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "min_impurity_decrease and ccp_alpha must be non-negative".into(),
+            ));
+        }
         let tree = grow(x, y, rows, sample_weight, &params, self.seed);
+        let tree = crate::node::prune_ccp(tree, self.ccp_alpha, false);
         Ok(FittedDecisionTreeRegressor { tree, n_features })
     }
 }

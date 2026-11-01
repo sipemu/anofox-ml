@@ -229,3 +229,119 @@ fn adaboost_weights_match_sklearn() {
         ],
     );
 }
+
+#[test]
+fn gradient_boosting_losses_match_sklearn() {
+    use anofox_ml_ensemble::{GbLoss, GradientBoostingRegressor};
+    // Continuous features (no split ties, which sklearn breaks randomly).
+    let x = Array2::from_shape_fn((40, 3), |(i, j)| {
+        (((i + 1) * (j + 1)) as f64 * 0.6180339887498949) % 1.0 * 10.0
+    });
+    let y = Array1::from_shape_fn(40, |i| x[[i, 0]] * 1.5 - x[[i, 2]] * 0.3 + (i as f64).sin());
+    let w = Array1::from_shape_fn(40, |i| 1.0 + (i % 4) as f64 * 0.5);
+    let q = x.slice(ndarray::s![..4, ..]).to_owned();
+    // sklearn 1.8: GradientBoostingRegressor(loss=..., learning_rate=0.3,
+    // max_depth=2, alpha=0.8). Absolute and pinball gradients take two
+    // values, so later trees hit exact split ties that sklearn breaks with
+    // its random feature order: those are compared after one stage.
+    let cases: [(GbLoss, usize, [f64; 4], [f64; 4]); 3] = [
+        (
+            GbLoss::AbsoluteError,
+            1,
+            [
+                7.1493319910508335,
+                4.4697537377993,
+                7.1493319910508335,
+                5.666265386826486,
+            ],
+            [
+                7.219376161585704,
+                4.648913126393593,
+                7.219376161585704,
+                5.937690239021798,
+            ],
+        ),
+        (
+            GbLoss::Quantile,
+            1,
+            [
+                8.96625347076722,
+                8.96625347076722,
+                10.561658555227677,
+                8.96625347076722,
+            ],
+            [
+                8.973122457676933,
+                8.973122457676933,
+                10.568527542137389,
+                8.973122457676933,
+            ],
+        ),
+        (
+            GbLoss::Huber,
+            6,
+            [
+                7.0924484882073395,
+                2.241821093617352,
+                10.562177310977049,
+                5.600735664537336,
+            ],
+            [
+                7.258995742549587,
+                1.7476201235155198,
+                10.857367055141799,
+                5.682123558434269,
+            ],
+        ),
+    ];
+    for (loss, n_estimators, unweighted, weighted) in cases {
+        let gb = GradientBoostingRegressor {
+            n_estimators,
+            learning_rate: 0.3,
+            max_depth: Some(2),
+            ..Default::default()
+        }
+        .with_loss(loss)
+        .with_alpha(0.8);
+        let a = Fit::fit(&gb, &x, &y).unwrap().predict(&q).unwrap();
+        assert_close(a.as_slice().unwrap(), &unweighted);
+        let b = gb
+            .fit_weighted(&x, &y, Some(&w))
+            .unwrap()
+            .predict(&q)
+            .unwrap();
+        assert_close(b.as_slice().unwrap(), &weighted);
+    }
+    // The 0.8 quantile model leaves about 80 % of the targets below it.
+    let f = Fit::fit(
+        &GradientBoostingRegressor {
+            n_estimators: 50,
+            max_depth: Some(2),
+            ..Default::default()
+        }
+        .with_loss(GbLoss::Quantile)
+        .with_alpha(0.8),
+        &x,
+        &y,
+    )
+    .unwrap();
+    let below = (&y - &f.predict(&x).unwrap())
+        .iter()
+        .filter(|&&d| d <= 0.0)
+        .count();
+    assert!((24..=40).contains(&below), "{below}");
+}
+
+#[test]
+fn gradient_boosting_early_stopping_stops() {
+    use anofox_ml_ensemble::GradientBoostingRegressor;
+    let (x, yr, _, _, _) = gb_data();
+    let gb = GradientBoostingRegressor {
+        n_estimators: 500,
+        learning_rate: 0.5,
+        ..Default::default()
+    }
+    .with_early_stopping(Some(3), 0.2, 1e-4);
+    let f = Fit::fit(&gb, &x, &yr).unwrap();
+    assert!(f.n_estimators() < 500, "{}", f.n_estimators());
+}

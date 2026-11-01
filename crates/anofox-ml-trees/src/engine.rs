@@ -35,6 +35,13 @@ pub(crate) struct GrowParams {
     /// Features drawn per split (`None` = all).
     pub max_features_k: Option<usize>,
     pub n_features: usize,
+    /// Minimum weighted impurity decrease of a split (sklearn's
+    /// `min_impurity_decrease`).
+    pub min_impurity_decrease: f64,
+    /// Minimum fraction of the total sample weight in each child.
+    pub min_weight_fraction_leaf: f64,
+    /// Grow best-first up to this many leaves (`None` = depth-first).
+    pub max_leaf_nodes: Option<usize>,
 }
 
 /// Grow a tree on the sample slots `rows` (row indices into `x` / `y`,
@@ -80,11 +87,16 @@ pub(crate) fn grow<F: Float>(
         }
     };
 
+    let total_weight = match weights {
+        Some(w) => rows.iter().fold(F::zero(), |a, &r| a + w[r]),
+        None => F::from_usize(m).unwrap(),
+    };
     let mut g = Grower {
         y,
         rows,
         weights,
         params,
+        total_weight,
         cols,
         sorted,
         order: (0..m as u32).collect(),
@@ -92,7 +104,58 @@ pub(crate) fn grow<F: Float>(
         buf: Vec::with_capacity(m),
         classes,
     };
-    g.node(0, m, 0, seed)
+    match params.max_leaf_nodes {
+        Some(max_leaves) => g.grow_best_first(m, seed, max_leaves),
+        None => g.node(0, m, 0, seed),
+    }
+}
+
+/// A node evaluated for splitting.
+struct Eval<F: Float> {
+    leaf: TreeNode<F>,
+    n_samples: usize,
+    impurity: F,
+    weighted_n_samples: Option<F>,
+    /// The chosen split and its weighted impurity decrease (sklearn's
+    /// `impurity_improvement`), if the node may split.
+    split: Option<(CandidateSplit<F>, F)>,
+}
+
+/// Arena node of best-first growth.
+enum Slot<F: Float> {
+    Leaf(TreeNode<F>),
+    Split {
+        feature: usize,
+        threshold: F,
+        left: usize,
+        right: usize,
+        n_samples: usize,
+        impurity: F,
+        weighted_n_samples: Option<F>,
+    },
+}
+
+fn from_arena<F: Float>(arena: &mut Vec<Option<Slot<F>>>, id: usize) -> TreeNode<F> {
+    match arena[id].take().expect("arena node used once") {
+        Slot::Leaf(leaf) => leaf,
+        Slot::Split {
+            feature,
+            threshold,
+            left,
+            right,
+            n_samples,
+            impurity,
+            weighted_n_samples,
+        } => TreeNode::Split {
+            feature_index: feature,
+            threshold,
+            left: Box::new(from_arena(arena, left)),
+            right: Box::new(from_arena(arena, right)),
+            n_samples,
+            impurity,
+            weighted_n_samples,
+        },
+    }
 }
 
 struct Grower<'a, F: Float> {
@@ -100,6 +163,8 @@ struct Grower<'a, F: Float> {
     rows: &'a [usize],
     weights: Option<&'a Array1<F>>,
     params: &'a GrowParams,
+    /// Total (weighted) number of samples of the tree.
+    total_weight: F,
     /// Feature values per slot, one vector per feature.
     cols: Vec<Vec<F>>,
     /// Per feature: slots sorted by value within every node range.
@@ -113,43 +178,87 @@ struct Grower<'a, F: Float> {
 }
 
 impl<F: Float> Grower<'_, F> {
-    fn node(&mut self, start: usize, end: usize, depth: usize, seed: u64) -> TreeNode<F> {
+    /// Evaluate the node `[start, end)`: its leaf, impurity and best
+    /// admissible split.
+    fn evaluate(
+        &self,
+        start: usize,
+        end: usize,
+        depth: usize,
+        seed: u64,
+        need_leaf: bool,
+    ) -> Eval<F> {
         let p = *self.params;
         let indices: Vec<usize> = self.order[start..end]
             .iter()
             .map(|&s| self.rows[s as usize])
             .collect();
         let n_samples = indices.len();
+        let weighted_n_samples = self
+            .weights
+            .map(|w| indices.iter().fold(F::zero(), |a, &i| a + w[i]));
         let impurity = match self.weights {
             Some(w) => compute_weighted_impurity(self.y, &indices, w, p.criterion),
             None => compute_impurity(self.y, &indices, p.criterion),
         };
-        if n_samples < p.min_samples_split
-            || p.max_depth.is_some_and(|md| depth >= md)
-            || impurity < F::from_f64(1e-15).unwrap()
+        let node_weight = weighted_n_samples.unwrap_or_else(|| F::from_usize(n_samples).unwrap());
+        let min_weight_leaf = F::from_f64(p.min_weight_fraction_leaf).unwrap() * self.total_weight;
+
+        let mut split = None;
+        if n_samples >= p.min_samples_split
+            && !p.max_depth.is_some_and(|md| depth >= md)
+            && impurity >= F::from_f64(1e-15).unwrap()
+            && node_weight >= min_weight_leaf + min_weight_leaf
         {
-            return make_leaf(self.y, &indices, p.criterion, self.weights);
+            let found = match p.max_features_k {
+                Some(k) if k < p.n_features => {
+                    let subset = select_feature_subset(p.n_features, k, seed);
+                    self.best_split(start, end, &indices, impurity, &subset)
+                        .or_else(|| {
+                            let rest = complement_features(p.n_features, &subset);
+                            self.best_split(start, end, &indices, impurity, &rest)
+                        })
+                }
+                _ => {
+                    let all: Vec<usize> = (0..p.n_features).collect();
+                    self.best_split(start, end, &indices, impurity, &all)
+                }
+            };
+            if let Some(c) = found {
+                let decrease = node_weight / self.total_weight * c.improvement;
+                // sklearn: split unless improvement + EPSILON < min_impurity_decrease.
+                if decrease + F::epsilon() >= F::from_f64(p.min_impurity_decrease).unwrap() {
+                    split = Some((c, decrease));
+                }
+            }
         }
-
-        let split = match p.max_features_k {
-            Some(k) if k < p.n_features => {
-                let subset = select_feature_subset(p.n_features, k, seed);
-                self.best_split(start, end, &indices, impurity, &subset)
-                    .or_else(|| {
-                        let rest = complement_features(p.n_features, &subset);
-                        self.best_split(start, end, &indices, impurity, &rest)
-                    })
-            }
-            _ => {
-                let all: Vec<usize> = (0..p.n_features).collect();
-                self.best_split(start, end, &indices, impurity, &all)
+        let leaf = if need_leaf || split.is_none() {
+            make_leaf(self.y, &indices, p.criterion, self.weights)
+        } else {
+            TreeNode::Leaf {
+                value: F::zero(),
+                n_samples,
+                class_counts: None,
+                impurity,
+                weighted_n_samples,
+                class_weights: None,
             }
         };
-        let Some(split) = split else {
-            return make_leaf(self.y, &indices, p.criterion, self.weights);
-        };
-        drop(indices);
+        Eval {
+            leaf,
+            n_samples,
+            impurity,
+            weighted_n_samples,
+            split,
+        }
+    }
 
+    /// Depth-first growth.
+    fn node(&mut self, start: usize, end: usize, depth: usize, seed: u64) -> TreeNode<F> {
+        let e = self.evaluate(start, end, depth, seed, false);
+        let Some((split, _)) = e.split else {
+            return e.leaf;
+        };
         let n_left = self.partition(start, end, split.feature, split.threshold);
         let left = self.node(start, start + n_left, depth + 1, child_seed(seed, 0));
         let right = self.node(start + n_left, end, depth + 1, child_seed(seed, 1));
@@ -158,9 +267,104 @@ impl<F: Float> Grower<'_, F> {
             threshold: split.threshold,
             left: Box::new(left),
             right: Box::new(right),
-            n_samples,
-            impurity,
+            n_samples: e.n_samples,
+            impurity: e.impurity,
+            weighted_n_samples: e.weighted_n_samples,
         }
+    }
+
+    /// Best-first growth (sklearn's `BestFirstTreeBuilder`): always expand
+    /// the open node with the largest weighted impurity decrease, until
+    /// `max_leaves` leaves exist.
+    fn grow_best_first(&mut self, m: usize, seed: u64, max_leaves: usize) -> TreeNode<F> {
+        struct Open<F: Float> {
+            priority: F,
+            id: usize,
+            start: usize,
+            end: usize,
+            depth: usize,
+            seed: u64,
+            split: CandidateSplit<F>,
+            n_samples: usize,
+            impurity: F,
+            weighted_n_samples: Option<F>,
+        }
+        let mut arena: Vec<Option<Slot<F>>> = Vec::new();
+        let mut open: Vec<Open<F>> = Vec::new();
+        let push = |arena: &mut Vec<Option<Slot<F>>>,
+                    open: &mut Vec<Open<F>>,
+                    e: Eval<F>,
+                    start: usize,
+                    end: usize,
+                    depth: usize,
+                    seed: u64| {
+            let id = arena.len();
+            arena.push(Some(Slot::Leaf(e.leaf)));
+            if let Some((split, priority)) = e.split {
+                open.push(Open {
+                    priority,
+                    id,
+                    start,
+                    end,
+                    depth,
+                    seed,
+                    split,
+                    n_samples: e.n_samples,
+                    impurity: e.impurity,
+                    weighted_n_samples: e.weighted_n_samples,
+                });
+            }
+            id
+        };
+        let root = self.evaluate(0, m, 0, seed, true);
+        push(&mut arena, &mut open, root, 0, m, 0, seed);
+        let mut leaves = 1;
+        while leaves < max_leaves && !open.is_empty() {
+            // Highest priority; ties go to the earliest node (stable).
+            let best = (0..open.len())
+                .max_by(|&a, &b| {
+                    open[a]
+                        .priority
+                        .partial_cmp(&open[b].priority)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(open[b].id.cmp(&open[a].id))
+                })
+                .unwrap();
+            let o = open.swap_remove(best);
+            let n_left = self.partition(o.start, o.end, o.split.feature, o.split.threshold);
+            let mid = o.start + n_left;
+            let le = self.evaluate(o.start, mid, o.depth + 1, child_seed(o.seed, 0), true);
+            let left = push(
+                &mut arena,
+                &mut open,
+                le,
+                o.start,
+                mid,
+                o.depth + 1,
+                child_seed(o.seed, 0),
+            );
+            let re = self.evaluate(mid, o.end, o.depth + 1, child_seed(o.seed, 1), true);
+            let right = push(
+                &mut arena,
+                &mut open,
+                re,
+                mid,
+                o.end,
+                o.depth + 1,
+                child_seed(o.seed, 1),
+            );
+            arena[o.id] = Some(Slot::Split {
+                feature: o.split.feature,
+                threshold: o.split.threshold,
+                left,
+                right,
+                n_samples: o.n_samples,
+                impurity: o.impurity,
+                weighted_n_samples: o.weighted_n_samples,
+            });
+            leaves += 1;
+        }
+        from_arena(&mut arena, 0)
     }
 
     /// Best split of the node `[start, end)` over `features`.
@@ -234,6 +438,8 @@ impl<F: Float> Grower<'_, F> {
         mut acc: A,
     ) -> Option<CandidateSplit<F>> {
         let n = end - start;
+        let min_weight_leaf =
+            F::from_f64(self.params.min_weight_fraction_leaf).unwrap() * self.total_weight;
         let mut best: Option<CandidateSplit<F>> = None;
         let mut best_improvement = F::neg_infinity();
         for &f in features {
@@ -253,6 +459,12 @@ impl<F: Float> Grower<'_, F> {
                     next,
                     parent_impurity,
                 ) {
+                    if min_weight_leaf > F::zero() {
+                        let (ml, mr) = acc.masses();
+                        if ml < min_weight_leaf || mr < min_weight_leaf {
+                            continue;
+                        }
+                    }
                     try_update_best_split(
                         improvement,
                         &mut best_improvement,
@@ -361,6 +573,16 @@ impl<F: Float> SplitAccumulator<F> for EncodedClassAccumulator<'_, F> {
         }
         self.n_left += 1;
         self.n_right -= 1;
+    }
+
+    fn masses(&self) -> (F, F) {
+        match self.weights {
+            None => (
+                F::from_usize(self.n_left).unwrap(),
+                F::from_usize(self.n_right).unwrap(),
+            ),
+            Some(_) => (self.left_weight, self.right_weight),
+        }
     }
 
     fn weighted_impurity(&self, n: usize) -> F {

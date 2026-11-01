@@ -116,6 +116,7 @@ impl<F: Float> Fit<F> for BaggingRegressor {
             max_features: None,
             sample_weight: None,
             seed: 0,
+            ..DecisionTreeRegressor::new()
         };
 
         // Pre-generate bootstrap row indices for determinism
