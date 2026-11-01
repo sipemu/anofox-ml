@@ -59,7 +59,7 @@ pub use gmm::{CovarianceType, FittedGaussianMixture, GaussianMixture, MixtureIni
 pub use hdbscan::{ClusterSelectionMethod, FittedHdbscan, Hdbscan};
 pub use kmeans::{FittedKMeans, KMeans, KMeansInit};
 pub use mean_shift::{estimate_bandwidth, FittedMeanShift, MeanShift};
-pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchKMeans};
+pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchInit, MiniBatchKMeans};
 pub use optics::{FittedOptics, Optics, OpticsClusterMethod};
 pub use spectral::{Affinity, FittedSpectralClustering, SpectralClustering};
 

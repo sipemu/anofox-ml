@@ -713,8 +713,9 @@ registry! {
     MiniBatchKMeans {
         config: cluster::MiniBatchKMeans = Default::default(),
         fitted: cluster::FittedMiniBatchKMeans<f64>,
-        fit: |c, x, y, w| unsup(K, c, x, w),
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
         predict: |m, x| m.predict(x),
+        labels: |m| m.labels().clone(),
     }
     Dbscan {
         config: cluster::Dbscan = Default::default(),

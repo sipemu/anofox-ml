@@ -1860,17 +1860,28 @@ class KMeans(ClusterMixin, BaseEstimator):
 class MiniBatchKMeans(ClusterMixin, BaseEstimator):
     _kind = "MiniBatchKMeans"
 
-    def __init__(self, n_clusters=8, max_iter=100, batch_size=1024, tol=1e-4,
-                 random_state=None):
+    def __init__(self, n_clusters=8, *, init="k-means++", max_iter=100, batch_size=1024,
+                 random_state=None, tol=0.0, max_no_improvement=10, init_size=None,
+                 n_init="auto", reassignment_ratio=0.01):
         self.n_clusters = n_clusters
+        self.init = init
         self.max_iter = max_iter
         self.batch_size = batch_size
-        self.tol = tol
         self.random_state = random_state
+        self.tol = tol
+        self.max_no_improvement = max_no_improvement
+        self.init_size = init_size
+        self.n_init = n_init
+        self.reassignment_ratio = reassignment_ratio
 
     def _rust_params(self, X, y):
-        return {"n_clusters": self.n_clusters, "max_iter": self.max_iter,
-                "batch_size": self.batch_size, "tol": self.tol,
+        return {"n_clusters": self.n_clusters,
+                "init": _choice(self.init, {"k-means++": "KMeansPlusPlus", "random": "Random"},
+                                "init"),
+                "max_iter": self.max_iter, "batch_size": self.batch_size, "tol": float(self.tol),
+                "max_no_improvement": self.max_no_improvement, "init_size": self.init_size,
+                "n_init": None if self.n_init == "auto" else int(self.n_init),
+                "reassignment_ratio": float(self.reassignment_ratio),
                 "seed": _seed(self.random_state)}
 
 

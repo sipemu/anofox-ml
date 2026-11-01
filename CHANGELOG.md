@@ -93,6 +93,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   LassoCV predictions on diabetes were 13.8 apart, now 2e-3, which is
   solver tolerance. `with_random_state(seed)` still shuffles. Python
   `ElasticNetCV` defaults to `l1_ratio=0.5`, as sklearn.
+- **MiniBatchKMeans is a port of sklearn's algorithm.**
+  - k-means++ / random init on `init_size` subsamples, best of `n_init`
+    on a validation set.
+  - `max_iter` epochs of `batch_size` rows drawn with replacement.
+  - Batch-wise weighted-mean centre updates, reassignment of rarely used
+    centres (`reassignment_ratio`).
+  - Stopping on the exponentially weighted batch inertia
+    (`max_no_improvement`), or on `tol · mean(var(X))` when `tol > 0`.
+  - `sample_weight`, `labels`, `inertia`, `n_steps`.
+  - Before, it applied per-sample online updates with a fixed shift
+    tolerance.
+  - Mean inertia over seeds agrees with sklearn.
+  - **Breaking:** defaults are now sklearn's (`batch_size` 1024, `tol` 0).
 
 ### Algorithms — new
 
