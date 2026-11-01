@@ -51,6 +51,7 @@ pub mod polynomial_features;
 pub mod power_transformer;
 pub(crate) mod quantile;
 pub mod quantile_transformer;
+pub mod rcs_transformer;
 pub mod rfe;
 pub mod robust_scaler;
 pub mod select_from_model;
@@ -92,6 +93,7 @@ pub use power_transformer::{FittedPowerTransformer, PowerMethod, PowerTransforme
 pub use quantile_transformer::{
     FittedQuantileTransformer, OutputDistribution, QuantileTransformer,
 };
+pub use rcs_transformer::{FittedRcsTransformer, RcsTransformer, SplineNorm};
 pub use rfe::{
     FittedRfe, FittedRfecv, FittedSequentialFeatureSelector, Rfe, Rfecv, SequentialFeatureSelector,
 };

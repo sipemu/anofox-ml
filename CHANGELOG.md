@@ -686,6 +686,11 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     uses this crate's seeded splitters, so cross-fitted values differ from
     sklearn's.
 
+- **RcsTransformer (#56):** restricted cubic spline expansion per feature.
+  It wraps `anofox_regression::splines::Rcs` (`rms::rcs`): default knots
+  at the RMS quantiles or explicit knots, `norm` options, rms-style
+  column names. sklearn has no counterpart.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
