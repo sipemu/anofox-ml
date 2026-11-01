@@ -21,6 +21,7 @@ num-traits = { workspace = true }
 serde = { workspace = true }
 faer = { workspace = true }
 rand = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }

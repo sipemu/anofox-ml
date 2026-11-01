@@ -35,6 +35,7 @@ pub mod fast_ica;
 pub mod incremental_pca;
 pub mod kbins_discretizer;
 pub mod kernel_pca;
+pub mod knn_imputer;
 pub mod label_encoder;
 pub mod max_abs_scaler;
 pub mod minmax_scaler;
@@ -68,6 +69,7 @@ pub use kbins_discretizer::{
     BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
 };
 pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
+pub use knn_imputer::{FittedKnnImputer, KnnImputeWeights, KnnImputer};
 pub use label_encoder::{FittedLabelEncoder, LabelEncoder};
 pub use max_abs_scaler::{FittedMaxAbsScaler, MaxAbsScaler};
 pub use minmax_scaler::{FittedMinMaxScaler, MinMaxScaler};

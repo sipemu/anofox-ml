@@ -661,6 +661,11 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     sklearn (its `fill_values` entry is NaN); before, `fit` returned an
     error. `keep_empty_features(true)` keeps it and imputes 0.
 
+- **KnnImputer (#56):** a port of sklearn's `KNNImputer` with the
+  `nan_euclidean` metric, `uniform` / `distance` weights, `add_indicator`
+  and `keep_empty_features`. Rows to impute are processed in parallel.
+  Matches sklearn 1.8 to 1e-12.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
