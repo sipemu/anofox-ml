@@ -5,6 +5,7 @@
 //! eigenvectors, and runs KMeans on the resulting embedding.
 
 use anofox_ml_core::{FitUnsupervised, Predict, Result, RustMlError};
+use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
@@ -69,26 +70,21 @@ fn build_affinity(x: &Array2<f64>, affinity: &Affinity) -> Array2<f64> {
             }
         }
         Affinity::KNearest(k) => {
-            // Compute pairwise sq distances.
-            let mut d = vec![vec![0.0_f64; n]; n];
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let mut sd = 0.0;
-                    for c in 0..x.ncols() {
-                        let dv = x[[i, c]] - x[[j, c]];
-                        sd += dv * dv;
+            // k nearest other samples of every sample (shared index).
+            let kk = (*k).min(n - 1);
+            if kk > 0 {
+                let index = NeighborIndex::new(
+                    x,
+                    DistanceMetric::Euclidean,
+                    NeighborAlgorithm::Auto,
+                    Some(kk),
+                )
+                .expect("non-empty input");
+                let (_, nbrs) = index.kneighbors_self(kk).expect("valid k");
+                for (i, row) in nbrs.rows().into_iter().enumerate() {
+                    for &j in row {
+                        a[[i, j]] = 1.0;
                     }
-                    d[i][j] = sd;
-                    d[j][i] = sd;
-                }
-            }
-            for i in 0..n {
-                let mut others: Vec<(usize, f64)> =
-                    (0..n).filter(|&j| j != i).map(|j| (j, d[i][j])).collect();
-                others.sort_by(|x, y| x.1.total_cmp(&y.1));
-                let kk = (*k).min(others.len());
-                for &(j, _) in others.iter().take(kk) {
-                    a[[i, j]] = 1.0;
                 }
             }
             // Symmetrize.

@@ -525,6 +525,23 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - **Breaking:** the public `kdtree` module is gone, and fitted kNN
     models saved by earlier versions do not load.
 
+- **Neighbours, part 2 (#60):** clustering and manifold learning query the
+  shared `NeighborIndex` instead of building dense n×n distance matrices.
+  - DBSCAN computes every eps-neighbourhood up front and expands clusters
+    depth-first like sklearn's `dbscan_inner`, so border points get
+    sklearn's labels. It gains `metric` (including `Precomputed`) and
+    `algorithm`; `predict` queries the index of core samples.
+  - OPTICS takes core distances from the index and picks the next point
+    from a heap with lazy deletion. Before, a linear scan plus
+    `stack.contains` made it about O(n³). It now exposes `core_distances`
+    and `predecessor`; ordering, reachability and labels match sklearn.
+  - HDBSCAN takes core distances from the index, and its Prim MST
+    computes distances on the fly (O(n) memory instead of n²).
+  - SpectralClustering (k-NN affinity), Isomap and LLE build their k-NN
+    graphs with the index. Isomap's geodesics use parallel Dijkstra on the
+    sparse graph (sklearn's `path_method="D"`) instead of O(n³)
+    Floyd–Warshall, and its embedding matches sklearn.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

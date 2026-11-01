@@ -22,6 +22,7 @@
 //! (`λ_point / λ_max(cluster)`, clipped to `[0, 1]`; 0 for noise).
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
+use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use ndarray::{Array1, Array2};
 
 /// Flat-cluster extraction strategy (sklearn `cluster_selection_method`).
@@ -127,10 +128,12 @@ fn euclid(a: &[f64], b: &[f64]) -> f64 {
         .sqrt()
 }
 
-/// Dense Prim MST over the mutual-reachability graph. Returns `n - 1` edges
-/// `(u, v, weight)` in insertion order.
-fn mst_prim(d: &[f64], core: &[f64], n: usize) -> Vec<(usize, usize, f64)> {
-    let mr = |i: usize, j: usize| d[i * n + j].max(core[i]).max(core[j]);
+/// Prim MST over the mutual-reachability graph, computing distances on the
+/// fly (O(n) memory; sklearn's `mst_from_data_matrix`). Returns `n - 1`
+/// edges `(u, v, weight)` in insertion order.
+fn mst_prim(x: &Array2<f64>, core: &[f64], n: usize) -> Vec<(usize, usize, f64)> {
+    let row = |i: usize| x.row(i).to_slice().expect("standard layout");
+    let mr = |i: usize, j: usize| euclid(row(i), row(j)).max(core[i]).max(core[j]);
     let mut in_tree = vec![false; n];
     let mut min_dist = vec![f64::INFINITY; n];
     let mut source = vec![0_usize; n];
@@ -458,32 +461,19 @@ impl FitUnsupervised<f64> for Hdbscan {
         let x_std = crate::standard_layout(x);
         let x: &Array2<f64> = &x_std;
 
-        // Pairwise distances (dense, row-major n×n).
-        let mut d = vec![0.0_f64; n * n];
-        for i in 0..n {
-            let xi = x.row(i);
-            let xi = xi.as_slice().expect("standard layout");
-            for j in (i + 1)..n {
-                let xj = x.row(j);
-                let val = euclid(xi, xj.as_slice().expect("standard layout"));
-                d[i * n + j] = val;
-                d[j * n + i] = val;
-            }
-        }
-
-        // Core distances: k-th smallest distance counting the point itself
-        // (d[i][i] = 0), k = min_samples — identical to sklearn.
+        // Core distances: k-th smallest distance counting the point itself,
+        // k = min_samples — identical to sklearn.
         let k = self.min_samples.min(n);
-        let mut core = vec![0.0_f64; n];
-        let mut buf = vec![0.0_f64; n];
-        for i in 0..n {
-            buf.copy_from_slice(&d[i * n..(i + 1) * n]);
-            let (_, kth, _) = buf.select_nth_unstable_by(k - 1, |a, b| a.total_cmp(b));
-            core[i] = *kth;
-        }
+        let index = NeighborIndex::new(
+            x,
+            DistanceMetric::Euclidean,
+            NeighborAlgorithm::Auto,
+            Some(k),
+        )?;
+        let (knn, _) = index.kneighbors(x, k)?;
+        let core: Vec<f64> = knn.column(k - 1).to_vec();
 
-        let mut edges = mst_prim(&d, &core, n);
-        drop(d);
+        let mut edges = mst_prim(x, &core, n);
         edges.sort_by(|a, b| a.2.total_cmp(&b.2)); // stable, like mergesort
         let merges = single_linkage(&edges, n);
         let rows = condense_tree(&merges, n, self.min_cluster_size);

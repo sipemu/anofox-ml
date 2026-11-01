@@ -1,5 +1,6 @@
 use anofox_ml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
+use ndarray::{Array1, Array2, Axis};
 use serde::{Deserialize, Serialize};
 
 /// Parameters for DBSCAN clustering (unfitted state).
@@ -25,12 +26,36 @@ pub struct Dbscan {
     /// Minimum number of samples in the epsilon-neighborhood of a point
     /// (including the point itself) for it to be considered a core point.
     pub min_samples: usize,
+    /// Distance metric (`Precomputed`: `fit` takes the square distance
+    /// matrix, `predict` distances to the training samples).
+    #[serde(default)]
+    pub metric: DistanceMetric,
+    /// Neighbour search algorithm.
+    #[serde(default)]
+    pub algorithm: NeighborAlgorithm,
 }
 
 impl Dbscan {
     /// Create a new `Dbscan` with the given epsilon and minimum samples.
     pub fn new(eps: f64, min_samples: usize) -> Self {
-        Self { eps, min_samples }
+        Self {
+            eps,
+            min_samples,
+            metric: DistanceMetric::Euclidean,
+            algorithm: NeighborAlgorithm::Auto,
+        }
+    }
+
+    /// Set the distance metric.
+    pub fn with_metric(mut self, metric: DistanceMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    /// Set the neighbour search algorithm.
+    pub fn with_algorithm(mut self, algorithm: NeighborAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
     }
 
     /// Set the maximum neighborhood distance.
@@ -48,10 +73,7 @@ impl Dbscan {
 
 impl Default for Dbscan {
     fn default() -> Self {
-        Self {
-            eps: 0.5,
-            min_samples: 5,
-        }
+        Self::new(0.5, 5)
     }
 }
 
@@ -78,6 +100,9 @@ pub struct FittedDbscan<F: Float> {
     /// Neighbourhood radius used at fit time (needed by `predict`).
     #[serde(default)]
     eps: f64,
+    /// Metric used at fit time (needed by `predict`).
+    #[serde(default)]
+    metric: DistanceMetric,
 }
 
 impl<F: Float> FittedDbscan<F> {
@@ -103,33 +128,6 @@ impl<F: Float> FittedDbscan<F> {
     pub fn components(&self) -> &Array2<F> {
         &self.components
     }
-}
-
-/// Compute the Euclidean distance between two slices.
-fn euclidean_distance<F: Float>(a: &[F], b: &[F]) -> F {
-    let sum_sq = a
-        .iter()
-        .zip(b.iter())
-        .map(|(&ai, &bi)| {
-            let diff = ai - bi;
-            diff * diff
-        })
-        .fold(F::zero(), |acc, v| acc + v);
-    sum_sq.sqrt()
-}
-
-/// Find all neighbor indices within `eps` of the point at `point_idx`.
-fn region_query<F: Float>(x: &Array2<F>, point_idx: usize, eps: F) -> Vec<usize> {
-    let point = x.row(point_idx);
-    let point_slice = point.as_slice().unwrap();
-    let mut neighbors = Vec::new();
-    for i in 0..x.nrows() {
-        let other = x.row(i);
-        if euclidean_distance(point_slice, other.as_slice().unwrap()) <= eps {
-            neighbors.push(i);
-        }
-    }
-    neighbors
 }
 
 impl<F: Float> FitUnsupervised<F> for Dbscan {
@@ -158,55 +156,41 @@ impl<F: Float> FitUnsupervised<F> for Dbscan {
         let eps = F::from_f64(self.eps).unwrap();
         let noise_label: i64 = -1;
 
-        // Labels: -1 = noise/unvisited, 0..n = cluster id.
-        // We track labels as i64 internally, then convert to F at the end.
+        // Every eps-neighbourhood up front (each point counts itself), as
+        // sklearn, through the shared neighbour index.
+        let index = NeighborIndex::new(x, self.metric, self.algorithm, None)?;
+        let neighborhoods = index.radius_neighbors(x, eps)?;
+        let is_core: Vec<bool> = neighborhoods
+            .iter()
+            .map(|nb| nb.len() >= self.min_samples)
+            .collect();
+
+        // sklearn's `dbscan_inner`: depth-first expansion from every
+        // unlabelled core point, in index order.
         let mut labels = vec![noise_label; n_samples];
-        let mut visited = vec![false; n_samples];
-        let mut is_core = vec![false; n_samples];
         let mut current_cluster: i64 = -1;
-
-        for i in 0..n_samples {
-            if visited[i] {
+        let mut stack: Vec<usize> = Vec::new();
+        for start in 0..n_samples {
+            if labels[start] != noise_label || !is_core[start] {
                 continue;
             }
-            visited[i] = true;
-
-            let neighbors = region_query(x, i, eps);
-
-            if neighbors.len() < self.min_samples {
-                // Not a core point; remains noise for now (may be claimed by a cluster later).
-                continue;
-            }
-
-            // Start a new cluster.
             current_cluster += 1;
-            labels[i] = current_cluster;
-            is_core[i] = true;
-
-            // Expand cluster: use a queue of neighbors to process.
-            let mut queue = neighbors;
-            let mut qi = 0;
-            while qi < queue.len() {
-                let neighbor = queue[qi];
-                qi += 1;
-
-                if !visited[neighbor] {
-                    visited[neighbor] = true;
-                    let neighbor_neighbors = region_query(x, neighbor, eps);
-                    if neighbor_neighbors.len() >= self.min_samples {
-                        is_core[neighbor] = true;
-                        // Add new neighbors to the queue.
-                        for &nn in &neighbor_neighbors {
-                            if !visited[nn] || labels[nn] == noise_label {
-                                queue.push(nn);
-                            }
-                        }
+            let mut i = start;
+            loop {
+                if labels[i] == noise_label {
+                    labels[i] = current_cluster;
+                    if is_core[i] {
+                        stack.extend(
+                            neighborhoods[i]
+                                .iter()
+                                .map(|&(j, _)| j)
+                                .filter(|&j| labels[j] == noise_label),
+                        );
                     }
                 }
-
-                // Assign to current cluster if not already assigned to a cluster.
-                if labels[neighbor] == noise_label {
-                    labels[neighbor] = current_cluster;
+                match stack.pop() {
+                    Some(next) => i = next,
+                    None => break,
                 }
             }
         }
@@ -254,6 +238,7 @@ impl<F: Float> FitUnsupervised<F> for Dbscan {
             components,
             core_labels,
             eps: self.eps,
+            metric: self.metric,
         })
     }
 }
@@ -290,25 +275,41 @@ impl<F: Float> Predict<F> for FittedDbscan<F> {
         }
         let eps = F::from_f64(self.eps).unwrap();
         let noise = F::from_f64(-1.0).unwrap();
-        let mut out = Array1::<F>::from_elem(x.nrows(), noise);
-        for (i, row) in x.rows().into_iter().enumerate() {
-            let mut best = F::infinity();
-            let mut best_label = noise;
-            for (c, core) in self.components.rows().into_iter().enumerate() {
-                let d = row
-                    .iter()
-                    .zip(core.iter())
-                    .fold(F::zero(), |acc, (&a, &b)| acc + (a - b) * (a - b))
-                    .sqrt();
-                if d < best {
-                    best = d;
-                    best_label = self.core_labels[c];
-                }
-            }
-            if best <= eps {
-                out[i] = best_label;
-            }
+        if self.core_sample_indices.is_empty() {
+            return Ok(Array1::from_elem(x.nrows(), noise));
         }
+        // Nearest core sample of every row.
+        let (dist, idx) = if self.metric == DistanceMetric::Precomputed {
+            // `x` holds distances to all training samples: keep the core
+            // samples' columns.
+            let to_core = x.select(Axis(1), &self.core_sample_indices);
+            let nearest = |row: ndarray::ArrayView1<'_, F>| {
+                row.iter().enumerate().fold(
+                    (F::infinity(), 0),
+                    |b, (c, &d)| if d < b.0 { (d, c) } else { b },
+                )
+            };
+            let pairs: Vec<(F, usize)> = to_core.rows().into_iter().map(nearest).collect();
+            (
+                Array2::from_shape_fn((pairs.len(), 1), |(i, _)| pairs[i].0),
+                Array2::from_shape_fn((pairs.len(), 1), |(i, _)| pairs[i].1),
+            )
+        } else {
+            NeighborIndex::new(
+                &self.components,
+                self.metric,
+                NeighborAlgorithm::Auto,
+                Some(1),
+            )?
+            .kneighbors(x, 1)?
+        };
+        let out = Array1::from_shape_fn(x.nrows(), |i| {
+            if dist[[i, 0]] <= eps {
+                self.core_labels[idx[[i, 0]]]
+            } else {
+                noise
+            }
+        });
         Ok(out)
     }
 }

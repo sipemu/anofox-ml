@@ -12,6 +12,7 @@
 //!    direction).
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
+use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use faer::linalg::solvers::{SelfAdjointEigen, Solve};
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2};
@@ -43,10 +44,6 @@ pub struct FittedLocallyLinearEmbedding {
     pub eigenvalues: Array1<f64>,
 }
 
-fn euclid_sq(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
-}
-
 impl FitUnsupervised<f64> for LocallyLinearEmbedding {
     type Fitted = FittedLocallyLinearEmbedding;
 
@@ -69,22 +66,15 @@ impl FitUnsupervised<f64> for LocallyLinearEmbedding {
             )));
         }
 
-        // 1. For each point find its k-NN.
-        let mut neighbours: Vec<Vec<usize>> = vec![Vec::with_capacity(k); n];
-        for i in 0..n {
-            let xi: Vec<f64> = x.row(i).iter().copied().collect();
-            let mut others: Vec<(usize, f64)> = (0..n)
-                .filter(|&j| j != i)
-                .map(|j| {
-                    let xj: Vec<f64> = x.row(j).iter().copied().collect();
-                    (j, euclid_sq(&xi, &xj))
-                })
-                .collect();
-            others.sort_by(|a, b| a.1.total_cmp(&b.1));
-            for &(j, _) in others.iter().take(k) {
-                neighbours[i].push(j);
-            }
-        }
+        // 1. For each point find its k-NN (shared neighbour index).
+        let index = NeighborIndex::new(
+            x,
+            DistanceMetric::Euclidean,
+            NeighborAlgorithm::Auto,
+            Some(k),
+        )?;
+        let (_, knn) = index.kneighbors_self(k)?;
+        let neighbours: Vec<Vec<usize>> = knn.rows().into_iter().map(|r| r.to_vec()).collect();
 
         // 2. Reconstruction weights. Solve C w = 1 (then normalise), where
         //    C_{ab} = (x_i - x_a) · (x_i - x_b) for a, b in N(i).
