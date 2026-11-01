@@ -53,6 +53,22 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `n_components=None` now always removes zero eigenvalues, as sklearn.
 - **Python `KBinsDiscretizer` defaults to `encode='onehot'`,** as sklearn.
   The output is dense, where sklearn returns a sparse matrix.
+- **Isomap follows sklearn.**
+  - A disconnected k-NN graph is completed as sklearn's
+    `_fix_connected_components` does: an edge between the closest pair of
+    every two components. Before, `fit` returned an error.
+  - The embedding gets sklearn's KernelPCA eigenvalue cleanup and
+    `svd_flip` signs.
+  - Embeddings match sklearn to 1e-14 (data with tied k-NN distances can
+    differ).
+- **LocalOutlierFactor thresholds follow sklearn.**
+  - `contamination: Option<f64>`, defaulting to `None` = sklearn's
+    `'auto'` (offset -1.5).
+  - A numeric contamination uses the linearly interpolated percentile.
+  - Outliers are the samples with `nof < offset`.
+  - Before: default 0.1, nearest-rank threshold, strict `>`, so about 10%
+    of labels differed from sklearn.
+  - **Breaking:** the type and default of `contamination` changed.
 
 ### Algorithms — new
 

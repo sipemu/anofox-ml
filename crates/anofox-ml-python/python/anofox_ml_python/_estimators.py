@@ -1232,12 +1232,14 @@ class LocalOutlierFactor(OutlierMixin, BaseEstimator):
 
     _kind = "LocalOutlierFactor"
 
-    def __init__(self, n_neighbors=20, contamination=0.1):
+    def __init__(self, n_neighbors=20, contamination="auto"):
         self.n_neighbors = n_neighbors
         self.contamination = contamination
 
     def _rust_params(self, X, y):
-        return {"n_neighbors": self.n_neighbors, "contamination": self.contamination}
+        return {"n_neighbors": self.n_neighbors,
+                "contamination": None if self.contamination == "auto"
+                else float(self.contamination)}
 
     def fit(self, X, y=None):
         self._fit_model(X)
