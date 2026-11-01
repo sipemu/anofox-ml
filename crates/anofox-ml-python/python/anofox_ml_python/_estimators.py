@@ -1771,12 +1771,15 @@ class MeanShift(ClusterMixin, BaseEstimator):
 class Birch(ClusterMixin, BaseEstimator):
     _kind = "Birch"
 
-    def __init__(self, threshold=0.5, n_clusters=3):
+    def __init__(self, *, threshold=0.5, branching_factor=50, n_clusters=3):
         self.threshold = threshold
+        self.branching_factor = branching_factor
         self.n_clusters = n_clusters
 
     def _rust_params(self, X, y):
-        return {"threshold": float(self.threshold), "n_clusters": self.n_clusters}
+        return {"threshold": float(self.threshold),
+                "branching_factor": int(self.branching_factor),
+                "n_clusters": self.n_clusters}
 
 
 class AgglomerativeClustering(ClusterMixin, BaseEstimator):

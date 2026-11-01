@@ -625,6 +625,19 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   extraction stays the Rust default; the Python `OPTICS` now defaults to
   ξ, like sklearn.
 
+- **Birch (#61)** is now a real CF-tree, ported from sklearn.
+  - A sample descends to the closest subcluster and merges when the merged
+    radius stays within `threshold` (before: distance to the centroid).
+  - Nodes split around their farthest pair, up to new roots
+    (`branching_factor`, default 50).
+  - Subcluster centres come out in leaf order.
+  - The global step is AgglomerativeClustering, as in sklearn; it was
+    KMeans, which ignored subcluster sizes.
+  - Centres, subcluster labels and sample labels match sklearn exactly in
+    the parity tests. On other data the leaf order can differ on ULP-level
+    ties, but the partition is the same.
+  - **Breaking:** the `seed` field is gone.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

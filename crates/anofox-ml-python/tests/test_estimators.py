@@ -276,3 +276,16 @@ def test_optics_matches_sklearn():
         ours = am.OPTICS(min_samples=5, **kw).fit(Xb)
         ref = skc.OPTICS(min_samples=5, **kw).fit(Xb)
         assert list(ours.labels_) == list(ref.labels_), kw
+
+
+def test_birch_matches_sklearn():
+    from sklearn import cluster as skc
+
+    for kw in [dict(threshold=0.8, branching_factor=5, n_clusters=3),
+               dict(threshold=1.0, branching_factor=4, n_clusters=None)]:
+        ours = am.Birch(**kw).fit(X)
+        ref = skc.Birch(**kw).fit(X)
+        # Same partition; the subcluster (leaf) order can differ where BLAS
+        # dot products round differently on near-ties.
+        from sklearn.metrics import adjusted_rand_score
+        assert adjusted_rand_score(ours.labels_, ref.labels_) == 1.0, kw
