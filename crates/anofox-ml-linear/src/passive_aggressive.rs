@@ -34,7 +34,8 @@ pub enum PaVariant {
 // PassiveAggressiveClassifier (binary; multi-class via one-vs-rest is omitted)
 // ---------------------------------------------------------------------------
 
-/// Binary Passive-Aggressive classifier (hinge loss).
+/// Passive-Aggressive classifier (sklearn's: hinge loss with PA-I or PA-II
+/// steps, one-vs-rest for more than two classes).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PassiveAggressiveClassifier {
     pub c: f64,
@@ -82,12 +83,78 @@ impl Default for PassiveAggressiveClassifier {
     }
 }
 
-/// Fitted binary PA classifier.
+/// Fitted PA classifier: one weight vector per class (one-vs-rest), or a
+/// single one for two classes.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedPassiveAggressiveClassifier {
-    pub coef: Array1<f64>,
-    pub intercept: f64,
-    pub classes: [f64; 2],
+    /// `(1, d)` for binary problems, else `(n_classes, d)` (sklearn `coef_`).
+    pub coef: Array2<f64>,
+    pub intercept: Array1<f64>,
+    /// Sorted class labels.
+    pub classes: Vec<f64>,
+}
+
+impl PassiveAggressiveClassifier {
+    /// One binary PA run with targets `±1` (sklearn `_plain_sgd` with
+    /// `learning_rate = pa1 / pa2`).
+    fn fit_binary(&self, x: &Array2<f64>, yb: &[f64], seed: u64) -> (Array1<f64>, f64) {
+        let (n, d) = x.dim();
+        let mut w = Array1::<f64>::zeros(d);
+        let mut b = 0.0_f64;
+        let mut indices: Vec<usize> = (0..n).collect();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut best = f64::INFINITY;
+        let mut no_improvement = 0;
+        let sqnorm: Vec<f64> = x.rows().into_iter().map(|r| r.dot(&r)).collect();
+        for _epoch in 0..self.max_iter {
+            if self.shuffle {
+                indices.shuffle(&mut rng);
+            }
+            let mut sumloss = 0.0_f64;
+            for &i in &indices {
+                let xi = x.row(i);
+                let yi = yb[i];
+                let p = xi.dot(&w) + b;
+                // sklearn uses the hinge loss for PA-I and PA-II alike; only
+                // the step size differs.
+                let loss = (1.0 - yi * p).max(0.0);
+                sumloss += loss;
+                let tau = match self.variant {
+                    PaVariant::Pa | PaVariant::PaI => {
+                        if sqnorm[i] == 0.0 {
+                            continue;
+                        }
+                        let c = if self.variant == PaVariant::Pa {
+                            f64::INFINITY
+                        } else {
+                            self.c
+                        };
+                        c.min(loss / sqnorm[i])
+                    }
+                    PaVariant::PaII => loss / (sqnorm[i] + 0.5 / self.c),
+                };
+                let update = tau * yi;
+                if update != 0.0 {
+                    w.scaled_add(update, &xi);
+                    if self.fit_intercept {
+                        b += update;
+                    }
+                }
+            }
+            // sklearn: no improvement when the mean loss exceeds best - tol.
+            let mean_loss = sumloss / n as f64;
+            if mean_loss > best - self.tol {
+                no_improvement += 1;
+            } else {
+                no_improvement = 0;
+            }
+            best = best.min(mean_loss);
+            if no_improvement >= 5 {
+                break;
+            }
+        }
+        (w, b)
+    }
 }
 
 impl Fit<f64> for PassiveAggressiveClassifier {
@@ -104,104 +171,81 @@ impl Fit<f64> for PassiveAggressiveClassifier {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
+        let (classes, _) = anofox_ml_core::encode_labels(y)?;
+        if classes.len() < 2 {
+            return Err(RustMlError::InvalidParameter(
+                "PassiveAggressiveClassifier needs at least 2 classes".into(),
+            ));
+        }
+        let target =
+            |c: f64| -> Vec<f64> { y.iter().map(|&v| if v == c { 1.0 } else { -1.0 }).collect() };
+        let d = x.ncols();
+        if classes.len() == 2 {
+            let (w, b) = self.fit_binary(x, &target(classes[1]), self.seed);
+            return Ok(FittedPassiveAggressiveClassifier {
+                coef: w.insert_axis(ndarray::Axis(0)),
+                intercept: Array1::from_elem(1, b),
+                classes,
+            });
+        }
+        // One-vs-rest, each class with its own seed (sklearn draws one per
+        // class).
+        let mut seeds = StdRng::seed_from_u64(self.seed);
+        let mut coef = Array2::<f64>::zeros((classes.len(), d));
+        let mut intercept = Array1::<f64>::zeros(classes.len());
+        for (k, &c) in classes.iter().enumerate() {
+            let (w, b) = self.fit_binary(x, &target(c), rand::Rng::gen(&mut seeds));
+            coef.row_mut(k).assign(&w);
+            intercept[k] = b;
+        }
+        Ok(FittedPassiveAggressiveClassifier {
+            coef,
+            intercept,
+            classes,
+        })
+    }
+}
 
-        // Find the two classes.
-        let mut classes: Vec<f64> = y.iter().copied().collect();
-        classes.sort_by(anofox_ml_core::labels::label_cmp);
-        classes.dedup();
-        if classes.len() != 2 {
-            return Err(RustMlError::InvalidParameter(format!(
-                "PassiveAggressiveClassifier expects 2 classes, found {}",
-                classes.len()
+impl FittedPassiveAggressiveClassifier {
+    /// Signed distances to the hyperplanes: `(n, 1)` for binary problems,
+    /// else `(n, n_classes)`.
+    pub fn decision_function(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.coef.ncols() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.coef.ncols(),
+                x.ncols()
             )));
         }
-        let neg = classes[0];
-        let pos = classes[1];
-
-        let n = x.nrows();
-        let d = x.ncols();
-        let mut w = Array1::<f64>::zeros(d);
-        let mut b = 0.0_f64;
-
-        let mut indices: Vec<usize> = (0..n).collect();
-        let mut rng = StdRng::seed_from_u64(self.seed);
-
-        let mut prev_loss = f64::INFINITY;
-        let mut n_no_improvement = 0;
-
-        for _epoch in 0..self.max_iter {
-            if self.shuffle {
-                indices.shuffle(&mut rng);
-            }
-
-            let mut epoch_loss = 0.0_f64;
-            for &i in &indices {
-                let xi = x.row(i);
-                let yi_raw = y[i];
-                let yi = if yi_raw == pos { 1.0 } else { -1.0 };
-
-                let p = xi.dot(&w) + b;
-                let margin = yi * p;
-                let loss = (1.0 - margin).max(0.0);
-                epoch_loss += loss;
-                if loss == 0.0 {
-                    continue;
-                }
-                let norm_sq: f64 = xi.iter().map(|v| v * v).sum::<f64>()
-                    + if self.fit_intercept { 1.0 } else { 0.0 };
-                let tau = match self.variant {
-                    PaVariant::Pa => loss / norm_sq,
-                    PaVariant::PaI => self.c.min(loss / norm_sq),
-                    PaVariant::PaII => loss / (norm_sq + 1.0 / (2.0 * self.c)),
-                };
-
-                for j in 0..d {
-                    w[j] += tau * yi * xi[j];
-                }
-                if self.fit_intercept {
-                    b += tau * yi;
-                }
-            }
-
-            let mean_loss = epoch_loss / n as f64;
-            if (prev_loss - mean_loss).abs() < self.tol {
-                n_no_improvement += 1;
-                if n_no_improvement >= 5 {
-                    break;
-                }
-            } else {
-                n_no_improvement = 0;
-            }
-            prev_loss = mean_loss;
-        }
-
-        Ok(FittedPassiveAggressiveClassifier {
-            coef: w,
-            intercept: b,
-            classes: [neg, pos],
-        })
+        Ok(x.dot(&self.coef.t()) + &self.intercept)
     }
 }
 
 impl Predict<f64> for FittedPassiveAggressiveClassifier {
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        if x.ncols() != self.coef.len() {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.coef.len(),
-                x.ncols()
-            )));
-        }
-        let mut out = Array1::<f64>::zeros(x.nrows());
-        for i in 0..x.nrows() {
-            let s = x.row(i).dot(&self.coef) + self.intercept;
-            out[i] = if s >= 0.0 {
-                self.classes[1]
-            } else {
-                self.classes[0]
-            };
-        }
-        Ok(out)
+        let df = self.decision_function(x)?;
+        Ok(df
+            .rows()
+            .into_iter()
+            .map(|r| {
+                if r.len() == 1 {
+                    // sklearn: positive class when the score is > 0.
+                    if r[0] > 0.0 {
+                        self.classes[1]
+                    } else {
+                        self.classes[0]
+                    }
+                } else {
+                    let mut best = 0;
+                    for k in 1..r.len() {
+                        if r[k] > r[best] {
+                            best = k;
+                        }
+                    }
+                    self.classes[best]
+                }
+            })
+            .collect())
     }
 }
 
@@ -419,6 +463,74 @@ impl anofox_ml_core::RegressorScore<f64> for FittedPassiveAggressiveRegressor {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_classifier_matches_sklearn_without_shuffle() {
+        // sklearn 1.8 PassiveAggressiveClassifier(shuffle=False, loss=..,
+        // C=0.5).fit(X, y): coef_ and intercept_ (3 classes, one-vs-rest).
+        let x = Array2::from_shape_fn((60, 3), |(i, j)| {
+            let t = i as f64;
+            match j {
+                0 => (t * 0.7).sin(),
+                1 => (t * 0.31).cos(),
+                _ => (i % 7) as f64 / 3.0 - 1.0,
+            }
+        });
+        let y = Array1::from_shape_fn(60, |i| (i % 3) as f64);
+        let cases = [
+            (
+                PaVariant::PaI,
+                [
+                    0.182_873_008_144_987_08,
+                    -0.221_758_215_223_213_62,
+                    -0.123_358_521_203_125_79,
+                    0.282_071_981_290_973_2,
+                    -0.130_800_264_644_157_67,
+                    0.186_046_128_749_096_26,
+                    -0.385_245_641_476_041_8,
+                    0.154_583_831_299_847_43,
+                    -0.436_066_470_118_093_63,
+                ],
+                [
+                    -1.068_481_996_398_010_3,
+                    -1.034_305_637_306_261_8,
+                    -0.741_023_405_250_369_9,
+                ],
+            ),
+            (
+                PaVariant::PaII,
+                [
+                    0.059_719_133_178_745_94,
+                    0.018_103_940_861_630_92,
+                    -0.136_388_184_244_042_03,
+                    0.971_271_265_449_140_9,
+                    -0.511_775_901_822_441_6,
+                    0.453_130_235_612_059_95,
+                    -1.021_727_458_727_575,
+                    0.613_821_922_587_981_4,
+                    -0.438_114_864_564_824_6,
+                ],
+                [
+                    -1.071_379_030_825_490_2,
+                    -0.135_693_770_105_549_62,
+                    0.026_842_619_856_511_04,
+                ],
+            ),
+        ];
+        for (variant, coef, intercept) in cases {
+            let mut pa = PassiveAggressiveClassifier::new()
+                .with_c(0.5)
+                .with_variant(variant);
+            pa.shuffle = false;
+            let f = pa.fit(&x, &y).unwrap();
+            for (a, b) in f.coef.iter().zip(coef) {
+                assert!((a - b).abs() < 1e-12, "{variant:?}: {a} vs {b}");
+            }
+            for (a, b) in f.intercept.iter().zip(intercept) {
+                assert!((a - b).abs() < 1e-12, "{variant:?}: {a} vs {b}");
+            }
+        }
+    }
     use ndarray::array;
 
     #[test]

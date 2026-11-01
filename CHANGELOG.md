@@ -106,6 +106,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
     tolerance.
   - Mean inertia over seeds agrees with sklearn.
   - **Breaking:** defaults are now sklearn's (`batch_size` 1024, `tol` 0).
+- **PassiveAggressiveClassifier follows sklearn's `_plain_sgd`.**
+  - Multiclass via one-vs-rest (before: an error for more than 2 classes).
+  - Steps use `‖x‖²` without an intercept term.
+  - Stopping uses sklearn's rule: 5 epochs whose mean loss exceeds
+    `best − tol`.
+  - New `decision_function`.
+  - With `shuffle=False` it matches sklearn to 1e-12 for PA-I and PA-II.
+  - **Breaking:** `coef` is an `Array2`, `intercept` an `Array1`, `classes`
+    a `Vec`.
 
 ### Algorithms — new
 

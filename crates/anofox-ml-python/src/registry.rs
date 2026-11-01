@@ -286,6 +286,7 @@ registry! {
         fitted: linear::FittedPassiveAggressiveClassifier,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        decision_function: |m, x| m.decision_function(x),
     }
     PassiveAggressiveRegressor {
         config: linear::PassiveAggressiveRegressor = Default::default(),
