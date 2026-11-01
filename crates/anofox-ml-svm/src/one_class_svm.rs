@@ -14,6 +14,7 @@ use anofox_ml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 use crate::kernel::SvmKernel;
+use crate::projection::project_capped_simplex;
 
 /// One-Class SVM estimator (unfitted state).
 ///
@@ -203,65 +204,14 @@ fn precompute_kernel_matrix<F: Float>(x: &Array2<F>, kernel: &SvmKernel) -> Arra
     k
 }
 
-#[inline]
-fn clip<F: Float>(value: F, lo: F, hi: F) -> F {
-    if value > hi {
-        hi
-    } else if value < lo {
-        lo
-    } else {
-        value
-    }
-}
-
-/// Project a vector onto the probability simplex (sum = 1, each element >= 0)
-/// using the efficient algorithm of Duchi et al. (2008).
-fn project_simplex<F: Float>(v: &mut [F], upper: F) {
-    let n = v.len();
-    if n == 0 {
-        return;
-    }
-    let one = F::one();
-
-    // Scale down so box constraint is [0, 1], project, then scale back.
-    // v_i' = v_i * upper, project onto simplex sum = 1 with [0, 1], then
-    // v_i = v_i' / upper. But it is simpler to project with sum = 1 and
-    // box [0, upper] directly.
-
-    // Sort in descending order.
-    let mut sorted: Vec<F> = v.to_vec();
-    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Find the threshold tau such that the projected values sum to 1.
-    let mut cumsum = F::zero();
-    let mut tau = F::zero();
-    let mut found = false;
-    for (j, &s_j) in sorted.iter().enumerate() {
-        cumsum += s_j;
-        let t = (cumsum - one) / F::from_usize(j + 1).unwrap();
-        if s_j - t > F::zero() {
-            tau = t;
-        } else {
-            found = true;
-            break;
-        }
-    }
-    let _ = found; // avoid unused warning
-
-    // Project: v_i = clip(v_i - tau, 0, upper)
-    for val in v.iter_mut() {
-        *val = clip(*val - tau, F::zero(), upper);
-    }
-}
-
 /// FISTA solver for the One-Class SVM dual.
 ///
 /// Minimises 0.5 alpha^T K alpha
 /// subject to  0 <= alpha_i <= 1/(nu*n),  sum(alpha_i) = 1.
 ///
 /// Uses accelerated proximal gradient descent with Nesterov momentum,
-/// projecting onto the constrained set (intersection of box and simplex)
-/// at each step.
+/// projecting exactly onto the constrained set (intersection of the box
+/// `[0, 1/(νn)]` and the hyperplane `Σα = 1`) at each step.
 fn solve_one_class_svm<F: Float>(
     x: &Array2<F>,
     kernel: &SvmKernel,
@@ -286,7 +236,7 @@ fn solve_one_class_svm<F: Float>(
     for i in 0..n {
         let mut row_sum = zero;
         for j in 0..n {
-            row_sum = row_sum + k_matrix[[i, j]].abs();
+            row_sum += k_matrix[[i, j]].abs();
         }
         if row_sum > lipschitz {
             lipschitz = row_sum;
@@ -307,7 +257,7 @@ fn solve_one_class_svm<F: Float>(
     };
     let mut alpha = vec![init_val; n];
     // Re-project to ensure sum = 1 after clamping.
-    project_simplex(&mut alpha, alpha_upper);
+    project_capped_simplex(&mut alpha, one, alpha_upper);
 
     let mut alpha_prev = alpha.clone();
     let mut v = alpha.clone(); // momentum point
@@ -319,7 +269,7 @@ fn solve_one_class_svm<F: Float>(
         for i in 0..n {
             let mut s = zero;
             for j in 0..n {
-                s = s + k_matrix[[i, j]] * v[j];
+                s += k_matrix[[i, j]] * v[j];
             }
             grad[i] = s;
         }
@@ -331,7 +281,7 @@ fn solve_one_class_svm<F: Float>(
         }
 
         // Project onto simplex intersected with box [0, alpha_upper].
-        project_simplex(&mut alpha, alpha_upper);
+        project_capped_simplex(&mut alpha, one, alpha_upper);
 
         // Check convergence.
         let mut max_change = zero;
@@ -366,9 +316,9 @@ fn solve_one_class_svm<F: Float>(
             // For a free SV: rho = sum_j alpha_j K(x_j, x_i)
             let mut score = zero;
             for j in 0..n {
-                score = score + alpha[j] * k_matrix[[j, i]];
+                score += alpha[j] * k_matrix[[j, i]];
             }
-            rho_sum = rho_sum + score;
+            rho_sum += score;
             rho_count += 1;
         }
     }
@@ -376,29 +326,28 @@ fn solve_one_class_svm<F: Float>(
     let rho = if rho_count > 0 {
         rho_sum / F::from_usize(rho_count).unwrap()
     } else {
-        // Fallback: use any support vector (alpha > 0).
-        let mut best_rho = zero;
-        let mut found = false;
+        // No free SVs: KKT only brackets rho.
+        //   α_i = 0      ⇒ score_i ≥ rho
+        //   α_i = upper  ⇒ score_i ≤ rho
+        let mut lo = F::neg_infinity();
+        let mut hi = F::infinity();
         for i in 0..n {
-            if alpha[i] > margin {
-                let mut score = zero;
-                for j in 0..n {
-                    score = score + alpha[j] * k_matrix[[j, i]];
-                }
-                best_rho = score;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            // Extreme fallback: use first sample.
             let mut score = zero;
             for j in 0..n {
-                score = score + alpha[j] * k_matrix[[j, 0]];
+                score += alpha[j] * k_matrix[[j, i]];
             }
-            best_rho = score;
+            if alpha[i] >= alpha_upper - margin {
+                lo = lo.max(score);
+            } else if alpha[i] <= margin {
+                hi = hi.min(score);
+            }
         }
-        best_rho
+        match (lo.is_finite(), hi.is_finite()) {
+            (true, true) => (lo + hi) / two,
+            (true, false) => lo,
+            (false, true) => hi,
+            (false, false) => zero,
+        }
     };
 
     (alpha, rho)
@@ -464,6 +413,103 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    /// 20 × 2 fixed dataset shared by the sklearn-parity tests (sklearn 1.9.1).
+    fn parity_data() -> (Array2<f64>, Array1<f64>) {
+        let x = array![
+            [-1.486, -0.003],
+            [0.406, -1.885],
+            [-1.408, 1.713],
+            [-1.718, -1.481],
+            [1.793, 0.488],
+            [-0.524, 0.046],
+            [0.651, -0.899],
+            [-1.448, 1.152],
+            [0.681, 0.05],
+            [1.267, 0.196],
+            [1.924, -1.182],
+            [0.215, -0.066],
+            [-0.587, 0.366],
+            [-1.059, 1.209],
+            [1.469, -1.485],
+            [-0.132, -0.891],
+            [-1.668, 1.584],
+            [-0.28, -1.409],
+            [0.693, -1.191],
+            [1.606, -1.131]
+        ];
+        let y = array![
+            -0.963, -0.523, -0.02, -1.858, 1.153, -0.561, -0.017, -0.404, 0.707, 0.978, 0.486,
+            0.263, -0.308, -0.227, 0.348, -0.71, -0.142, -0.921, -0.133, 0.469
+        ];
+        (x, y)
+    }
+
+    #[test]
+    fn test_dual_is_feasible() {
+        let (x, _) = parity_data();
+        let kernel = SvmKernel::Rbf { gamma: 0.5 };
+        let n = x.nrows() as f64;
+        for &(nu, max_iter) in &[(0.3, 50usize), (0.3, 20_000), (0.9, 500), (0.05, 500)] {
+            let (alpha, _rho) = solve_one_class_svm(&x, &kernel, nu, max_iter, 1e-12);
+            let upper = 1.0 / (nu * n);
+            let sum: f64 = alpha.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-9, "Σα = {sum} (nu={nu})");
+            assert!(alpha.iter().all(|&a| (-1e-15..=upper + 1e-15).contains(&a)));
+        }
+    }
+
+    #[test]
+    fn test_rbf_matches_sklearn() {
+        // sklearn OneClassSVM(kernel='rbf', gamma=0.5, nu=0.3, tol=1e-10).
+        // sklearn normalises Σα = νn; this crate uses Σα = 1, so decision
+        // values and rho are scaled by 1/(νn) = 1/6.
+        let sk_dec = [
+            6.9503616195731865e-09,
+            -9.859661975752942e-10,
+            2.1139432426764415e-09,
+            -0.0494922297759226,
+            -2.6398514485492797e-09,
+            0.01721861759923482,
+            0.1708220770115747,
+            0.09670733698392686,
+            0.04353703818254151,
+            0.12360942560747157,
+            -1.7019230469372815e-09,
+            -9.01498431460368e-10,
+            3.08246628222264e-08,
+            0.06233383172152385,
+            0.05883642903452113,
+            0.0677535427239575,
+            2.6196671498723845e-09,
+            0.039233360875097434,
+            0.1780002101153637,
+            0.13576351210873505,
+        ];
+        let sk_rho = 1.3410398139399482;
+        let scale = 1.0 / 6.0;
+        let (x, _) = parity_data();
+        let model = OneClassSvm::new()
+            .with_nu(0.3)
+            .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+            .with_max_iter(100_000)
+            .with_tol(1e-12);
+        let fitted: FittedOneClassSvm<f64> = model.fit(&x).unwrap();
+        assert!(
+            (fitted.rho() - sk_rho * scale).abs() < 1e-5,
+            "rho = {}, sklearn/6 = {}",
+            fitted.rho(),
+            sk_rho * scale
+        );
+        let dec = fitted.decision_function(&x).unwrap();
+        for (i, (d, e)) in dec.iter().zip(sk_dec.iter()).enumerate() {
+            assert!(
+                (d - e * scale).abs() < 1e-5,
+                "dec[{i}] = {d}, sklearn/6 = {}",
+                e * scale
+            );
+        }
+    }
 
     #[test]
     fn test_basic_inlier_detection() {

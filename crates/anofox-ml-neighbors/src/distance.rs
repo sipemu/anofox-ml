@@ -185,8 +185,22 @@ pub fn compute_distance<F: Float>(
     b: &ArrayView1<F>,
     metric: DistanceMetric,
 ) -> F {
-    let a_slice = a.as_slice().expect("a must be contiguous");
-    let b_slice = b.as_slice().expect("b must be contiguous");
+    // Layout-agnostic: fall back to a contiguous copy for strided views (#42).
+    let (a_owned, b_owned);
+    let a_slice = match a.as_slice() {
+        Some(s) => s,
+        None => {
+            a_owned = a.to_vec();
+            &a_owned
+        }
+    };
+    let b_slice = match b.as_slice() {
+        Some(s) => s,
+        None => {
+            b_owned = b.to_vec();
+            &b_owned
+        }
+    };
 
     match metric {
         DistanceMetric::Euclidean => euclidean_squared_chunked(a_slice, b_slice).sqrt(),
@@ -209,26 +223,36 @@ pub fn compute_distances_batch<F: Float>(
     data: &Array2<F>,
     metric: DistanceMetric,
 ) -> Vec<F> {
-    let q = query.as_slice().expect("query must be contiguous");
+    // Layout-agnostic: copy strided query / non-C-order data once (#42).
+    let q_owned;
+    let q = match query.as_slice() {
+        Some(s) => s,
+        None => {
+            q_owned = query.to_vec();
+            &q_owned
+        }
+    };
+    let data_std = crate::standard_layout(data);
+    let data: &Array2<F> = &data_std;
     let n_rows = data.nrows();
     let mut result = Vec::with_capacity(n_rows);
 
     match metric {
         DistanceMetric::Euclidean => {
             for row in data.rows() {
-                let r = row.as_slice().expect("row must be contiguous");
+                let r = row.as_slice().expect("standard layout");
                 result.push(euclidean_squared_chunked(q, r).sqrt());
             }
         }
         DistanceMetric::Manhattan => {
             for row in data.rows() {
-                let r = row.as_slice().expect("row must be contiguous");
+                let r = row.as_slice().expect("standard layout");
                 result.push(manhattan_chunked(q, r));
             }
         }
         DistanceMetric::Cosine => {
             for row in data.rows() {
-                let r = row.as_slice().expect("row must be contiguous");
+                let r = row.as_slice().expect("standard layout");
                 result.push(cosine_distance_chunked(q, r));
             }
         }

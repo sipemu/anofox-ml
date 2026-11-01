@@ -85,7 +85,7 @@ fn build_affinity(x: &Array2<f64>, affinity: &Affinity) -> Array2<f64> {
             for i in 0..n {
                 let mut others: Vec<(usize, f64)> =
                     (0..n).filter(|&j| j != i).map(|j| (j, d[i][j])).collect();
-                others.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap());
+                others.sort_by(|x, y| x.1.total_cmp(&y.1));
                 let kk = (*k).min(others.len());
                 for &(j, _) in others.iter().take(kk) {
                     a[[i, j]] = 1.0;

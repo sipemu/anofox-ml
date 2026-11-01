@@ -46,6 +46,7 @@ pub mod pca;
 pub mod pls;
 pub mod polynomial_features;
 pub mod power_transformer;
+pub(crate) mod quantile;
 pub mod quantile_transformer;
 pub mod rfe;
 pub mod robust_scaler;

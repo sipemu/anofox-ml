@@ -3,7 +3,9 @@
 //! Mirrors `sklearn.neighbors.LocalOutlierFactor`. For each training point:
 //! 1. Find its `k` nearest neighbors and the `k`-distance.
 //! 2. `reach_dist(a, b) = max(k_dist(b), dist(a, b))`.
-//! 3. Local reachability density `lrd(a) = 1 / mean_b reach_dist(a, b)`.
+//! 3. Local reachability density `lrd(a) = 1 / (mean_b reach_dist(a, b) + 1e-10)`
+//!    (the `1e-10` guard is sklearn's: duplicated points get a huge `lrd`,
+//!    so a point whose neighbours are duplicates gets a huge LOF).
 //! 4. `LOF(a) = mean_b lrd(b) / lrd(a)`.
 //!
 //! LOF >> 1 indicates an outlier.
@@ -82,7 +84,7 @@ fn brute_knn(x: &Array2<f64>, k: usize) -> Vec<Vec<(usize, f64)>> {
             struct DPair(usize, f64);
             impl Ord for DPair {
                 fn cmp(&self, other: &Self) -> Ordering {
-                    self.1.partial_cmp(&other.1).unwrap_or(Ordering::Equal)
+                    self.1.total_cmp(&other.1)
                 }
             }
             impl PartialOrd for DPair {
@@ -97,16 +99,16 @@ fn brute_knn(x: &Array2<f64>, k: usize) -> Vec<Vec<(usize, f64)>> {
                 }
             }
 
-            let ri = x.row(i).to_owned();
-            let ri = ri.as_slice().unwrap();
+            let ri = x.row(i).to_vec();
+            let ri = ri.as_slice();
             let mut heap: std::collections::BinaryHeap<DPair> =
                 std::collections::BinaryHeap::with_capacity(k);
             for j in 0..x.nrows() {
                 if j == i {
                     continue;
                 }
-                let rj = x.row(j).to_owned();
-                let rj = rj.as_slice().unwrap();
+                let rj = x.row(j).to_vec();
+                let rj = rj.as_slice();
                 let d = euclidean(ri, rj);
                 if heap.len() < k {
                     heap.push(DPair(j, d));
@@ -118,7 +120,7 @@ fn brute_knn(x: &Array2<f64>, k: usize) -> Vec<Vec<(usize, f64)>> {
                 }
             }
             let mut v: Vec<(usize, f64)> = heap.into_iter().map(|p| (p.0, p.1)).collect();
-            v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
             v
         })
         .collect()
@@ -143,7 +145,7 @@ fn kdtree_knn(x: &Array2<f64>, k: usize) -> Vec<Vec<(usize, f64)>> {
                 .map(|(d, idx)| (idx, d))
                 .collect();
             // KD-tree result is already ascending; ensure deterministic order.
-            v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
+            v.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
             v
         })
         .collect()
@@ -188,7 +190,8 @@ impl FitUnsupervised<f64> for LocalOutlierFactor {
                 s += rd;
             }
             let mean_rd = s / k as f64;
-            lrd[i] = if mean_rd > 0.0 { 1.0 / mean_rd } else { 1.0 };
+            // sklearn `_local_reachability_density`: 1 / (mean + 1e-10).
+            lrd[i] = 1.0 / (mean_rd + 1e-10);
         }
         // 3. LOF per point = mean(lrd(neighbors) / lrd(i)).
         let mut lof = vec![0.0_f64; n];
@@ -204,7 +207,7 @@ impl FitUnsupervised<f64> for LocalOutlierFactor {
 
         // Threshold: contamination-th percentile of negative LOF (sklearn).
         let mut sorted: Vec<f64> = neg_of.iter().copied().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.total_cmp(b));
         let q = (self.contamination * (n as f64 - 1.0)).round() as usize;
         let q = q.min(n - 1);
         let threshold = sorted[q];
@@ -282,6 +285,82 @@ mod tests {
                 a,
                 b
             );
+        }
+    }
+    /// Regression for #57: sklearn's `lrd = 1 / (mean_reach + 1e-10)`.
+    /// Six duplicated points have reach distance 0 -> huge lrd, so the
+    /// point next to them gets LOF ~ 5e9 (it used to get ~ 0.5, i.e. look
+    /// like the most normal point). Reference values: sklearn 1.8.0.
+    #[test]
+    fn test_lof_duplicates_match_sklearn() {
+        let x = ndarray::array![
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [3.0, 3.0],
+            [3.2, 3.1],
+            [2.9, 3.3],
+            [3.1, 2.8],
+            [3.3, 3.2],
+            [2.8, 2.9]
+        ];
+        let expected = [
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -5000000001.0,
+            -1.0710583821777968,
+            -1.030117830630578,
+            -0.9869830906938422,
+            -0.9869830906938422,
+            -0.9659225184560674,
+            -0.9659225184560674,
+        ];
+        for algo in [LofAlgorithm::KdTree, LofAlgorithm::BruteForce] {
+            let f = LocalOutlierFactor::new(5)
+                .with_algorithm(algo)
+                .fit(&x)
+                .unwrap();
+            for (i, (&a, &b)) in f.negative_outlier_factor.iter().zip(&expected).enumerate() {
+                assert!(
+                    ((a - b) / b).abs() < 1e-6,
+                    "{algo:?}: nof[{i}] = {a}, sklearn {b}"
+                );
+            }
+            assert_eq!(f.predictions[6], -1.0);
+        }
+    }
+
+    #[test]
+    fn test_lof_fortran_order_input() {
+        use ndarray::ShapeBuilder;
+        let mut v = Vec::new();
+        for i in 0..20 {
+            let t = i as f64 * 0.3;
+            v.push(t.sin());
+            v.push(t.cos());
+        }
+        let x = Array2::from_shape_vec((20, 2), v).unwrap();
+        let col: Vec<f64> = x.t().iter().copied().collect();
+        let xf = Array2::from_shape_vec((20, 2).f(), col).unwrap();
+        assert!(!xf.is_standard_layout());
+        for algo in [LofAlgorithm::KdTree, LofAlgorithm::BruteForce] {
+            let a = LocalOutlierFactor::new(4)
+                .with_algorithm(algo)
+                .fit(&x)
+                .unwrap();
+            let b = LocalOutlierFactor::new(4)
+                .with_algorithm(algo)
+                .fit(&xf)
+                .unwrap();
+            assert_eq!(a.negative_outlier_factor, b.negative_outlier_factor);
         }
     }
 }

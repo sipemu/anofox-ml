@@ -143,6 +143,8 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
     type Fitted = FittedMiniBatchKMeans<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<F> = &x_std;
         let n = x.nrows();
         let d = x.ncols();
         if n == 0 {

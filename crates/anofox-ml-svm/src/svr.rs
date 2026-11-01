@@ -1,13 +1,16 @@
-//! Epsilon-Support Vector Regression (SVR) using SMO.
+//! Epsilon-Support Vector Regression (SVR) using an accelerated projected
+//! (proximal) gradient dual solver (FISTA).
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
 use crate::kernel::SvmKernel;
+use crate::projection::prox_l1_box_zero_sum;
 
 /// Epsilon-Support Vector Regressor (unfitted state).
 ///
-/// Implements an SMO-based solver for epsilon-insensitive regression:
+/// Solves the epsilon-insensitive dual with FISTA (accelerated proximal
+/// gradient) and an exact projection onto the dual feasible set:
 /// `min 0.5 ||w||^2 + C * sum(max(0, |y_i - f(x_i)| - epsilon))`
 ///
 /// Uses the type-state pattern: call [`Fit::fit`] to produce a [`FittedSvr`].
@@ -19,7 +22,7 @@ pub struct Svr {
     pub epsilon: f64,
     /// Kernel function to use.
     pub kernel: SvmKernel,
-    /// Maximum number of SMO iterations.
+    /// Maximum number of solver (FISTA) iterations.
     pub max_iter: usize,
     /// Tolerance for stopping criterion.
     pub tol: f64,
@@ -200,28 +203,17 @@ fn precompute_kernel_matrix<F: Float>(x: &Array2<F>, kernel: &SvmKernel) -> Arra
     k
 }
 
-#[inline]
-fn clip<F: Float>(value: F, lo: F, hi: F) -> F {
-    if value > hi {
-        hi
-    } else if value < lo {
-        lo
-    } else {
-        value
-    }
-}
-
 /// FISTA (Fast Iterative Shrinkage-Thresholding) solver for epsilon-SVR.
 ///
 /// Maximises the dual objective:
 ///   W(w) = −½ Σ w_i w_j K(x_i,x_j) + Σ y_i w_i − ε Σ |w_i|
 ///
-/// subject to  −C ≤ w_i ≤ C.
+/// subject to  −C ≤ w_i ≤ C  and  Σ w_i = 0  (w = α − α*).
 ///
 /// Uses accelerated proximal gradient descent with Nesterov momentum,
 /// which converges in O(1/k²) and handles rank-deficient kernel matrices
 /// (e.g. linear kernel on low-dim data) gracefully.
-fn smo_svr<F: Float>(
+fn fista_svr_dual<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
     kernel: &SvmKernel,
@@ -243,7 +235,7 @@ fn smo_svr<F: Float>(
     for i in 0..n {
         let mut row_sum = zero;
         for j in 0..n {
-            row_sum = row_sum + k_matrix[[i, j]].abs();
+            row_sum += k_matrix[[i, j]].abs();
         }
         if row_sum > lipschitz {
             lipschitz = row_sum;
@@ -260,41 +252,27 @@ fn smo_svr<F: Float>(
     let mut v = vec![zero; n]; // momentum point
     let mut t_k = one;
 
-    let n_f = F::from_usize(n).unwrap();
-
     for _iter in 0..max_iter {
         // Compute K * v
         let mut kv = vec![zero; n];
         for i in 0..n {
             let mut s = zero;
             for j in 0..n {
-                s = s + k_matrix[[i, j]] * v[j];
+                s += k_matrix[[i, j]] * v[j];
             }
             kv[i] = s;
         }
 
-        // Proximal gradient step: w_new = prox_{step*ε|·|}(v + step*(y − K*v))
+        // Proximal gradient step:
+        //   w_new = prox_{step·ε‖·‖₁ + I_box + I_{Σw=0}}(v + step·(y − K v)).
+        // The ℓ1 term, the box [−C, C] and the bias constraint Σ w_i = 0 are
+        // handled jointly by an exact shift-and-clip prox (bisection on the
+        // multiplier τ of Σ w_i = 0), so every iterate is dual-feasible.
         for i in 0..n {
-            let z_i = v[i] + step * (y[i] - kv[i]);
-
-            let new_w = if z_i > eps_step {
-                clip(z_i - eps_step, zero, c)
-            } else if z_i < -eps_step {
-                clip(z_i + eps_step, -c, zero)
-            } else {
-                zero
-            };
-
             w_prev[i] = w[i];
-            w[i] = new_w;
+            w[i] = v[i] + step * (y[i] - kv[i]);
         }
-
-        // Project onto Σ w_i = 0 (dual constraint from bias term),
-        // then re-enforce box constraints.
-        let w_mean = w.iter().copied().fold(zero, |a, b| a + b) / n_f;
-        for i in 0..n {
-            w[i] = clip(w[i] - w_mean, -c, c);
-        }
+        prox_l1_box_zero_sum(&mut w, eps_step, c);
 
         // Check convergence
         let mut max_change = zero;
@@ -324,7 +302,7 @@ fn smo_svr<F: Float>(
     for i in 0..n {
         let mut s = zero;
         for j in 0..n {
-            s = s + k_matrix[[i, j]] * w[j];
+            s += k_matrix[[i, j]] * w[j];
         }
         g[i] = s;
     }
@@ -339,10 +317,10 @@ fn smo_svr<F: Float>(
 
     for i in 0..n {
         if w[i] > margin && w[i] < c - margin {
-            b_sum = b_sum + y[i] - epsilon - g[i];
+            b_sum += y[i] - epsilon - g[i];
             b_count += 1;
         } else if w[i] < -margin && w[i] > -(c - margin) {
-            b_sum = b_sum + y[i] + epsilon - g[i];
+            b_sum += y[i] + epsilon - g[i];
             b_count += 1;
         }
     }
@@ -350,20 +328,31 @@ fn smo_svr<F: Float>(
     let bias = if b_count > 0 {
         b_sum / F::from_usize(b_count).unwrap()
     } else {
-        // All SVs bounded or no SVs — average upper/lower bias bounds
-        let mut b_lo = F::from_f64(-1e30).unwrap();
-        let mut b_hi = F::from_f64(1e30).unwrap();
+        // No free SVs: the KKT conditions only bracket b.
+        //   w_i = 0   ⇒ y_i − ε − g_i ≤ b ≤ y_i + ε − g_i
+        //   w_i = C   ⇒ b ≤ y_i − ε − g_i   (α_i at bound)
+        //   w_i = −C  ⇒ b ≥ y_i + ε − g_i   (α*_i at bound)
+        let mut b_lo = F::neg_infinity();
+        let mut b_hi = F::infinity();
         for i in 0..n {
             let lo_i = y[i] - epsilon - g[i];
             let hi_i = y[i] + epsilon - g[i];
-            if w[i] >= zero {
-                b_lo = if lo_i > b_lo { lo_i } else { b_lo };
-            }
-            if w[i] <= zero {
-                b_hi = if hi_i < b_hi { hi_i } else { b_hi };
+            if w[i] >= c - margin {
+                b_hi = b_hi.min(lo_i);
+            } else if w[i] <= -(c - margin) {
+                b_lo = b_lo.max(hi_i);
+            } else {
+                b_lo = b_lo.max(lo_i);
+                b_hi = b_hi.min(hi_i);
             }
         }
-        (b_lo + b_hi) / (F::one() + F::one())
+        let two = F::one() + F::one();
+        match (b_lo.is_finite(), b_hi.is_finite()) {
+            (true, true) => (b_lo + b_hi) / two,
+            (true, false) => b_lo,
+            (false, true) => b_hi,
+            (false, false) => zero,
+        }
     };
 
     (w, bias)
@@ -398,7 +387,7 @@ impl<F: Float> Fit<F> for Svr {
         let y_centered = y.mapv(|v| v - y_mean);
 
         let (coefs, bias_centered) =
-            smo_svr(x, &y_centered, &self.kernel, c, epsilon, self.max_iter, tol);
+            fista_svr_dual(x, &y_centered, &self.kernel, c, epsilon, self.max_iter, tol);
         let bias = bias_centered + y_mean;
 
         // Extract support vectors (non-zero coefficients)
@@ -444,6 +433,98 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    /// 20 × 2 fixed dataset shared by the sklearn-parity tests (sklearn 1.9.1).
+    fn parity_data() -> (Array2<f64>, Array1<f64>) {
+        let x = array![
+            [-1.486, -0.003],
+            [0.406, -1.885],
+            [-1.408, 1.713],
+            [-1.718, -1.481],
+            [1.793, 0.488],
+            [-0.524, 0.046],
+            [0.651, -0.899],
+            [-1.448, 1.152],
+            [0.681, 0.05],
+            [1.267, 0.196],
+            [1.924, -1.182],
+            [0.215, -0.066],
+            [-0.587, 0.366],
+            [-1.059, 1.209],
+            [1.469, -1.485],
+            [-0.132, -0.891],
+            [-1.668, 1.584],
+            [-0.28, -1.409],
+            [0.693, -1.191],
+            [1.606, -1.131]
+        ];
+        let y = array![
+            -0.963, -0.523, -0.02, -1.858, 1.153, -0.561, -0.017, -0.404, 0.707, 0.978, 0.486,
+            0.263, -0.308, -0.227, 0.348, -0.71, -0.142, -0.921, -0.133, 0.469
+        ];
+        (x, y)
+    }
+
+    #[test]
+    fn test_dual_is_feasible() {
+        let (x, y) = parity_data();
+        let kernel = SvmKernel::Rbf { gamma: 0.5 };
+        for &(c, max_iter) in &[(1.0, 50usize), (1.0, 20_000), (0.05, 2_000)] {
+            let (w, _b) = fista_svr_dual(&x, &y, &kernel, c, 0.1, max_iter, 1e-12);
+            let sum: f64 = w.iter().sum();
+            assert!(
+                sum.abs() < 1e-6,
+                "Σ(α − α*) = {sum} (C={c}, iters={max_iter})"
+            );
+            assert!(w.iter().all(|&wi| wi.abs() <= c + 1e-12));
+        }
+    }
+
+    #[test]
+    fn test_rbf_matches_sklearn() {
+        // sklearn SVR(kernel='rbf', gamma=0.5, C=1, epsilon=0.1, tol=1e-10)
+        let sk_pred = [
+            -0.8629999947669329,
+            -0.4229999800405266,
+            -0.12000000600255367,
+            -1.3537266608386191,
+            1.0241806466400396,
+            -0.4610000030940126,
+            0.08300000989060297,
+            -0.30399999659300175,
+            0.6215526217944429,
+            0.9906390972524501,
+            0.410394264319056,
+            0.16299999447920932,
+            -0.36821779800692017,
+            -0.24847108352010214,
+            0.24799999641924758,
+            -0.609999968434382,
+            -0.15860107604854762,
+            -0.8742795102520489,
+            -0.04015272739990233,
+            0.43214326812710635,
+        ];
+        let sk_bias = -0.158313369367737;
+        let (x, y) = parity_data();
+        let fitted: FittedSvr<f64> = Svr::new()
+            .with_kernel(SvmKernel::Rbf { gamma: 0.5 })
+            .with_c(1.0)
+            .with_epsilon(0.1)
+            .with_max_iter(100_000)
+            .with_tol(1e-10)
+            .fit(&x, &y)
+            .unwrap();
+        let pred = fitted.predict(&x).unwrap();
+        for (i, (p, e)) in pred.iter().zip(sk_pred.iter()).enumerate() {
+            assert!((p - e).abs() < 1e-4, "pred[{i}] = {p}, sklearn {e}");
+        }
+        assert!(
+            (fitted.bias() - sk_bias).abs() < 1e-4,
+            "bias = {}, sklearn {sk_bias}",
+            fitted.bias()
+        );
+    }
 
     #[test]
     fn test_linear_regression() {

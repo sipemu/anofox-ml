@@ -1,14 +1,42 @@
-//! Linear Support Vector Regression (LinearSVR) using SGD on the primal.
+//! Linear Support Vector Regression (LinearSVR) using liblinear's dual
+//! coordinate descent (Ho & Lin, 2012).
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+
+/// Loss function minimised by [`LinearSvr`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum LinearSvrLoss {
+    /// L1 epsilon-insensitive loss `max(0, |r| − ε)` (sklearn default
+    /// `loss='epsilon_insensitive'`, liblinear solver 13).
+    #[default]
+    EpsilonInsensitive,
+    /// L2 (squared) epsilon-insensitive loss `max(0, |r| − ε)²`
+    /// (sklearn `loss='squared_epsilon_insensitive'`, liblinear solver 12).
+    SquaredEpsilonInsensitive,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_one() -> f64 {
+    1.0
+}
 
 /// Linear Support Vector Regressor parameters (unfitted state).
 ///
-/// Solves the epsilon-insensitive SVR objective in the primal via
-/// stochastic gradient descent:
+/// Solves the L2-regularised epsilon-insensitive SVR problem
 ///
-/// `min  0.5 * ||w||^2  +  C * sum(max(0, |y_i - w . x_i - b| - epsilon))`
+/// `min  0.5 * ||ŵ||^2  +  C * sum(loss(|y_i - w . x_i - b|, epsilon))`
+///
+/// (`ŵ = [w, b / intercept_scaling]`, i.e. the intercept is regularised as an
+/// augmented constant feature, exactly like liblinear / sklearn) with the
+/// dual coordinate descent method of Ho & Lin (2012) used by sklearn's
+/// `LinearSVR(dual=True)`.
 ///
 /// Uses the type-state pattern: call [`Fit::fit`] to produce a
 /// [`FittedLinearSvr`] that can make predictions.
@@ -18,10 +46,24 @@ pub struct LinearSvr {
     pub c: f64,
     /// Width of the epsilon-insensitive tube.
     pub epsilon: f64,
-    /// Maximum number of SGD epochs.
+    /// Maximum number of passes (epochs) over the data.
     pub max_iter: usize,
-    /// Tolerance for the stopping criterion (change in loss).
+    /// Tolerance for the stopping criterion: stop once the ℓ1 norm of the
+    /// projected (sub)gradient falls below `tol` times its initial value
+    /// (liblinear's criterion).
     pub tol: f64,
+    /// Loss function. Default: [`LinearSvrLoss::EpsilonInsensitive`].
+    #[serde(default)]
+    pub loss: LinearSvrLoss,
+    /// Whether to fit an intercept (via an augmented constant feature).
+    #[serde(default = "default_true")]
+    pub fit_intercept: bool,
+    /// Value of the augmented constant feature used for the intercept.
+    #[serde(default = "default_one")]
+    pub intercept_scaling: f64,
+    /// Seed of the per-epoch random permutation of the samples.
+    #[serde(default)]
+    pub seed: u64,
 }
 
 impl LinearSvr {
@@ -32,7 +74,35 @@ impl LinearSvr {
             epsilon: 0.1,
             max_iter: 1000,
             tol: 1e-4,
+            loss: LinearSvrLoss::EpsilonInsensitive,
+            fit_intercept: true,
+            intercept_scaling: 1.0,
+            seed: 0,
         }
+    }
+
+    /// Set the loss function.
+    pub fn with_loss(mut self, loss: LinearSvrLoss) -> Self {
+        self.loss = loss;
+        self
+    }
+
+    /// Set whether an intercept is fitted.
+    pub fn with_fit_intercept(mut self, fit_intercept: bool) -> Self {
+        self.fit_intercept = fit_intercept;
+        self
+    }
+
+    /// Set the value of the augmented intercept feature.
+    pub fn with_intercept_scaling(mut self, intercept_scaling: f64) -> Self {
+        self.intercept_scaling = intercept_scaling;
+        self
+    }
+
+    /// Set the seed of the coordinate permutation.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
     }
 
     /// Set the regularization parameter C.
@@ -47,7 +117,7 @@ impl LinearSvr {
         self
     }
 
-    /// Set the maximum number of SGD epochs.
+    /// Set the maximum number of passes over the data.
     pub fn with_max_iter(mut self, max_iter: usize) -> Self {
         self.max_iter = max_iter;
         self
@@ -76,6 +146,11 @@ impl LinearSvr {
         }
         if self.tol <= 0.0 {
             return Err(RustMlError::InvalidParameter("tol must be positive".into()));
+        }
+        if self.fit_intercept && self.intercept_scaling <= 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "intercept_scaling must be positive".into(),
+            ));
         }
         Ok(())
     }
@@ -144,72 +219,123 @@ impl<F: Float> Predict<F> for FittedLinearSvr<F> {
     }
 }
 
-/// Train a linear SVR model using stochastic gradient descent on the primal.
+/// Train a linear SVR with the dual coordinate descent method of Ho & Lin
+/// (2012), as implemented in liblinear's `solve_l2r_l1l2_svr`.
 ///
-/// For each epoch, iterates over all samples and applies sub-gradient
-/// updates for the epsilon-insensitive loss plus L2 regularization.
+/// Dual: `min_β ½ βᵀ(Q + λI)β − yᵀβ + ε‖β‖₁  s.t. −U ≤ β_i ≤ U`, with
+/// `Q_ij = x̂_iᵀ x̂_j`, `w = Σ β_i x̂_i` and
+///
+/// - L1 loss: `λ = 0`, `U = C`;
+/// - L2 loss: `λ = 1/(2C)`, `U = ∞`.
+///
+/// `x̂_i = [x_i, s]` when an intercept is fitted (`s = intercept_scaling`).
+/// Each coordinate takes the exact one-variable minimiser of the
+/// (piecewise-quadratic) dual, clipped to the box. Stops when the ℓ1 norm of
+/// the minimum-norm subgradient drops below `tol` × its first-epoch value.
+#[allow(clippy::too_many_arguments)]
 fn fit_linear_svr<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
     c: F,
     epsilon: F,
+    loss: LinearSvrLoss,
+    intercept_scaling: Option<F>,
     max_iter: usize,
     tol: F,
+    seed: u64,
 ) -> (Array1<F>, F) {
     let n_samples = x.nrows();
     let n_features = x.ncols();
     let zero = F::zero();
     let one = F::one();
-    let n_f = F::from_usize(n_samples).unwrap();
+    let two = one + one;
 
+    let (lambda, upper) = match loss {
+        LinearSvrLoss::EpsilonInsensitive => (zero, c),
+        LinearSvrLoss::SquaredEpsilonInsensitive => (one / (two * c), F::infinity()),
+    };
+    let s = intercept_scaling.unwrap_or(zero);
+
+    let mut beta = vec![zero; n_samples];
     let mut w = Array1::<F>::zeros(n_features);
-    let mut b = zero;
+    // Weight of the augmented constant feature; bias = w_b · s.
+    let mut w_b = zero;
 
-    // Initial learning rate; decays as 1/epoch.
-    let lr_0 = F::from_f64(0.01).unwrap();
+    let q_diag: Vec<F> = x
+        .rows()
+        .into_iter()
+        .map(|row| row.dot(&row) + s * s)
+        .collect();
 
-    let mut prev_loss = F::from_f64(f64::MAX).unwrap();
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut indices: Vec<usize> = (0..n_samples).collect();
+    let tiny = F::from_f64(1e-12).unwrap();
+    let mut gnorm1_init = F::neg_infinity();
 
-    for epoch in 0..max_iter {
-        let lr = lr_0 / (one + F::from_usize(epoch).unwrap() * F::from_f64(0.001).unwrap());
+    for _ in 0..max_iter {
+        indices.shuffle(&mut rng);
+        let mut gnorm1 = zero;
 
-        for i in 0..n_samples {
+        for &i in &indices {
             let xi = x.row(i);
-            let residual = xi.dot(&w) + b - y[i];
-            let abs_residual = residual.abs();
+            let bi = beta[i];
+            let g = xi.dot(&w) + w_b * s - y[i] + lambda * bi;
+            let gp = g + epsilon;
+            let gn = g - epsilon;
+            let h = q_diag[i] + lambda;
 
-            if abs_residual > epsilon {
-                // Sub-gradient of epsilon-insensitive loss
-                let sign = if residual > zero { one } else { -one };
-                // Update weights: SGD step for regularization + loss
-                // gradient of 0.5*||w||^2 is w, scaled by 1/n for per-sample
-                // gradient of C * max(0, |r| - eps) is C * sign(r) * x_i
-                let grad_w = &w / n_f + &xi * (c * sign);
-                w = w - &grad_w * lr;
-                b = b - lr * c * sign;
+            // Minimum-norm subgradient (optimality violation).
+            let violation = if bi == zero {
+                if gp < zero {
+                    -gp
+                } else if gn > zero {
+                    gn
+                } else {
+                    zero
+                }
+            } else if bi >= upper {
+                gp.max(zero)
+            } else if bi <= -upper {
+                (-gn).max(zero)
+            } else if bi > zero {
+                gp.abs()
             } else {
-                // Only regularization decay
-                w = &w * (one - lr / n_f);
+                gn.abs()
+            };
+            gnorm1 += violation;
+
+            if h <= zero {
+                continue;
+            }
+            // Newton direction of the one-variable piecewise quadratic.
+            let d = if gp < h * bi {
+                -gp / h
+            } else if gn > h * bi {
+                -gn / h
+            } else {
+                -bi
+            };
+            if d.abs() < tiny {
+                continue;
+            }
+            let new = (bi + d).max(-upper).min(upper);
+            let delta = new - bi;
+            if delta != zero {
+                beta[i] = new;
+                w.scaled_add(delta, &xi);
+                w_b += delta * s;
             }
         }
 
-        // Compute loss for convergence check
-        let mut loss = F::from_f64(0.5).unwrap() * w.dot(&w);
-        for i in 0..n_samples {
-            let residual = (x.row(i).dot(&w) + b - y[i]).abs();
-            if residual > epsilon {
-                loss = loss + c * (residual - epsilon);
-            }
+        if gnorm1_init < zero {
+            gnorm1_init = gnorm1;
         }
-
-        let change = (prev_loss - loss).abs();
-        if change < tol && epoch > 0 {
+        if gnorm1 <= tol * gnorm1_init {
             break;
         }
-        prev_loss = loss;
     }
 
-    (w, b)
+    (w, w_b * s)
 }
 
 impl<F: Float> Fit<F> for LinearSvr {
@@ -235,7 +361,23 @@ impl<F: Float> Fit<F> for LinearSvr {
         let epsilon = F::from_f64(self.epsilon).unwrap();
         let tol = F::from_f64(self.tol).unwrap();
 
-        let (weights, bias) = fit_linear_svr(x, y, c, epsilon, self.max_iter, tol);
+        let intercept_scaling = if self.fit_intercept {
+            Some(F::from_f64(self.intercept_scaling).unwrap())
+        } else {
+            None
+        };
+
+        let (weights, bias) = fit_linear_svr(
+            x,
+            y,
+            c,
+            epsilon,
+            self.loss,
+            intercept_scaling,
+            self.max_iter,
+            tol,
+            self.seed,
+        );
 
         Ok(FittedLinearSvr {
             n_features: x.ncols(),

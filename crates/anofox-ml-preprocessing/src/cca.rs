@@ -75,7 +75,7 @@ impl Cca {
         let nx = c.nrows();
         let ny = c.ncols();
         let cm = Mat::<f64>::from_fn(nx, ny, |i, j| c[[i, j]]);
-        let svd = Svd::new(cm.as_ref())
+        let svd = Svd::new_thin(cm.as_ref())
             .map_err(|e| RustMlError::InvalidParameter(format!("SVD failed: {e:?}")))?;
         let u = svd.U();
         let s = svd.S();
@@ -111,7 +111,7 @@ fn whitening(xc: &Array2<f64>, scale: f64) -> Result<Array2<f64>> {
     let n = xc.nrows();
     let d = xc.ncols();
     let m = Mat::<f64>::from_fn(n, d, |i, j| xc[[i, j]]);
-    let svd = Svd::new(m.as_ref())
+    let svd = Svd::new_thin(m.as_ref())
         .map_err(|e| RustMlError::InvalidParameter(format!("SVD failed: {e:?}")))?;
     let s = svd.S();
     let v = svd.V();

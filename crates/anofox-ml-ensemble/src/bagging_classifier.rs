@@ -117,6 +117,7 @@ impl<F: Float> Fit<F> for BaggingClassifier {
             max_features: None,
             sample_weight: None,
             class_weight: None,
+            seed: 0,
         };
 
         // Pre-generate bootstrap row indices for determinism
@@ -238,7 +239,7 @@ impl<F: Float> FittedBaggingClassifier<F> {
                 }
             }
         }
-        global_classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        global_classes.sort_by(anofox_ml_trees::split::cmp_nan_last);
 
         let n_samples = x.nrows();
         let n_classes = global_classes.len();
@@ -286,7 +287,7 @@ impl<F: Float> FittedBaggingClassifier<F> {
                 }
             }
         }
-        classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        classes.sort_by(anofox_ml_trees::split::cmp_nan_last);
         classes
     }
 }
@@ -304,20 +305,11 @@ fn build_sub_matrix_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Arra
     Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
 }
 
-/// Return the class that appears most frequently in `votes`.
+/// Return the class that appears most frequently in `votes` (deterministic;
+/// ties go to the smallest class label).
 #[inline]
 fn majority_vote<F: Float>(votes: &[F]) -> F {
-    use std::collections::HashMap;
-    let mut counts: HashMap<u64, (F, usize)> = HashMap::new();
-    for &v in votes {
-        let key = v.to_f64().unwrap().to_bits();
-        counts.entry(key).and_modify(|e| e.1 += 1).or_insert((v, 1));
-    }
-    counts
-        .into_values()
-        .max_by_key(|&(_, count)| count)
-        .unwrap()
-        .0
+    anofox_ml_trees::split::majority_vote(votes)
 }
 
 #[cfg(test)]

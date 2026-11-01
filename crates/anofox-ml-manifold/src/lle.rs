@@ -80,7 +80,7 @@ impl FitUnsupervised<f64> for LocallyLinearEmbedding {
                     (j, euclid_sq(&xi, &xj))
                 })
                 .collect();
-            others.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            others.sort_by(|a, b| a.1.total_cmp(&b.1));
             for &(j, _) in others.iter().take(k) {
                 neighbours[i].push(j);
             }

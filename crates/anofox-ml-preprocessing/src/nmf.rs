@@ -54,7 +54,7 @@ fn nndsvd_init(x: &Array2<f64>, k: usize) -> Result<(Array2<f64>, Array2<f64>)> 
     let n = x.nrows();
     let d = x.ncols();
     let mat = Mat::<f64>::from_fn(n, d, |i, j| x[[i, j]]);
-    let svd = Svd::new(mat.as_ref())
+    let svd = Svd::new_thin(mat.as_ref())
         .map_err(|e| RustMlError::InvalidParameter(format!("NNDSVD SVD failed: {e:?}")))?;
     let u = svd.U();
     let s = svd.S();

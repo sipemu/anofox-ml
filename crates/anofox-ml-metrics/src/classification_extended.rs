@@ -1,54 +1,39 @@
 use anofox_ml_core::{Float, Result, RustMlError};
 use ndarray::Array1;
 
-/// ROC AUC score via trapezoidal rule on sorted (FPR, TPR) pairs.
+use crate::curves::binary_clf_curve;
+
+/// ROC AUC score via the trapezoidal rule over the ROC curve.
 ///
 /// `y_true` must be binary (only 0.0 and 1.0 values) and `y_scores` are
-/// continuous confidence scores. Returns an error if the inputs are empty,
-/// have mismatched lengths, contain non-binary true labels, or contain only
-/// a single class.
+/// continuous confidence scores. Tied scores are grouped into a single
+/// threshold (as in sklearn), which is equivalent to the Mann-Whitney U
+/// statistic with ties counted as 1/2 — e.g. all-equal scores give 0.5.
+///
+/// Returns an error if the inputs are empty, have mismatched lengths, contain
+/// non-binary true labels, contain only a single class, or if any score is NaN.
 pub fn roc_auc_score<F: Float>(y_true: &Array1<F>, y_scores: &Array1<F>) -> Result<F> {
     check_lengths(y_true, y_scores)?;
     check_binary(y_true)?;
 
-    let pos_count = y_true
-        .iter()
-        .filter(|&&v| (v - F::one()).abs() < F::from_f64(1e-9).unwrap())
-        .count();
-    let neg_count = y_true.len() - pos_count;
+    let (fps, tps, _) = binary_clf_curve(y_true, y_scores)?;
+    let total_pos = *tps.last().unwrap();
+    let total_neg = *fps.last().unwrap();
 
-    if pos_count == 0 || neg_count == 0 {
+    if total_pos == F::zero() || total_neg == F::zero() {
         return Err(RustMlError::InvalidParameter(
             "ROC AUC requires both positive and negative samples".into(),
         ));
     }
 
-    // Create index array sorted by score descending (ties broken arbitrarily)
-    let mut indices: Vec<usize> = (0..y_true.len()).collect();
-    indices.sort_by(|&a, &b| y_scores[b].partial_cmp(&y_scores[a]).unwrap());
-
-    let total_pos = F::from_usize(pos_count).unwrap();
-    let total_neg = F::from_usize(neg_count).unwrap();
-
-    let mut tp = F::zero();
-    let mut fp = F::zero();
+    let two = F::from_f64(2.0).unwrap();
     let mut auc = F::zero();
     let mut prev_fpr = F::zero();
     let mut prev_tpr = F::zero();
-
-    for &idx in &indices {
-        if (y_true[idx] - F::one()).abs() < F::from_f64(1e-9).unwrap() {
-            tp += F::one();
-        } else {
-            fp += F::one();
-        }
-
+    for (&fp, &tp) in fps.iter().zip(tps.iter()) {
         let fpr = fp / total_neg;
         let tpr = tp / total_pos;
-
-        // Trapezoidal rule: area of trapezoid between previous and current point
-        auc += (fpr - prev_fpr) * (tpr + prev_tpr) / F::from_f64(2.0).unwrap();
-
+        auc += (fpr - prev_fpr) * (tpr + prev_tpr) / two;
         prev_fpr = fpr;
         prev_tpr = tpr;
     }
@@ -59,45 +44,31 @@ pub fn roc_auc_score<F: Float>(y_true: &Array1<F>, y_scores: &Array1<F>) -> Resu
 /// Average precision score (area under precision-recall curve).
 ///
 /// `y_true` must be binary (only 0.0 and 1.0 values) and `y_scores` are
-/// continuous confidence scores. AP is computed as
-/// `sum((R_n - R_{n-1}) * P_n)` where precision and recall are evaluated
-/// at each threshold defined by sorted scores.
+/// continuous confidence scores. Following sklearn, AP is
+/// `sum_n (R_n - R_{n-1}) * P_n` where `P_n` / `R_n` are the precision and
+/// recall at the n-th **distinct** score threshold (tied scores are grouped
+/// into one threshold, so the result does not depend on the order of ties).
+///
+/// Returns an error if the inputs are empty, have mismatched lengths, contain
+/// non-binary true labels, contain no positive sample, or if any score is NaN.
 pub fn average_precision_score<F: Float>(y_true: &Array1<F>, y_scores: &Array1<F>) -> Result<F> {
     check_lengths(y_true, y_scores)?;
     check_binary(y_true)?;
 
-    let pos_count = y_true
-        .iter()
-        .filter(|&&v| (v - F::one()).abs() < F::from_f64(1e-9).unwrap())
-        .count();
+    let (fps, tps, _) = binary_clf_curve(y_true, y_scores)?;
+    let total_pos = *tps.last().unwrap();
 
-    if pos_count == 0 {
+    if total_pos == F::zero() {
         return Err(RustMlError::InvalidParameter(
             "average precision requires at least one positive sample".into(),
         ));
     }
 
-    // Sort by score descending
-    let mut indices: Vec<usize> = (0..y_true.len()).collect();
-    indices.sort_by(|&a, &b| y_scores[b].partial_cmp(&y_scores[a]).unwrap());
-
-    let total_pos = F::from_usize(pos_count).unwrap();
-    let mut tp = F::zero();
-    let mut fp = F::zero();
     let mut ap = F::zero();
     let mut prev_recall = F::zero();
-
-    for &idx in &indices {
-        if (y_true[idx] - F::one()).abs() < F::from_f64(1e-9).unwrap() {
-            tp += F::one();
-        } else {
-            fp += F::one();
-        }
-
+    for (&fp, &tp) in fps.iter().zip(tps.iter()) {
         let precision = tp / (tp + fp);
         let recall = tp / total_pos;
-
-        // AP = sum((R_n - R_{n-1}) * P_n)
         ap += (recall - prev_recall) * precision;
         prev_recall = recall;
     }
@@ -213,7 +184,7 @@ mod tests {
         // TPR/FPR: (0,0)->(0.5,0)->(1.0,0)->(1.0,0.5)->(1.0,1.0)
         // AUC = 0 + 0 + 0.5*1.0 + 0.5*(1.0+1.0)/2 = 0.5 + 0.5 = 1.0... let me recalculate
         // Actually let's just check it's between 0 and 1
-        assert!(auc >= 0.0 && auc <= 1.0);
+        assert!((0.0..=1.0).contains(&auc));
     }
 
     #[test]
@@ -316,6 +287,77 @@ mod tests {
     fn test_average_precision_no_positive_error() {
         let y_true = array![0.0, 0.0, 0.0];
         let y_scores = array![0.5, 0.6, 0.7];
+        assert!(average_precision_score(&y_true, &y_scores).is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // Tie handling (issue #34)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_roc_auc_all_tied_is_half() {
+        let auc: f64 = roc_auc_score(&array![1.0, 0.0], &array![0.5, 0.5]).unwrap();
+        assert_abs_diff_eq!(auc, 0.5, epsilon = 1e-12);
+        let auc: f64 = roc_auc_score(&array![0.0, 1.0], &array![0.5, 0.5]).unwrap();
+        assert_abs_diff_eq!(auc, 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_roc_auc_grouped_ties() {
+        let y_true = array![0.0, 1.0, 0.0, 1.0];
+        let y_scores = array![0.3, 0.3, 0.7, 0.7];
+        let auc: f64 = roc_auc_score(&y_true, &y_scores).unwrap();
+        assert_abs_diff_eq!(auc, 0.5, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_roc_auc_matches_mann_whitney_with_ties() {
+        // Heavily tied, kNN/tree-like probabilities.
+        let y_true = array![1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let y_scores = array![0.8, 0.8, 0.6, 0.2, 0.2, 0.6, 1.0, 0.0, 0.6, 0.2, 0.8, 0.2];
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for i in 0..y_true.len() {
+            for j in 0..y_true.len() {
+                if y_true[i] == 1.0 && y_true[j] == 0.0 {
+                    den += 1.0;
+                    if y_scores[i] > y_scores[j] {
+                        num += 1.0;
+                    } else if y_scores[i] == y_scores[j] {
+                        num += 0.5;
+                    }
+                }
+            }
+        }
+        let auc: f64 = roc_auc_score(&y_true, &y_scores).unwrap();
+        assert_abs_diff_eq!(auc, num / den, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_average_precision_ties() {
+        // sklearn: average_precision_score([1, 0], [.5, .5]) == 0.5
+        let ap: f64 = average_precision_score(&array![1.0, 0.0], &array![0.5, 0.5]).unwrap();
+        assert_abs_diff_eq!(ap, 0.5, epsilon = 1e-12);
+        let ap: f64 = average_precision_score(&array![0.0, 1.0], &array![0.5, 0.5]).unwrap();
+        assert_abs_diff_eq!(ap, 0.5, epsilon = 1e-12);
+        // y=[0,1,0,1], s=[.3,.3,.7,.7]: thresholds .7 (P=.5,R=.5), .3 (P=.5,R=1) -> 0.5
+        let ap: f64 =
+            average_precision_score(&array![0.0, 1.0, 0.0, 1.0], &array![0.3, 0.3, 0.7, 0.7])
+                .unwrap();
+        assert_abs_diff_eq!(ap, 0.5, epsilon = 1e-12);
+        // y=[1,0,1,1], s=[.9,.9,.4,.1]: (.9: P=.5,R=1/3), (.4: P=2/3,R=2/3), (.1: P=.75,R=1)
+        // AP = 1/3*.5 + 1/3*2/3 + 1/3*.75 = 23/36
+        let ap: f64 =
+            average_precision_score(&array![1.0, 0.0, 1.0, 1.0], &array![0.9, 0.9, 0.4, 0.1])
+                .unwrap();
+        assert_abs_diff_eq!(ap, 23.0 / 36.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_auc_ap_nan_scores_error() {
+        let y_true = array![0.0, 1.0, 1.0];
+        let y_scores = array![0.1, f64::NAN, 0.9];
+        assert!(roc_auc_score(&y_true, &y_scores).is_err());
         assert!(average_precision_score(&y_true, &y_scores).is_err());
     }
 

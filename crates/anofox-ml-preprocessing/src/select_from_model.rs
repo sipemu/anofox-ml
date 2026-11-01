@@ -118,9 +118,7 @@ impl SelectFromModel {
             if candidates.len() > max_f {
                 // Sort descending by importance; break ties by index (ascending).
                 candidates.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.0.cmp(&b.0))
+                    crate::quantile::total_cmp_nan_low(&b.1, &a.1).then(a.0.cmp(&b.0))
                 });
                 candidates.truncate(max_f);
             }

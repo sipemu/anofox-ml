@@ -6,8 +6,8 @@
 //!
 //! Algorithm (Ankerst et al. 1999):
 //! 1. For each point compute `core_distance(p)` = distance to its
-//!    `min_samples`-th nearest neighbour within `eps_inf` (or ∞ if fewer
-//!    than `min_samples - 1` neighbours within that radius).
+//!    `min_samples`-th nearest neighbour, counting `p` itself as in sklearn
+//!    (∞ if that distance exceeds `eps_max`).
 //! 2. Process points in a priority-queue order: from a seed, repeatedly
 //!    extract the point with the smallest `reachability_distance` and update
 //!    its neighbours' reachability distances.
@@ -82,15 +82,20 @@ impl FitUnsupervised<f64> for Optics {
                 dist[j][i] = d;
             }
         }
-        // Core distance per point.
+        // Core distance per point: distance to the `min_samples`-th nearest
+        // neighbour *counting the point itself* (sklearn semantics, so
+        // `min_samples = 1` gives 0 and `min_samples = 2` the nearest other
+        // point). Infinite when that distance exceeds `eps_max` or there are
+        // fewer than `min_samples` points.
         let mut core_dist = vec![f64::INFINITY; n];
-        for i in 0..n {
-            let mut neigh: Vec<f64> = (0..n).filter(|&j| j != i).map(|j| dist[i][j]).collect();
-            neigh.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            if neigh.len() >= self.min_samples - 1 + 1 {
-                let kth = neigh[self.min_samples - 1];
-                if kth <= self.eps_max {
-                    core_dist[i] = kth;
+        if self.min_samples <= n {
+            let mut row = vec![0.0_f64; n];
+            for i in 0..n {
+                row.copy_from_slice(&dist[i]);
+                let (_, kth, _) =
+                    row.select_nth_unstable_by(self.min_samples - 1, |a, b| a.total_cmp(b));
+                if *kth <= self.eps_max {
+                    core_dist[i] = *kth;
                 }
             }
         }
@@ -109,7 +114,7 @@ impl FitUnsupervised<f64> for Optics {
             while let Some(p) = stack
                 .iter()
                 .filter(|&&q| !processed[q])
-                .min_by(|&&a, &&b| reach[a].partial_cmp(&reach[b]).unwrap())
+                .min_by(|&&a, &&b| reach[a].total_cmp(&reach[b]).then(a.cmp(&b)))
                 .copied()
             {
                 processed[p] = true;
@@ -203,5 +208,91 @@ mod tests {
             "outlier label = {}",
             labels[8]
         );
+    }
+    /// Parity with `sklearn.cluster.OPTICS(min_samples, max_eps=inf,
+    /// cluster_method="dbscan", eps=1.0)` (sklearn 1.8.0). Regression for the
+    /// core-distance off-by-one (#57): `min_samples` counts the point itself.
+    #[test]
+    fn test_optics_matches_sklearn() {
+        let x = array![
+            [0.537, 0.131],
+            [0.029, -0.559],
+            [-0.083, -0.106],
+            [-0.025, -0.188],
+            [-0.013, -0.143],
+            [-0.394, 0.265],
+            [0.264, 0.513],
+            [0.015, -0.121],
+            [3.836, 3.536],
+            [4.295, 3.67],
+            [3.644, 3.938],
+            [4.446, 4.071],
+            [3.693, 3.786],
+            [4.188, 3.952],
+            [3.769, 3.931],
+            [4.224, 4.593],
+            [10.0, -6.0]
+        ];
+        let inf = f64::INFINITY;
+        let cases: [(usize, Vec<f64>, Vec<usize>); 2] = [
+            (
+                2,
+                vec![
+                    inf,
+                    0.3749093224,
+                    0.0791770169,
+                    0.0465725241,
+                    0.0356089876,
+                    0.4841094917,
+                    0.4695242273,
+                    0.5796447188,
+                    4.6794992253,
+                    0.3016173072,
+                    0.1597028491,
+                    0.2841214529,
+                    0.2880086804,
+                    0.4195259229,
+                    0.1251958466,
+                    0.5672459784,
+                    11.2274629815,
+                ],
+                vec![0, 6, 7, 4, 3, 2, 1, 5, 8, 12, 10, 14, 13, 11, 9, 15, 16],
+            ),
+            (
+                4,
+                vec![
+                    inf,
+                    0.3749093224,
+                    0.0791770169,
+                    0.0791770169,
+                    0.6144721312,
+                    0.4841094917,
+                    0.6144721312,
+                    0.0791770169,
+                    4.6794992253,
+                    0.4195259229,
+                    0.4454974747,
+                    0.4195259229,
+                    0.4454974747,
+                    0.4195259229,
+                    0.2880086804,
+                    0.5672459784,
+                    11.2274629815,
+                ],
+                vec![0, 4, 2, 3, 7, 1, 5, 6, 8, 10, 12, 14, 13, 9, 11, 15, 16],
+            ),
+        ];
+        let labels: Vec<f64> = [vec![0.0; 8], vec![1.0; 8], vec![-1.0]].concat();
+        for (ms, reach, order) in cases {
+            let f = Optics::new(ms, 1.0).fit(&x).unwrap();
+            assert_eq!(f.ordering, order, "min_samples={ms}");
+            for (i, (&a, &b)) in f.reachability.iter().zip(reach.iter()).enumerate() {
+                assert!(
+                    (a.is_infinite() && b.is_infinite()) || (a - b).abs() < 1e-8,
+                    "min_samples={ms} reach[{i}] {a} vs {b}"
+                );
+            }
+            assert_eq!(f.labels.to_vec(), labels, "min_samples={ms}");
+        }
     }
 }

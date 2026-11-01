@@ -161,6 +161,8 @@ impl FitUnsupervised<f64> for GaussianMixture {
     type Fitted = FittedGaussianMixture;
 
     fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<f64> = &x_std;
         let n = x.nrows();
         let _d = x.ncols();
         let k = self.n_components;

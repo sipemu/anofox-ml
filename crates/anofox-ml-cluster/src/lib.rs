@@ -54,9 +54,25 @@ pub use bgmm::{BayesianGaussianMixture, FittedBayesianGaussianMixture};
 pub use birch::{Birch, FittedBirch};
 pub use dbscan::{Dbscan, FittedDbscan};
 pub use gmm::{CovarianceType, FittedGaussianMixture, GaussianMixture};
-pub use hdbscan::{FittedHdbscan, Hdbscan};
+pub use hdbscan::{ClusterSelectionMethod, FittedHdbscan, Hdbscan};
 pub use kmeans::{FittedKMeans, KMeans};
 pub use mean_shift::{FittedMeanShift, MeanShift};
 pub use mini_batch_kmeans::{FittedMiniBatchKMeans, MiniBatchKMeans};
 pub use optics::{FittedOptics, Optics};
 pub use spectral::{Affinity, FittedSpectralClustering, SpectralClustering};
+
+/// Return `x` in standard (C-contiguous, row-major) layout.
+///
+/// Borrowed (zero-copy) when `x` already is standard layout; otherwise a
+/// row-major copy is made once. Used at estimator entry points so that
+/// `row(i).as_slice()` fast paths never panic on Fortran-order or
+/// transposed input (issue #42).
+pub(crate) fn standard_layout<F: Clone>(
+    x: &ndarray::Array2<F>,
+) -> std::borrow::Cow<'_, ndarray::Array2<F>> {
+    if x.is_standard_layout() {
+        std::borrow::Cow::Borrowed(x)
+    } else {
+        std::borrow::Cow::Owned(x.as_standard_layout().into_owned())
+    }
+}

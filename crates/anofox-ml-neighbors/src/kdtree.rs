@@ -46,10 +46,7 @@ impl<F: Float> Ord for HeapEntry<F> {
     fn cmp(&self, other: &Self) -> Ordering {
         // Max-heap by distance, then by index (higher index = "worse" = on top)
         // so that when we evict, we keep lower-indexed entries for tie-breaking.
-        self.dist_sq
-            .partial_cmp(&other.dist_sq)
-            .unwrap_or(Ordering::Equal)
-            .then(self.index.cmp(&other.index))
+        crate::total_cmp(&self.dist_sq, &other.dist_sq).then(self.index.cmp(&other.index))
     }
 }
 
@@ -84,11 +81,9 @@ impl<F: Float> KdTree<F> {
         let split_dim = depth % self.n_dims;
 
         // Sort by split dimension
-        indices.sort_by(|&a, &b| {
-            points[a].0[split_dim]
-                .partial_cmp(&points[b].0[split_dim])
-                .unwrap()
-        });
+        // total_cmp: NaN coordinates must not panic the build (#42).
+        indices
+            .sort_by(|&a, &b| crate::total_cmp(&points[a].0[split_dim], &points[b].0[split_dim]));
 
         let median = indices.len() / 2;
         let median_idx = indices[median];
@@ -130,7 +125,7 @@ impl<F: Float> KdTree<F> {
             .into_iter()
             .map(|e| (e.dist_sq.sqrt(), e.index))
             .collect();
-        result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+        result.sort_by(|a, b| crate::total_cmp(&a.0, &b.0).then(a.1.cmp(&b.1)));
         result.truncate(k);
         result
     }
@@ -265,6 +260,22 @@ mod tests {
         let tree = KdTree::build(&points, 1);
         let result = tree.query_k_nearest(&[0.5], 3);
         assert_eq!(result.len(), 3);
+    }
+
+    /// Regression for #42: `partial_cmp().unwrap()` in the build panicked on
+    /// NaN coordinates; `total_cmp` must not.
+    #[test]
+    fn test_kdtree_build_with_nan_does_not_panic() {
+        let points: Vec<(Vec<f64>, usize)> = vec![
+            (vec![0.0, 1.0], 0),
+            (vec![f64::NAN, 0.0], 1),
+            (vec![2.0, f64::NAN], 2),
+            (vec![3.0, 3.0], 3),
+        ];
+        let tree = KdTree::build(&points, 2);
+        let result = tree.query_k_nearest(&[3.0, 3.0], 2);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].1, 3);
     }
 
     #[test]

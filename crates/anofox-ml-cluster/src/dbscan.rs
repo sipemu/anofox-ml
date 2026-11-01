@@ -68,6 +68,16 @@ pub struct FittedDbscan<F: Float> {
     core_sample_indices: Vec<usize>,
     /// Number of features in the training data (for predict-time validation).
     n_features: usize,
+    /// Copy of each core sample (sklearn `components_`), one row per entry
+    /// of `core_sample_indices`.
+    #[serde(default)]
+    components: Array2<F>,
+    /// Cluster label of each core sample (parallel to `components`).
+    #[serde(default)]
+    core_labels: Vec<F>,
+    /// Neighbourhood radius used at fit time (needed by `predict`).
+    #[serde(default)]
+    eps: f64,
 }
 
 impl<F: Float> FittedDbscan<F> {
@@ -86,6 +96,12 @@ impl<F: Float> FittedDbscan<F> {
     /// Returns the indices of core samples in the training data.
     pub fn core_sample_indices(&self) -> &[usize] {
         &self.core_sample_indices
+    }
+
+    /// Returns a copy of each core sample (sklearn's `components_`), one row
+    /// per entry of [`core_sample_indices`](Self::core_sample_indices).
+    pub fn components(&self) -> &Array2<F> {
+        &self.components
     }
 }
 
@@ -120,6 +136,8 @@ impl<F: Float> FitUnsupervised<F> for Dbscan {
     type Fitted = FittedDbscan<F>;
 
     fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_std = crate::standard_layout(x);
+        let x: &Array2<F> = &x_std;
         let n_samples = x.nrows();
         let n_features = x.ncols();
 
@@ -219,22 +237,40 @@ impl<F: Float> FitUnsupervised<F> for Dbscan {
                 .collect(),
         );
 
+        let mut components = Array2::<F>::zeros((core_sample_indices.len(), n_features));
+        for (r, &i) in core_sample_indices.iter().enumerate() {
+            components.row_mut(r).assign(&x.row(i));
+        }
+        let core_labels: Vec<F> = core_sample_indices
+            .iter()
+            .map(|&i| float_labels[i])
+            .collect();
+
         Ok(FittedDbscan {
             labels: float_labels,
             n_clusters,
             core_sample_indices,
             n_features,
+            components,
+            core_labels,
+            eps: self.eps,
         })
     }
 }
 
 impl<F: Float> Predict<F> for FittedDbscan<F> {
-    /// For DBSCAN, prediction returns the training labels.
+    /// Label new points by their nearest core sample.
     ///
-    /// DBSCAN is a transductive algorithm and does not naturally generalize to
-    /// unseen data. This implementation validates the input shape and returns
-    /// the labels computed during fitting for inputs with the correct number of
-    /// rows and features. For new data, consider re-fitting the model.
+    /// sklearn's `DBSCAN` has no `predict`; this follows the common
+    /// "approximate predict" convention: a point gets the cluster label of
+    /// the nearest training core sample if that core sample is within `eps`
+    /// (i.e. the point would have been a border point of that cluster),
+    /// otherwise `-1` (noise). Returns one label per row of `x`.
+    ///
+    /// Note that predicting on the training data can differ from
+    /// [`labels`](FittedDbscan::labels) for border points reachable from
+    /// several clusters (fit assigns them to the first cluster that reaches
+    /// them, predict to the nearest core sample).
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -243,8 +279,37 @@ impl<F: Float> Predict<F> for FittedDbscan<F> {
                 x.ncols()
             )));
         }
-
-        Ok(self.labels.clone())
+        if self.components.nrows() != self.core_sample_indices.len()
+            || self.core_labels.len() != self.core_sample_indices.len()
+            || (self.eps <= 0.0 && !self.core_sample_indices.is_empty())
+        {
+            return Err(RustMlError::NotFitted(
+                "DBSCAN model has no stored core samples (serialized by an older version); refit"
+                    .into(),
+            ));
+        }
+        let eps = F::from_f64(self.eps).unwrap();
+        let noise = F::from_f64(-1.0).unwrap();
+        let mut out = Array1::<F>::from_elem(x.nrows(), noise);
+        for (i, row) in x.rows().into_iter().enumerate() {
+            let mut best = F::infinity();
+            let mut best_label = noise;
+            for (c, core) in self.components.rows().into_iter().enumerate() {
+                let d = row
+                    .iter()
+                    .zip(core.iter())
+                    .fold(F::zero(), |acc, (&a, &b)| acc + (a - b) * (a - b))
+                    .sqrt();
+                if d < best {
+                    best = d;
+                    best_label = self.core_labels[c];
+                }
+            }
+            if best <= eps {
+                out[i] = best_label;
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -418,6 +483,50 @@ mod tests {
             RustMlError::ShapeMismatch(_) => {}
             other => panic!("expected ShapeMismatch, got {other}"),
         }
+    }
+
+    /// Regression for #57: `predict` used to return the training labels
+    /// regardless of `x` (a 1-row input returned n_train labels).
+    #[test]
+    fn test_predict_labels_new_points() {
+        let x = make_dbscan_data();
+        let fitted = FitUnsupervised::<f64>::fit(&Dbscan::new(1.0, 3), &x).unwrap();
+        let labels = fitted.labels().clone();
+
+        let one = array![[0.05, 0.05]];
+        let p = fitted.predict(&one).unwrap();
+        assert_eq!(p.len(), 1);
+        assert_abs_diff_eq!(p[0], labels[0], epsilon = 1e-12);
+
+        let new = array![[10.05, 10.05], [20.1, 0.05], [100.0, 100.0], [5.0, 5.0]];
+        let p = fitted.predict(&new).unwrap();
+        assert_eq!(p.len(), new.nrows());
+        assert_abs_diff_eq!(p[0], labels[5], epsilon = 1e-12);
+        assert_abs_diff_eq!(p[1], labels[10], epsilon = 1e-12);
+        assert_abs_diff_eq!(p[2], -1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(p[3], -1.0, epsilon = 1e-12);
+
+        // Predicting on the training data reproduces the fit labels here
+        // (no ambiguous border points).
+        let p = fitted.predict(&x).unwrap();
+        assert_eq!(p, labels);
+        assert_eq!(
+            fitted.components().nrows(),
+            fitted.core_sample_indices().len()
+        );
+    }
+
+    #[test]
+    fn test_fortran_order_input() {
+        use ndarray::ShapeBuilder;
+        let x = make_dbscan_data();
+        let v: Vec<f64> = x.t().iter().copied().collect();
+        let xf = Array2::from_shape_vec((x.nrows(), x.ncols()).f(), v).unwrap();
+        assert!(!xf.is_standard_layout());
+        let a = FitUnsupervised::<f64>::fit(&Dbscan::new(1.0, 3), &x).unwrap();
+        let b = FitUnsupervised::<f64>::fit(&Dbscan::new(1.0, 3), &xf).unwrap();
+        assert_eq!(a.labels(), b.labels());
+        assert_eq!(b.predict(&xf).unwrap(), a.predict(&x).unwrap());
     }
 
     #[test]

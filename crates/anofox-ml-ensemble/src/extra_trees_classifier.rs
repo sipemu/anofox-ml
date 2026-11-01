@@ -1,19 +1,24 @@
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::node::TreeNode;
-use anofox_ml_trees::split::{
-    compute_impurity, count_classes, find_random_split, leaf_value, SplitCriterion,
-};
+use anofox_ml_trees::split::SplitCriterion;
+use anofox_ml_trees::MaxFeatures;
 use ndarray::{Array1, Array2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
+
+use crate::forest_common::{
+    argmax_first, build_extra_tree, class_index, resolve_max_features, sorted_classes, tree_input,
+    ExtraTreeParams,
+};
 
 /// Extra-Trees (Extremely Randomized Trees) classifier parameters (unfitted state).
 ///
 /// Trains an ensemble of decision trees using random split thresholds instead of
 /// the best possible split at each node. Unlike Random Forests, Extra-Trees does
 /// **not** use bootstrap sampling — each tree is trained on the full dataset.
-/// However, each tree still considers a random subset of features at each split.
+/// At every split a fresh random subset of `max_features` features is drawn
+/// (default `MaxFeatures::Sqrt`, like `sklearn.ensemble.ExtraTreesClassifier`).
 ///
 /// The randomization in split thresholds reduces variance further than Random
 /// Forests and can lead to smoother decision boundaries.
@@ -27,8 +32,9 @@ pub struct ExtraTreesClassifier {
     pub min_samples_split: usize,
     /// Minimum samples required in a leaf node.
     pub min_samples_leaf: usize,
-    /// Number of features to consider per tree. If `None`, all features are used.
-    pub max_features: Option<usize>,
+    /// Number of features to consider at each split. `None` = all features.
+    /// Default: `Some(MaxFeatures::Sqrt)`.
+    pub max_features: Option<MaxFeatures>,
     /// Random seed for reproducibility.
     pub seed: u64,
 }
@@ -41,7 +47,7 @@ impl ExtraTreesClassifier {
             max_depth: None,
             min_samples_split: 2,
             min_samples_leaf: 1,
-            max_features: None,
+            max_features: Some(MaxFeatures::Sqrt),
             seed: 0,
         }
     }
@@ -64,8 +70,8 @@ impl ExtraTreesClassifier {
         self
     }
 
-    /// Set the number of features to consider per tree.
-    pub fn with_max_features(mut self, max_features: Option<usize>) -> Self {
+    /// Set the number of features to consider at each split (`None` = all).
+    pub fn with_max_features(mut self, max_features: Option<MaxFeatures>) -> Self {
         self.max_features = max_features;
         self
     }
@@ -83,14 +89,14 @@ impl Default for ExtraTreesClassifier {
     }
 }
 
-/// A single tree in the Extra-Trees ensemble together with its selected feature indices.
+/// A single tree in the Extra-Trees ensemble together with the feature indices it reads.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound(deserialize = "F: serde::de::DeserializeOwned"))]
 struct ExtraForestTree<F: Float> {
     tree: TreeNode<F>,
-    /// Indices of the features this tree was trained on (relative to the
-    /// original feature matrix). When `max_features` is `None` this contains
-    /// `0..n_features`.
+    /// Indices of the input features this tree was trained on (`0..n_features`
+    /// for trees built by this version; older serialized models may hold a
+    /// per-tree subset).
     feature_indices: Vec<usize>,
     /// Number of features the tree was trained on.
     n_features_tree: usize,
@@ -102,6 +108,9 @@ struct ExtraForestTree<F: Float> {
 pub struct FittedExtraTreesClassifier<F: Float> {
     trees: Vec<ExtraForestTree<F>>,
     n_features: usize,
+    /// Sorted training class labels.
+    #[serde(default)]
+    classes: Vec<F>,
 }
 
 impl<F: Float> Fit<F> for ExtraTreesClassifier {
@@ -125,113 +134,58 @@ impl<F: Float> Fit<F> for ExtraTreesClassifier {
         }
 
         let n_features = x.ncols();
+        let max_features_k = resolve_max_features(self.max_features, n_features)?;
 
-        if let Some(k) = self.max_features {
-            if k == 0 || k > n_features {
-                return Err(RustMlError::InvalidParameter(format!(
-                    "max_features={k} is invalid for data with {n_features} features"
-                )));
-            }
-        }
-
-        let mut rng = StdRng::seed_from_u64(self.seed);
-
-        // Pre-generate feature indices and per-tree seeds for determinism.
+        // Pre-generate per-tree seeds sequentially for determinism under rayon.
         // ExtraTrees does NOT use bootstrap — each tree trains on the full dataset.
-        let tree_plans: Vec<(Vec<usize>, u64)> = (0..self.n_estimators)
-            .map(|_| {
-                let feature_indices = select_features(n_features, self.max_features, &mut rng);
-                let tree_seed: u64 = rng.gen();
-                (feature_indices, tree_seed)
-            })
-            .collect();
+        let mut rng = StdRng::seed_from_u64(self.seed);
+        let tree_seeds: Vec<u64> = (0..self.n_estimators).map(|_| rng.gen()).collect();
 
-        let max_depth = self.max_depth;
-        let min_samples_split = self.min_samples_split;
-        let min_samples_leaf = self.min_samples_leaf;
+        let params = ExtraTreeParams {
+            max_depth: self.max_depth,
+            min_samples_split: self.min_samples_split,
+            min_samples_leaf: self.min_samples_leaf,
+            criterion: SplitCriterion::Gini,
+            max_features_k,
+            n_features,
+        };
+        let indices: Vec<usize> = (0..x.nrows()).collect();
 
         // Train trees in parallel
-        let trees: Vec<ExtraForestTree<F>> = tree_plans
+        let trees: Vec<ExtraForestTree<F>> = tree_seeds
             .into_par_iter()
-            .map(|(feature_indices, tree_seed)| {
-                // Build sub-matrix with only selected features (all rows — no bootstrap)
-                let x_sub = build_sub_matrix_cols(x, &feature_indices);
-                let n_features_tree = feature_indices.len();
-                let indices: Vec<usize> = (0..x.nrows()).collect();
-
-                let tree = build_extra_tree(
-                    &x_sub,
-                    y,
-                    &indices,
-                    0,
-                    max_depth,
-                    min_samples_split,
-                    min_samples_leaf,
-                    SplitCriterion::Gini,
-                    tree_seed,
-                );
-
-                ExtraForestTree {
-                    tree,
-                    feature_indices,
-                    n_features_tree,
-                }
+            .map(|tree_seed| ExtraForestTree {
+                tree: build_extra_tree(x, y, &indices, 0, &params, tree_seed),
+                feature_indices: (0..n_features).collect(),
+                n_features_tree: n_features,
             })
             .collect();
 
-        Ok(FittedExtraTreesClassifier { trees, n_features })
+        Ok(FittedExtraTreesClassifier {
+            trees,
+            n_features,
+            classes: sorted_classes(y),
+        })
     }
 }
 
 impl<F: Float> Predict<F> for FittedExtraTreesClassifier<F> {
+    /// Predict the class with the highest mean leaf probability across trees
+    /// (sklearn semantics). Ties go to the smallest class label.
     fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        if x.ncols() != self.n_features {
-            return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} features, got {}",
-                self.n_features,
-                x.ncols()
-            )));
-        }
-
-        let n_samples = x.nrows();
-        let n_trees = self.trees.len();
-
-        // Collect all tree predictions in parallel
-        let all_preds: Vec<Array1<F>> = self
-            .trees
-            .par_iter()
-            .map(|forest_tree| {
-                let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
-                let preds: Vec<F> = sub_x
-                    .rows()
-                    .into_iter()
-                    .map(|row| forest_tree.tree.predict_one(row.as_slice().unwrap()))
-                    .collect();
-                Array1::from_vec(preds)
-            })
-            .collect();
-
-        // Aggregate votes per sample (majority vote)
-        let mut predictions = Vec::with_capacity(n_samples);
-        let mut votes = Vec::with_capacity(n_trees);
-        for i in 0..n_samples {
-            votes.clear();
-            for tree_pred in &all_preds {
-                votes.push(tree_pred[i]);
-            }
-            predictions.push(majority_vote(&votes));
-        }
-
-        Ok(Array1::from_vec(predictions))
+        let proba = self.proba_matrix(x)?;
+        let classes = self.classes();
+        Ok(Array1::from_iter(
+            proba
+                .rows()
+                .into_iter()
+                .map(|row| classes[argmax_first(row.iter().copied())]),
+        ))
     }
 }
 
 impl<F: Float> FittedExtraTreesClassifier<F> {
     /// Feature importances averaged across all trees and normalized to sum to 1.
-    ///
-    /// Each tree's importances are computed in its own (possibly reduced)
-    /// feature space, then mapped back to the original feature indices and
-    /// averaged.
     pub fn feature_importances(&self) -> Array1<F> {
         let mut importances = vec![F::zero(); self.n_features];
         let n_trees = F::from_usize(self.trees.len()).unwrap();
@@ -259,11 +213,21 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
         }
     }
 
-    /// Predict class probabilities for each sample.
-    ///
-    /// Returns a vector of vectors, where each inner vector contains
-    /// `(class_label, probability)` pairs sorted by class label.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Vec<Vec<(F, F)>>> {
+    /// Sorted class labels seen during training.
+    pub fn classes(&self) -> Vec<F> {
+        if !self.classes.is_empty() {
+            return self.classes.clone();
+        }
+        // Models serialized before `classes` was stored: recover from leaves.
+        let mut all = Vec::new();
+        for t in &self.trees {
+            collect_leaf_classes(&t.tree, &mut all);
+        }
+        sorted_classes(&Array1::from_vec(all))
+    }
+
+    /// Mean leaf class-probabilities, shape `(n_samples, n_classes)`.
+    fn proba_matrix(&self, x: &Array2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -271,49 +235,64 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
                 x.ncols()
             )));
         }
-
+        let classes = self.classes();
         let n_samples = x.nrows();
-        let n_trees = self.trees.len();
-        let n_trees_f = F::from_usize(n_trees).unwrap();
+        let n_classes = classes.len();
+        let w = F::one() / F::from_usize(self.trees.len()).unwrap();
 
-        // Collect all tree predictions in parallel
-        let all_preds: Vec<Array1<F>> = self
+        let per_tree: Vec<Array2<F>> = self
             .trees
             .par_iter()
             .map(|forest_tree| {
-                let sub_x = build_sub_matrix_cols(x, &forest_tree.feature_indices);
-                let preds: Vec<F> = sub_x
-                    .rows()
-                    .into_iter()
-                    .map(|row| forest_tree.tree.predict_one(row.as_slice().unwrap()))
-                    .collect();
-                Array1::from_vec(preds)
+                let sub_x = tree_input(x, &forest_tree.feature_indices);
+                let mut acc = Array2::<F>::zeros((n_samples, n_classes));
+                for (i, row) in sub_x.rows().into_iter().enumerate() {
+                    match forest_tree.tree.leaf_for_view(row) {
+                        TreeNode::Leaf {
+                            class_counts: Some(counts),
+                            ..
+                        } => {
+                            let total: usize = counts.iter().map(|&(_, c)| c).sum();
+                            let total_f = F::from_usize(total.max(1)).unwrap();
+                            for &(label, c) in counts {
+                                if let Some(ci) = class_index(&classes, label) {
+                                    acc[[i, ci]] += w * F::from_usize(c).unwrap() / total_f;
+                                }
+                            }
+                        }
+                        TreeNode::Leaf { value, .. } => {
+                            if let Some(ci) = class_index(&classes, *value) {
+                                acc[[i, ci]] += w;
+                            }
+                        }
+                        TreeNode::Split { .. } => unreachable!(),
+                    }
+                }
+                acc
             })
             .collect();
 
-        // For each sample, count votes per class and convert to probabilities
-        let mut result = Vec::with_capacity(n_samples);
-        for i in 0..n_samples {
-            let mut class_votes: std::collections::HashMap<u64, (F, usize)> =
-                std::collections::HashMap::new();
-            for tree_pred in &all_preds {
-                let v = tree_pred[i];
-                let key = v.to_f64().unwrap().to_bits();
-                class_votes
-                    .entry(key)
-                    .and_modify(|e| e.1 += 1)
-                    .or_insert((v, 1));
-            }
-
-            let mut probs: Vec<(F, F)> = class_votes
-                .into_values()
-                .map(|(class, count)| (class, F::from_usize(count).unwrap() / n_trees_f))
-                .collect();
-            probs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            result.push(probs);
+        // Reduce in tree order for a deterministic floating-point sum.
+        let mut proba = Array2::<F>::zeros((n_samples, n_classes));
+        for p in &per_tree {
+            proba += p;
         }
+        Ok(proba)
+    }
 
-        Ok(result)
+    /// Predict class probabilities for each sample (mean leaf probabilities).
+    ///
+    /// Returns a vector of vectors, where each inner vector contains
+    /// `(class_label, probability)` pairs for every training class, sorted by
+    /// class label.
+    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Vec<Vec<(F, F)>>> {
+        let proba = self.proba_matrix(x)?;
+        let classes = self.classes();
+        Ok(proba
+            .rows()
+            .into_iter()
+            .map(|row| classes.iter().copied().zip(row.iter().copied()).collect())
+            .collect())
     }
 
     /// Number of trees in the ensemble.
@@ -322,88 +301,17 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tree-building with random splits
-// ---------------------------------------------------------------------------
-
-/// Bundled parameters for recursive extra-tree building.
-#[allow(clippy::too_many_arguments)]
-fn build_extra_tree<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
-    indices: &[usize],
-    depth: usize,
-    max_depth: Option<usize>,
-    min_samples_split: usize,
-    min_samples_leaf: usize,
-    criterion: SplitCriterion,
-    seed: u64,
-) -> TreeNode<F> {
-    let n_samples = indices.len();
-    let impurity = compute_impurity(y, indices, criterion);
-
-    // Check stopping criteria
-    let should_stop = n_samples < min_samples_split
-        || max_depth.is_some_and(|d| depth >= d)
-        || impurity < F::from_f64(1e-15).unwrap();
-
-    if should_stop {
-        return make_leaf(y, indices, criterion);
-    }
-
-    // Use a depth-dependent seed so left/right children get different randomness
-    let split_seed = seed
-        .wrapping_add(depth as u64)
-        .wrapping_mul(0x517CC1B727220A95);
-
-    match find_random_split(x, y, indices, criterion, min_samples_leaf, split_seed) {
-        Some(split) => {
-            let left = build_extra_tree(
-                x,
-                y,
-                &split.left_indices,
-                depth + 1,
-                max_depth,
-                min_samples_split,
-                min_samples_leaf,
-                criterion,
-                seed.wrapping_add(1),
-            );
-            let right = build_extra_tree(
-                x,
-                y,
-                &split.right_indices,
-                depth + 1,
-                max_depth,
-                min_samples_split,
-                min_samples_leaf,
-                criterion,
-                seed.wrapping_add(2),
-            );
-
-            TreeNode::Split {
-                feature_index: split.feature_index,
-                threshold: split.threshold,
-                left: Box::new(left),
-                right: Box::new(right),
-                n_samples,
-                impurity,
-            }
+fn collect_leaf_classes<F: Float>(node: &TreeNode<F>, out: &mut Vec<F>) {
+    match node {
+        TreeNode::Leaf {
+            class_counts: Some(counts),
+            ..
+        } => out.extend(counts.iter().map(|&(c, _)| c)),
+        TreeNode::Leaf { value, .. } => out.push(*value),
+        TreeNode::Split { left, right, .. } => {
+            collect_leaf_classes(left, out);
+            collect_leaf_classes(right, out);
         }
-        None => make_leaf(y, indices, criterion),
-    }
-}
-
-fn make_leaf<F: Float>(y: &Array1<F>, indices: &[usize], criterion: SplitCriterion) -> TreeNode<F> {
-    let value = leaf_value(y, indices, criterion);
-    let class_counts = match criterion {
-        SplitCriterion::Gini | SplitCriterion::Entropy => Some(count_classes(y, indices)),
-        SplitCriterion::Mse => None,
-    };
-    TreeNode::Leaf {
-        value,
-        n_samples: indices.len(),
-        class_counts,
     }
 }
 
@@ -412,61 +320,6 @@ fn tree_n_samples<F: Float>(node: &TreeNode<F>) -> usize {
         TreeNode::Leaf { n_samples, .. } => *n_samples,
         TreeNode::Split { n_samples, .. } => *n_samples,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helper functions (same as in random_forest_classifier)
-// ---------------------------------------------------------------------------
-
-/// Select `k` distinct feature indices from `0..n_features` without replacement.
-/// If `max_features` is `None`, returns all feature indices.
-fn select_features(n_features: usize, max_features: Option<usize>, rng: &mut StdRng) -> Vec<usize> {
-    match max_features {
-        None => (0..n_features).collect(),
-        Some(k) => {
-            // Fisher-Yates partial shuffle
-            let mut indices: Vec<usize> = (0..n_features).collect();
-            for i in 0..k {
-                let j = rng.gen_range(i..n_features);
-                indices.swap(i, j);
-            }
-            indices.truncate(k);
-            indices.sort_unstable();
-            indices
-        }
-    }
-}
-
-/// Build a sub-matrix selecting all rows but only specific columns from `x`.
-/// Produces a guaranteed C-contiguous (standard layout) array so that
-/// `row.as_slice()` works in downstream predict calls.
-fn build_sub_matrix_cols<F: Float>(x: &Array2<F>, col_indices: &[usize]) -> Array2<F> {
-    let n_rows = x.nrows();
-    let n_cols = col_indices.len();
-    let mut data = Vec::with_capacity(n_rows * n_cols);
-    for i in 0..n_rows {
-        for &ci in col_indices {
-            data.push(x[[i, ci]]);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data).expect("shape matches data length")
-}
-
-/// Return the class that appears most frequently in `votes`.
-/// Uses HashMap with f64 bit representation for O(1) lookup per vote.
-#[inline]
-fn majority_vote<F: Float>(votes: &[F]) -> F {
-    use std::collections::HashMap;
-    let mut counts: HashMap<u64, (F, usize)> = HashMap::new();
-    for &v in votes {
-        let key = v.to_f64().unwrap().to_bits();
-        counts.entry(key).and_modify(|e| e.1 += 1).or_insert((v, 1));
-    }
-    counts
-        .into_values()
-        .max_by_key(|&(_, count)| count)
-        .unwrap()
-        .0
 }
 
 #[cfg(test)]
@@ -537,7 +390,7 @@ mod tests {
 
         let et = ExtraTreesClassifier {
             n_estimators: 30,
-            max_features: Some(2),
+            max_features: Some(MaxFeatures::Fixed(2)),
             seed: 99,
             ..Default::default()
         };
@@ -650,7 +503,7 @@ mod tests {
 
         let et = ExtraTreesClassifier {
             n_estimators: 5,
-            max_features: Some(5),
+            max_features: Some(MaxFeatures::Fixed(5)),
             seed: 0,
             ..Default::default()
         };

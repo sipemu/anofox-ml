@@ -91,7 +91,7 @@ fn column_median<F: Float>(values: &[F]) -> Option<F> {
     if valid.is_empty() {
         return None;
     }
-    valid.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    valid.sort_by(crate::quantile::total_cmp);
     let n = valid.len();
     if n % 2 == 1 {
         Some(valid[n / 2])
@@ -121,7 +121,10 @@ fn column_most_frequent<F: Float>(values: &[F]) -> Option<F> {
     // Pick highest count, break ties by smallest value.
     counts
         .values()
-        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.partial_cmp(&a.0).unwrap()))
+        .max_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| crate::quantile::total_cmp(&b.0, &a.0))
+        })
         .map(|&(v, _)| v)
 }
 

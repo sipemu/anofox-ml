@@ -49,6 +49,7 @@ pub mod bagging_regressor;
 pub mod calibrated_classifier;
 pub mod extra_trees_classifier;
 pub mod extra_trees_regressor;
+mod forest_common;
 pub mod gradient_boosting_classifier;
 pub mod gradient_boosting_regressor;
 pub mod hist_gradient_boosting;

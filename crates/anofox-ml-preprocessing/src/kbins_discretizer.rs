@@ -1,3 +1,4 @@
+use crate::quantile::{percentile_sorted, sorted_non_nan};
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 use ndarray::Array2;
 
@@ -79,23 +80,6 @@ pub struct FittedKBinsDiscretizer<F: Float> {
     encode: EncodeStrategy,
 }
 
-/// Compute a percentile from a sorted slice using linear interpolation.
-fn percentile_sorted<F: Float>(sorted: &[F], p: f64) -> F {
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let idx = p * (n - 1) as f64;
-    let lo = idx.floor() as usize;
-    let hi = idx.ceil().min((n - 1) as f64) as usize;
-    if lo == hi {
-        sorted[lo]
-    } else {
-        let frac = F::from_f64(idx - lo as f64).unwrap();
-        sorted[lo] * (F::one() - frac) + sorted[hi] * frac
-    }
-}
-
 impl<F: Float> FitUnsupervised<F> for KBinsDiscretizer {
     type Fitted = FittedKBinsDiscretizer<F>;
 
@@ -113,8 +97,14 @@ impl<F: Float> FitUnsupervised<F> for KBinsDiscretizer {
         let mut bin_edges = Vec::with_capacity(ncols);
 
         for j in 0..ncols {
-            let mut col: Vec<F> = x.column(j).to_vec();
-            col.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            // NaNs are ignored when computing the bin edges; at transform
+            // time a NaN input yields NaN (ordinal) / an all-zero block (one-hot).
+            let col = sorted_non_nan(x.column(j).iter().copied());
+            if col.is_empty() {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "feature {j} contains only NaN values; cannot compute bin edges"
+                )));
+            }
 
             let edges = match self.strategy {
                 BinStrategy::Uniform => {
@@ -194,7 +184,12 @@ impl<F: Float> Transform<F> for FittedKBinsDiscretizer<F> {
                 let mut result = Array2::<F>::zeros(x.raw_dim());
                 for i in 0..x.nrows() {
                     for j in 0..x.ncols() {
-                        let bin = find_bin(x[[i, j]], &self.bin_edges[j], self.n_bins);
+                        let v = x[[i, j]];
+                        if v.is_nan() {
+                            result[[i, j]] = F::nan();
+                            continue;
+                        }
+                        let bin = find_bin(v, &self.bin_edges[j], self.n_bins);
                         result[[i, j]] = F::from_usize(bin).unwrap();
                     }
                 }
@@ -205,7 +200,11 @@ impl<F: Float> Transform<F> for FittedKBinsDiscretizer<F> {
                 let mut result = Array2::<F>::zeros((x.nrows(), out_cols));
                 for i in 0..x.nrows() {
                     for j in 0..x.ncols() {
-                        let bin = find_bin(x[[i, j]], &self.bin_edges[j], self.n_bins);
+                        let v = x[[i, j]];
+                        if v.is_nan() {
+                            continue;
+                        }
+                        let bin = find_bin(v, &self.bin_edges[j], self.n_bins);
                         let col_offset = j * self.n_bins + bin;
                         result[[i, col_offset]] = F::one();
                     }
@@ -233,6 +232,32 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn test_nan_ignored_at_fit_and_passed_through() {
+        // Regression for #42: NaN used to panic in `partial_cmp().unwrap()`.
+        let x = array![[0.0], [f64::NAN], [1.0], [2.0], [3.0], [4.0]];
+        for strategy in [BinStrategy::Uniform, BinStrategy::Quantile] {
+            let kbd = KBinsDiscretizer::new().n_bins(4).strategy(strategy);
+            let fitted = FitUnsupervised::<f64>::fit(&kbd, &x).unwrap();
+            assert_eq!(fitted.bin_edges()[0], vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+            let t = fitted.transform(&x).unwrap();
+            assert!(t[[1, 0]].is_nan());
+            assert_abs_diff_eq!(t[[3, 0]], 2.0, epsilon = 1e-12);
+
+            let onehot = KBinsDiscretizer::new()
+                .n_bins(4)
+                .strategy(strategy)
+                .encode(EncodeStrategy::Onehot);
+            let fitted = FitUnsupervised::<f64>::fit(&onehot, &x).unwrap();
+            let t = fitted.transform(&x).unwrap();
+            assert_eq!(t.row(1).sum(), 0.0, "NaN row should be all zeros");
+            assert_eq!(t.row(0).sum(), 1.0);
+        }
+        // An all-NaN column is an error, not a panic.
+        let all_nan = array![[f64::NAN], [f64::NAN]];
+        assert!(FitUnsupervised::<f64>::fit(&KBinsDiscretizer::new(), &all_nan).is_err());
+    }
 
     #[test]
     fn test_uniform_ordinal() {

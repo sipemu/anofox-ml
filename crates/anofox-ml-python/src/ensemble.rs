@@ -24,11 +24,17 @@ impl RandomForestClassifier {
         max_features: Option<usize>,
         seed: u64,
     ) -> Self {
+        // `max_features=None` keeps the estimator default (sqrt(n_features)
+        // per split for the classifier, all features for the regressor, as in
+        // sklearn); an integer is a fixed per-split feature count.
+        let mut inner = anofox_ml_ensemble::RandomForestClassifier::new(n_estimators)
+            .with_max_depth(max_depth)
+            .with_seed(seed);
+        if let Some(k) = max_features {
+            inner = inner.with_max_features(Some(anofox_ml_trees::MaxFeatures::Fixed(k)));
+        }
         Self {
-            inner: anofox_ml_ensemble::RandomForestClassifier::new(n_estimators)
-                .with_max_depth(max_depth)
-                .with_max_features(max_features)
-                .with_seed(seed),
+            inner,
             fitted: None,
         }
     }
@@ -105,11 +111,17 @@ impl RandomForestRegressor {
         max_features: Option<usize>,
         seed: u64,
     ) -> Self {
+        // `max_features=None` keeps the estimator default (sqrt(n_features)
+        // per split for the classifier, all features for the regressor, as in
+        // sklearn); an integer is a fixed per-split feature count.
+        let mut inner = anofox_ml_ensemble::RandomForestRegressor::new(n_estimators)
+            .with_max_depth(max_depth)
+            .with_seed(seed);
+        if let Some(k) = max_features {
+            inner = inner.with_max_features(Some(anofox_ml_trees::MaxFeatures::Fixed(k)));
+        }
         Self {
-            inner: anofox_ml_ensemble::RandomForestRegressor::new(n_estimators)
-                .with_max_depth(max_depth)
-                .with_max_features(max_features)
-                .with_seed(seed),
+            inner,
             fitted: None,
         }
     }

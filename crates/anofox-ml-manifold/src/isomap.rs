@@ -3,9 +3,17 @@
 //! Mirrors `sklearn.manifold.Isomap` with a brute-force k-NN graph and
 //! Floyd-Warshall all-pairs shortest paths:
 //!
-//! 1. Build the k-nearest-neighbor graph G(V, E).
+//! 1. Build the k-nearest-neighbor graph G(V, E), symmetrised as the
+//!    **union** of the directed k-NN relations (edge i–j if j is among i's
+//!    k nearest neighbours *or* i is among j's), like sklearn's
+//!    `kneighbors_graph` + `shortest_path(directed=False)`.
 //! 2. Compute geodesic distances d_g(i, j) = shortest-path(i, j) in G.
 //! 3. Apply classical MDS to the geodesic distance matrix.
+//!
+//! If the k-NN graph is disconnected, geodesic distances between components
+//! are undefined and `fit` returns [`RustMlError::InvalidParameter`] asking
+//! for a larger `n_neighbors` (instead of silently treating unreachable pairs
+//! as distance 0, which collapsed unrelated points onto each other).
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use faer::linalg::solvers::SelfAdjointEigen;
@@ -71,13 +79,13 @@ impl FitUnsupervised<f64> for Isomap {
             }
         }
 
-        // 2. Build k-NN graph: keep d(i,j) only if j is in i's k-NN OR vice versa
-        //    (mutual k-NN), and set others to INFINITY.
+        // 2. Build k-NN graph: keep d(i,j) if j is in i's k-NN OR i is in j's
+        //    k-NN (union, as sklearn), and set others to INFINITY.
         let mut g = vec![vec![f64::INFINITY; n]; n];
         for i in 0..n {
             let mut others: Vec<(usize, f64)> =
                 (0..n).filter(|&j| j != i).map(|j| (j, pd[i][j])).collect();
-            others.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            others.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
             for &(j, d) in others.iter().take(k) {
                 g[i][j] = d;
             }
@@ -108,15 +116,34 @@ impl FitUnsupervised<f64> for Isomap {
             }
         }
 
+        // Disconnected k-NN graph: geodesics between components are infinite.
+        if d.iter().any(|row| row.iter().any(|v| !v.is_finite())) {
+            // Count connected components for a helpful message.
+            let mut comp = vec![usize::MAX; n];
+            let mut n_comp = 0;
+            for s0 in 0..n {
+                if comp[s0] != usize::MAX {
+                    continue;
+                }
+                for j in 0..n {
+                    if d[s0][j].is_finite() {
+                        comp[j] = n_comp;
+                    }
+                }
+                n_comp += 1;
+            }
+            return Err(RustMlError::InvalidParameter(format!(
+                "Isomap: the k-nearest-neighbour graph (n_neighbors = {k}) has {n_comp} \
+                 connected components, so geodesic distances between them are undefined; \
+                 increase n_neighbors"
+            )));
+        }
+
         // 4. Classical MDS on the geodesic distance matrix.
         let mut d2 = vec![vec![0.0_f64; n]; n];
         for i in 0..n {
             for j in 0..n {
-                d2[i][j] = if d[i][j].is_finite() {
-                    d[i][j] * d[i][j]
-                } else {
-                    0.0
-                };
+                d2[i][j] = d[i][j] * d[i][j];
             }
         }
         let mut row_mean = vec![0.0_f64; n];
@@ -210,5 +237,37 @@ mod tests {
         for v in fitted.embedding.iter() {
             assert!(v.is_finite());
         }
+    }
+    /// Regression for #57: two far-apart groups with a small `n_neighbors`
+    /// give a disconnected k-NN graph. This used to "succeed" with the
+    /// infinite geodesics set to 0; it must now be an error.
+    #[test]
+    fn test_isomap_disconnected_graph_errors() {
+        let x = array![
+            [0.0_f64, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [100.0, 0.0],
+            [100.1, 0.0],
+            [100.2, 0.0],
+        ];
+        match Isomap::new(1, 2).fit(&x) {
+            Err(RustMlError::InvalidParameter(msg)) => {
+                assert!(msg.contains("2 connected components"), "{msg}");
+                assert!(msg.contains("n_neighbors"), "{msg}");
+            }
+            other => panic!("expected InvalidParameter, got {other:?}"),
+        }
+        // Enough neighbours to connect the groups -> fine.
+        let f = Isomap::new(1, 3).fit(&x).unwrap();
+        assert!(f.embedding.iter().all(|v| v.is_finite()));
+    }
+
+    /// The graph is the union of directed k-NN relations: the outlier's
+    /// nearest neighbour does not list it, but the edge still exists.
+    #[test]
+    fn test_isomap_union_knn_graph_connects_outlier() {
+        let x = array![[0.0_f64], [1.0], [2.0], [3.0], [10.0]];
+        assert!(Isomap::new(1, 1).fit(&x).is_ok());
     }
 }

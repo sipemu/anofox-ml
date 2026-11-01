@@ -1,4 +1,5 @@
 use anofox_ml_core::Float;
+use ndarray::ArrayView1;
 
 /// A node in a decision tree.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -42,6 +43,40 @@ impl<F: Float> TreeNode<F> {
                     left.predict_one(features)
                 } else {
                     right.predict_one(features)
+                }
+            }
+        }
+    }
+
+    /// Predict a single sample given as an ndarray view of any layout/stride
+    /// (e.g. a row of a Fortran-order matrix).
+    #[inline]
+    pub fn predict_view(&self, features: ArrayView1<'_, F>) -> F {
+        match self.leaf_for_view(features) {
+            TreeNode::Leaf { value, .. } => *value,
+            TreeNode::Split { .. } => unreachable!("leaf_for_view always returns a leaf"),
+        }
+    }
+
+    /// Return the leaf node reached by `features` (any layout/stride).
+    #[inline]
+    pub fn leaf_for_view(&self, features: ArrayView1<'_, F>) -> &TreeNode<F> {
+        let mut node = self;
+        loop {
+            match node {
+                TreeNode::Leaf { .. } => return node,
+                TreeNode::Split {
+                    feature_index,
+                    threshold,
+                    left,
+                    right,
+                    ..
+                } => {
+                    node = if features[*feature_index] <= *threshold {
+                        left
+                    } else {
+                        right
+                    };
                 }
             }
         }

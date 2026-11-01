@@ -126,6 +126,7 @@ impl<F: Float> Fit<F> for AdaBoostClassifier {
             max_features: None,
             sample_weight: None,
             class_weight: None,
+            seed: 0,
         };
 
         let mut rng = StdRng::seed_from_u64(self.seed);

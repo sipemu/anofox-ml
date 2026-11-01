@@ -80,6 +80,66 @@ fn log_det_chol(a: &Array2<f64>) -> Result<f64> {
     Ok(2.0 * s)
 }
 
+/// Solve the generalised symmetric eigenproblem `Σ_b v = λ Σ_w v` via
+/// Cholesky whitening (`Σ_w = L Lᵀ`): eigendecompose the symmetric matrix
+/// `L⁻¹ Σ_b L⁻ᵀ = U Λ Uᵀ` and back-transform `V = L⁻ᵀ U`, which yields
+/// `Vᵀ Σ_w V = I` (the same normalisation as `scipy.linalg.eigh(Sb, Sw)`).
+///
+/// Returns the top `n_proj` eigenvectors (descending eigenvalue order) and
+/// their explained-variance ratios `λ_i / Σ_j λ_j`.
+fn lda_projection(
+    sw: &Mat<f64>,
+    sb: &Mat<f64>,
+    n_proj: usize,
+) -> Result<(Array2<f64>, Array1<f64>)> {
+    use faer::linalg::triangular_solve::{
+        solve_lower_triangular_in_place, solve_upper_triangular_in_place,
+    };
+    use faer::Par;
+
+    let d = sw.nrows();
+    let llt = faer::linalg::solvers::Llt::new(sw.as_ref(), Side::Lower)
+        .map_err(|e| RustMlError::InvalidParameter(format!("Σ_w Cholesky failed: {e:?}")))?;
+    let lower = llt.L();
+
+    // A = L⁻¹ Σ_b.
+    let mut a = sb.clone();
+    solve_lower_triangular_in_place(lower, a.as_mut(), Par::Seq);
+    // B = L⁻¹ Aᵀ = L⁻¹ Σ_b L⁻ᵀ (Σ_b symmetric ⇒ Aᵀ = Σ_b L⁻ᵀ).
+    let mut b = a.transpose().to_owned();
+    solve_lower_triangular_in_place(lower, b.as_mut(), Par::Seq);
+    // Symmetrise to wash out round-off before the self-adjoint solver.
+    let b = Mat::from_fn(d, d, |i, j| 0.5 * (b[(i, j)] + b[(j, i)]));
+
+    let eig = SelfAdjointEigen::new(b.as_ref(), Side::Lower)
+        .map_err(|e| RustMlError::InvalidParameter(format!("eigen failed: {e:?}")))?;
+    let evals = eig.S().column_vector();
+    let u = eig.U();
+
+    // Descending eigenvalue order.
+    let mut order: Vec<usize> = (0..d).collect();
+    order.sort_by(|&i, &j| {
+        evals[j]
+            .partial_cmp(&evals[i])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let total: f64 = (0..d).map(|i| evals[i]).sum();
+
+    // V = L⁻ᵀ U for the retained columns.
+    let mut v = Mat::from_fn(d, n_proj, |i, c| u[(i, order[c])]);
+    solve_upper_triangular_in_place(lower.transpose(), v.as_mut(), Par::Seq);
+
+    let scalings = Array2::from_shape_fn((d, n_proj), |(i, c)| v[(i, c)]);
+    let evr = Array1::from_shape_fn(n_proj, |c| {
+        if total > 0.0 {
+            evals[order[c]] / total
+        } else {
+            0.0
+        }
+    });
+    Ok((scalings, evr))
+}
+
 // ---------------------------------------------------------------------------
 // LinearDiscriminantAnalysis (LDA)
 // ---------------------------------------------------------------------------
@@ -120,8 +180,16 @@ pub struct FittedLinearDiscriminantAnalysis {
     pub coef: Vec<Array1<f64>>, // sigma_inv @ mu_k
     pub intercept: Vec<f64>,    // -0.5 * mu_k^T sigma_inv mu_k + log(pi_k)
     /// Projection matrix for dimensionality reduction; columns are the
-    /// generalised eigenvectors of `Σ_b v = λ Σ_w v`. Shape (d, n_classes-1).
+    /// generalised eigenvectors of `Σ_b v = λ Σ_w v` in descending eigenvalue
+    /// order, normalised so that `Vᵀ Σ_w V = I` (sklearn `solver='eigen'`
+    /// `scalings_`, with `Σ_w` the biased within-class covariance).
+    /// Shape `(d, min(n_classes - 1, d))`.
     pub scalings: Array2<f64>,
+    /// Fraction of between-class variance explained by each retained
+    /// discriminant direction (`λ_i / Σ_j λ_j`), as sklearn's
+    /// `explained_variance_ratio_` for `solver='eigen'`.
+    #[serde(default)]
+    pub explained_variance_ratio: Array1<f64>,
     /// Global feature mean (used to center before projecting).
     pub xbar: Array1<f64>,
     pub n_features: usize,
@@ -205,55 +273,17 @@ impl Fit<f64> for LinearDiscriminantAnalysis {
                 }
             }
         }
-        // L Lᵀ = Σ_w; then symmetric matrix L⁻¹ Σ_b L⁻ᵀ.
-        let sw_mat = Mat::from_fn(d, d, |i, j| sigma[[i, j]]);
-        let llt = faer::linalg::solvers::Llt::new(sw_mat.as_ref(), Side::Lower)
-            .map_err(|e| RustMlError::InvalidParameter(format!("Σ_w Cholesky failed: {e:?}")))?;
-        // Solve L A = Σ_b for A (column-wise).
-        let sb_mat = Mat::from_fn(d, d, |i, j| s_b[[i, j]]);
-        let a_mat = llt.solve(&sb_mat);
-        // Then solve Lᵀ B = Aᵀ → B = (L⁻¹ Σ_b L⁻ᵀ) is symmetric.
-        // Equivalently: B = (L⁻¹ Σ_b)ᵀ first, then L⁻¹ on that.
-        let mut a_t = Mat::<f64>::zeros(d, d);
-        for i in 0..d {
-            for j in 0..d {
-                a_t[(i, j)] = a_mat[(j, i)];
-            }
-        }
-        let b_mat = llt.solve(&a_t);
-        // b_mat = L⁻¹ Σ_b L⁻ᵀ. Eigendecompose.
-        let eig = SelfAdjointEigen::new(b_mat.as_ref(), Side::Lower)
-            .map_err(|e| RustMlError::InvalidParameter(format!("eigen failed: {e:?}")))?;
-        let u = eig.U();
-        // Recover original-space eigenvectors V = L⁻ᵀ U; sklearn keeps the
-        // top n_classes-1 in descending eigenvalue order.
-        let n_proj = (classes.len() - 1).min(d);
-        let mut scalings = Array2::<f64>::zeros((d, n_proj));
-        for c in 0..n_proj {
-            let src = d - 1 - c;
-            let mut u_col = Mat::<f64>::zeros(d, 1);
-            for i in 0..d {
-                u_col[(i, 0)] = u[(i, src)];
-            }
-            // Solve Lᵀ v = u → v = L⁻ᵀ u; via two triangular solves on the
-            // same `llt`, we transpose-solve.
-            // faer's Llt::solve does L Lᵀ x = b, so we get the full inverse;
-            // for just Lᵀ x = u use an explicit back-sub on `lower.transpose()`.
-            let lower = llt.L();
-            // Lᵀ v = u; back-substitute from bottom.
-            let mut v = vec![0.0_f64; d];
-            for r in (0..d).rev() {
-                let mut s = u_col[(r, 0)];
-                for cc in (r + 1)..d {
-                    s -= lower[(cc, r)] * v[cc];
-                }
-                v[r] = s / lower[(r, r)].max(1e-12);
-            }
-            for r in 0..d {
-                scalings[[r, c]] = v[r];
-            }
-        }
-
+        // sklearn's eigen solver works with the *biased* covariances
+        // (divided by n): Σ_w = Σ_k π_k Cov_k and Σ_b = Σ_t − Σ_w. Rescale
+        // the (n − K)-normalised pooled covariance accordingly so that the
+        // scalings / eigenvalues match `solver='eigen'`.
+        let nf = n as f64;
+        let cov_scale = denom.max(1.0) / nf;
+        let (scalings, explained_variance_ratio) = lda_projection(
+            &Mat::from_fn(d, d, |i, j| sigma[[i, j]] * cov_scale),
+            &Mat::from_fn(d, d, |i, j| s_b[[i, j]] / nf),
+            (classes.len() - 1).min(d),
+        )?;
         Ok(FittedLinearDiscriminantAnalysis {
             classes,
             means,
@@ -261,6 +291,7 @@ impl Fit<f64> for LinearDiscriminantAnalysis {
             coef,
             intercept,
             scalings,
+            explained_variance_ratio,
             xbar,
             n_features: d,
         })
@@ -578,6 +609,162 @@ mod tests {
             d_between > 5.0 * d_within,
             "within={d_within}, between={d_between}"
         );
+    }
+
+    /// 4 classes × 6 samples × 3 correlated features. Reference values from
+    /// sklearn 1.9.1 `LinearDiscriminantAnalysis(solver='eigen')`:
+    /// `scalings_`, `explained_variance_ratio_` and `(X - X̄) @ scalings_`.
+    fn lda_four_class_data() -> (Array2<f64>, Array1<f64>) {
+        let x = array![
+            [0.001, 0.24, -0.194],
+            [-0.891, -0.898, -1.226],
+            [0.06, 1.108, -0.156],
+            [-0.62, 0.02, 0.326],
+            [0.105, -0.681, -0.216],
+            [0.695, -0.658, -0.6],
+            [0.099, -1.672, -2.427],
+            [1.765, -0.655, -0.074],
+            [2.157, 0.445, -2.411],
+            [1.461, 0.138, -0.011],
+            [0.47, -0.8, -1.347],
+            [1.191, 0.863, -0.693],
+            [0.467, 2.688, 0.636],
+            [0.388, 2.021, 1.063],
+            [-0.725, 1.326, 2.068],
+            [-1.047, 1.759, 0.998],
+            [-0.141, 3.215, 2.049],
+            [-0.699, 1.34, 1.327],
+            [0.811, 1.433, -1.448],
+            [1.667, 2.551, -1.687],
+            [1.203, 0.751, -1.442],
+            [-0.187, -0.176, -2.055],
+            [1.899, 2.455, -2.325],
+            [0.205, 1.041, -3.413],
+        ];
+        let y = Array1::from_iter((0..24).map(|i| (i / 6) as f64));
+        (x, y)
+    }
+
+    #[test]
+    fn test_lda_eigen_matches_sklearn_multiclass() {
+        let (x, y) = lda_four_class_data();
+        let fitted = LinearDiscriminantAnalysis::new().fit(&x, &y).unwrap();
+        let sk_scalings = array![
+            [1.4993785967073294, 0.5228310055497781, 1.2282762684511621],
+            [
+                -1.0147543973140523,
+                -1.2583908947696176,
+                0.12988828311400066
+            ],
+            [-0.8905420995009952, 1.03077519813169, 0.5294813006159078],
+        ];
+        let sk_evr = [
+            0.7871788587221186,
+            0.19000275099452799,
+            0.022818390283353612,
+        ];
+        let sk_t3 = array![
+            [
+                -0.4519415329518326,
+                0.7789716695189309,
+                -0.40332496149225683
+            ],
+            [0.28444270961364804, 0.6808952463444498, -2.193184961370043],
+            [
+                -1.2781256123957354,
+                -0.24329514028465624,
+                -0.19799334248728126
+            ],
+        ];
+        assert_eq!(fitted.scalings.shape(), &[3, 3]);
+        let t = fitted.transform(&x).unwrap();
+        for c in 0..3 {
+            // Eigenvectors are defined up to sign.
+            let sign = if fitted.scalings[[0, c]] * sk_scalings[[0, c]] < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            for r in 0..3 {
+                let got = sign * fitted.scalings[[r, c]];
+                assert!(
+                    (got - sk_scalings[[r, c]]).abs() < 1e-6,
+                    "scalings[{r},{c}] = {got}, sklearn {}",
+                    sk_scalings[[r, c]]
+                );
+                let got_t = sign * t[[r, c]];
+                assert!(
+                    (got_t - sk_t3[[r, c]]).abs() < 1e-6,
+                    "transform[{r},{c}] = {got_t}, sklearn {}",
+                    sk_t3[[r, c]]
+                );
+            }
+            assert!(
+                (fitted.explained_variance_ratio[c] - sk_evr[c]).abs() < 1e-8,
+                "evr[{c}] = {}, sklearn {}",
+                fitted.explained_variance_ratio[c],
+                sk_evr[c]
+            );
+        }
+    }
+
+    #[test]
+    fn test_lda_scalings_solve_generalised_eigenproblem() {
+        let (x, y) = lda_four_class_data();
+        let fitted = LinearDiscriminantAnalysis::new().fit(&x, &y).unwrap();
+        let (n, d) = x.dim();
+        // Biased within-class and between-class covariances.
+        let mut sw = Array2::<f64>::zeros((d, d));
+        let mut sb = Array2::<f64>::zeros((d, d));
+        for (k, mu) in fitted.means.iter().enumerate() {
+            let idx: Vec<usize> = (0..n).filter(|&i| y[i] == k as f64).collect();
+            outer_subtract_accum(&x, mu, &idx, &mut sw);
+            let diff = mu - &fitted.xbar;
+            for a in 0..d {
+                for b in 0..d {
+                    sb[[a, b]] += idx.len() as f64 * diff[a] * diff[b];
+                }
+            }
+        }
+        sw.mapv_inplace(|v| v / n as f64);
+        sb.mapv_inplace(|v| v / n as f64);
+        let v = &fitted.scalings;
+        // Vᵀ Σ_w V = I.
+        let vt_sw_v = v.t().dot(&sw).dot(v);
+        for i in 0..v.ncols() {
+            for j in 0..v.ncols() {
+                let expect = if i == j { 1.0 } else { 0.0 };
+                assert!((vt_sw_v[[i, j]] - expect).abs() < 1e-8, "VᵀΣ_wV[{i},{j}]");
+            }
+        }
+        // Σ_b v = λ Σ_w v with λ = vᵀ Σ_b v, descending.
+        let mut prev = f64::INFINITY;
+        for c in 0..v.ncols() {
+            let vc = v.column(c).to_owned();
+            let lam = vc.dot(&sb.dot(&vc));
+            assert!(lam <= prev + 1e-12);
+            prev = lam;
+            let resid = sb.dot(&vc) - sw.dot(&vc) * lam;
+            assert!(resid.iter().all(|r| r.abs() < 1e-8), "residual {resid:?}");
+        }
+        // Projected within-class covariance is the identity.
+        let t = fitted.transform(&x).unwrap();
+        let mut wc = Array2::<f64>::zeros((v.ncols(), v.ncols()));
+        for k in 0..fitted.classes.len() {
+            let idx: Vec<usize> = (0..n).filter(|&i| y[i] == k as f64).collect();
+            let mu = class_mean(&t, &idx);
+            outer_subtract_accum(&t, &mu, &idx, &mut wc);
+        }
+        wc.mapv_inplace(|v| v / n as f64);
+        for i in 0..v.ncols() {
+            for j in 0..v.ncols() {
+                let expect = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (wc[[i, j]] - expect).abs() < 1e-8,
+                    "within-class cov [{i},{j}]"
+                );
+            }
+        }
     }
 
     #[test]

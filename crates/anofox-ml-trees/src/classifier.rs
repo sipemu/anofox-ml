@@ -3,9 +3,10 @@ use ndarray::{Array1, Array2};
 
 use crate::node::TreeNode;
 use crate::split::{
-    compute_impurity, compute_sample_weights_from_class_weight, compute_weighted_impurity,
-    count_classes, find_best_split_weighted, find_best_split_with_features, leaf_value,
-    select_feature_subset, weighted_count_classes, weighted_leaf_value, ClassWeight, MaxFeatures,
+    child_seed, cmp_nan_last, complement_features, compute_impurity,
+    compute_sample_weights_from_class_weight, compute_weighted_impurity, count_classes,
+    find_best_split_weighted, find_best_split_with_features, leaf_value, select_feature_subset,
+    weighted_count_classes, weighted_leaf_value, BestSplit, ClassWeight, MaxFeatures,
     SplitCriterion,
 };
 
@@ -23,6 +24,10 @@ pub struct DecisionTreeClassifier {
     pub sample_weight: Option<Array1<f64>>,
     /// Class weighting strategy.
     pub class_weight: Option<ClassWeight>,
+    /// Seed for the per-split feature subsampling RNG (only used when
+    /// `max_features` is set). Different seeds give different trees.
+    #[serde(default)]
+    pub seed: u64,
 }
 
 impl DecisionTreeClassifier {
@@ -36,6 +41,7 @@ impl DecisionTreeClassifier {
             max_features: None,
             sample_weight: None,
             class_weight: None,
+            seed: 0,
         }
     }
 
@@ -80,6 +86,12 @@ impl DecisionTreeClassifier {
         self.class_weight = class_weight;
         self
     }
+
+    /// Set the seed of the per-split feature subsampling RNG.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
 }
 
 impl Default for DecisionTreeClassifier {
@@ -109,6 +121,16 @@ impl<F: Float> Fit<F> for DecisionTreeClassifier {
         }
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
+        }
+
+        if let Some(sw) = &self.sample_weight {
+            if sw.len() != y.len() {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "sample_weight has {} entries but y has {}",
+                    sw.len(),
+                    y.len()
+                )));
+            }
         }
 
         let indices: Vec<usize> = (0..x.nrows()).collect();
@@ -141,7 +163,15 @@ impl<F: Float> Fit<F> for DecisionTreeClassifier {
             max_features_k,
             n_features,
         };
-        let tree = build_tree(x, y, &indices, 0, &params, 0, effective_weights.as_ref());
+        let tree = build_tree(
+            x,
+            y,
+            &indices,
+            0,
+            &params,
+            self.seed,
+            effective_weights.as_ref(),
+        );
 
         Ok(FittedDecisionTreeClassifier {
             tree,
@@ -163,7 +193,7 @@ impl<F: Float> Predict<F> for FittedDecisionTreeClassifier<F> {
         let predictions: Vec<F> = x
             .rows()
             .into_iter()
-            .map(|row| self.tree.predict_one(row.as_slice().unwrap()))
+            .map(|row| self.tree.predict_view(row))
             .collect();
 
         Ok(Array1::from_vec(predictions))
@@ -208,7 +238,7 @@ impl<F: Float> FittedDecisionTreeClassifier<F> {
         let mut proba = Array2::<F>::zeros((n_samples, n_classes));
 
         for (i, row) in x.rows().into_iter().enumerate() {
-            let leaf = find_leaf(&self.tree, row.as_slice().unwrap());
+            let leaf = self.tree.leaf_for_view(row);
             if let TreeNode::Leaf {
                 class_counts: Some(counts),
                 ..
@@ -226,7 +256,7 @@ impl<F: Float> FittedDecisionTreeClassifier<F> {
                 }
             } else {
                 // Regression leaf or no counts — put all weight on predicted class
-                let pred = self.tree.predict_one(row.as_slice().unwrap());
+                let pred = self.tree.predict_view(row);
                 if let Some(ci) = classes
                     .iter()
                     .position(|&c| (c - pred).abs() < F::from_f64(1e-9).unwrap())
@@ -275,7 +305,7 @@ fn build_tree<F: Float>(
     indices: &[usize],
     depth: usize,
     params: &TreeBuildParams,
-    node_id: u64,
+    node_seed: u64,
     weights: Option<&Array1<F>>,
 ) -> TreeNode<F> {
     let n_samples = indices.len();
@@ -293,36 +323,41 @@ fn build_tree<F: Float>(
         return make_leaf(y, indices, params.criterion, weights);
     }
 
-    let feature_subset;
-    let feature_indices: &[usize] = if let Some(k) = params.max_features_k {
-        let seed = node_id
-            .wrapping_mul(0x517CC1B727220A95)
-            .wrapping_add(depth as u64);
-        feature_subset = select_feature_subset(params.n_features, k, seed);
-        &feature_subset
-    } else {
-        feature_subset = (0..params.n_features).collect();
-        &feature_subset
+    let find = |features: &[usize]| -> Option<BestSplit<F>> {
+        match weights {
+            Some(w) => find_best_split_weighted(
+                x,
+                y,
+                indices,
+                w,
+                params.criterion,
+                params.min_samples_leaf,
+                features,
+            ),
+            None => find_best_split_with_features(
+                x,
+                y,
+                indices,
+                params.criterion,
+                params.min_samples_leaf,
+                features,
+            ),
+        }
     };
 
-    let split_result = match weights {
-        Some(w) => find_best_split_weighted(
-            x,
-            y,
-            indices,
-            w,
-            params.criterion,
-            params.min_samples_leaf,
-            feature_indices,
-        ),
-        None => find_best_split_with_features(
-            x,
-            y,
-            indices,
-            params.criterion,
-            params.min_samples_leaf,
-            feature_indices,
-        ),
+    // Per-split feature subsampling (`max_features`): draw a fresh subset at
+    // every node. Like sklearn, if none of the drawn features admits a valid
+    // split (e.g. they are all constant here), keep searching the remaining
+    // features instead of turning the node into a leaf.
+    let split_result = match params.max_features_k {
+        Some(k) if k < params.n_features => {
+            let subset = select_feature_subset(params.n_features, k, node_seed);
+            find(&subset).or_else(|| find(&complement_features(params.n_features, &subset)))
+        }
+        _ => {
+            let all: Vec<usize> = (0..params.n_features).collect();
+            find(&all)
+        }
     };
 
     match split_result {
@@ -333,7 +368,7 @@ fn build_tree<F: Float>(
                 &split.left_indices,
                 depth + 1,
                 params,
-                node_id.wrapping_mul(2).wrapping_add(1),
+                child_seed(node_seed, 0),
                 weights,
             );
             let right = build_tree(
@@ -342,7 +377,7 @@ fn build_tree<F: Float>(
                 &split.right_indices,
                 depth + 1,
                 params,
-                node_id.wrapping_mul(2).wrapping_add(2),
+                child_seed(node_seed, 1),
                 weights,
             );
 
@@ -394,31 +429,11 @@ fn make_leaf<F: Float>(
     }
 }
 
-/// Traverse the tree to find the leaf node for a given sample.
-fn find_leaf<'a, F: Float>(node: &'a TreeNode<F>, features: &[F]) -> &'a TreeNode<F> {
-    match node {
-        TreeNode::Leaf { .. } => node,
-        TreeNode::Split {
-            feature_index,
-            threshold,
-            left,
-            right,
-            ..
-        } => {
-            if features[*feature_index] <= *threshold {
-                find_leaf(left, features)
-            } else {
-                find_leaf(right, features)
-            }
-        }
-    }
-}
-
 /// Collect all unique sorted class labels from the tree's leaf nodes.
 fn collect_classes<F: Float>(node: &TreeNode<F>) -> Vec<F> {
     let mut classes = Vec::new();
     collect_classes_recursive(node, &mut classes);
-    classes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    classes.sort_by(cmp_nan_last);
     classes.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-9).unwrap());
     classes
 }
@@ -795,5 +810,150 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use crate::regressor::DecisionTreeRegressor;
+    use crate::split::majority_vote;
+    use ndarray::{array, ShapeBuilder};
+
+    fn data(n: usize, d: usize) -> (Array2<f64>, Array1<f64>) {
+        let mut s = 99u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let x = Array2::from_shape_fn((n, d), |_| next());
+        let y = Array1::from_iter(x.rows().into_iter().map(|r| {
+            if r.iter().take(3).sum::<f64>() > 1.5 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
+        (x, y)
+    }
+
+    fn split_features(node: &TreeNode<f64>, out: &mut Vec<usize>) {
+        if let TreeNode::Split {
+            feature_index,
+            left,
+            right,
+            ..
+        } = node
+        {
+            out.push(*feature_index);
+            split_features(left, out);
+            split_features(right, out);
+        }
+    }
+
+    /// #42: Fortran-order input used to panic in `row.as_slice().unwrap()`.
+    #[test]
+    fn fortran_order_input_fit_and_predict() {
+        let (x, y) = data(60, 4);
+        let mut x_f = Array2::<f64>::zeros((60, 4).f());
+        x_f.assign(&x);
+        assert!(!x_f.is_standard_layout());
+
+        let clf = DecisionTreeClassifier::new().with_max_depth(Some(4));
+        let a = Fit::fit(&clf, &x, &y).unwrap();
+        let b = Fit::fit(&clf, &x_f, &y).unwrap();
+        assert_eq!(a.predict(&x).unwrap(), b.predict(&x_f).unwrap());
+        assert_eq!(a.predict_proba(&x).unwrap(), b.predict_proba(&x_f).unwrap());
+
+        // `x.t().to_owned().t()` is the other common non-standard layout.
+        let x_t = x.t().to_owned();
+        let x_tt = x_t.t().to_owned();
+        let reg = DecisionTreeRegressor::new().with_max_depth(Some(4));
+        let ra = Fit::fit(&reg, &x, &y).unwrap();
+        let rb = Fit::fit(&reg, &x_f, &y).unwrap();
+        assert_eq!(ra.predict(&x).unwrap(), rb.predict(&x_tt).unwrap());
+        assert_eq!(ra.predict(&x).unwrap(), rb.predict(&x_f).unwrap());
+    }
+
+    /// #42: ties must go to the smallest class label, deterministically.
+    #[test]
+    fn leaf_ties_go_to_smallest_label() {
+        let x = array![[1.0], [1.0], [1.0], [1.0]];
+        let y = array![5.0, 2.0, 5.0, 2.0];
+        for _ in 0..20 {
+            let f = Fit::fit(&DecisionTreeClassifier::new(), &x, &y).unwrap();
+            assert_eq!(f.predict(&x).unwrap()[0], 2.0);
+            let fw = Fit::fit(
+                &DecisionTreeClassifier::new().with_sample_weight(Some(Array1::ones(4))),
+                &x,
+                &y,
+            )
+            .unwrap();
+            assert_eq!(fw.predict(&x).unwrap()[0], 2.0);
+        }
+        for _ in 0..20 {
+            assert_eq!(majority_vote(&[3.0, 1.0, 3.0, 1.0, 2.0]), 1.0);
+            assert_eq!(majority_vote(&[3.0, 3.0, 1.0]), 3.0);
+        }
+    }
+
+    /// #45: with `max_features` the subset is drawn per split, and the seed
+    /// changes the tree.
+    #[test]
+    fn max_features_is_per_split_and_seeded() {
+        let (x, y) = data(300, 16);
+        let base = DecisionTreeClassifier::new().with_max_features(Some(MaxFeatures::Sqrt));
+
+        let t1 = Fit::fit(&base.clone().with_seed(1), &x, &y).unwrap();
+        let mut feats = Vec::new();
+        split_features(t1.tree(), &mut feats);
+        feats.sort_unstable();
+        feats.dedup();
+        assert!(
+            feats.len() > 4,
+            "a deep tree with sqrt(16)=4 features per split should use more than 4 features overall, used {feats:?}"
+        );
+
+        let structure = |t: &FittedDecisionTreeClassifier<f64>| {
+            let mut v = Vec::new();
+            split_features(t.tree(), &mut v);
+            v
+        };
+        let t2 = Fit::fit(&base.clone().with_seed(2), &x, &y).unwrap();
+        assert_ne!(
+            structure(&t1),
+            structure(&t2),
+            "different seeds must give different trees"
+        );
+        let (x_new, _) = data(500, 16);
+        let x_new = x_new.mapv(|v| 1.0 - v);
+        assert_ne!(
+            t1.predict_proba(&x_new).unwrap(),
+            t2.predict_proba(&x_new).unwrap()
+        );
+
+        // Same seed -> identical tree.
+        let t1b = Fit::fit(&base.with_seed(1), &x, &y).unwrap();
+        assert_eq!(structure(&t1), structure(&t1b));
+    }
+
+    #[test]
+    fn sample_weight_length_is_validated() {
+        let x = array![[1.0], [2.0], [3.0]];
+        let y = array![0.0, 1.0, 1.0];
+        let clf = DecisionTreeClassifier::new().with_sample_weight(Some(array![1.0, 1.0]));
+        assert!(Fit::<f64>::fit(&clf, &x, &y).is_err());
+        let reg = DecisionTreeRegressor::new().with_sample_weight(Some(array![1.0]));
+        assert!(Fit::<f64>::fit(&reg, &x, &y).is_err());
+    }
+
+    #[test]
+    fn nan_feature_does_not_panic() {
+        let x = array![[1.0], [f64::NAN], [3.0], [4.0]];
+        let y = array![0.0, 0.0, 1.0, 1.0];
+        let f = Fit::fit(&DecisionTreeClassifier::new(), &x, &y).unwrap();
+        assert_eq!(f.predict(&x).unwrap().len(), 4);
     }
 }

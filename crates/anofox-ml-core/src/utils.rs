@@ -141,47 +141,81 @@ pub fn cross_val_score<F: Float>(
     Ok(scores)
 }
 
-/// Group sample indices by their class label (string representation of the float value).
-fn group_indices_by_class<F: Float>(
-    y: &Array1<F>,
-    n: usize,
-) -> std::collections::BTreeMap<String, Vec<usize>> {
-    let mut class_indices: std::collections::BTreeMap<String, Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for i in 0..n {
-        let label = format!("{}", y[i]);
-        class_indices.entry(label).or_default().push(i);
+/// A single cross-validation split: `(train_indices, test_indices)`.
+pub type CvSplit = (Vec<usize>, Vec<usize>);
+
+/// A borrowed scoring function `(y_true, y_pred) -> score`, as accepted by
+/// [`cross_validate`].
+pub type ScorerFn<'a, F> = dyn Fn(&Array1<F>, &Array1<F>) -> Result<F> + 'a;
+
+/// Return type of [`learning_curve`]: `(train_sizes_abs, train_scores, test_scores)`.
+pub type LearningCurveResult<F> = (Vec<usize>, Vec<Vec<F>>, Vec<Vec<F>>);
+
+/// Return type of [`validation_curve`]: `(train_scores, test_scores)`.
+pub type ValidationCurveResult<F> = (Vec<Vec<F>>, Vec<Vec<F>>);
+
+/// Canonical hash key for a label value: `-0.0`/`0.0` collapse, all NaNs collapse.
+fn label_key<F: Float>(v: F) -> u64 {
+    let f = v.to_f64().unwrap_or(f64::NAN);
+    if f.is_nan() {
+        f64::NAN.to_bits()
+    } else if f == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        f.to_bits()
     }
-    class_indices
 }
 
-/// Distribute class indices across `k` folds in round-robin order.
-fn distribute_round_robin(
-    class_indices: &std::collections::BTreeMap<String, Vec<usize>>,
-    k: usize,
-) -> Vec<Vec<usize>> {
-    let mut folds: Vec<Vec<usize>> = vec![Vec::new(); k];
-    for indices in class_indices.values() {
-        for (i, &idx) in indices.iter().enumerate() {
-            folds[i % k].push(idx);
+/// Group sample indices by class label.
+///
+/// Classes are ordered by first appearance in `y` (like sklearn's
+/// `StratifiedKFold` encoding) and indices within a class are ascending, so
+/// the result is fully deterministic (no hash-map iteration order leaks out).
+fn group_by_class<F: Float>(y: &Array1<F>) -> Vec<Vec<usize>> {
+    let mut position: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, &v) in y.iter().enumerate() {
+        let g = *position.entry(label_key(v)).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[g].push(i);
+    }
+    groups
+}
+
+/// Heuristic: does `y` look like a vector of class labels (rather than a
+/// continuous regression target)?
+///
+/// Returns `true` iff every value is finite and integral **and** the number of
+/// distinct values is at most 2 or at most `n / 2` (i.e. on average every class
+/// has at least two members). Continuous targets (any non-integral value) and
+/// integer-valued targets that are almost all unique (ids, counts with a huge
+/// range, ...) are treated as regression targets.
+///
+/// This is the rule used by [`default_cv_splits`] (and therefore by
+/// [`grid_search_cv`], [`randomized_search_cv`], [`cross_val_predict`],
+/// [`cross_validate`], [`learning_curve`] and [`validation_curve`]) to choose
+/// between stratified and plain shuffled K-fold.
+pub fn looks_like_class_labels<F: Float>(y: &Array1<F>) -> bool {
+    let n = y.len();
+    if n == 0 {
+        return false;
+    }
+    for &v in y.iter() {
+        let f = match v.to_f64() {
+            Some(f) => f,
+            None => return false,
+        };
+        if !f.is_finite() || f.fract() != 0.0 {
+            return false;
         }
     }
-    folds
+    let n_unique = group_by_class(y).len();
+    n_unique <= 2 || 2 * n_unique <= n
 }
 
-/// Generate stratified k-fold cross-validation splits.
-///
-/// Returns a `Vec` of `(train_indices, test_indices)` tuples, one per fold.
-/// Each fold has approximately the same proportion of each class as the full dataset.
-///
-/// Samples are grouped by class label, shuffled within each group using the
-/// provided `seed`, then distributed across folds in a round-robin fashion.
-pub fn stratified_k_fold<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
-    k: usize,
-    seed: u64,
-) -> Result<Vec<(Vec<usize>, Vec<usize>)>> {
+fn check_xy<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<()> {
     if x.nrows() != y.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {} elements",
@@ -189,48 +223,225 @@ pub fn stratified_k_fold<F: Float>(
             y.len()
         )));
     }
-    if x.is_empty() {
-        return Err(RustMlError::EmptyInput("input is empty".into()));
-    }
+    Ok(())
+}
+
+fn check_k(k: usize, n: usize) -> Result<()> {
     if k < 2 {
         return Err(RustMlError::InvalidParameter(
             "k must be >= 2 for cross-validation".into(),
         ));
     }
-    if k > x.nrows() {
+    if k > n {
         return Err(RustMlError::InvalidParameter(format!(
             "k ({}) > number of samples ({})",
-            k,
-            x.nrows()
+            k, n
         )));
     }
+    Ok(())
+}
 
+/// Turn a per-sample test-fold assignment into `(train, test)` pairs with
+/// ascending indices.
+fn splits_from_assignment(test_fold: &[usize], k: usize) -> Vec<CvSplit> {
+    (0..k)
+        .map(|fold| {
+            let mut train = Vec::new();
+            let mut test = Vec::new();
+            for (i, &f) in test_fold.iter().enumerate() {
+                if f == fold {
+                    test.push(i);
+                } else {
+                    train.push(i);
+                }
+            }
+            (train, test)
+        })
+        .collect()
+}
+
+/// Check user-supplied splits: at least one split, every train/test set
+/// non-empty and every index `< n`. If `require_partition`, every sample must
+/// appear in exactly one test set (needed by [`cross_val_predict_with_splits`]).
+fn validate_splits(splits: &[CvSplit], n: usize, require_partition: bool) -> Result<()> {
+    if splits.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "need at least one (train, test) split".into(),
+        ));
+    }
+    let mut seen = vec![0usize; n];
+    for (s, (train, test)) in splits.iter().enumerate() {
+        if train.is_empty() || test.is_empty() {
+            return Err(RustMlError::InvalidParameter(format!(
+                "split {} has an empty train or test set",
+                s
+            )));
+        }
+        if let Some(&bad) = train.iter().chain(test.iter()).find(|&&i| i >= n) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "split {} contains index {} >= n_samples ({})",
+                s, bad, n
+            )));
+        }
+        for &i in test {
+            seen[i] += 1;
+        }
+    }
+    if require_partition && seen.iter().any(|&c| c != 1) {
+        return Err(RustMlError::InvalidParameter(
+            "test sets must partition the samples (each sample in exactly one test set)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Generate stratified k-fold cross-validation splits.
+///
+/// Returns a `Vec` of `(train_indices, test_indices)` tuples, one per fold,
+/// with indices in ascending order. Each fold has approximately the same
+/// proportion of each class as the full dataset.
+///
+/// The allocation follows sklearn's `StratifiedKFold(shuffle=True)`: the
+/// label vector is sorted by class and dealt round-robin over the `k` folds,
+/// which fixes how many samples of each class go to each fold; the samples of
+/// every class are then randomly (via `seed`) assigned to their fold slots.
+/// Consequently every fold receives `n / k` or `n / k + 1` samples even when
+/// some (or all) classes have fewer than `k` members — e.g. a continuous
+/// target with all-unique values yields `k` non-empty folds.
+pub fn stratified_k_fold<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    k: usize,
+    seed: u64,
+) -> Result<Vec<CvSplit>> {
+    check_xy(x, y)?;
+    if x.nrows() == 0 {
+        return Err(RustMlError::EmptyInput("input is empty".into()));
+    }
     let n = x.nrows();
+    check_k(k, n)?;
 
-    let mut class_indices = group_indices_by_class(y, n);
+    let classes = group_by_class(y);
 
-    // Shuffle within each class group.
+    // allocation[fold][class]: number of samples of `class` in `fold`.
+    let mut allocation = vec![vec![0usize; classes.len()]; k];
+    let mut pos = 0usize;
+    for (c, members) in classes.iter().enumerate() {
+        for _ in 0..members.len() {
+            allocation[pos % k][c] += 1;
+            pos += 1;
+        }
+    }
+
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    for indices in class_indices.values_mut() {
-        indices.shuffle(&mut rng);
-    }
-
-    let folds = distribute_round_robin(&class_indices, k);
-
-    // Build (train, test) pairs.
-    let mut result = Vec::with_capacity(k);
-    for fold in 0..k {
-        let test_indices = folds[fold].clone();
-        let train_indices: Vec<usize> = folds
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != fold)
-            .flat_map(|(_, v)| v.iter().copied())
+    let mut test_fold = vec![0usize; n];
+    for (c, members) in classes.iter().enumerate() {
+        let mut fold_ids: Vec<usize> = (0..k)
+            .flat_map(|f| std::iter::repeat_n(f, allocation[f][c]))
             .collect();
-        result.push((train_indices, test_indices));
+        fold_ids.shuffle(&mut rng);
+        for (&i, &f) in members.iter().zip(fold_ids.iter()) {
+            test_fold[i] = f;
+        }
     }
 
-    Ok(result)
+    Ok(splits_from_assignment(&test_fold, k))
+}
+
+/// Shuffled (non-stratified) K-fold splitting, like sklearn's
+/// `KFold(shuffle=True, random_state=seed)`.
+///
+/// Samples are randomly permuted with `seed` and cut into `k` folds of size
+/// `n / k` or `n / k + 1`. Returned index lists are ascending.
+///
+/// # Errors
+///
+/// Returns `InvalidParameter` if `k < 2` or `k > n_samples`.
+pub fn shuffled_k_fold(n_samples: usize, k: usize, seed: u64) -> Result<Vec<CvSplit>> {
+    check_k(k, n_samples)?;
+    let mut perm: Vec<usize> = (0..n_samples).collect();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    perm.shuffle(&mut rng);
+
+    let fold_size = n_samples / k;
+    let remainder = n_samples % k;
+    let mut test_fold = vec![0usize; n_samples];
+    let mut start = 0;
+    for fold in 0..k {
+        let size = fold_size + usize::from(fold < remainder);
+        for &i in &perm[start..start + size] {
+            test_fold[i] = fold;
+        }
+        start += size;
+    }
+    Ok(splits_from_assignment(&test_fold, k))
+}
+
+/// The default CV splitter used by the high-level model-selection helpers.
+///
+/// Uses [`stratified_k_fold`] when `y` [`looks_like_class_labels`] and
+/// [`shuffled_k_fold`] (seeded) otherwise, mirroring sklearn's choice of
+/// `StratifiedKFold` for classifiers and `KFold` for regressors.
+pub fn default_cv_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    k: usize,
+    seed: u64,
+) -> Result<Vec<CvSplit>> {
+    if looks_like_class_labels(y) {
+        stratified_k_fold(x, y, k, seed)
+    } else {
+        check_xy(x, y)?;
+        if x.nrows() == 0 {
+            return Err(RustMlError::EmptyInput("input is empty".into()));
+        }
+        shuffled_k_fold(x.nrows(), k, seed)
+    }
+}
+
+/// Fit once on `(x_train, y_train)` and predict both the training and the test
+/// rows, by passing `vstack(x_train, x_test)` as the evaluation matrix.
+fn fit_predict_train_and_test<F: Float>(
+    x_train: &Array2<F>,
+    y_train: &Array1<F>,
+    x_test: &Array2<F>,
+    fit_predict: &impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+) -> Result<(Array1<F>, Array1<F>)> {
+    let n_train = x_train.nrows();
+    let n_test = x_test.nrows();
+    let x_eval = ndarray::concatenate(ndarray::Axis(0), &[x_train.view(), x_test.view()])
+        .map_err(|e| RustMlError::ShapeMismatch(e.to_string()))?;
+    let pred = fit_predict(x_train, y_train, &x_eval)?;
+    if pred.len() != n_train + n_test {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "fit_predict returned {} predictions for {} rows",
+            pred.len(),
+            n_train + n_test
+        )));
+    }
+    Ok((
+        pred.slice(ndarray::s![..n_train]).to_owned(),
+        pred.slice(ndarray::s![n_train..]).to_owned(),
+    ))
+}
+
+/// Cross-validation score over user-supplied `(train, test)` splits.
+///
+/// Returns one score per split. Use this to plug in any splitter
+/// ([`group_k_fold`], [`time_series_split`], [`shuffled_k_fold`], ...).
+pub fn cross_val_score_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
+) -> Result<Vec<F>> {
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
+    splits
+        .iter()
+        .map(|(train, test)| evaluate_fold(x, y, train, test, &fit_predict, &scorer))
+        .collect()
 }
 
 /// Stratified k-fold cross-validation score.
@@ -272,10 +483,13 @@ pub struct GridSearchResult<F: Float> {
     pub mean_scores: Vec<F>,
 }
 
-/// Grid search with stratified cross-validation.
+/// Grid search with cross-validation.
 ///
-/// Evaluates each parameter configuration in `param_configs` using stratified k-fold
+/// Evaluates each parameter configuration in `param_configs` using k-fold
 /// cross-validation and returns the configuration that achieved the highest mean score.
+/// Folds come from [`default_cv_splits`]: stratified for class-label targets,
+/// seeded shuffled K-fold for continuous (regression) targets. Use
+/// [`grid_search_cv_with_splits`] to supply your own splits.
 ///
 /// Each element of `param_configs` is a `fit_predict` closure that encapsulates a
 /// particular hyperparameter setting. This design keeps the grid search generic:
@@ -286,7 +500,7 @@ pub struct GridSearchResult<F: Float> {
 /// # Errors
 ///
 /// Returns `InvalidParameter` if `param_configs` is empty, or propagates errors from
-/// `stratified_k_fold` and the individual `fit_predict` / `scorer` calls.
+/// the splitter and the individual `fit_predict` / `scorer` calls.
 pub fn grid_search_cv<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
@@ -300,33 +514,42 @@ pub fn grid_search_cv<F: Float>(
             "param_configs must not be empty".into(),
         ));
     }
+    let folds = default_cv_splits(x, y, k, seed)?;
+    grid_search_cv_with_splits(x, y, &folds, param_configs, scorer)
+}
 
-    let folds = stratified_k_fold(x, y, k, seed)?;
+/// Grid search over user-supplied `(train, test)` splits.
+///
+/// Same as [`grid_search_cv`] but the cross-validation splits are given
+/// explicitly (e.g. from [`group_k_fold`], [`time_series_split`] or
+/// [`shuffled_k_fold`]).
+pub fn grid_search_cv_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    param_configs: &[impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>],
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
+) -> Result<GridSearchResult<F>> {
+    if param_configs.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "param_configs must not be empty".into(),
+        ));
+    }
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
 
     let mut cv_scores: Vec<Vec<F>> = Vec::with_capacity(param_configs.len());
-
     for fit_predict in param_configs {
-        let mut fold_scores = Vec::with_capacity(k);
-        for (train_indices, test_indices) in &folds {
+        let mut fold_scores = Vec::with_capacity(splits.len());
+        for (train_indices, test_indices) in splits {
             let score = evaluate_fold(x, y, train_indices, test_indices, fit_predict, &scorer)?;
             fold_scores.push(score);
         }
         cv_scores.push(fold_scores);
     }
 
-    let mean_scores: Vec<F> = cv_scores
-        .iter()
-        .map(|scores| {
-            let sum: F = scores.iter().copied().sum();
-            sum / F::from_usize(scores.len()).unwrap()
-        })
-        .collect();
-
-    let (best_params_index, &best_score) = mean_scores
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap(); // safe: param_configs is non-empty
+    let mean_scores: Vec<F> = cv_scores.iter().map(|s| mean_of(s)).collect();
+    let (best_params_index, best_score) = argmax(&mean_scores);
 
     Ok(GridSearchResult {
         best_score,
@@ -334,6 +557,23 @@ pub fn grid_search_cv<F: Float>(
         cv_scores,
         mean_scores,
     })
+}
+
+fn mean_of<F: Float>(scores: &[F]) -> F {
+    let sum: F = scores.iter().copied().sum();
+    sum / F::from_usize(scores.len()).unwrap()
+}
+
+/// Index and value of the maximum (first one wins on ties; NaNs never win
+/// unless everything is NaN). `values` must be non-empty.
+fn argmax<F: Float>(values: &[F]) -> (usize, F) {
+    let mut best = 0usize;
+    for (i, &v) in values.iter().enumerate().skip(1) {
+        if v > values[best] || (values[best].is_nan() && !v.is_nan()) {
+            best = i;
+        }
+    }
+    (best, values[best])
 }
 
 /// Non-stratified K-fold splitting.
@@ -545,11 +785,13 @@ pub fn repeated_k_fold(
     Ok(result)
 }
 
-/// Randomized search with stratified cross-validation.
+/// Randomized search with cross-validation.
 ///
 /// Randomly samples `n_iter` parameter configurations from `param_sampler` and
-/// evaluates each using stratified k-fold cross-validation. Returns the
-/// configuration that achieved the highest mean score.
+/// evaluates each using k-fold cross-validation (folds from
+/// [`default_cv_splits`]: stratified for class labels, shuffled K-fold for
+/// continuous targets). Returns the configuration that achieved the highest
+/// mean score.
 ///
 /// This is more efficient than grid search when the parameter space is large,
 /// as it explores the space randomly rather than exhaustively.
@@ -560,7 +802,7 @@ pub fn repeated_k_fold(
 /// # Errors
 ///
 /// Returns `InvalidParameter` if `n_iter == 0`, or propagates errors from
-/// `stratified_k_fold` and the individual evaluations.
+/// the splitter and the individual evaluations.
 pub fn randomized_search_cv<F, S, P>(
     x: &Array2<F>,
     y: &Array1<F>,
@@ -578,8 +820,33 @@ where
     if n_iter == 0 {
         return Err(RustMlError::InvalidParameter("n_iter must be > 0".into()));
     }
+    let folds = default_cv_splits(x, y, k, seed)?;
+    randomized_search_cv_with_splits(x, y, &folds, seed, n_iter, param_sampler, scorer)
+}
 
-    let folds = stratified_k_fold(x, y, k, seed)?;
+/// Randomized search over user-supplied `(train, test)` splits.
+///
+/// `seed` is only used to derive the per-configuration seeds passed to
+/// `param_sampler` (identically to [`randomized_search_cv`]).
+pub fn randomized_search_cv_with_splits<F, S, P>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    seed: u64,
+    n_iter: usize,
+    param_sampler: S,
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
+) -> Result<GridSearchResult<F>>
+where
+    F: Float,
+    S: Fn(u64) -> P,
+    P: Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+{
+    if n_iter == 0 {
+        return Err(RustMlError::InvalidParameter("n_iter must be > 0".into()));
+    }
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
 
     let mut cv_scores: Vec<Vec<F>> = Vec::with_capacity(n_iter);
     let mut mean_scores: Vec<F> = Vec::with_capacity(n_iter);
@@ -590,23 +857,17 @@ where
             .wrapping_mul(6364136223846793005);
         let fit_predict = param_sampler(config_seed);
 
-        let mut fold_scores = Vec::with_capacity(k);
-        for (train_indices, test_indices) in &folds {
+        let mut fold_scores = Vec::with_capacity(splits.len());
+        for (train_indices, test_indices) in splits {
             let score = evaluate_fold(x, y, train_indices, test_indices, &fit_predict, &scorer)?;
             fold_scores.push(score);
         }
 
-        let sum: F = fold_scores.iter().copied().sum();
-        let mean = sum / F::from_usize(fold_scores.len()).unwrap();
-        mean_scores.push(mean);
+        mean_scores.push(mean_of(&fold_scores));
         cv_scores.push(fold_scores);
     }
 
-    let (best_params_index, &best_score) = mean_scores
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
+    let (best_params_index, best_score) = argmax(&mean_scores);
 
     Ok(GridSearchResult {
         best_score,
@@ -620,7 +881,8 @@ where
 ///
 /// Like [`cross_val_score`], but returns out-of-fold predictions for every
 /// sample instead of per-fold scores. Each sample gets a prediction from
-/// the model trained without it. Uses stratified K-fold splitting.
+/// the model trained without it. Folds come from [`default_cv_splits`]
+/// (stratified for class labels, shuffled K-fold for continuous targets).
 ///
 /// Returns an `Array1<F>` of length `n_samples` with the out-of-fold
 /// predictions arranged in the original sample order.
@@ -631,16 +893,38 @@ pub fn cross_val_predict<F: Float>(
     seed: u64,
     fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
 ) -> Result<Array1<F>> {
-    let folds = stratified_k_fold(x, y, k, seed)?;
+    let folds = default_cv_splits(x, y, k, seed)?;
+    cross_val_predict_with_splits(x, y, &folds, fit_predict)
+}
+
+/// Cross-validated predictions over user-supplied `(train, test)` splits.
+///
+/// The test sets must partition the samples (every sample in exactly one
+/// test set), otherwise `InvalidParameter` is returned.
+pub fn cross_val_predict_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+) -> Result<Array1<F>> {
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), true)?;
     let n = x.nrows();
     let mut predictions = Array1::zeros(n);
 
-    for (train_indices, test_indices) in &folds {
+    for (train_indices, test_indices) in splits {
         let x_train = select_rows(x, train_indices);
         let y_train = select_elements(y, train_indices);
         let x_test = select_rows(x, test_indices);
 
         let y_pred = fit_predict(&x_train, &y_train, &x_test)?;
+        if y_pred.len() != test_indices.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "fit_predict returned {} predictions for {} test rows",
+                y_pred.len(),
+                test_indices.len()
+            )));
+        }
 
         for (local_idx, &global_idx) in test_indices.iter().enumerate() {
             predictions[global_idx] = y_pred[local_idx];
@@ -681,16 +965,26 @@ pub fn repeated_stratified_k_fold<F: Float>(
 
 /// Stratified shuffle split.
 ///
-/// Like [`shuffle_split`] but preserves the class distribution in each split.
-/// Returns `n_splits` random (train, test) index pairs where each split
-/// maintains approximately the same class proportions as the full dataset.
+/// Like [`shuffle_split`] but preserves the class distribution in each split,
+/// following sklearn's `StratifiedShuffleSplit`:
+///
+/// - the test set has exactly `n_test = ceil(test_size * n)` samples (clamped
+///   to `1..=n-1`) and the train set the remaining `n - n_test`;
+/// - per-class test counts are allocated by the "approximate mode" of the
+///   multivariate hypergeometric distribution (floor of the proportional
+///   share, remaining slots going to the classes with the largest
+///   fractional remainders, ties broken by the seeded RNG);
+/// - classes are visited in first-appearance order and a single seeded RNG
+///   drives all draws, so the result is fully deterministic for a given `seed`.
+///
+/// Returned index lists are ascending.
 pub fn stratified_shuffle_split<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
     n_splits: usize,
     test_size: f64,
     seed: u64,
-) -> Result<Vec<(Vec<usize>, Vec<usize>)>> {
+) -> Result<Vec<CvSplit>> {
     if test_size <= 0.0 || test_size >= 1.0 {
         return Err(RustMlError::InvalidParameter(
             "test_size must be in (0, 1)".into(),
@@ -699,6 +993,7 @@ pub fn stratified_shuffle_split<F: Float>(
     if n_splits == 0 {
         return Err(RustMlError::InvalidParameter("n_splits must be > 0".into()));
     }
+    check_xy(x, y)?;
     let n = x.nrows();
     if n < 2 {
         return Err(RustMlError::InvalidParameter(
@@ -706,28 +1001,23 @@ pub fn stratified_shuffle_split<F: Float>(
         ));
     }
 
-    // Group indices by class
-    let mut class_indices: std::collections::HashMap<u64, Vec<usize>> =
-        std::collections::HashMap::new();
-    for (i, &val) in y.iter().enumerate() {
-        let key = val.to_f64().unwrap().to_bits();
-        class_indices.entry(key).or_default().push(i);
-    }
+    let n_test = ((n as f64 * test_size).ceil() as usize).clamp(1, n - 1);
+    let classes = group_by_class(y);
+    let counts: Vec<usize> = classes.iter().map(Vec::len).collect();
 
     let mut result = Vec::with_capacity(n_splits);
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
     for _ in 0..n_splits {
-        let mut test_indices = Vec::new();
-        let mut train_indices = Vec::new();
+        let test_counts = approximate_mode(&counts, n_test, &mut rng);
+        let mut test_indices = Vec::with_capacity(n_test);
+        let mut train_indices = Vec::with_capacity(n - n_test);
 
-        for indices in class_indices.values_mut() {
-            indices.shuffle(&mut rng);
-            let n_test = (indices.len() as f64 * test_size).max(1.0).ceil() as usize;
-            let n_test = n_test.min(indices.len().saturating_sub(1)); // keep at least 1 for train
-
-            test_indices.extend_from_slice(&indices[..n_test]);
-            train_indices.extend_from_slice(&indices[n_test..]);
+        for (members, &t) in classes.iter().zip(test_counts.iter()) {
+            let mut perm = members.clone();
+            perm.shuffle(&mut rng);
+            test_indices.extend_from_slice(&perm[..t]);
+            train_indices.extend_from_slice(&perm[t..]);
         }
 
         train_indices.sort_unstable();
@@ -736,6 +1026,33 @@ pub fn stratified_shuffle_split<F: Float>(
     }
 
     Ok(result)
+}
+
+/// sklearn's `_approximate_mode`: split `n_draws` across classes with the
+/// given `counts` as proportionally as possible, using exact integer
+/// arithmetic. Returns per-class draws summing to `n_draws` (`<= counts[c]`).
+fn approximate_mode(counts: &[usize], n_draws: usize, rng: &mut rand::rngs::StdRng) -> Vec<usize> {
+    let total: usize = counts.iter().sum();
+    let mut drawn: Vec<usize> = counts.iter().map(|&c| c * n_draws / total).collect();
+    let remainder: Vec<usize> = counts.iter().map(|&c| c * n_draws % total).collect();
+    let mut need = n_draws - drawn.iter().sum::<usize>();
+
+    let mut values: Vec<usize> = remainder.iter().copied().filter(|&r| r > 0).collect();
+    values.sort_unstable_by(|a, b| b.cmp(a));
+    values.dedup();
+    for v in values {
+        if need == 0 {
+            break;
+        }
+        let mut inds: Vec<usize> = (0..counts.len()).filter(|&c| remainder[c] == v).collect();
+        inds.shuffle(rng);
+        let take = inds.len().min(need);
+        for &c in &inds[..take] {
+            drawn[c] += 1;
+        }
+        need -= take;
+    }
+    drawn
 }
 
 /// Leave-P-Out cross-validation.
@@ -850,29 +1167,49 @@ pub struct CrossValidateResult<F: Float> {
 /// Cross-validate with multiple metrics and timing.
 ///
 /// Like [`cross_val_score_stratified`] but returns per-fold fit/score times
-/// and supports multiple scoring functions.
+/// and supports multiple scoring functions. Folds come from
+/// [`default_cv_splits`] (stratified for class labels, shuffled K-fold for
+/// continuous targets).
 pub fn cross_validate<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
     k: usize,
     seed: u64,
     fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
-    scorers: &[&dyn Fn(&Array1<F>, &Array1<F>) -> Result<F>],
+    scorers: &[&ScorerFn<'_, F>],
 ) -> Result<CrossValidateResult<F>> {
     if scorers.is_empty() {
         return Err(RustMlError::InvalidParameter(
             "need at least one scorer".into(),
         ));
     }
+    let folds = default_cv_splits(x, y, k, seed)?;
+    cross_validate_with_splits(x, y, &folds, fit_predict, scorers)
+}
 
-    let folds = stratified_k_fold(x, y, k, seed)?;
+/// [`cross_validate`] over user-supplied `(train, test)` splits.
+pub fn cross_validate_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+    scorers: &[&ScorerFn<'_, F>],
+) -> Result<CrossValidateResult<F>> {
+    if scorers.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "need at least one scorer".into(),
+        ));
+    }
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
     let n_metrics = scorers.len();
+    let n_splits = splits.len();
 
-    let mut all_scores: Vec<Vec<F>> = vec![Vec::with_capacity(k); n_metrics];
-    let mut fit_times = Vec::with_capacity(k);
-    let mut score_times = Vec::with_capacity(k);
+    let mut all_scores: Vec<Vec<F>> = vec![Vec::with_capacity(n_splits); n_metrics];
+    let mut fit_times = Vec::with_capacity(n_splits);
+    let mut score_times = Vec::with_capacity(n_splits);
 
-    for (train_indices, test_indices) in &folds {
+    for (train_indices, test_indices) in splits {
         let x_train = select_rows(x, train_indices);
         let y_train = select_elements(y, train_indices);
         let x_test = select_rows(x, test_indices);
@@ -892,13 +1229,7 @@ pub fn cross_validate<F: Float>(
         score_times.push(score_elapsed);
     }
 
-    let mean_scores: Vec<F> = all_scores
-        .iter()
-        .map(|scores| {
-            let sum: F = scores.iter().copied().sum();
-            sum / F::from_usize(scores.len()).unwrap()
-        })
-        .collect();
+    let mean_scores: Vec<F> = all_scores.iter().map(|s| mean_of(s)).collect();
 
     Ok(CrossValidateResult {
         scores: all_scores,
@@ -910,13 +1241,22 @@ pub fn cross_validate<F: Float>(
 
 /// Generate a learning curve: scores as a function of training set size.
 ///
-/// Trains the model on increasing subsets of the training data and evaluates
-/// on a held-out test set (the last fold of a stratified K-fold split).
+/// For every CV fold (from [`default_cv_splits`]: stratified for class
+/// labels, shuffled K-fold for continuous targets) the fold's training indices
+/// are shuffled with `seed` and the model is trained on increasing prefixes of
+/// that permutation, then evaluated both on the training prefix and on the
+/// held-out fold.
 ///
 /// `train_sizes` is a slice of fractions in (0, 1], e.g. `[0.1, 0.3, 0.5, 0.7, 1.0]`.
 ///
-/// Returns `(train_sizes_abs, train_scores, test_scores)` where each inner
-/// Vec has length `train_sizes.len()`.
+/// The model is fitted **once** per (fold, size): `fit_predict` receives
+/// `vstack(X_train, X_test)` as its evaluation matrix and must return one
+/// prediction per row (row-wise predictions, as every estimator's `predict`
+/// does).
+///
+/// Returns `(train_sizes_abs, train_scores, test_scores)` where the outer
+/// Vecs have length `train_sizes.len()` and the inner ones one score per fold.
+/// `train_sizes_abs` is computed from the first fold's training-set size.
 pub fn learning_curve<F: Float>(
     x: &Array2<F>,
     y: &Array1<F>,
@@ -925,7 +1265,13 @@ pub fn learning_curve<F: Float>(
     train_sizes: &[f64],
     fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
     scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
-) -> Result<(Vec<usize>, Vec<Vec<F>>, Vec<Vec<F>>)> {
+) -> Result<LearningCurveResult<F>> {
+    check_train_sizes(train_sizes)?;
+    let folds = default_cv_splits(x, y, k, seed)?;
+    learning_curve_with_splits(x, y, &folds, seed, train_sizes, fit_predict, scorer)
+}
+
+fn check_train_sizes(train_sizes: &[f64]) -> Result<()> {
     if train_sizes.is_empty() {
         return Err(RustMlError::InvalidParameter(
             "train_sizes must not be empty".into(),
@@ -939,38 +1285,54 @@ pub fn learning_curve<F: Float>(
             )));
         }
     }
+    Ok(())
+}
 
-    let folds = stratified_k_fold(x, y, k, seed)?;
+/// [`learning_curve`] over user-supplied `(train, test)` splits.
+///
+/// `seed` drives the shuffling of each split's training indices before the
+/// prefixes are taken.
+pub fn learning_curve_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    seed: u64,
+    train_sizes: &[f64],
+    fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
+) -> Result<LearningCurveResult<F>> {
+    check_train_sizes(train_sizes)?;
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
+
+    let n_splits = splits.len();
     let mut train_sizes_abs = Vec::with_capacity(train_sizes.len());
-    let mut all_train_scores: Vec<Vec<F>> = vec![Vec::with_capacity(k); train_sizes.len()];
-    let mut all_test_scores: Vec<Vec<F>> = vec![Vec::with_capacity(k); train_sizes.len()];
+    let mut all_train_scores: Vec<Vec<F>> = vec![Vec::with_capacity(n_splits); train_sizes.len()];
+    let mut all_test_scores: Vec<Vec<F>> = vec![Vec::with_capacity(n_splits); train_sizes.len()];
+    // Decorrelate the prefix shuffle from the splitter's own use of `seed`.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
 
-    for (train_indices, test_indices) in &folds {
+    for (fold, (train_indices, test_indices)) in splits.iter().enumerate() {
         let x_test = select_rows(x, test_indices);
         let y_test = select_elements(y, test_indices);
+        let mut perm = train_indices.clone();
+        perm.shuffle(&mut rng);
 
         for (si, &frac) in train_sizes.iter().enumerate() {
-            let n_train = ((train_indices.len() as f64 * frac).ceil() as usize)
+            let n_train = ((perm.len() as f64 * frac).ceil() as usize)
                 .max(1)
-                .min(train_indices.len());
-            let sub_train = &train_indices[..n_train];
-
-            if si == 0 || train_sizes_abs.len() <= si {
-                if train_sizes_abs.len() <= si {
-                    train_sizes_abs.push(n_train);
-                }
+                .min(perm.len());
+            if fold == 0 {
+                train_sizes_abs.push(n_train);
             }
-
+            let sub_train = &perm[..n_train];
             let x_train = select_rows(x, sub_train);
             let y_train = select_elements(y, sub_train);
 
-            let y_pred_train = fit_predict(&x_train, &y_train, &x_train)?;
-            let train_score = scorer(&y_train, &y_pred_train)?;
-            all_train_scores[si].push(train_score);
-
-            let y_pred_test = fit_predict(&x_train, &y_train, &x_test)?;
-            let test_score = scorer(&y_test, &y_pred_test)?;
-            all_test_scores[si].push(test_score);
+            let (y_pred_train, y_pred_test) =
+                fit_predict_train_and_test(&x_train, &y_train, &x_test, &fit_predict)?;
+            all_train_scores[si].push(scorer(&y_train, &y_pred_train)?);
+            all_test_scores[si].push(scorer(&y_test, &y_pred_test)?);
         }
     }
 
@@ -980,9 +1342,13 @@ pub fn learning_curve<F: Float>(
 /// Generate a validation curve: scores as a function of a hyperparameter.
 ///
 /// Evaluates performance across different hyperparameter values using
-/// stratified K-fold cross-validation.
+/// k-fold cross-validation (folds from [`default_cv_splits`]: stratified for
+/// class labels, shuffled K-fold for continuous targets).
 ///
 /// `param_configs` is a slice of `fit_predict` closures, one per hyperparameter value.
+/// Each closure is fitted **once** per fold and receives
+/// `vstack(X_train, X_test)` as its evaluation matrix (it must return one
+/// prediction per row).
 ///
 /// Returns `(train_scores, test_scores)` where each inner Vec has k fold scores.
 pub fn validation_curve<F: Float>(
@@ -992,34 +1358,47 @@ pub fn validation_curve<F: Float>(
     seed: u64,
     param_configs: &[impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>],
     scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
-) -> Result<(Vec<Vec<F>>, Vec<Vec<F>>)> {
+) -> Result<ValidationCurveResult<F>> {
     if param_configs.is_empty() {
         return Err(RustMlError::InvalidParameter(
             "param_configs must not be empty".into(),
         ));
     }
+    let folds = default_cv_splits(x, y, k, seed)?;
+    validation_curve_with_splits(x, y, &folds, param_configs, scorer)
+}
 
-    let folds = stratified_k_fold(x, y, k, seed)?;
+/// [`validation_curve`] over user-supplied `(train, test)` splits.
+pub fn validation_curve_with_splits<F: Float>(
+    x: &Array2<F>,
+    y: &Array1<F>,
+    splits: &[CvSplit],
+    param_configs: &[impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>],
+    scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
+) -> Result<ValidationCurveResult<F>> {
+    if param_configs.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "param_configs must not be empty".into(),
+        ));
+    }
+    check_xy(x, y)?;
+    validate_splits(splits, x.nrows(), false)?;
     let n_configs = param_configs.len();
-    let mut train_scores: Vec<Vec<F>> = vec![Vec::with_capacity(k); n_configs];
-    let mut test_scores: Vec<Vec<F>> = vec![Vec::with_capacity(k); n_configs];
+    let n_splits = splits.len();
+    let mut train_scores: Vec<Vec<F>> = vec![Vec::with_capacity(n_splits); n_configs];
+    let mut test_scores: Vec<Vec<F>> = vec![Vec::with_capacity(n_splits); n_configs];
 
-    for (train_indices, test_indices) in &folds {
+    for (train_indices, test_indices) in splits {
         let x_train = select_rows(x, train_indices);
         let y_train = select_elements(y, train_indices);
         let x_test = select_rows(x, test_indices);
         let y_test = select_elements(y, test_indices);
 
         for (ci, fit_predict) in param_configs.iter().enumerate() {
-            // Train score
-            let y_pred_train = fit_predict(&x_train, &y_train, &x_train)?;
-            let ts = scorer(&y_train, &y_pred_train)?;
-            train_scores[ci].push(ts);
-
-            // Test score
-            let y_pred_test = fit_predict(&x_train, &y_train, &x_test)?;
-            let vs = scorer(&y_test, &y_pred_test)?;
-            test_scores[ci].push(vs);
+            let (y_pred_train, y_pred_test) =
+                fit_predict_train_and_test(&x_train, &y_train, &x_test, fit_predict)?;
+            train_scores[ci].push(scorer(&y_train, &y_pred_train)?);
+            test_scores[ci].push(scorer(&y_test, &y_pred_test)?);
         }
     }
 
@@ -1863,7 +2242,7 @@ mod tests {
         // Even seeds predict all 0s, odd seeds predict based on threshold
         let sampler = |seed: u64| {
             move |_x_train: &Array2<f64>, _y_train: &Array1<f64>, x_test: &Array2<f64>| {
-                if seed % 2 == 0 {
+                if seed.is_multiple_of(2) {
                     Ok(Array1::from_elem(x_test.nrows(), 0.0))
                 } else {
                     Ok(x_test.column(0).mapv(|v| if v > 4.0 { 1.0 } else { 0.0 }))
@@ -2113,5 +2492,276 @@ mod tests {
 
         assert_eq!(train_scores.len(), 2);
         assert_eq!(test_scores.len(), 2);
+    }
+
+    // ---------------------------------------------------------------
+    // Regression tests for issue #33
+    // ---------------------------------------------------------------
+
+    fn continuous_xy(n: usize) -> (Array2<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(n, |i| 0.37 * i as f64 + 0.1);
+        (x, y)
+    }
+
+    fn assert_valid_partition(folds: &[CvSplit], n: usize) {
+        let mut all_test: Vec<usize> = folds.iter().flat_map(|(_, t)| t.clone()).collect();
+        all_test.sort_unstable();
+        assert_eq!(all_test, (0..n).collect::<Vec<_>>());
+        for (train, test) in folds {
+            assert!(!train.is_empty(), "empty train fold");
+            assert!(!test.is_empty(), "empty test fold");
+            let mut combined: Vec<usize> = train.iter().chain(test.iter()).copied().collect();
+            combined.sort_unstable();
+            assert_eq!(combined, (0..n).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn test_stratified_k_fold_all_unique_continuous_y() {
+        let (x, y) = continuous_xy(10);
+        let folds = stratified_k_fold(&x, &y, 5, 0).unwrap();
+        assert_eq!(folds.len(), 5);
+        assert_valid_partition(&folds, 10);
+        for (train, test) in &folds {
+            assert_eq!(test.len(), 2);
+            assert_eq!(train.len(), 8);
+        }
+    }
+
+    #[test]
+    fn test_stratified_k_fold_class_smaller_than_k() {
+        // class 1 has only 2 members, k = 5
+        let x = Array2::from_shape_fn((10, 1), |(i, _)| i as f64);
+        let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
+        let folds = stratified_k_fold(&x, &y, 5, 3).unwrap();
+        assert_valid_partition(&folds, 10);
+        for (_, test) in &folds {
+            assert_eq!(test.len(), 2);
+        }
+        // the two minority samples land in different folds
+        let minority_folds = folds
+            .iter()
+            .filter(|(_, t)| t.contains(&8) || t.contains(&9))
+            .count();
+        assert_eq!(minority_folds, 2);
+    }
+
+    #[test]
+    fn test_looks_like_class_labels() {
+        assert!(looks_like_class_labels(&array![0.0, 1.0, 0.0, 1.0]));
+        assert!(looks_like_class_labels(&array![0.0, 1.0]));
+        assert!(looks_like_class_labels(&array![
+            0.0, 1.0, 2.0, 2.0, 1.0, 0.0
+        ]));
+        assert!(!looks_like_class_labels(&array![0.5, 1.0, 0.0, 1.0]));
+        assert!(!looks_like_class_labels(&continuous_xy(10).1));
+        // integer-valued but (almost) all unique -> regression
+        assert!(!looks_like_class_labels(&array![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0
+        ]));
+        assert!(!looks_like_class_labels(&array![0.0, f64::NAN]));
+    }
+
+    #[test]
+    fn test_shuffled_k_fold_partition_and_determinism() {
+        let folds = shuffled_k_fold(11, 3, 7).unwrap();
+        assert_valid_partition(&folds, 11);
+        let sizes: Vec<usize> = folds.iter().map(|(_, t)| t.len()).collect();
+        assert_eq!(sizes, vec![4, 4, 3]);
+        assert_eq!(folds, shuffled_k_fold(11, 3, 7).unwrap());
+        // shuffled, i.e. not the contiguous k_fold blocks
+        assert_ne!(folds, k_fold(11, 3).unwrap());
+    }
+
+    #[test]
+    fn test_default_cv_splits_regression_target_uses_shuffled_kfold() {
+        let (x, y) = continuous_xy(10);
+        let folds = default_cv_splits(&x, &y, 5, 1).unwrap();
+        assert_eq!(folds, shuffled_k_fold(10, 5, 1).unwrap());
+        let y_cls = array![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
+        let folds = default_cv_splits(&x, &y_cls, 5, 1).unwrap();
+        assert_eq!(folds, stratified_k_fold(&x, &y_cls, 5, 1).unwrap());
+    }
+
+    /// Mean predictor that errors on an empty training set (as real estimators do).
+    fn predict_mean(
+        _x_train: &Array2<f64>,
+        y_train: &Array1<f64>,
+        x_test: &Array2<f64>,
+    ) -> Result<Array1<f64>> {
+        if y_train.is_empty() {
+            return Err(RustMlError::EmptyInput("empty training set".into()));
+        }
+        Ok(Array1::from_elem(x_test.nrows(), y_train.mean().unwrap()))
+    }
+
+    fn neg_mse(y_true: &Array1<f64>, y_pred: &Array1<f64>) -> Result<f64> {
+        if y_true.is_empty() {
+            return Err(RustMlError::EmptyInput("empty test set".into()));
+        }
+        Ok(-(y_true - y_pred).mapv(|d| d * d).mean().unwrap())
+    }
+
+    #[test]
+    fn test_model_selection_helpers_work_on_regression_targets() {
+        let (x, y) = continuous_xy(10);
+        let configs: Vec<fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>> =
+            vec![predict_mean];
+
+        let gs = grid_search_cv(&x, &y, 5, 0, &configs, neg_mse).unwrap();
+        assert_eq!(gs.cv_scores[0].len(), 5);
+
+        let rs = randomized_search_cv(&x, &y, 5, 0, 2, |_s| predict_mean, neg_mse).unwrap();
+        assert_eq!(rs.cv_scores.len(), 2);
+
+        let preds = cross_val_predict(&x, &y, 5, 0, predict_mean).unwrap();
+        assert_eq!(preds.len(), 10);
+
+        let cv = cross_validate(&x, &y, 5, 0, predict_mean, &[&neg_mse]).unwrap();
+        assert_eq!(cv.scores[0].len(), 5);
+
+        let (sizes, tr, te) =
+            learning_curve(&x, &y, 5, 0, &[0.25, 1.0], predict_mean, neg_mse).unwrap();
+        assert_eq!(sizes, vec![2, 8]);
+        assert_eq!(tr[0].len(), 5);
+        assert_eq!(te[1].len(), 5);
+
+        let (tr, te) = validation_curve(&x, &y, 5, 0, &configs, neg_mse).unwrap();
+        assert_eq!(tr[0].len(), 5);
+        assert_eq!(te[0].len(), 5);
+    }
+
+    #[test]
+    fn test_with_splits_variants() {
+        let (x, y) = continuous_xy(12);
+        let splits = time_series_split(12, 3).unwrap();
+        let configs: Vec<fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> Result<Array1<f64>>> =
+            vec![predict_mean, predict_zero];
+
+        let s = cross_val_score_with_splits(&x, &y, &splits, predict_mean, neg_mse).unwrap();
+        assert_eq!(s.len(), 3);
+        let gs = grid_search_cv_with_splits(&x, &y, &splits, &configs, neg_mse).unwrap();
+        assert_eq!(gs.best_params_index, 0);
+        assert_eq!(gs.cv_scores[1].len(), 3);
+        let rs =
+            randomized_search_cv_with_splits(&x, &y, &splits, 0, 3, |_s| predict_mean, neg_mse)
+                .unwrap();
+        assert_eq!(rs.cv_scores.len(), 3);
+        let cv = cross_validate_with_splits(&x, &y, &splits, predict_mean, &[&neg_mse]).unwrap();
+        assert_eq!(cv.fit_times.len(), 3);
+        let (_, tr, _) =
+            learning_curve_with_splits(&x, &y, &splits, 0, &[0.5, 1.0], predict_mean, neg_mse)
+                .unwrap();
+        assert_eq!(tr[0].len(), 3);
+        let (tr, _) = validation_curve_with_splits(&x, &y, &splits, &configs, neg_mse).unwrap();
+        assert_eq!(tr.len(), 2);
+
+        // time-series test sets do not partition the samples
+        assert!(cross_val_predict_with_splits(&x, &y, &splits, predict_mean).is_err());
+        let kf = k_fold(12, 4).unwrap();
+        let p = cross_val_predict_with_splits(&x, &y, &kf, predict_mean).unwrap();
+        assert_eq!(p.len(), 12);
+
+        // invalid splits
+        let bad: Vec<CvSplit> = vec![(vec![], vec![0, 1])];
+        assert!(cross_val_score_with_splits(&x, &y, &bad, predict_mean, neg_mse).is_err());
+        let bad: Vec<CvSplit> = vec![(vec![0], vec![99])];
+        assert!(cross_val_score_with_splits(&x, &y, &bad, predict_mean, neg_mse).is_err());
+        assert!(cross_val_score_with_splits(&x, &y, &[], predict_mean, neg_mse).is_err());
+    }
+
+    #[test]
+    fn test_learning_curve_small_fraction_not_single_class() {
+        // Sorted, class-grouped data: without shuffling, a small prefix of a
+        // fold's (class-grouped) train indices is single-class.
+        let n = 40;
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(n, |i| if i < n / 2 { 0.0 } else { 1.0 });
+        let seen_classes = std::cell::RefCell::new(Vec::new());
+        let fit_predict = |_xt: &Array2<f64>, yt: &Array1<f64>, x_te: &Array2<f64>| {
+            let ones = yt.iter().filter(|&&v| v == 1.0).count();
+            seen_classes.borrow_mut().push((ones, yt.len() - ones));
+            Ok(Array1::zeros(x_te.nrows()))
+        };
+        learning_curve(&x, &y, 4, 0, &[0.25], fit_predict, accuracy).unwrap();
+        let seen = seen_classes.into_inner();
+        assert_eq!(seen.len(), 4);
+        assert!(
+            seen.iter().all(|&(ones, zeros)| ones > 0 && zeros > 0),
+            "single-class training prefixes: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn test_learning_and_validation_curve_fit_once_per_point() {
+        let x = Array2::from_shape_fn((8, 1), |(i, _)| i as f64);
+        let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let calls = std::cell::Cell::new(0usize);
+        let fit_predict = |_xt: &Array2<f64>, _yt: &Array1<f64>, x_te: &Array2<f64>| {
+            calls.set(calls.get() + 1);
+            Ok(Array1::zeros(x_te.nrows()))
+        };
+        learning_curve(&x, &y, 2, 0, &[0.5, 1.0], fit_predict, accuracy).unwrap();
+        assert_eq!(calls.get(), 4); // 2 folds x 2 sizes
+
+        calls.set(0);
+        let configs = [fit_predict];
+        validation_curve(&x, &y, 2, 0, &configs, accuracy).unwrap();
+        assert_eq!(calls.get(), 2); // 2 folds x 1 config
+    }
+
+    #[test]
+    fn test_stratified_shuffle_split_deterministic() {
+        let n = 30;
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(n, |i| (i % 3) as f64);
+        let first = stratified_shuffle_split(&x, &y, 4, 0.3, 0).unwrap();
+        for _ in 0..10 {
+            assert_eq!(stratified_shuffle_split(&x, &y, 4, 0.3, 0).unwrap(), first);
+        }
+        // the four splits differ from each other
+        assert_ne!(first[0].1, first[1].1);
+    }
+
+    #[test]
+    fn test_stratified_shuffle_split_exact_test_size() {
+        // classes of size 7 / 4 / 4; the old per-class `ceil(..).max(1)` gave
+        // 2 + 1 + 1 = 4 test samples for test_size 0.1 (expected ceil(1.5) = 2).
+        let x = Array2::from_shape_fn((15, 1), |(i, _)| i as f64);
+        let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0];
+        for &(ts, expected) in &[(0.25, 4usize), (0.2, 3), (0.5, 8), (0.1, 2)] {
+            let splits = stratified_shuffle_split(&x, &y, 5, ts, 11).unwrap();
+            for (train, test) in &splits {
+                assert_eq!(test.len(), expected, "test_size {ts}");
+                assert_eq!(train.len(), 15 - expected);
+                let mut all: Vec<usize> = train.iter().chain(test.iter()).copied().collect();
+                all.sort_unstable();
+                assert_eq!(all, (0..15).collect::<Vec<_>>());
+            }
+        }
+        // proportional allocation: 0.4 * 15 = 6 test samples; shares (2.8, 1.6, 1.6)
+        // -> class 0 gets 3, one of classes 1/2 gets 2 and the other 1.
+        let splits = stratified_shuffle_split(&x, &y, 3, 0.4, 5).unwrap();
+        for (_, test) in &splits {
+            let c0 = test.iter().filter(|&&i| y[i] == 0.0).count();
+            let c1 = test.iter().filter(|&&i| y[i] == 1.0).count();
+            let c2 = test.iter().filter(|&&i| y[i] == 2.0).count();
+            assert_eq!(c0, 3);
+            assert_eq!((c1.min(c2), c1.max(c2)), (1, 2));
+        }
+    }
+
+    #[test]
+    fn test_approximate_mode_sums_to_draws() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let counts = [7usize, 4, 4];
+        for draws in 0..=15 {
+            let d = approximate_mode(&counts, draws, &mut rng);
+            assert_eq!(d.iter().sum::<usize>(), draws);
+            for (a, b) in d.iter().zip(counts.iter()) {
+                assert!(a <= b);
+            }
+        }
     }
 }
