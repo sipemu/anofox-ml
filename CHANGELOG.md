@@ -729,6 +729,15 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   - The classifier votes; `predict_proba` is the vote fraction, as sklearn
     does for bases without `predict_proba`.
 
+- **Gradient boosting `warm_start` (#50):**
+  `GradientBoostingRegressor::fit_warm_start(prev, X, y, w)` and the
+  classifier's counterpart add trees to a fitted model until there are
+  `n_estimators`. The earlier rounds' random draws are replayed, so
+  without early stopping the result is identical to one fit with
+  `n_estimators` trees, which is sklearn's guarantee. The early-stopping
+  history restarts with each call, as in sklearn. Not exposed in Python
+  yet.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

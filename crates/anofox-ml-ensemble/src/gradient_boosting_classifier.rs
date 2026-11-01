@@ -190,7 +190,7 @@ impl<F: Float> Fit<F> for GradientBoostingClassifier {
     type Fitted = FittedGradientBoostingClassifier<F>;
 
     fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
-        self.fit_impl(x, y, None)
+        self.fit_impl(x, y, None, None)
     }
 }
 
@@ -204,16 +204,33 @@ impl<F: Float> FitWeighted<F> for GradientBoostingClassifier {
         y: &Array1<F>,
         sample_weight: Option<&Array1<F>>,
     ) -> Result<Self::Fitted> {
-        self.fit_impl(x, y, sample_weight)
+        self.fit_impl(x, y, sample_weight, None)
     }
 }
 
 impl GradientBoostingClassifier {
+    /// sklearn's `warm_start=True`: keep the rounds of `prev` and add more
+    /// until there are `n_estimators`, fitted on the same `(X, y)`. The
+    /// random draws of the earlier rounds are replayed, so without early
+    /// stopping the result equals a single fit with `n_estimators` rounds.
+    /// The early-stopping history restarts, as in sklearn. Asking for fewer
+    /// rounds than `prev` has is an error; as many returns `prev` unchanged.
+    pub fn fit_warm_start<F: Float>(
+        &self,
+        prev: FittedGradientBoostingClassifier<F>,
+        x: &Array2<F>,
+        y: &Array1<F>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<FittedGradientBoostingClassifier<F>> {
+        self.fit_impl(x, y, sample_weight, Some(prev))
+    }
+
     fn fit_impl<F: Float>(
         &self,
         x: &Array2<F>,
         y: &Array1<F>,
         sample_weight: Option<&Array1<F>>,
+        prev: Option<FittedGradientBoostingClassifier<F>>,
     ) -> Result<FittedGradientBoostingClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -255,6 +272,28 @@ impl GradientBoostingClassifier {
         // Binary: one tree per round on the log-odds. Multiclass: K trees per
         // round, one per class, on the multinomial deviance.
         let n_trees_per_round = if n_classes == 2 { 1 } else { n_classes };
+        if let Some(p) = &prev {
+            if p.n_features != n_features || p.classes != classes {
+                return Err(RustMlError::ShapeMismatch(
+                    "warm start needs the features and classes of the previous fit".into(),
+                ));
+            }
+            if p.learning_rate != lr {
+                return Err(RustMlError::InvalidParameter(
+                    "warm start needs the learning_rate of the previous fit".into(),
+                ));
+            }
+            let done = p.tree_sets[0].len();
+            if done > self.n_estimators {
+                return Err(RustMlError::InvalidParameter(format!(
+                    "warm start: n_estimators={} is less than the {done} rounds already fitted",
+                    self.n_estimators
+                )));
+            }
+            if done == self.n_estimators {
+                return Ok(p.clone());
+            }
+        }
 
         // Encoded labels 0..K-1.
         let y_idx: Vec<usize> = y
@@ -305,7 +344,9 @@ impl GradientBoostingClassifier {
             .iter()
             .map(|&c| clamp(c / n_f, eps, F::one() - eps))
             .collect();
-        let initial_values: Vec<F> = if n_classes == 2 {
+        let initial_values: Vec<F> = if let Some(p) = &prev {
+            p.initial_values.clone()
+        } else if n_classes == 2 {
             vec![(priors[1] / (F::one() - priors[1])).ln()]
         } else {
             let logs: Vec<F> = priors.iter().map(|p| p.ln()).collect();
@@ -352,7 +393,26 @@ impl GradientBoostingClassifier {
         let mut in_bag: Vec<usize> = train_rows.clone();
         let mut loss_history = vec![F::infinity(); self.n_iter_no_change.unwrap_or(0)];
 
-        for iteration in 0..self.n_estimators {
+        // Warm start: take over the previous rounds and replay their random
+        // draws so the streams continue where the previous fit stopped.
+        let mut begin = 0;
+        if let Some(p) = prev {
+            raw = p.raw_predictions(x)?;
+            begin = p.tree_sets[0].len();
+            for _ in 0..begin {
+                if use_subsample {
+                    train_rows.clone().shuffle(&mut rng);
+                }
+                if self.max_features.is_some() {
+                    for _ in 0..n_trees_per_round {
+                        let _: u64 = tree_seeds.gen();
+                    }
+                }
+            }
+            tree_sets = p.tree_sets;
+        }
+
+        for iteration in begin..self.n_estimators {
             // Probabilities from the raw predictions at the start of the
             // round (shared by all K trees of the round).
             compute_probs(&raw, &mut probs);
@@ -1095,6 +1155,41 @@ mod tests {
             correct_normal >= correct_tiny,
             "normal lr ({correct_normal} correct) should be >= tiny lr ({correct_tiny} correct)"
         );
+    }
+
+    #[test]
+    fn test_warm_start_equals_single_fit() {
+        let x = Array2::from_shape_fn((90, 3), |(i, j)| ((i * (j + 2)) as f64 * 0.41).sin());
+        for n_classes in [2usize, 3] {
+            let y = Array1::from_shape_fn(90, |i| {
+                let s = x[[i, 0]] + 0.5 * x[[i, 1]];
+                if n_classes == 2 {
+                    f64::from(u8::from(s > 0.0))
+                } else if s < -0.4 {
+                    0.0
+                } else if s < 0.4 {
+                    1.0
+                } else {
+                    2.0
+                }
+            });
+            let gb = |n| {
+                GradientBoostingClassifier::new()
+                    .with_n_estimators(n)
+                    .with_subsample(0.6)
+                    .with_max_depth(Some(2))
+                    .with_max_features(Some(anofox_ml_trees::MaxFeatures::Fixed(2)))
+                    .with_seed(9)
+            };
+            let full = gb(10).fit(&x, &y).unwrap();
+            let part = gb(4).fit(&x, &y).unwrap();
+            let warm = gb(10).fit_warm_start(part, &x, &y, None).unwrap();
+            assert_eq!(
+                warm.predict_proba(&x).unwrap(),
+                full.predict_proba(&x).unwrap()
+            );
+            assert!(gb(3).fit_warm_start(full, &x, &y, None).is_err());
+        }
     }
 }
 
