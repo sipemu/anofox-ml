@@ -708,6 +708,18 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   `anofox_regression::imputation::areg_impute` (`Hmisc::aregImpute`). It
   returns `n_impute` completed data sets to pool with Rubin's rules.
 
+- **Python / facade (#56):**
+  - New Python classes `IncrementalPCA`, `MissingIndicator`, `KNNImputer`,
+    `IterativeImputer` (BayesianRidge estimator) and `TargetEncoder`, whose
+    `fit_transform` returns the cross-fitted encoding.
+  - `SimpleImputer` gains `add_indicator` / `keep_empty_features`, and
+    `PolynomialFeatures` gains `include_bias` and a `degree` tuple.
+  - `StandardScaler` and `SimpleImputer` accept `sample_weight`.
+  - `partial_fit` is not exposed in Python yet.
+  - The new Rust types are in the `anofox_ml` prelude.
+  - `KnnImputer` breaks exact distance ties by training-row order. sklearn
+    leaves the order unspecified (`argpartition`), so tied cases can differ.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

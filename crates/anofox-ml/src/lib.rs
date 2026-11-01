@@ -99,8 +99,9 @@ pub mod prelude {
         repeated_stratified_k_fold, shuffle_split, stratified_group_k_fold, stratified_k_fold,
         stratified_shuffle_split, time_series_split, train_test_split, validation_curve,
         ClassWeight, ColumnSelector, ColumnTransformer, CrossValidateResult, FeatureUnion, Fit,
-        FitUnsupervised, FitWeighted, FittedPipeline, Float, FunctionTransformer, GridSearchResult,
-        InverseTransform, Pipeline, Predict, PredictProba, Remainder, Supervised, Transform,
+        FitUnsupervised, FitUnsupervisedWeighted, FitWeighted, FittedPipeline, Float,
+        FunctionTransformer, GridSearchResult, InverseTransform, PartialFitUnsupervised, Pipeline,
+        Predict, PredictProba, Remainder, Supervised, Transform,
     };
 
     pub use anofox_ml_metrics::{
@@ -113,12 +114,14 @@ pub mod prelude {
     };
 
     pub use anofox_ml_preprocessing::{
-        BinStrategy, Binarizer, EncodeStrategy, ImputeStrategy, KBinsDiscretizer, KernelPca,
-        KpcaKernel, LabelEncoder, MaxAbsScaler, MinMaxScaler, MutualInformationSelector, Nmf,
-        NormType, Normalizer, OneHotEncoder, OrdinalEncoder, OutputDistribution, Pca,
-        PolynomialFeatures, PowerTransformer, QuantileTransformer, Rfe, RobustScaler,
-        SelectFromModel, SelectKBest, SequentialFeatureSelector, SimpleImputer, StandardScaler,
-        TruncatedSvd, VarianceThreshold,
+        AregImputer, BinStrategy, Binarizer, EncodeStrategy, ImputationOrder, ImputeStrategy,
+        IncrementalPca, IterativeImputer, KBinsDiscretizer, KernelPca, KnnImputeWeights,
+        KnnImputer, KpcaKernel, LabelEncoder, MaxAbsScaler, MinMaxScaler, MissingFeatures,
+        MissingIndicator, MutualInformationSelector, Nmf, NormType, Normalizer, OneHotEncoder,
+        OrdinalEncoder, OutputDistribution, Pca, PolynomialFeatures, PowerTransformer,
+        QuantileTransformer, RcsTransformer, Rfe, RobustScaler, SelectFromModel, SelectKBest,
+        SequentialFeatureSelector, SimpleImputer, StandardScaler, TargetEncoder, TargetSmooth,
+        TargetType, TruncatedSvd, VarianceThreshold,
     };
 
     pub use anofox_ml_neighbors::{

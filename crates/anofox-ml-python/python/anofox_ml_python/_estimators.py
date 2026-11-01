@@ -1419,29 +1419,145 @@ class Binarizer(TransformerMixin, BaseEstimator):
         return {"threshold": float(self.threshold)}
 
 
+_IMPUTE_STRATEGY = {"mean": "Mean", "median": "Median", "most_frequent": "MostFrequent",
+                    "constant": "Constant"}
+
+
 class SimpleImputer(TransformerMixin, BaseEstimator):
     _kind = "SimpleImputer"
 
-    def __init__(self, strategy="mean", fill_value=None):
+    def __init__(self, strategy="mean", fill_value=None, add_indicator=False,
+                 keep_empty_features=False):
         self.strategy = strategy
         self.fill_value = fill_value
+        self.add_indicator = add_indicator
+        self.keep_empty_features = keep_empty_features
 
     def _rust_params(self, X, y):
-        return {"strategy": _choice(self.strategy, {"mean": "Mean", "median": "Median",
-                                                    "most_frequent": "MostFrequent",
-                                                    "constant": "Constant"}, "strategy"),
-                "fill_value": None if self.fill_value is None else float(self.fill_value)}
+        return {"strategy": _choice(self.strategy, _IMPUTE_STRATEGY, "strategy"),
+                "fill_value": None if self.fill_value is None else float(self.fill_value),
+                "add_indicator": self.add_indicator,
+                "keep_empty_features": self.keep_empty_features}
+
+
+class MissingIndicator(TransformerMixin, BaseEstimator):
+    _kind = "MissingIndicator"
+
+    def __init__(self, features="missing-only", error_on_new=True):
+        self.features = features
+        self.error_on_new = error_on_new
+
+    def _rust_params(self, X, y):
+        return {"features": _choice(self.features, {"missing-only": "MissingOnly",
+                                                    "all": "All"}, "features"),
+                "error_on_new": self.error_on_new}
+
+
+class KNNImputer(TransformerMixin, BaseEstimator):
+    _kind = "KnnImputer"
+
+    def __init__(self, n_neighbors=5, weights="uniform", add_indicator=False,
+                 keep_empty_features=False):
+        self.n_neighbors = n_neighbors
+        self.weights = weights
+        self.add_indicator = add_indicator
+        self.keep_empty_features = keep_empty_features
+
+    def _rust_params(self, X, y):
+        return {"n_neighbors": self.n_neighbors,
+                "weights": _choice(self.weights, {"uniform": "Uniform", "distance": "Distance"},
+                                   "weights"),
+                "add_indicator": self.add_indicator,
+                "keep_empty_features": self.keep_empty_features}
+
+
+def _bound(v):
+    """IterativeImputer bound -> Rust list (JSON has no infinity)."""
+    if v is None or (np.isscalar(v) and np.isinf(v)):
+        return []
+    if np.isscalar(v):
+        return [float(v)]
+    big = np.finfo(np.float64).max
+    return [float(np.clip(b, -big, big)) for b in v]
+
+
+class IterativeImputer(TransformerMixin, BaseEstimator):
+    """sklearn's IterativeImputer with its default BayesianRidge estimator."""
+
+    _kind = "IterativeImputer"
+
+    def __init__(self, sample_posterior=False, max_iter=10, tol=1e-3, n_nearest_features=None,
+                 initial_strategy="mean", fill_value=None, imputation_order="ascending",
+                 skip_complete=False, min_value=-np.inf, max_value=np.inf, random_state=None,
+                 add_indicator=False, keep_empty_features=False):
+        self.sample_posterior = sample_posterior
+        self.max_iter = max_iter
+        self.tol = tol
+        self.n_nearest_features = n_nearest_features
+        self.initial_strategy = initial_strategy
+        self.fill_value = fill_value
+        self.imputation_order = imputation_order
+        self.skip_complete = skip_complete
+        self.min_value = min_value
+        self.max_value = max_value
+        self.random_state = random_state
+        self.add_indicator = add_indicator
+        self.keep_empty_features = keep_empty_features
+
+    def _rust_params(self, X, y):
+        return {"sample_posterior": self.sample_posterior, "max_iter": self.max_iter,
+                "tol": float(self.tol), "n_nearest_features": self.n_nearest_features,
+                "initial_strategy": _choice(self.initial_strategy, _IMPUTE_STRATEGY,
+                                            "initial_strategy"),
+                "fill_value": None if self.fill_value is None else float(self.fill_value),
+                "imputation_order": _choice(self.imputation_order,
+                                            {"ascending": "Ascending",
+                                             "descending": "Descending", "roman": "Roman",
+                                             "arabic": "Arabic", "random": "Random"},
+                                            "imputation_order"),
+                "skip_complete": self.skip_complete,
+                "min_value": _bound(self.min_value), "max_value": _bound(self.max_value),
+                "random_state": _seed(self.random_state),
+                "add_indicator": self.add_indicator,
+                "keep_empty_features": self.keep_empty_features}
+
+
+class TargetEncoder(SupervisedTransformerMixin, BaseEstimator):
+    """sklearn's TargetEncoder; ``fit_transform`` returns the cross-fitted encoding."""
+
+    _kind = "TargetEncoder"
+
+    def __init__(self, target_type="auto", smooth="auto", cv=5, random_state=None):
+        self.target_type = target_type
+        self.smooth = smooth
+        self.cv = cv
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        smooth = "Auto" if self.smooth == "auto" else {"Value": float(self.smooth)}
+        return {"target_type": _choice(self.target_type,
+                                       {"auto": "Auto", "continuous": "Continuous",
+                                        "binary": "Binary", "multiclass": "Multiclass"},
+                                       "target_type"),
+                "smooth": smooth, "cv": self.cv, "random_state": _seed(self.random_state)}
+
+    def fit_transform(self, X, y, **fit_params):
+        self.fit(X, y, **fit_params)
+        return np.asarray(self._model().embedding())
 
 
 class PolynomialFeatures(TransformerMixin, BaseEstimator):
     _kind = "PolynomialFeatures"
 
-    def __init__(self, degree=2, interaction_only=False):
+    def __init__(self, degree=2, interaction_only=False, include_bias=True):
         self.degree = degree
         self.interaction_only = interaction_only
+        self.include_bias = include_bias
 
     def _rust_params(self, X, y):
-        return {"degree": self.degree, "interaction_only": self.interaction_only}
+        lo, hi = (0, self.degree) if np.isscalar(self.degree) else self.degree
+        return {"degree": int(hi), "min_degree": int(lo),
+                "interaction_only": self.interaction_only, "include_bias": self.include_bias}
 
 
 class PowerTransformer(TransformerMixin, BaseEstimator):
@@ -1512,6 +1628,19 @@ class PCA(TransformerMixin, BaseEstimator):
     def _rust_params(self, X, y):
         n = min(X.shape) if self.n_components is None else int(self.n_components)
         return {"n_components": n, "whiten": self.whiten}
+
+
+class IncrementalPCA(TransformerMixin, BaseEstimator):
+    _kind = "IncrementalPca"
+
+    def __init__(self, n_components=None, whiten=False, batch_size=None):
+        self.n_components = n_components
+        self.whiten = whiten
+        self.batch_size = batch_size
+
+    def _rust_params(self, X, y):
+        return {"n_components": self.n_components, "whiten": self.whiten,
+                "batch_size": self.batch_size}
 
 
 class KernelPCA(TransformerMixin, BaseEstimator):

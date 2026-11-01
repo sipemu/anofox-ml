@@ -82,7 +82,8 @@ pub(crate) trait DynModel: Send + Sync {
     fn labels(&self) -> Result<Out> {
         Err(unsupported(self.kind(), "labels"))
     }
-    /// Embedding of the training data (manifold learners).
+    /// Transformed training data from the fit: manifold embeddings, the
+    /// cross-fitted TargetEncoder output.
     fn embedding(&self) -> Result<Out> {
         Err(unsupported(self.kind(), "embedding"))
     }

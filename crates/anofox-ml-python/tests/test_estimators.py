@@ -46,6 +46,7 @@ SPECIAL = {
     "RadiusNeighborsRegressor": dict(params=dict(radius=3.0)),
     "SpectralClustering": dict(params=dict(n_clusters=3, random_state=0)),
     "TSNE": dict(params=dict(perplexity=10.0, max_iter=250, random_state=0)),
+    "TargetEncoder": dict(X=np.round(X_pos), params=dict(random_state=0)),
 }
 
 
@@ -97,7 +98,8 @@ def test_fit_predict_pickle_clone(name):
         return
     else:  # transformer
         out = est.fit_transform(Xd, yd) if name in ("SelectKBest",
-                                                     "MutualInformationSelector") \
+                                                     "MutualInformationSelector",
+                                                     "TargetEncoder") \
             else est.fit_transform(Xd)
         assert out.shape[0] == len(Xd)
 
@@ -107,7 +109,9 @@ def test_fit_predict_pickle_clone(name):
     if kind in ("classifier", "regressor"):
         np.testing.assert_array_equal(clone.predict(Xd), out)
     elif kind is None and hasattr(est, "transform"):
-        np.testing.assert_array_equal(clone.transform(Xd), out)
+        # (TargetEncoder's fit_transform is cross-fitted, so compare with
+        # transform rather than with `out`.)
+        np.testing.assert_array_equal(clone.transform(Xd), est.transform(Xd))
 
     # sklearn-style clone: same params, unfitted
     fresh = type(est)(**est.get_params())
@@ -289,3 +293,36 @@ def test_birch_matches_sklearn():
         # dot products round differently on near-ties.
         from sklearn.metrics import adjusted_rand_score
         assert adjusted_rand_score(ours.labels_, ref.labels_) == 1.0, kw
+
+
+def test_imputers_and_encoders_match_sklearn():
+    from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+    from sklearn import decomposition as skd
+    from sklearn import impute as ski
+    from sklearn import preprocessing as skp
+
+    Xm = X.copy()
+    Xm[rng.rand(*X.shape) < 0.15] = np.nan
+    close = lambda a, b: np.testing.assert_allclose(a, b, atol=1e-8)  # noqa: E731
+    close(am.SimpleImputer(add_indicator=True).fit_transform(Xm),
+          ski.SimpleImputer(add_indicator=True).fit_transform(Xm))
+    close(am.MissingIndicator().fit_transform(Xm), ski.MissingIndicator().fit_transform(Xm))
+    close(am.KNNImputer(n_neighbors=3, weights="distance").fit_transform(Xm),
+          ski.KNNImputer(n_neighbors=3, weights="distance").fit_transform(Xm))
+    for kw in [dict(), dict(min_value=-1.0, max_value=[2, 2, 3, 3], max_iter=4)]:
+        close(am.IterativeImputer(**kw).fit_transform(Xm),
+              ski.IterativeImputer(**kw).fit_transform(Xm))
+    close(am.IncrementalPCA(n_components=2, batch_size=20).fit_transform(X),
+          skd.IncrementalPCA(n_components=2, batch_size=20).fit_transform(X))
+    close(am.PolynomialFeatures(degree=(2, 3), include_bias=False).fit_transform(X),
+          skp.PolynomialFeatures(degree=(2, 3), include_bias=False).fit_transform(X))
+    w = rng.rand(len(X))
+    close(am.StandardScaler().fit(X, sample_weight=w).transform(X),
+          skp.StandardScaler().fit(X, sample_weight=w).transform(X))
+
+    cats = np.round(X_pos)
+    for yy in [y_reg, y_multi]:
+        ours = am.TargetEncoder(random_state=0)
+        train = ours.fit_transform(cats, yy)
+        close(ours.transform(cats), skp.TargetEncoder().fit(cats, yy).transform(cats))
+        assert train.shape == ours.transform(cats).shape

@@ -7,7 +7,9 @@
 //! between rows with missing coordinates use only the coordinates present in
 //! both, scaled up by `n_features / n_present` (sklearn's
 //! `nan_euclidean_distances`). A row with no usable distance to any donor
-//! gets the feature's training mean.
+//! gets the feature's training mean. Donors at exactly the same distance
+//! are taken in training-row order; sklearn's `argpartition` leaves that
+//! order unspecified, so results can differ from sklearn on exact ties.
 //!
 //! The distances are computed by brute force, `O(n_missing_rows · n_train ·
 //! n_features)`, in parallel over the rows to impute.

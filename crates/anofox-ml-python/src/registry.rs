@@ -77,6 +77,15 @@ fn wsup<C: FitWeighted<f64>>(
     c.fit_weighted(x, need_y(k, y)?, w)
 }
 
+/// Fitted TargetEncoder plus the cross-fitted encoding of its training data
+/// (what `fit_transform` returns; not pickled).
+#[derive(Serialize, Deserialize)]
+struct TargetEncoderFit {
+    model: pre::FittedTargetEncoder<f64>,
+    #[serde(skip)]
+    train: Array2<f64>,
+}
+
 /// Unsupervised fit, no weights (`y` is ignored, as in sklearn).
 fn unsup<C: FitUnsupervised<f64>>(
     k: &str,
@@ -527,7 +536,7 @@ registry! {
     StandardScaler {
         config: pre::StandardScaler = Default::default(),
         fitted: pre::FittedStandardScaler<f64>,
-        fit: |c, x, y, w| unsup(K, c, x, w),
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
     }
@@ -567,6 +576,41 @@ registry! {
     SimpleImputer {
         config: pre::SimpleImputer<f64> = Default::default(),
         fitted: pre::FittedSimpleImputer<f64>,
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    MissingIndicator {
+        config: pre::MissingIndicator = Default::default(),
+        fitted: pre::FittedMissingIndicator,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    KnnImputer {
+        config: pre::KnnImputer = Default::default(),
+        fitted: pre::FittedKnnImputer<f64>,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    IterativeImputer {
+        config: pre::IterativeImputer = Default::default(),
+        fitted: pre::FittedIterativeImputer<reg::FittedBayesianRidge>,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    TargetEncoder {
+        config: pre::TargetEncoder = Default::default(),
+        fitted: TargetEncoderFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit_transform(x, need_y(K, y)?)
+                .map(|(model, train)| TargetEncoderFit { model, train })
+        },
+        transform: |m, x| Transform::transform(&m.model, x),
+        embedding: |m| m.train.clone(),
+    }
+    RcsTransformer {
+        config: pre::RcsTransformer = Default::default(),
+        fitted: pre::FittedRcsTransformer<f64>,
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
@@ -606,6 +650,13 @@ registry! {
     Pca {
         config: pre::Pca = pre::Pca::new(2),
         fitted: pre::FittedPca<f64>,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+        inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
+    }
+    IncrementalPca {
+        config: pre::IncrementalPca = Default::default(),
+        fitted: pre::FittedIncrementalPca<f64>,
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
