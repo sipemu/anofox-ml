@@ -666,6 +666,13 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   and `keep_empty_features`. Rows to impute are processed in parallel.
   Matches sklearn 1.8 to 1e-12.
 
+- **PolynomialFeatures (#56)** gains sklearn's `include_bias` and
+  `degree=(min, max)` (`with_degree_range`), `powers()` and
+  `feature_names_out()`. Each degree-k column is built from its degree-k−1
+  prefix column times one feature, instead of recomputing every power.
+  `degree = 0` with a bias is allowed, as in sklearn. Output matches
+  sklearn 1.8.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
