@@ -650,6 +650,17 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     with mean correction; `fit` runs in batches of `batch_size` rows.
   - Scalers and IncrementalPCA match sklearn 1.8 to 1e-10.
 
+- **Imputation (#56):**
+  - New `MissingIndicator` (sklearn's, `features` = missing-only / all,
+    `error_on_new`).
+  - `SimpleImputer` gains sklearn's `add_indicator` and
+    `keep_empty_features`, and `sample_weight` through
+    `FitUnsupervisedWeighted` (weighted mean, median and mode; this is an
+    extension, sklearn has no weights here).
+  - **Breaking:** an all-missing column is dropped from the output, as in
+    sklearn (its `fill_values` entry is NaN); before, `fit` returned an
+    error. `keep_empty_features(true)` keeps it and imputes 0.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

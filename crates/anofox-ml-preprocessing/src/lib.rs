@@ -38,6 +38,7 @@ pub mod kernel_pca;
 pub mod label_encoder;
 pub mod max_abs_scaler;
 pub mod minmax_scaler;
+pub mod missing_indicator;
 pub mod mutual_information;
 pub mod nmf;
 pub mod normalizer;
@@ -70,6 +71,7 @@ pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
 pub use label_encoder::{FittedLabelEncoder, LabelEncoder};
 pub use max_abs_scaler::{FittedMaxAbsScaler, MaxAbsScaler};
 pub use minmax_scaler::{FittedMinMaxScaler, MinMaxScaler};
+pub use missing_indicator::{FittedMissingIndicator, MissingFeatures, MissingIndicator};
 pub use mutual_information::{
     mutual_info_classif, mutual_info_regression, DiscreteFeatures, FittedMutualInformationSelector,
     MiTarget, MutualInformationSelector,
