@@ -18,6 +18,7 @@
 //!    `reachability ≤ eps` join the current cluster; otherwise start a new
 //!    cluster or label as noise.
 
+use anofox_ml_core::Float;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -119,10 +120,13 @@ impl Ord for Key {
     }
 }
 
-impl FitUnsupervised<f64> for Optics {
+impl<F: Float> FitUnsupervised<F> for Optics {
     type Fitted = FittedOptics;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));

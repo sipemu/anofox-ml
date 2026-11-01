@@ -15,6 +15,7 @@
 //! for a larger `n_neighbors` (instead of silently treating unreachable pairs
 //! as distance 0, which collapsed unrelated points onto each other).
 
+use anofox_ml_core::Float;
 use std::collections::BinaryHeap;
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
@@ -79,10 +80,13 @@ fn dijkstra(adj: &[Vec<(usize, f64)>], source: usize) -> Vec<f64> {
     dist
 }
 
-impl FitUnsupervised<f64> for Isomap {
+impl<F: Float> FitUnsupervised<F> for Isomap {
     type Fitted = FittedIsomap;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));

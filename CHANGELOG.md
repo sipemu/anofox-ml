@@ -738,6 +738,17 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
   history restarts with each call, as in sklearn. Not exposed in Python
   yet.
 
+- **f32 input for clustering / manifold / LOF (#61):**
+  - Affected estimators: AgglomerativeClustering, AffinityPropagation,
+    GaussianMixture, BayesianGaussianMixture, Birch, SpectralClustering,
+    OPTICS, MeanShift, HDBSCAN, Isomap, LLE, ClassicalMds, t-SNE and
+    LocalOutlierFactor.
+  - They now implement `FitUnsupervised<F>` (and `Predict<F>` /
+    `PredictProba<F>` where available) for any `F: Float`.
+  - They compute in f64 and convert at the boundary (new core helpers
+    `as_f64` / `from_f64`, zero-copy for f64). f32 data gives the same
+    result as the same data in f64. Fitted attributes stay f64.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,

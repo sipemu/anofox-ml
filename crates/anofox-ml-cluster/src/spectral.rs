@@ -7,6 +7,7 @@
 //! divided by `√degree`, from a sparse eigensolver for large graphs), and
 //! k-means with `n_init` restarts on that embedding.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_manifold::spectral_embedding;
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
@@ -108,10 +109,13 @@ fn build_affinity(x: &Array2<f64>, affinity: &Affinity) -> Result<Vec<(usize, us
     }
 }
 
-impl FitUnsupervised<f64> for SpectralClustering {
+impl<F: Float> FitUnsupervised<F> for SpectralClustering {
     type Fitted = FittedSpectralClustering;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));

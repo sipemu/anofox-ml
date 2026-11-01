@@ -21,6 +21,7 @@
 //! [`FittedHdbscan::probabilities`] holds sklearn's membership strengths
 //! (`λ_point / λ_max(cluster)`, clipped to `[0, 1]`; 0 for noise).
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use ndarray::{Array1, Array2};
@@ -438,10 +439,13 @@ fn extract_clusters(
     (labels, probs)
 }
 
-impl FitUnsupervised<f64> for Hdbscan {
+impl<F: Float> FitUnsupervised<F> for Hdbscan {
     type Fitted = FittedHdbscan;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));

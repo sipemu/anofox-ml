@@ -10,6 +10,7 @@
 //!
 //! LOF >> 1 indicates an outlier.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
@@ -62,10 +63,13 @@ pub struct FittedLocalOutlierFactor {
     pub predictions: Array1<f64>,
 }
 
-impl FitUnsupervised<f64> for LocalOutlierFactor {
+impl<F: Float> FitUnsupervised<F> for LocalOutlierFactor {
     type Fitted = FittedLocalOutlierFactor;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -278,5 +282,16 @@ mod tests {
                 .unwrap();
             assert_eq!(a.negative_outlier_factor, b.negative_outlier_factor);
         }
+    }
+
+    #[test]
+    fn test_f32_input_matches_f64() {
+        let x = Array2::from_shape_fn((25, 2), |(i, j)| ((i * (j + 2)) % 9) as f64 / 4.0);
+        let x32 = x.mapv(|v| v as f32);
+        let lof = LocalOutlierFactor::new(5);
+        let a = FitUnsupervised::<f64>::fit(&lof, &x).unwrap();
+        let b = FitUnsupervised::<f32>::fit(&lof, &x32).unwrap();
+        assert_eq!(a.negative_outlier_factor, b.negative_outlier_factor);
+        assert_eq!(a.predictions, b.predictions);
     }
 }

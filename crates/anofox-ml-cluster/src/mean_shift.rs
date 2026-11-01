@@ -16,6 +16,7 @@
 //!
 //! Without a bandwidth, [`estimate_bandwidth`] picks one.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Predict, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use ndarray::{Array1, Array2, Axis};
@@ -174,10 +175,13 @@ fn bin_seeds(x: &Array2<f64>, bin_size: f64, min_bin_freq: usize) -> Array2<f64>
     })
 }
 
-impl FitUnsupervised<f64> for MeanShift {
+impl<F: Float> FitUnsupervised<F> for MeanShift {
     type Fitted = FittedMeanShift;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -303,9 +307,8 @@ impl FitUnsupervised<f64> for MeanShift {
     }
 }
 
-impl Predict<f64> for FittedMeanShift {
-    /// Index of the nearest cluster centre.
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+impl FittedMeanShift {
+    fn predict_f64(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let d = self.cluster_centers.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -322,6 +325,15 @@ impl Predict<f64> for FittedMeanShift {
         )?
         .kneighbors(x, 1)?;
         Ok(idx.column(0).mapv(|v| v as f64))
+    }
+}
+
+impl<F: Float> Predict<F> for FittedMeanShift {
+    /// Index of the nearest cluster centre.
+    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+        Ok(anofox_ml_core::from_f64(
+            self.predict_f64(&anofox_ml_core::as_f64(x))?,
+        ))
     }
 }
 
@@ -383,4 +395,4 @@ mod tests {
     }
 }
 
-impl anofox_ml_core::ClassifierScore<f64> for FittedMeanShift {}
+impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedMeanShift {}

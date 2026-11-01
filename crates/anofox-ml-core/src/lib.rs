@@ -54,7 +54,7 @@ pub use class_weight::{
 pub use column_transformer::{ColumnSelector, ColumnTransformer, Remainder};
 pub use error::{Result, RustMlError};
 pub use feature_union::{FeatureUnion, FittedFeatureUnion};
-pub use float::Float;
+pub use float::{as_f64, from_f64, Float};
 pub use function_transformer::FunctionTransformer;
 pub use halving::{
     halving_grid_search_cv, halving_grid_search_cv_with_splitter, halving_random_search_cv,

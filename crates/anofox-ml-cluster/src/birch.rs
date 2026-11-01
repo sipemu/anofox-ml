@@ -11,6 +11,7 @@
 //! AgglomerativeClustering (Ward) into `n_clusters`, and every sample takes
 //! the label of its nearest subcluster.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
@@ -271,10 +272,13 @@ fn nearest(row: ndarray::ArrayView1<'_, f64>, centers: &Array2<f64>) -> usize {
     best.0
 }
 
-impl FitUnsupervised<f64> for Birch {
+impl<F: Float> FitUnsupervised<F> for Birch {
     type Fitted = FittedBirch;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let (n, d) = x.dim();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -331,9 +335,8 @@ impl FitUnsupervised<f64> for Birch {
     }
 }
 
-impl Predict<f64> for FittedBirch {
-    /// Label of the nearest subcluster.
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+impl FittedBirch {
+    fn predict_f64(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.subcluster_centers.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -344,6 +347,15 @@ impl Predict<f64> for FittedBirch {
         Ok(Array1::from_shape_fn(x.nrows(), |i| {
             self.subcluster_labels[nearest(x.row(i), &self.subcluster_centers)]
         }))
+    }
+}
+
+impl<F: Float> Predict<F> for FittedBirch {
+    /// Label of the nearest subcluster.
+    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+        Ok(anofox_ml_core::from_f64(
+            self.predict_f64(&anofox_ml_core::as_f64(x))?,
+        ))
     }
 }
 
@@ -385,4 +397,4 @@ mod tests {
     }
 }
 
-impl anofox_ml_core::ClassifierScore<f64> for FittedBirch {}
+impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedBirch {}

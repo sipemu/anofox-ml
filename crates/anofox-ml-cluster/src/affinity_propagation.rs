@@ -21,6 +21,7 @@
 //!   [`FittedAffinityPropagation::converged`] is `false`, so callers can
 //!   treat the result as degenerate.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use ndarray::{Array1, Array2};
 
@@ -169,10 +170,13 @@ fn extract_labels(
     (labels, uniq)
 }
 
-impl FitUnsupervised<f64> for AffinityPropagation {
+impl<F: Float> FitUnsupervised<F> for AffinityPropagation {
     type Fitted = FittedAffinityPropagation;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));

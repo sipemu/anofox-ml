@@ -28,6 +28,7 @@
 //! initialisation and computes the Barnes–Hut forces in single precision;
 //! this implementation works in double precision throughout.
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use faer::linalg::solvers::SelfAdjointEigen;
@@ -731,10 +732,13 @@ fn gradient_descent(
     )
 }
 
-impl FitUnsupervised<f64> for TSne {
+impl<F: Float> FitUnsupervised<F> for TSne {
     type Fitted = FittedTSne;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         let k = self.n_components;
         if n < 2 {

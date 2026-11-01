@@ -13,6 +13,7 @@
 //!    shift-invert Lanczos otherwise), dropping the very smallest (the
 //!    constant direction).
 
+use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use faer::linalg::solvers::Solve;
@@ -52,10 +53,13 @@ pub struct FittedLocallyLinearEmbedding {
     pub reconstruction_error: f64,
 }
 
-impl FitUnsupervised<f64> for LocallyLinearEmbedding {
+impl<F: Float> FitUnsupervised<F> for LocallyLinearEmbedding {
     type Fitted = FittedLocallyLinearEmbedding;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         let d = x.ncols();
         if n == 0 {

@@ -11,6 +11,7 @@
 //! - **t-SNE** — `sklearn.manifold.TSNE`, exact or Barnes–Hut.
 //! - **spectral_embedding** — `sklearn.manifold.spectral_embedding`.
 
+use anofox_ml_core::Float;
 pub mod isomap;
 pub mod lle;
 pub mod sparse_eigen;
@@ -92,10 +93,13 @@ fn top_eigen(b: &Array2<f64>, k: usize) -> Result<(Array1<f64>, Array2<f64>)> {
     Ok((vals, vecs))
 }
 
-impl FitUnsupervised<f64> for ClassicalMds {
+impl<F: Float> FitUnsupervised<F> for ClassicalMds {
     type Fitted = FittedClassicalMds;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    /// Computed in `f64` whatever the input float type.
+    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+        let x_f64 = anofox_ml_core::as_f64(x);
+        let x: &Array2<f64> = &x_f64;
         let n = x.nrows();
         let k = self.n_components;
         if n == 0 {
