@@ -64,13 +64,7 @@ fn compute_bins(
         let mut edges = Vec::new();
 
         if is_categorical {
-            // For categorical features, bin edges are the unique values themselves.
-            let mut col: Vec<f64> = (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
-            col.sort_by(f64::total_cmp);
-            col.dedup();
-            for &v in col.iter().take(max_bins - 1) {
-                edges.push(v);
-            }
+            edges = categorical_edges(x.column(j), max_bins, min_data_in_bin);
         } else {
             // Greedy binning matching LightGBM: collect distinct values with
             // sample counts, then greedily fill bins so each has at least
@@ -137,9 +131,8 @@ fn compute_bins(
             if v.is_nan() {
                 binned[[i, j]] = MISSING_BIN;
             } else if is_categorical {
-                // Direct bin lookup for categorical
-                let bin = categorical_bin(v, &edges).unwrap_or(edges.len().saturating_sub(1));
-                binned[[i, j]] = bin.min((MISSING_BIN - 1) as usize) as u8;
+                // Categories without a bin share the "other" (missing) bin.
+                binned[[i, j]] = categorical_bin(v, &edges).map_or(MISSING_BIN, |b| b as u8);
             } else {
                 binned[[i, j]] = numeric_bin(v, &edges);
             }
@@ -152,6 +145,42 @@ fn compute_bins(
     }
 
     (binned, all_bins)
+}
+
+/// The categories of a categorical feature that get their own bin, sorted by
+/// value (the bin index is the position in this list).
+///
+/// Follows LightGBM's categorical binning: categories are ranked by
+/// frequency, and the most frequent ones are kept until a category is rarer
+/// than `min_data_in_bin` (the two most frequent are always kept) or all
+/// `max_bins - 1` value bins are used. Every other category, like a category
+/// unseen in training, falls into the "other" bin, which is the missing bin
+/// and always goes right at a categorical split.
+fn categorical_edges(
+    col: ndarray::ArrayView1<'_, f64>,
+    max_bins: usize,
+    min_data_in_bin: usize,
+) -> Vec<f64> {
+    let mut values: Vec<f64> = col.iter().copied().filter(|v| !v.is_nan()).collect();
+    values.sort_by(f64::total_cmp);
+    let mut counts: Vec<(f64, usize)> = Vec::new();
+    for v in values {
+        match counts.last_mut() {
+            Some((last, c)) if *last == v => *c += 1,
+            _ => counts.push((v, 1)),
+        }
+    }
+    // Most frequent first; ties keep the smaller value first.
+    counts.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+    let mut edges: Vec<f64> = counts
+        .iter()
+        .enumerate()
+        .take_while(|&(k, &(_, c))| k < 2 || c >= min_data_in_bin)
+        .take(max_bins - 1)
+        .map(|(_, &(v, _))| v)
+        .collect();
+    edges.sort_by(f64::total_cmp);
+    edges
 }
 
 /// Bin index of a non-NaN numeric value. The index is clamped *before* the
@@ -189,8 +218,7 @@ fn bin_value(v: f64, bins: &FeatureBins) -> u8 {
         MISSING_BIN
     } else if bins.is_categorical {
         categorical_bin(v, &bins.edges)
-            .map(|b| b.min((MISSING_BIN - 1) as usize) as u8)
-            .unwrap_or(MISSING_BIN - 1)
+            .map_or(MISSING_BIN, |b| b.min(MISSING_BIN as usize - 1) as u8)
     } else {
         numeric_bin(v, &bins.edges)
     }
@@ -406,12 +434,6 @@ fn monotone_of(feat: usize, all_bins: &[FeatureBins], monotone_constraints: &[i8
     }
 }
 
-/// Find the best split for this node across all candidate features.
-///
-/// With monotone constraints, child outputs are clamped to the node's
-/// `bounds`, the gain is computed for the clamped outputs, and splits whose
-/// outputs violate the constraint direction are rejected.
-#[allow(clippy::too_many_arguments)]
 /// Below this many (sample, feature) pairs histograms are built serially.
 const PARALLEL_HISTOGRAM_WORK: usize = 1 << 16;
 
@@ -448,8 +470,128 @@ fn node_totals(gradients: &[f64], hessians: &[f64], indices: &[usize]) -> (f64, 
     )
 }
 
+/// Best split of categorical feature `feat` (LightGBM's
+/// `FindBestThresholdCategoricalInner`). The left child is a set of
+/// categories; the "other"/missing bin always goes right.
+///
+/// With at most `max_cat_to_onehot` bins (the "other" bin included) each
+/// category is tried alone against the rest. Otherwise the categories with
+/// at least `cat_smooth` samples are sorted by `G / (H + cat_smooth)` and
+/// prefixes of up to `max_cat_threshold` categories are tried from both ends
+/// of that order, with `reg_lambda + cat_l2` as the children's L2 penalty and
+/// at least `min_data_per_group` samples per added group and on the right.
+/// `bounds` is `Some` in monotone-constrained mode.
+#[allow(clippy::too_many_arguments)]
+fn best_categorical_split(
+    hist: &Histogram,
+    totals: (f64, f64),
+    total_count: usize,
+    feat: usize,
+    n_categories: usize,
+    params: &LgbmParams,
+    bounds: Option<OutputBounds>,
+    parent_gain: f64,
+) -> Option<BestSplit> {
+    let cat = &params.categorical;
+    let (total_grad, total_hess) = totals;
+    let (l1, mcs, mcw) = (
+        params.reg_alpha,
+        params.min_child_samples,
+        params.min_child_weight,
+    );
+    let one_hot = n_categories < cat.max_cat_to_onehot;
+    let l2 = params.reg_lambda + if one_hot { 0.0 } else { cat.cat_l2 };
+
+    // Gain and child outputs of sending the categories summed in `left` left.
+    let evaluate = |lg: f64, lh: f64| -> Option<(f64, f64, f64)> {
+        let (rg, rh) = (total_grad - lg, total_hess - lh);
+        let mut lv = leaf_value(lg, lh, l1, l2);
+        let mut rv = leaf_value(rg, rh, l1, l2);
+        let gain = if let Some((lo, hi)) = bounds {
+            lv = lv.clamp(lo, hi);
+            rv = rv.clamp(lo, hi);
+            0.5 * (leaf_gain_given_output(lg, lh, l1, l2, lv)
+                + leaf_gain_given_output(rg, rh, l1, l2, rv)
+                - parent_gain)
+        } else {
+            0.5 * (leaf_gain(lg, lh, l1, l2) + leaf_gain(rg, rh, l1, l2) - parent_gain)
+        };
+        (gain > params.min_split_gain).then_some((gain, lv, rv))
+    };
+
+    let mut best: Option<(f64, f64, f64, Vec<u8>, usize)> = None;
+    let mut consider = |cand: Option<(f64, f64, f64)>, left: &[u8], left_count: usize| {
+        if let Some((gain, lv, rv)) = cand {
+            if gain > best.as_ref().map_or(f64::NEG_INFINITY, |b| b.0) {
+                best = Some((gain, lv, rv, left.to_vec(), left_count));
+            }
+        }
+    };
+
+    let bins = 0..n_categories.min(MISSING_BIN as usize) as u8;
+    if one_hot {
+        for b in bins {
+            let k = b as usize;
+            let (lc, lh) = (hist.count[k] as usize, hist.hess_sum[k]);
+            let rc = total_count - lc;
+            if lc < mcs || lh < mcw || rc < mcs || total_hess - lh < mcw {
+                continue;
+            }
+            consider(evaluate(hist.grad_sum[k], lh), &[b], lc);
+        }
+    } else {
+        let ctr = |b: u8| hist.grad_sum[b as usize] / (hist.hess_sum[b as usize] + cat.cat_smooth);
+        let mut sorted: Vec<u8> = bins
+            .filter(|&b| hist.count[b as usize] as f64 >= cat.cat_smooth)
+            .collect();
+        sorted.sort_by(|&a, &b| ctr(a).total_cmp(&ctr(b)));
+        let max_num_cat = cat.max_cat_threshold.min(sorted.len().div_ceil(2));
+        let reversed: Vec<u8> = sorted.iter().rev().copied().collect();
+        for order in [&sorted, &reversed] {
+            let (mut lg, mut lh, mut lc, mut group) = (0.0, 0.0, 0usize, 0usize);
+            for (i, &b) in order.iter().take(max_num_cat).enumerate() {
+                let k = b as usize;
+                lg += hist.grad_sum[k];
+                lh += hist.hess_sum[k];
+                lc += hist.count[k] as usize;
+                group += hist.count[k] as usize;
+                if lc < mcs || lh < mcw {
+                    continue;
+                }
+                let rc = total_count - lc;
+                if rc < mcs || rc < cat.min_data_per_group || total_hess - lh < mcw {
+                    break;
+                }
+                if group < cat.min_data_per_group {
+                    continue;
+                }
+                group = 0;
+                consider(evaluate(lg, lh), &order[..=i], lc);
+            }
+        }
+    }
+
+    best.map(
+        |(gain, left_value, right_value, left, left_count)| BestSplit {
+            feature: feat,
+            bin_threshold: *left.last().expect("non-empty left set"),
+            gain,
+            left_value,
+            right_value,
+            left_count,
+            right_count: total_count - left_count,
+            missing_left: false,
+            categorical_order: Some(left),
+        },
+    )
+}
+
 /// Best split of a node from its histograms (`hists[k]` belongs to
 /// `feature_indices[k]`).
+///
+/// With monotone constraints, child outputs are clamped to the node's
+/// `bounds`, the gain is computed for the clamped outputs, and splits whose
+/// outputs violate the constraint direction are rejected.
 #[allow(clippy::too_many_arguments)]
 fn find_best_split(
     hists: &[Histogram],
@@ -457,16 +599,19 @@ fn find_best_split(
     total_count: usize,
     feature_indices: &[usize],
     all_bins: &[FeatureBins],
-    min_child_samples: usize,
-    min_child_weight: f64,
-    min_split_gain: f64,
-    l1: f64,
-    l2: f64,
-    monotone_constraints: &[i8],
+    params: &LgbmParams,
     bounds: OutputBounds,
     parent_value: f64,
 ) -> Option<BestSplit> {
-    let n_bins = DEFAULT_MAX_BINS;
+    let LgbmParams {
+        min_child_samples,
+        min_child_weight,
+        min_split_gain,
+        reg_alpha: l1,
+        reg_lambda: l2,
+        ref monotone_constraints,
+        ..
+    } = *params;
     let mut best: Option<BestSplit> = None;
     let (total_grad, total_hess) = totals;
 
@@ -481,36 +626,31 @@ fn find_best_split(
     };
 
     for (&feat, hist) in feature_indices.iter().zip(hists) {
-        // Determine scan order: for categorical, sort by grad/hess ratio (Fisher method).
-        let scan_order: Vec<u8> = if all_bins[feat].is_categorical {
-            let mut order: Vec<u8> = (0..n_bins as u8).collect();
-            order.sort_by(|&a, &b| {
-                let ra = if hist.hess_sum[a as usize] > 1e-10 {
-                    hist.grad_sum[a as usize] / hist.hess_sum[a as usize]
-                } else {
-                    0.0
-                };
-                let rb = if hist.hess_sum[b as usize] > 1e-10 {
-                    hist.grad_sum[b as usize] / hist.hess_sum[b as usize]
-                } else {
-                    0.0
-                };
-                ra.partial_cmp(&rb).unwrap_or(Ordering::Equal)
-            });
-            order
-        } else {
-            // Bins above the feature's last value bin are empty: they would
-            // repeat the last candidate with an equal (never better) gain.
-            (0..n_value_bins(&all_bins[feat]).min(n_bins - 1) as u8).collect()
-        };
-        // The last *global* bin is never a threshold (nothing to its right
-        // but missing values); for numeric features `scan_order` already
-        // stops before it.
-        let n_candidates = if all_bins[feat].is_categorical {
-            scan_order.len() - 1
-        } else {
-            scan_order.len()
-        };
+        if all_bins[feat].is_categorical {
+            let candidate = best_categorical_split(
+                hist,
+                totals,
+                total_count,
+                feat,
+                all_bins[feat].edges.len(),
+                params,
+                constrained.then_some(bounds),
+                parent_gain,
+            );
+            if let Some(split) = candidate {
+                if split.gain > best.as_ref().map_or(0.0, |b| b.gain) {
+                    best = Some(split);
+                }
+            }
+            continue;
+        }
+        // Bins above the feature's last value bin are empty: they would
+        // repeat the last candidate with an equal (never better) gain. The
+        // last *global* bin is never a threshold (nothing to its right but
+        // missing values).
+        let scan_order: Vec<u8> =
+            (0..n_value_bins(&all_bins[feat]).min(DEFAULT_MAX_BINS - 1) as u8).collect();
+        let n_candidates = scan_order.len();
 
         // Try both missing directions.
         for &missing_left in &[true, false] {
@@ -577,11 +717,7 @@ fn find_best_split(
                         left_count,
                         right_count,
                         missing_left,
-                        categorical_order: if all_bins[feat].is_categorical {
-                            Some(scan_order.clone())
-                        } else {
-                            None
-                        },
+                        categorical_order: None,
                     });
                 }
             }
@@ -761,12 +897,7 @@ fn build_lgbm_tree(
             count,
             feature_indices,
             all_bins,
-            params.min_child_samples,
-            params.min_child_weight,
-            params.min_split_gain,
-            params.reg_alpha,
-            params.reg_lambda,
-            &params.monotone_constraints,
+            params,
             bounds,
             value,
         )
@@ -1060,6 +1191,39 @@ struct LgbmParams {
     /// Per-feature monotone constraint: -1 = decreasing, 0 = none, +1 = increasing.
     /// Length must match number of features (empty = all zero).
     monotone_constraints: Vec<i8>,
+    categorical: CategoricalSplitParams,
+}
+
+/// How categorical features are split (LightGBM's parameters of the same
+/// names and defaults).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CategoricalSplitParams {
+    /// Up to this many bins (the "other" bin included) every category is
+    /// tried alone against the rest (one-vs-rest). Default 4.
+    pub max_cat_to_onehot: usize,
+    /// Smoothing added to the hessian when ordering categories by
+    /// `G / (H + cat_smooth)`; categories with fewer samples are not
+    /// candidates for the left set. Default 10.
+    pub cat_smooth: f64,
+    /// Extra L2 penalty on the children of a many-vs-many split. Default 10.
+    pub cat_l2: f64,
+    /// Maximum number of categories in the left set. Default 32.
+    pub max_cat_threshold: usize,
+    /// Minimum samples added per group of categories and on the right side
+    /// of a many-vs-many split. Default 100.
+    pub min_data_per_group: usize,
+}
+
+impl Default for CategoricalSplitParams {
+    fn default() -> Self {
+        Self {
+            max_cat_to_onehot: 4,
+            cat_smooth: 10.0,
+            cat_l2: 10.0,
+            max_cat_threshold: 32,
+            min_data_per_group: 100,
+        }
+    }
 }
 
 // ============================================================
@@ -1101,9 +1265,13 @@ pub struct LgbmRegressor {
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
     pub objective: LgbmObjective,
+    /// Huber transition point (LightGBM's `alpha`, default 0.9).
     pub huber_delta: f64,
     pub early_stopping_rounds: Option<usize>,
     pub categorical_features: Vec<usize>,
+    /// How categorical features are split.
+    #[serde(default)]
+    pub categorical_split: CategoricalSplitParams,
     /// Per-feature monotone constraint: -1 (decreasing), 0 (none), +1 (increasing).
     /// Length must match `n_features` (or be empty for no constraints).
     pub monotone_constraints: Vec<i8>,
@@ -1130,9 +1298,10 @@ impl LgbmRegressor {
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
             objective: LgbmObjective::Regression,
-            huber_delta: 1.0,
+            huber_delta: 0.9,
             early_stopping_rounds: None,
             categorical_features: Vec::new(),
+            categorical_split: CategoricalSplitParams::default(),
             monotone_constraints: Vec::new(),
             seed: 0,
         }
@@ -1217,6 +1386,12 @@ impl LgbmRegressor {
         self.categorical_features = feats;
         self
     }
+    /// Categorical split parameters (LightGBM's `max_cat_to_onehot`,
+    /// `cat_smooth`, `cat_l2`, `max_cat_threshold`, `min_data_per_group`).
+    pub fn with_categorical_split(mut self, p: CategoricalSplitParams) -> Self {
+        self.categorical_split = p;
+        self
+    }
     pub fn with_monotone_constraints(mut self, constraints: Vec<i8>) -> Self {
         self.monotone_constraints = constraints;
         self
@@ -1236,6 +1411,7 @@ impl LgbmRegressor {
             reg_alpha: self.reg_alpha,
             reg_lambda: self.reg_lambda,
             monotone_constraints: self.monotone_constraints.clone(),
+            categorical: self.categorical_split,
         }
     }
 }
@@ -1331,10 +1507,12 @@ fn compute_regression_gradients(
             }
         }
         LgbmObjective::RegressionL1 => {
+            // LightGBM's sign has sign(0) = 0; leaf outputs are refit to
+            // residual medians afterwards (`renew_leaf_outputs`).
             for i in 0..n {
                 let r = preds[i] - y[i];
-                grad[i] = r.signum();
-                hess[i] = 1.0; // approximation
+                grad[i] = if r == 0.0 { 0.0 } else { r.signum() };
+                hess[i] = 1.0;
             }
         }
         LgbmObjective::Huber => {
@@ -1352,6 +1530,122 @@ fn compute_regression_gradients(
     }
 
     (grad, hess)
+}
+
+/// `alpha`-percentile of `values` with linear interpolation between order
+/// statistics (LightGBM's `PercentileFun`, numpy's default method).
+fn percentile(values: &mut [f64], alpha: f64) -> f64 {
+    let n = values.len();
+    if n <= 1 {
+        return values.first().copied().unwrap_or(0.0);
+    }
+    values.sort_by(f64::total_cmp);
+    let pos = (n - 1) as f64 * alpha;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    values[lo] + (values[hi] - values[lo]) * (pos - lo as f64)
+}
+
+/// Weighted `alpha`-percentile (LightGBM 4.7's `WeightedPercentileFun`):
+/// the first value whose cumulative weight exceeds `alpha` times the total,
+/// interpolated from the previous value when that step's weight is at
+/// least 1.
+fn weighted_percentile(values: &[f64], weights: &[f64], alpha: f64) -> f64 {
+    let n = values.len();
+    if n <= 1 {
+        return values.first().copied().unwrap_or(0.0);
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let cdf: Vec<f64> = order
+        .iter()
+        .scan(0.0, |acc, &i| {
+            *acc += weights[i];
+            Some(*acc)
+        })
+        .collect();
+    let threshold = cdf[n - 1] * alpha;
+    let pos = cdf.partition_point(|&c| c <= threshold).min(n - 1);
+    if pos == 0 || pos == n - 1 {
+        return values[order[pos]];
+    }
+    let (v1, v2) = (values[order[pos - 1]], values[order[pos]]);
+    let step = cdf[pos] - cdf[pos - 1];
+    if step >= 1.0 {
+        (threshold - cdf[pos - 1]) / step * (v2 - v1) + v1
+    } else {
+        v1
+    }
+}
+
+/// Median of `values[rows]`, weighted when `weights` is given.
+fn rows_median(values: &[f64], rows: &[usize], weights: Option<&Array1<f64>>) -> f64 {
+    let mut v: Vec<f64> = rows.iter().map(|&i| values[i]).collect();
+    match weights {
+        Some(w) => {
+            let wv: Vec<f64> = rows.iter().map(|&i| w[i]).collect();
+            weighted_percentile(&v, &wv, 0.5)
+        }
+        None => percentile(&mut v, 0.5),
+    }
+}
+
+/// Replace every leaf output with the median residual of the training rows
+/// `rows` that reach it (LightGBM's `RenewTreeOutput` for the L1
+/// objective). `binned_x` is column-major; leaves no row reaches keep their
+/// value.
+fn renew_leaf_outputs(
+    node: &mut TreeNode,
+    binned_x: &Array2<u8>,
+    rows: Vec<usize>,
+    residuals: &[f64],
+    weights: Option<&Array1<f64>>,
+) {
+    match node {
+        TreeNode::Leaf { value } => {
+            if !rows.is_empty() {
+                *value = rows_median(residuals, &rows, weights);
+            }
+        }
+        TreeNode::Internal {
+            feature,
+            bin_threshold,
+            missing_left,
+            categorical_order,
+            left,
+            right,
+            ..
+        } => {
+            let mask = categorical_order
+                .as_ref()
+                .map(|order| categorical_left_mask(order, *bin_threshold));
+            let col = binned_x.column(*feature);
+            let (l, r): (Vec<usize>, Vec<usize>) = rows
+                .into_iter()
+                .partition(|&i| goes_left(col[i], *bin_threshold, *missing_left, mask.as_deref()));
+            renew_leaf_outputs(left, binned_x, l, residuals, weights);
+            renew_leaf_outputs(right, binned_x, r, residuals, weights);
+        }
+    }
+}
+
+/// LightGBM's Python package drops sample weights that are all 1, which
+/// selects the unweighted percentile formulas; this keeps that behaviour.
+fn effective_sample_weight(w: Option<&Array1<f64>>) -> Option<&Array1<f64>> {
+    w.filter(|w| w.iter().any(|&v| v != 1.0))
+}
+
+/// Initial score of a regression objective: the weighted mean (squared
+/// error, Huber) or the weighted median (L1), as LightGBM's `BoostFromScore`.
+fn regression_baseline(y: &[f64], weights: Option<&Array1<f64>>, objective: LgbmObjective) -> f64 {
+    if objective == LgbmObjective::RegressionL1 {
+        let rows: Vec<usize> = (0..y.len()).collect();
+        return rows_median(y, &rows, weights);
+    }
+    match weights {
+        Some(w) => y.iter().zip(w).map(|(&v, &wi)| v * wi).sum::<f64>() / w.sum(),
+        None => y.iter().sum::<f64>() / y.len() as f64,
+    }
 }
 
 /// Select random feature subset for this tree.
@@ -1438,8 +1732,9 @@ impl LgbmRegressor {
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
 
+        let sample_weight = effective_sample_weight(opts.sample_weight);
+
         // Baseline / init_score
-        let mean_y: f64 = y.iter().sum::<f64>() / n as f64;
         let (baseline, mut preds): (f64, Vec<f64>) = if let Some(init) = opts.init_score {
             // init_score replaces the baseline entirely; we still store a
             // scalar "baseline" = mean(init) so predict() has a consistent
@@ -1447,7 +1742,8 @@ impl LgbmRegressor {
             let m = init.iter().sum::<f64>() / n as f64;
             (m, init.to_vec())
         } else {
-            (mean_y, vec![mean_y; n])
+            let b = regression_baseline(&y_vec, sample_weight, self.objective);
+            (b, vec![b; n])
         };
 
         let mut trees: Vec<TreeNode> = Vec::with_capacity(self.n_estimators);
@@ -1479,7 +1775,7 @@ impl LgbmRegressor {
                 compute_regression_gradients(&y_vec, &preds, self.objective, self.huber_delta);
 
             // Apply sample weights (multiply into gradients and hessians)
-            if let Some(sw) = opts.sample_weight {
+            if let Some(sw) = sample_weight {
                 for i in 0..n {
                     gradients[i] *= sw[i];
                     hessians[i] *= sw[i];
@@ -1508,8 +1804,10 @@ impl LgbmRegressor {
             };
 
             let feature_indices = sample_features(p, self.colsample_bytree, &mut rng);
+            let refit_rows =
+                (self.objective == LgbmObjective::RegressionL1).then(|| row_indices.clone());
 
-            let tree = build_lgbm_tree(
+            let mut tree = build_lgbm_tree(
                 &binned_x,
                 &gradients,
                 &hessians,
@@ -1520,6 +1818,10 @@ impl LgbmRegressor {
                 &mut feature_gain,
                 &mut feature_split_count,
             );
+            if let Some(rows) = refit_rows {
+                let residuals: Vec<f64> = y_vec.iter().zip(&preds).map(|(y, p)| y - p).collect();
+                renew_leaf_outputs(&mut tree, &binned_x, rows, &residuals, sample_weight);
+            }
 
             // Update predictions (on ALL rows, not just sampled)
             for i in 0..n {
@@ -1714,10 +2016,21 @@ pub struct LgbmClassifier {
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
     pub categorical_features: Vec<usize>,
+    /// How categorical features are split.
+    #[serde(default)]
+    pub categorical_split: CategoricalSplitParams,
     pub monotone_constraints: Vec<i8>,
     pub class_weight: Option<LgbmClassWeight>,
     pub early_stopping_rounds: Option<usize>,
     pub seed: u64,
+    /// Scale the softmax hessian by K / (K - 1) as LightGBM does; the
+    /// HistGradientBoosting facade turns it off (sklearn's hessian).
+    #[serde(skip, default = "default_true")]
+    pub(crate) softmax_hessian_factor: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl LgbmClassifier {
@@ -1740,10 +2053,12 @@ impl LgbmClassifier {
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
             categorical_features: Vec::new(),
+            categorical_split: CategoricalSplitParams::default(),
             monotone_constraints: Vec::new(),
             class_weight: None,
             early_stopping_rounds: None,
             seed: 0,
+            softmax_hessian_factor: true,
         }
     }
 
@@ -1804,6 +2119,12 @@ impl LgbmClassifier {
         self.categorical_features = feats;
         self
     }
+    /// Categorical split parameters (LightGBM's `max_cat_to_onehot`,
+    /// `cat_smooth`, `cat_l2`, `max_cat_threshold`, `min_data_per_group`).
+    pub fn with_categorical_split(mut self, p: CategoricalSplitParams) -> Self {
+        self.categorical_split = p;
+        self
+    }
     pub fn with_monotone_constraints(mut self, c: Vec<i8>) -> Self {
         self.monotone_constraints = c;
         self
@@ -1831,6 +2152,7 @@ impl LgbmClassifier {
             reg_alpha: self.reg_alpha,
             reg_lambda: self.reg_lambda,
             monotone_constraints: self.monotone_constraints.clone(),
+            categorical: self.categorical_split,
         }
     }
 
@@ -2041,7 +2363,13 @@ impl LgbmClassifier {
                 .iter()
                 .map(|&v| if v == pos_class { 1.0 } else { 0.0 })
                 .collect();
-            let pos_frac: f64 = labels.iter().sum::<f64>() / n as f64;
+            // Weighted positive rate (LightGBM's BoostFromScore).
+            let pos_frac: f64 = labels
+                .iter()
+                .zip(&effective_weights)
+                .map(|(l, w)| l * w)
+                .sum::<f64>()
+                / effective_weights.iter().sum::<f64>();
             let baseline = (pos_frac / (1.0 - pos_frac + 1e-15)).ln();
             let mut raw = if let Some(init) = opts.init_score {
                 init.to_vec()
@@ -2153,9 +2481,15 @@ impl LgbmClassifier {
             let mut baselines = Vec::with_capacity(n_classes);
             let mut raw_scores = vec![vec![0.0; n]; n_classes];
 
+            let total_weight: f64 = effective_weights.iter().sum();
             for (c, &cls) in classes.iter().enumerate() {
-                let count = y.iter().filter(|&&v| v == cls).count() as f64;
-                let prior = (count / n as f64).max(1e-15);
+                let class_weight: f64 = y
+                    .iter()
+                    .zip(&effective_weights)
+                    .filter(|(&v, _)| v == cls)
+                    .map(|(_, w)| w)
+                    .sum();
+                let prior = (class_weight / total_weight).max(1e-15);
                 let bl = prior.ln();
                 baselines.push(bl);
                 raw_scores[c] = vec![bl; n];
@@ -2178,6 +2512,12 @@ impl LgbmClassifier {
                     }
                 }
 
+                // LightGBM scales the softmax hessian by K / (K - 1).
+                let hess_factor = if self.softmax_hessian_factor {
+                    n_classes as f64 / (n_classes as f64 - 1.0)
+                } else {
+                    1.0
+                };
                 for (c, &cls) in classes.iter().enumerate() {
                     let mut gradients: Vec<f64> = (0..n)
                         .map(|i| {
@@ -2187,7 +2527,9 @@ impl LgbmClassifier {
                         .collect();
                     let mut hessians: Vec<f64> = (0..n)
                         .map(|i| {
-                            (probas[i][c] * (1.0 - probas[i][c])).max(1e-12) * effective_weights[i]
+                            hess_factor
+                                * (probas[i][c] * (1.0 - probas[i][c])).max(1e-12)
+                                * effective_weights[i]
                         })
                         .collect();
 
@@ -3865,6 +4207,38 @@ mod tests {
 
         assert!(fitted.best_iteration() > 0);
         assert!(fitted.best_iteration() <= 500);
+    }
+
+    #[test]
+    fn test_categorical_edges_keep_most_frequent() {
+        // 300 categories: 0..=99 appear 5 times, 100..=299 three times,
+        // and 1000 once. Only 254 value bins exist: all frequent categories
+        // and the 154 smallest 3-count categories keep a bin; the rest share
+        // the "other" bin instead of collapsing into the last category.
+        let mut col = Vec::new();
+        for c in 0..300 {
+            col.extend(std::iter::repeat(c as f64).take(if c < 100 { 5 } else { 3 }));
+        }
+        col.push(1000.0);
+        let col = Array1::from_vec(col);
+        let edges = categorical_edges(col.view(), DEFAULT_MAX_BINS, 3);
+        assert_eq!(edges.len(), 254);
+        assert_eq!(edges.first(), Some(&0.0));
+        assert_eq!(edges.last(), Some(&253.0));
+        let bins = FeatureBins {
+            edges,
+            is_categorical: true,
+        };
+        assert_eq!(bin_value(42.0, &bins), 42);
+        assert_eq!(bin_value(299.0, &bins), MISSING_BIN);
+        assert_eq!(bin_value(1000.0, &bins), MISSING_BIN);
+
+        // Rarer than min_data_in_bin (after the two most frequent): "other".
+        let col = Array1::from_vec(vec![1.0, 1.0, 1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(
+            categorical_edges(col.view(), DEFAULT_MAX_BINS, 3),
+            vec![1.0, 2.0]
+        );
     }
 
     #[test]

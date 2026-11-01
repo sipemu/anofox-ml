@@ -131,12 +131,12 @@ pub mod prelude {
 
     pub use anofox_ml_ensemble::{
         AdaBoostClassifier, AdaBoostRegressor, BaggingClassifier, BaggingRegressor, BoostingType,
-        CalibratedClassifierCV, CalibrationMethod, ExtraTreesClassifier, ExtraTreesRegressor,
-        GradientBoostingClassifier, GradientBoostingRegressor, HistGradientBoostingClassifier,
-        HistGradientBoostingRegressor, IsolationForest, LgbmClassWeight, LgbmClassifier,
-        LgbmFitOptions, LgbmObjective, LgbmRegressor, RandomForestClassifier,
-        RandomForestRegressor, StackingClassifier, StackingRegressor, VotingClassifier,
-        VotingRegressor,
+        CalibratedClassifierCV, CalibrationMethod, CategoricalSplitParams, ExtraTreesClassifier,
+        ExtraTreesRegressor, GradientBoostingClassifier, GradientBoostingRegressor,
+        HistGradientBoostingClassifier, HistGradientBoostingRegressor, IsolationForest,
+        LgbmClassWeight, LgbmClassifier, LgbmFitOptions, LgbmObjective, LgbmRegressor,
+        RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor,
+        VotingClassifier, VotingRegressor,
     };
 
     pub use anofox_ml_cluster::{

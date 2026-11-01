@@ -147,14 +147,18 @@ impl HistGradientBoostingRegressor {
 impl HistGradientBoostingClassifier {
     fn engine(&self) -> Result<LgbmClassifier> {
         self.validate()?;
-        Ok(LgbmClassifier::new()
+        let mut engine = LgbmClassifier::new()
             .with_n_estimators(self.n_estimators)
             .with_learning_rate(self.learning_rate)
             .with_num_leaves(self.num_leaves())
             .with_max_depth(self.max_depth)
             .with_min_child_samples(self.min_samples_leaf)
             .with_reg_lambda(self.l2_regularization)
-            .with_max_bins(self.max_bins))
+            .with_max_bins(self.max_bins);
+        // sklearn's multinomial hessian is p(1 - p), without LightGBM's
+        // K / (K - 1) factor.
+        engine.softmax_hessian_factor = false;
+        Ok(engine)
     }
 }
 

@@ -462,6 +462,30 @@ Every splitter returns `Vec<CvSplit>` for the `*_with_splits` helpers.
     losses with sklearn's terminal-region updates, early stopping
     (`n_iter_no_change`, `validation_fraction`, `tol`) and `max_features`.
 
+- **LGBM parity, part 2 (#50):** checked against LightGBM 4.7.
+  - The L1 objective starts from the (weighted) median and refits every
+    leaf to the median residual of its rows (LightGBM's
+    `RenewTreeOutput`), with `sign(0) = 0` gradients. Previously it used the
+    mean and plain Newton leaves.
+  - Baselines use sample weights: the weighted mean (L2 / Huber), the
+    weighted positive rate (binary) and weighted class priors (multiclass).
+  - LgbmClassifier's softmax hessian carries LightGBM's `K / (K - 1)`
+    factor. The HistGradientBoosting facade keeps sklearn's hessian, and
+    its multiclass output matches sklearn.
+  - Categorical binning keeps the most frequent categories, at most 254 and
+    none rarer than `min_data_in_bin`. Every other category (and any
+    category unseen in training) goes to the "other"/missing bin. Before,
+    categories beyond 254 collapsed into the last bin, and unseen
+    categories landed on a real category.
+  - Categorical splits follow LightGBM: one-vs-rest up to
+    `max_cat_to_onehot`, otherwise `G / (H + cat_smooth)` ordering scanned
+    from both ends with `cat_l2`, `max_cat_threshold` and
+    `min_data_per_group` (new `CategoricalSplitParams`, LightGBM defaults).
+    Missing and "other" categories always go right.
+  - **Breaking:** `huber_delta` defaults to LightGBM's 0.9 (was 1.0), and
+    results change for the L1 objective, weighted fits, multiclass LGBM and
+    categorical features.
+
 - **SVM persistence:** `Gamma` now round-trips through bincode, so fitted
   SVMs can be saved with `save_bincode` (they previously failed to load).
 - More configs derive `Serialize` / `Deserialize` (regression, clustering,
