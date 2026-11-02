@@ -4,7 +4,7 @@ use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use anofox_regression::{FittedQuantile, QuantileRegressor as InnerQuantile};
 use anofox_regression::{FittedRegressor as _, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
 /// Quantile regression estimator.
 ///
@@ -58,7 +58,7 @@ impl FittedQuantileRegressor {
 impl Fit<f64> for QuantileRegressor {
     type Fitted = FittedQuantileRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_weighted(x, y, None)
     }
 }
@@ -66,11 +66,11 @@ impl Fit<f64> for QuantileRegressor {
 impl FitWeighted<f64> for QuantileRegressor {
     type Fitted = FittedQuantileRegressor;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         crate::convert::check_xy(x, y)?;
         if self.quantile <= 0.0 || self.quantile >= 1.0 {
@@ -87,7 +87,7 @@ impl FitWeighted<f64> for QuantileRegressor {
             .with_intercept(self.with_intercept);
         if let Some(w) = sample_weight {
             let w = crate::convert::resolve_sample_weight(Some(w), y.len())?;
-            builder = builder.weights(ndarray_to_col(&w));
+            builder = builder.weights(ndarray_to_col(w.view()));
         }
 
         let fitted = builder
@@ -106,7 +106,7 @@ impl FitWeighted<f64> for QuantileRegressor {
 }
 
 impl Predict<f64> for FittedQuantileRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -122,7 +122,7 @@ impl Predict<f64> for FittedQuantileRegressor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_quantile_median() {

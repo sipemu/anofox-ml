@@ -1,7 +1,7 @@
 use crate::quantile::{percentile_sorted, sorted_non_nan};
 use crate::special::{norm_cdf, norm_ppf};
 use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -140,7 +140,7 @@ fn interp(x: f64, xp: &[f64], fp: &[f64]) -> f64 {
 impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
     type Fitted = FittedQuantileTransformer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -217,7 +217,7 @@ impl<F: Float> FitUnsupervised<F> for QuantileTransformer {
 }
 
 impl<F: Float> FittedQuantileTransformer<F> {
-    fn apply(&self, x: &Array2<F>, inverse: bool) -> Result<Array2<F>> {
+    fn apply(&self, x: ArrayView2<F>, inverse: bool) -> Result<Array2<F>> {
         let expected_cols = self.quantiles.len();
         if x.ncols() != expected_cols {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -299,7 +299,7 @@ fn transform_value(
 }
 
 impl<F: Float> Transform<F> for FittedQuantileTransformer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.apply(x, false)
     }
 }
@@ -307,7 +307,7 @@ impl<F: Float> Transform<F> for FittedQuantileTransformer<F> {
 impl<F: Float> InverseTransform<F> for FittedQuantileTransformer<F> {
     /// Map uniform (or standard-normal) values back to the data scale by
     /// interpolating the stored quantiles (sklearn `inverse_transform`).
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.apply(x, true)
     }
 }

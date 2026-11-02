@@ -6,6 +6,35 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### View-based estimator inputs (#37)
+
+- **Breaking:** the core traits take `ndarray` views. Implementors now
+  write `fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>)`,
+  `predict_view`, `transform_view`, `predict_proba_view`,
+  `fit_weighted_view`, `partial_fit_view`, etc. Callers keep using
+  `fit` / `predict` / `transform` / ..., which now accept anything that
+  views as an array (`&Array2`, `ArrayView2`, slices of a larger
+  matrix), so `model.predict(&x)` still compiles and
+  `model.predict(x.slice(s![..100, ..]))` no longer needs a copy.
+  Weighted entry points keep `Option<&Array1<F>>`; the `*_view` methods
+  take `Option<ArrayView1<F>>`.
+- Public inherent methods that took `&Array2<F>` as their input
+  (`predict_proba`, `decision_function`, `score_samples`, `kneighbors`,
+  `predict_std`, ...) accept `impl AsArray` the same way.
+- **Breaking:** the pipeline step traits (`FitTransform`,
+  `TransformStep`, `FitPredict`, `PredictStep`) take views, and the
+  `FunctionTransformer` closure receives an `ArrayView2<F>`. `Pipeline`
+  and `FittedPipeline` lose their inherent `fit` / `predict` /
+  `predict_proba` / `transform`, which duplicated the `Fit`, `Predict`,
+  `PredictProba` and `Transform` impls (import the traits).
+- **Breaking:** `as_f64` takes any view and returns a `CowArray`
+  (borrowed for `f64`). `LgbmFitOptions::sample_weight` /
+  `eval_sample_weight` are `Option<ArrayView1<f64>>`.
+- The Python bindings pass borrowed NumPy arrays to the estimators instead
+  of copying every input.
+- New test `view_inputs`: strided, non-contiguous views give exactly the
+  results of their owned copies.
+
 ### Correctness parity with sklearn (round 2)
 
 - **anofox-regression 0.9.0** (its API cleanup). The changes here are

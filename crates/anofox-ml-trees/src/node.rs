@@ -1,5 +1,5 @@
 use anofox_ml_core::Float;
-use ndarray::ArrayView1;
+use ndarray::{ArrayView1, ArrayView2};
 
 /// A node in a decision tree.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -153,7 +153,7 @@ impl<F: Float> TreeNode<F> {
     /// The numbering matches [`TreeNode::leaf_values_mut`], so the two can be
     /// combined to re-estimate leaf values after fitting (e.g. the Newton
     /// step of gradient boosting).
-    pub fn apply(&self, x: &ndarray::Array2<F>) -> Vec<usize> {
+    pub fn apply(&self, x: ndarray::ArrayView2<F>) -> Vec<usize> {
         let mut out = vec![0usize; x.nrows()];
         let rows: Vec<usize> = (0..x.nrows()).collect();
         let mut next_leaf = 0usize;
@@ -163,7 +163,7 @@ impl<F: Float> TreeNode<F> {
 
     fn apply_rec(
         &self,
-        x: &ndarray::Array2<F>,
+        x: ArrayView2<F>,
         rows: Vec<usize>,
         next_leaf: &mut usize,
         out: &mut [usize],

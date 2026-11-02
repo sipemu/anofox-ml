@@ -1,7 +1,7 @@
 use anofox_ml_core::{
     Fit, FitWeighted, Float, PartialFit, Predict, PredictLogProba, PredictProba, Result,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 use crate::common::{
     argmax_labels, check_alpha, check_n_features, class_log_prior, log_proba_from_jll,
@@ -98,14 +98,16 @@ impl MultinomialNB {
 
     /// Incremental fit with optional per-sample weights (sklearn's
     /// `partial_fit(X, y, classes, sample_weight)`).
-    pub fn partial_fit_weighted<F: Float>(
+    pub fn partial_fit_weighted<'a, 'b, F: Float>(
         &self,
         state: Option<FittedMultinomialNB<F>>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
         classes: Option<&[F]>,
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedMultinomialNB<F>> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         check_alpha(self.alpha, self.force_alpha)?;
         check_non_negative(x, "MultinomialNB")?;
         let prev = state
@@ -171,7 +173,8 @@ impl<F: Float> FittedMultinomialNB<F> {
 
     /// Joint log-likelihood `X · log_prob_ᵀ + log_prior`, shape
     /// `(n_samples, n_classes)`.
-    pub fn joint_log_likelihood(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn joint_log_likelihood<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         check_n_features(x, self.log_feature_prob.ncols())?;
         let prior = Array1::from(self.log_class_prior.clone());
         Ok(x.dot(&self.log_feature_prob.t()) + &prior)
@@ -181,7 +184,8 @@ impl<F: Float> FittedMultinomialNB<F> {
     ///
     /// Returns an array of shape `(n_samples, n_classes)` where each row sums
     /// to 1.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         Ok(proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }
@@ -189,11 +193,11 @@ impl<F: Float> FittedMultinomialNB<F> {
 impl<F: Float> FitWeighted<F> for MultinomialNB {
     type Fitted = FittedMultinomialNB<F>;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(None, x, y, None, sample_weight)
     }
@@ -202,7 +206,7 @@ impl<F: Float> FitWeighted<F> for MultinomialNB {
 impl<F: Float> Fit<F> for MultinomialNB {
     type Fitted = FittedMultinomialNB<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.partial_fit_weighted(None, x, y, None, None)
     }
 }
@@ -210,11 +214,11 @@ impl<F: Float> Fit<F> for MultinomialNB {
 impl<F: Float> PartialFit<F> for MultinomialNB {
     type Fitted = FittedMultinomialNB<F>;
 
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         classes: Option<&[F]>,
     ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(state, x, y, classes, None)
@@ -222,20 +226,20 @@ impl<F: Float> PartialFit<F> for MultinomialNB {
 }
 
 impl<F: Float> Predict<F> for FittedMultinomialNB<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let jll = self.joint_log_likelihood(x)?;
         Ok(argmax_labels(&jll, &self.class_labels))
     }
 }
 
 impl<F: Float> PredictProba<F> for FittedMultinomialNB<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
     }
 }
 
 impl<F: Float> PredictLogProba<F> for FittedMultinomialNB<F> {
-    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_log_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(log_proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }
@@ -282,7 +286,7 @@ mod tests {
         let fitted: FittedMultinomialNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
 
         let x_test = array![[2.0, 2.0], [5.0, 0.0], [0.0, 5.0]];
-        let proba = fitted.predict_proba(&x_test).unwrap();
+        let proba = fitted.predict_proba(x_test.view()).unwrap();
 
         // Each row should sum to 1.
         for i in 0..proba.nrows() {
@@ -311,8 +315,8 @@ mod tests {
             Fit::fit(&nb_large, &x_train, &y_train).unwrap();
 
         let x_test = array![[10.0, 0.0]];
-        let proba_small = fitted_small.predict_proba(&x_test).unwrap();
-        let proba_large = fitted_large.predict_proba(&x_test).unwrap();
+        let proba_small = fitted_small.predict_proba(x_test.view()).unwrap();
+        let proba_large = fitted_large.predict_proba(x_test.view()).unwrap();
 
         // With small alpha, class 0 probability should be very high.
         assert!(
@@ -434,7 +438,7 @@ mod tests {
         let fitted: FittedMultinomialNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
 
         let x_test = array![[1.0]];
-        let result = fitted.predict_proba(&x_test);
+        let result = fitted.predict_proba(x_test.view());
         assert!(result.is_err());
         match result {
             Err(RustMlError::ShapeMismatch(_)) => {}
@@ -479,7 +483,7 @@ mod sklearn_parity {
             .fit_weighted(&x, &y, Some(&w))
             .unwrap();
         assert_close2(
-            &m.predict_proba(&t).unwrap(),
+            &m.predict_proba(t.view()).unwrap(),
             &[
                 &[
                     0.9709058805672579,
@@ -520,7 +524,7 @@ mod sklearn_parity {
             .fit(&x, &y)
             .unwrap();
         assert_close2(
-            &m.predict_proba(&t).unwrap(),
+            &m.predict_proba(t.view()).unwrap(),
             &[
                 &[0.9143402300632678, 0.0095177522151925, 0.07614201772153988],
                 &[
@@ -538,7 +542,7 @@ mod sklearn_parity {
             .fit(&x, &y)
             .unwrap();
         assert_close2(
-            &m.predict_proba(&t).unwrap(),
+            &m.predict_proba(t.view()).unwrap(),
             &[
                 &[0.6532188667790225, 0.020398890189469304, 0.3263822430315087],
                 &[0.003928971795239665, 0.5878451969733006, 0.4082258312314593],
@@ -563,7 +567,7 @@ mod sklearn_parity {
                 &x.slice(ndarray::s![..3, ..]).to_owned(),
                 &y.slice(ndarray::s![..3]).to_owned(),
                 Some(&[0.0, 1.0, 2.0]),
-                Some(&w.slice(ndarray::s![..3]).to_owned()),
+                Some(w.slice(ndarray::s![..3])),
             )
             .unwrap();
         let m = nb
@@ -572,7 +576,7 @@ mod sklearn_parity {
                 &x.slice(ndarray::s![3.., ..]).to_owned(),
                 &y.slice(ndarray::s![3..]).to_owned(),
                 None,
-                Some(&w.slice(ndarray::s![3..]).to_owned()),
+                Some(w.slice(ndarray::s![3..])),
             )
             .unwrap();
         let efc = array![
@@ -582,7 +586,7 @@ mod sklearn_parity {
         ];
         assert!((m.feature_count() - &efc).iter().all(|d| d.abs() < 1e-12));
         assert_close2(
-            &m.predict_proba(&t).unwrap(),
+            &m.predict_proba(t.view()).unwrap(),
             &[
                 &[0.9482134859856537, 0.00571342828931442, 0.04607308572503148],
                 &[0.01788396035371436, 0.861211512331716, 0.12090452731456926],
@@ -609,7 +613,7 @@ mod sklearn_parity {
             .fit(&x, &y)
             .unwrap();
         assert_close2(
-            &m.predict_proba(&t).unwrap(),
+            &m.predict_proba(t.view()).unwrap(),
             &[
                 &[
                     0.9744318181788123,

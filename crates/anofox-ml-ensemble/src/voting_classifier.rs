@@ -5,7 +5,7 @@
 
 use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 /// A named estimator for the voting ensemble.
 struct NamedEstimator<F: Float> {
@@ -54,7 +54,13 @@ impl<F: Float> FittedVotingClassifier<F> {
     }
 
     /// Compute classification accuracy on the given data.
-    pub fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<f64> {
+    pub fn score<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+    ) -> Result<f64> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         let preds = self.predict(x)?;
         let n = y.len();
         let correct = preds
@@ -69,7 +75,7 @@ impl<F: Float> FittedVotingClassifier<F> {
 impl<F: Float + 'static> Fit<F> for VotingClassifier<F> {
     type Fitted = FittedVotingClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         if self.estimators.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "VotingClassifier needs at least one estimator".into(),
@@ -100,7 +106,7 @@ impl<F: Float + 'static> Fit<F> for VotingClassifier<F> {
 }
 
 impl<F: Float> Predict<F> for FittedVotingClassifier<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

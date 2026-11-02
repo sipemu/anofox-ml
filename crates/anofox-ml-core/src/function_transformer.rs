@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 use crate::error::Result;
 use crate::float::Float;
@@ -21,7 +21,7 @@ use crate::traits::{FitUnsupervised, Transform};
 /// ```ignore
 /// use anofox_ml_core::{Pipeline, FunctionTransformer};
 ///
-/// let log_transform = FunctionTransformer::new(|x: &Array2<f64>| {
+/// let log_transform = FunctionTransformer::new(|x: ArrayView2<f64>| {
 ///     Ok(x.mapv(|v| v.ln()))
 /// });
 ///
@@ -29,12 +29,12 @@ use crate::traits::{FitUnsupervised, Transform};
 ///     .push_transformer("log", log_transform);
 /// ```
 pub struct FunctionTransformer<F: Float> {
-    func: Arc<dyn Fn(&Array2<F>) -> Result<Array2<F>> + Send + Sync>,
+    func: Arc<dyn Fn(ArrayView2<F>) -> Result<Array2<F>> + Send + Sync>,
 }
 
 impl<F: Float> FunctionTransformer<F> {
     /// Create a new FunctionTransformer from a closure.
-    pub fn new(func: impl Fn(&Array2<F>) -> Result<Array2<F>> + Send + Sync + 'static) -> Self {
+    pub fn new(func: impl Fn(ArrayView2<F>) -> Result<Array2<F>> + Send + Sync + 'static) -> Self {
         Self {
             func: Arc::new(func),
         }
@@ -57,11 +57,11 @@ impl<F: Float> Clone for FunctionTransformer<F> {
 
 /// Fitted function transformer — just holds the closure.
 pub struct FittedFunctionTransformer<F: Float> {
-    func: Arc<dyn Fn(&Array2<F>) -> Result<Array2<F>> + Send + Sync>,
+    func: Arc<dyn Fn(ArrayView2<F>) -> Result<Array2<F>> + Send + Sync>,
 }
 
 impl<F: Float> Transform<F> for FittedFunctionTransformer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         (self.func)(x)
     }
 }
@@ -69,7 +69,7 @@ impl<F: Float> Transform<F> for FittedFunctionTransformer<F> {
 impl<F: Float + 'static> FitUnsupervised<F> for FunctionTransformer<F> {
     type Fitted = FittedFunctionTransformer<F>;
 
-    fn fit(&self, _x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, _x: ArrayView2<F>) -> Result<Self::Fitted> {
         Ok(FittedFunctionTransformer {
             func: Arc::clone(&self.func),
         })

@@ -22,11 +22,11 @@ use anofox_regression::solvers::{
     Regressor as _,
 };
 use anofox_regression::{BinomialFamily, BinomialLink as InnerLink, GlmFamily};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 use serde::{Deserialize, Serialize};
 
 pub(crate) fn check_response(
-    y: &Array1<f64>,
+    y: ArrayView1<f64>,
     family: &str,
     ok: impl Fn(f64) -> bool,
     what: &str,
@@ -68,11 +68,12 @@ impl GlmFit {
     }
 
     /// `b + Xβ (+ offset)`.
-    pub fn linear_predictor(
+    pub fn linear_predictor<'a>(
         &self,
-        x: &Array2<f64>,
+        x: impl AsArray<'a, f64, Ix2>,
         offset: Option<&Array1<f64>>,
     ) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
         check_n_features(x, self.n_features)?;
         check_row_vector(offset, x.nrows(), "offset")?;
         let mut eta = x.dot(&self.coef) + self.intercept.unwrap_or(0.0);
@@ -168,12 +169,14 @@ impl PoissonRegressor {
     }
 
     /// Fit with an optional offset on the linear-predictor (log) scale.
-    pub fn fit_with_offset(
+    pub fn fit_with_offset<'a, 'b>(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
         offset: Option<&Array1<f64>>,
     ) -> Result<FittedPoissonRegressor> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         check_xy(x, y)?;
         check_response(y, "Poisson", |v| v >= 0.0, "non-negative")?;
         check_row_vector(offset, y.len(), "offset")?;
@@ -188,7 +191,7 @@ impl PoissonRegressor {
             .compute_inference(self.inference)
             .confidence_level(self.confidence_level);
         if let Some(o) = offset {
-            b = b.offset(ndarray_to_col(o));
+            b = b.offset(ndarray_to_col(o.view()));
         }
         let inner = b
             .build()
@@ -229,7 +232,7 @@ impl PoissonRegressor {
     ) -> Result<FittedPoissonRegressor> {
         check_row_vector(Some(exposure), y.len(), "exposure")?;
         let offset = exposure_to_offset(exposure)?;
-        self.fit_with_offset(x, y, Some(&offset))
+        self.fit_with_offset(x.view(), y.view(), Some(&offset))
     }
 }
 
@@ -278,8 +281,9 @@ impl FittedPoissonRegressor {
     }
 
     /// Linear predictor `b + Xβ` (log scale, no offset).
-    pub fn predict_linear(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        self.fit.linear_predictor(x, None)
+    pub fn predict_linear<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        self.fit.linear_predictor(x.view(), None)
     }
 
     /// Predicted mean `exp(b + Xβ + offset)`.
@@ -288,7 +292,10 @@ impl FittedPoissonRegressor {
         x: &Array2<f64>,
         offset: &Array1<f64>,
     ) -> Result<Array1<f64>> {
-        Ok(self.fit.linear_predictor(x, Some(offset))?.mapv(f64::exp))
+        Ok(self
+            .fit
+            .linear_predictor(x.view(), Some(offset))?
+            .mapv(f64::exp))
     }
 
     /// Predicted counts for the given exposures: `exposure · exp(b + Xβ)`.
@@ -306,13 +313,13 @@ impl FittedPoissonRegressor {
 impl Fit<f64> for PoissonRegressor {
     type Fitted = FittedPoissonRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_with_offset(x, y, None)
     }
 }
 
 impl Predict<f64> for FittedPoissonRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         Ok(self.fit.linear_predictor(x, None)?.mapv(f64::exp))
     }
 }
@@ -418,13 +425,15 @@ impl BinomialRegressor {
 
     /// Fit with optional sample (trial) weights and an optional offset on the
     /// link scale.
-    pub fn fit_with_offset(
+    pub fn fit_with_offset<'a, 'b>(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+        sample_weight: Option<ArrayView1<f64>>,
         offset: Option<&Array1<f64>>,
     ) -> Result<FittedBinomialRegressor> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         check_xy(x, y)?;
         check_response(y, "Binomial", |v| (0.0..=1.0).contains(&v), "[0, 1]-valued")?;
         check_row_vector(offset, y.len(), "offset")?;
@@ -441,10 +450,10 @@ impl BinomialRegressor {
             .compute_inference(self.inference)
             .confidence_level(self.confidence_level);
         if sample_weight.is_some() {
-            b = b.weights(ndarray_to_col(&w));
+            b = b.weights(ndarray_to_col(w.view()));
         }
         if let Some(o) = offset {
-            b = b.offset(ndarray_to_col(o));
+            b = b.offset(ndarray_to_col(o.view()));
         }
         let inner = b
             .build()
@@ -523,8 +532,9 @@ impl FittedBinomialRegressor {
     }
 
     /// Linear predictor `b + Xβ` (link scale).
-    pub fn predict_linear(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        self.fit.linear_predictor(x, None)
+    pub fn predict_linear<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        self.fit.linear_predictor(x.view(), None)
     }
 
     /// Predicted probability with an offset on the link scale.
@@ -536,7 +546,7 @@ impl FittedBinomialRegressor {
         let fam = self.link.family();
         Ok(self
             .fit
-            .linear_predictor(x, Some(offset))?
+            .linear_predictor(x.view(), Some(offset))?
             .mapv(|e| fam.link_inverse(e)))
     }
 }
@@ -544,7 +554,7 @@ impl FittedBinomialRegressor {
 impl Fit<f64> for BinomialRegressor {
     type Fitted = FittedBinomialRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_with_offset(x, y, None, None)
     }
 }
@@ -552,11 +562,11 @@ impl Fit<f64> for BinomialRegressor {
 impl FitWeighted<f64> for BinomialRegressor {
     type Fitted = FittedBinomialRegressor;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         self.fit_with_offset(x, y, sample_weight, None)
     }
@@ -564,7 +574,7 @@ impl FitWeighted<f64> for BinomialRegressor {
 
 impl Predict<f64> for FittedBinomialRegressor {
     /// Predicted probabilities `g⁻¹(b + Xβ)`.
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let fam = self.link.family();
         Ok(self
             .fit

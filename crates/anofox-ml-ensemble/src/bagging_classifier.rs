@@ -2,7 +2,7 @@ use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, Rus
 use anofox_ml_trees::{
     DecisionTreeClassifier, FittedDecisionTreeClassifier, MaxFeatures, SplitCriterion,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 use rayon::prelude::*;
 
 use crate::bagging_common::{add_importances, out_of_bag, select_columns, BagSampling};
@@ -135,7 +135,7 @@ pub struct FittedBaggingClassifier<F: Float> {
 impl<F: Float> Fit<F> for BaggingClassifier {
     type Fitted = FittedBaggingClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -145,11 +145,11 @@ impl<F: Float> FitWeighted<F> for BaggingClassifier {
 
     /// Per-sample weights (sklearn's `sample_weight`), applied on top of
     /// the bootstrap counts.
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -158,9 +158,9 @@ impl<F: Float> FitWeighted<F> for BaggingClassifier {
 impl BaggingClassifier {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedBaggingClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -197,7 +197,7 @@ impl BaggingClassifier {
                 let xs = select_columns(x, &plan.features);
                 crate::forest_common::fit_tree_on_rows(
                     &tree_params.clone().with_seed(plan.seed),
-                    &xs,
+                    xs.view(),
                     y,
                     &plan.rows,
                     sample_weight,
@@ -224,7 +224,7 @@ impl BaggingClassifier {
                     continue;
                 }
                 let xs = x.select(Axis(0), &oob);
-                let proba = fitted.tree_proba(t, &xs)?;
+                let proba = fitted.tree_proba(t, xs.view())?;
                 for (k, &i) in oob.iter().enumerate() {
                     let mut row = sum.row_mut(i);
                     row += &proba.row(k);
@@ -256,7 +256,7 @@ impl BaggingClassifier {
 
 impl<F: Float> Predict<F> for FittedBaggingClassifier<F> {
     /// The class with the highest averaged probability (sklearn).
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let proba = self.predict_proba(x)?;
         let classes = self.classes();
         Ok(proba
@@ -274,7 +274,7 @@ impl<F: Float> FittedBaggingClassifier<F> {
 
     /// Probabilities of tree `t` for the (full-width) rows `x`, mapped to
     /// the ensemble's class columns.
-    fn tree_proba(&self, t: usize, x: &Array2<F>) -> Result<Array2<F>> {
+    fn tree_proba(&self, t: usize, x: ArrayView2<F>) -> Result<Array2<F>> {
         let tree = &self.trees[t];
         let local = tree.predict_proba(&select_columns(x, self.tree_features(t)))?;
         let classes = self.classes();
@@ -334,7 +334,8 @@ impl<F: Float> FittedBaggingClassifier<F> {
     ///
     /// Returns an `Array2<F>` of shape `(n_samples, n_classes)` where each row
     /// sums to 1.0. Probabilities are averaged across all trees in the ensemble.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -354,7 +355,8 @@ impl<F: Float> FittedBaggingClassifier<F> {
     }
 
     /// Compute classification accuracy on the given data.
-    pub fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<f64> {
+    pub fn score<'a>(&self, x: impl AsArray<'a, F, Ix2>, y: &Array1<F>) -> Result<f64> {
+        let x: ArrayView2<F> = x.into();
         let preds = self.predict(x)?;
         let n = y.len();
         let correct = preds
@@ -614,7 +616,7 @@ mod tests {
 }
 
 impl<F: Float> PredictProba<F> for FittedBaggingClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
     }
 }

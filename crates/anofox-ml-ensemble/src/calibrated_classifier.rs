@@ -10,7 +10,7 @@
 //! returns [`RustMlError::InvalidParameter`].
 
 use anofox_ml_core::{DecisionFunction, Fit, Float, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 /// Calibration method.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -25,12 +25,12 @@ pub enum CalibrationMethod {
 
 /// Type-erased "fit, then produce a real-valued positive-class score".
 trait ScoreFit<F: Float>: Send + Sync {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ScoreModel<F>>>;
+    fn fit_box(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Box<dyn ScoreModel<F>>>;
 }
 
 /// A fitted model that maps samples to positive-class scores.
 trait ScoreModel<F: Float>: Send + Sync {
-    fn scores(&self, x: &Array2<F>) -> Result<Vec<f64>>;
+    fn scores(&self, x: ArrayView2<F>) -> Result<Vec<f64>>;
 }
 
 /// Base estimator whose fitted model provides `predict_proba`; the score is
@@ -48,7 +48,7 @@ where
     T: Fit<F> + Send + Sync,
     T::Fitted: PredictProba<F> + Send + Sync + 'static,
 {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ScoreModel<F>>> {
+    fn fit_box(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Box<dyn ScoreModel<F>>> {
         Ok(Box::new(ProbaModel(Fit::fit(&self.0, x, y)?)))
     }
 }
@@ -58,7 +58,7 @@ where
     F: Float,
     M: PredictProba<F> + Send + Sync,
 {
-    fn scores(&self, x: &Array2<F>) -> Result<Vec<f64>> {
+    fn scores(&self, x: ArrayView2<F>) -> Result<Vec<f64>> {
         let proba = self.0.predict_proba(x)?;
         if proba.ncols() != 2 {
             return Err(RustMlError::InvalidParameter(format!(
@@ -80,7 +80,7 @@ where
     T: Fit<F> + Send + Sync,
     T::Fitted: DecisionFunction<F> + Send + Sync + 'static,
 {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ScoreModel<F>>> {
+    fn fit_box(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Box<dyn ScoreModel<F>>> {
         Ok(Box::new(DecisionModel(Fit::fit(&self.0, x, y)?)))
     }
 }
@@ -90,7 +90,7 @@ where
     F: Float,
     M: DecisionFunction<F> + Send + Sync,
 {
-    fn scores(&self, x: &Array2<F>) -> Result<Vec<f64>> {
+    fn scores(&self, x: ArrayView2<F>) -> Result<Vec<f64>> {
         let df = self.0.decision_function(x)?;
         match df.ncols() {
             // Single binary score.
@@ -181,7 +181,8 @@ pub struct FittedCalibratedClassifier<F: Float> {
 
 impl<F: Float> FittedCalibratedClassifier<F> {
     /// Calibrated probability of the positive class (`classes()[1]`).
-    pub fn predict_proba_positive(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    pub fn predict_proba_positive<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array1<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -204,7 +205,8 @@ impl<F: Float> FittedCalibratedClassifier<F> {
 
     /// Calibrated class probabilities, shape `(n_samples, 2)`; columns follow
     /// [`classes`](Self::classes).
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         let p1 = self.predict_proba_positive(x)?;
         let mut out = Array2::<F>::zeros((p1.len(), 2));
         for (i, &p) in p1.iter().enumerate() {
@@ -227,7 +229,7 @@ impl<F: Float> FittedCalibratedClassifier<F> {
 }
 
 impl<F: Float> PredictProba<F> for FittedCalibratedClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
     }
 }
@@ -235,7 +237,7 @@ impl<F: Float> PredictProba<F> for FittedCalibratedClassifier<F> {
 impl<F: Float + 'static> Fit<F> for CalibratedClassifierCV<F> {
     type Fitted = FittedCalibratedClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -286,8 +288,10 @@ impl<F: Float + 'static> Fit<F> for CalibratedClassifierCV<F> {
             let y_train = select_elements(y, train_idx);
             let x_test = crate::forest_common::select_rows(x, test_idx);
 
-            let fitted = self.base_estimator.fit_box(&x_train, &y_train)?;
-            let scores = fitted.scores(&x_test)?;
+            let fitted = self
+                .base_estimator
+                .fit_box(x_train.view(), y_train.view())?;
+            let scores = fitted.scores(x_test.view())?;
 
             for (li, &gi) in test_idx.iter().enumerate() {
                 oof_scores[gi] = scores[li];
@@ -325,7 +329,7 @@ impl<F: Float + 'static> Fit<F> for CalibratedClassifierCV<F> {
 impl<F: Float> Predict<F> for FittedCalibratedClassifier<F> {
     /// Predict the original class labels (positive class when the calibrated
     /// probability is `>= 0.5`).
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let proba = self.predict_proba_positive(x)?;
         let threshold = F::from_f64(0.5).unwrap();
         let [neg, pos] = self.classes;
@@ -536,7 +540,7 @@ fn isotonic_predict(score: f64, x: &[f64], y: &[f64]) -> f64 {
 /// round-robin fashion, preserving the class proportions in every fold.
 /// Deterministic (classes are visited in sorted order).
 fn stratified_k_fold<F: Float>(
-    y: &Array1<F>,
+    y: ArrayView1<F>,
     classes: &[F],
     k: usize,
 ) -> Vec<(Vec<usize>, Vec<usize>)> {
@@ -556,7 +560,7 @@ fn stratified_k_fold<F: Float>(
         .collect()
 }
 
-fn select_elements<F: Float>(y: &Array1<F>, indices: &[usize]) -> Array1<F> {
+fn select_elements<F: Float>(y: ArrayView1<F>, indices: &[usize]) -> Array1<F> {
     Array1::from_vec(indices.iter().map(|&i| y[i]).collect())
 }
 
@@ -745,7 +749,7 @@ mod tests {
     struct FittedStump(f64);
     impl Fit<f64> for Stump {
         type Fitted = FittedStump;
-        fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedStump> {
+        fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<FittedStump> {
             let (mut s0, mut n0, mut s1, mut n1) = (0.0, 0.0, 0.0, 0.0);
             for (row, &t) in x.rows().into_iter().zip(y.iter()) {
                 if t > 0.5 {
@@ -760,7 +764,7 @@ mod tests {
         }
     }
     impl DecisionFunction<f64> for FittedStump {
-        fn decision_function(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        fn decision_function_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
             Ok(x.column(0)
                 .mapv(|v| v - self.0)
                 .insert_axis(ndarray::Axis(1)))

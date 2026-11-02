@@ -1,7 +1,7 @@
 use anofox_ml_core::{
     FitUnsupervised, FitUnsupervisedWeighted, Float, Predict, Result, RustMlError,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::rngs::StdRng;
 #[cfg(test)]
 use rand::Rng;
@@ -162,9 +162,9 @@ struct LloydRun<F> {
 /// Weighted per-cluster coordinate sums and weight totals, in parallel over
 /// row blocks.
 fn cluster_sums<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     labels: &[usize],
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
     k: usize,
 ) -> (Array2<F>, Vec<F>) {
     let n = x.nrows();
@@ -205,9 +205,9 @@ fn cluster_sums<F: Float>(
 /// their currently assigned centroid — sklearn's
 /// `_relocate_empty_clusters_dense`. Operates on the un-normalised sums.
 fn relocate_empty_clusters<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     labels: &[usize],
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
     centers_old: &Array2<F>,
     sums: &mut Array2<F>,
     wsum: &mut [F],
@@ -245,9 +245,9 @@ fn relocate_empty_clusters<F: Float>(
 /// One Lloyd run from the given initial centroids (sklearn's
 /// `_kmeans_single_lloyd`).
 fn lloyd<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     x_sq: &Array1<F>,
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
     mut centers: Array2<F>,
     max_iter: usize,
     tol: F,
@@ -304,10 +304,10 @@ fn lloyd<F: Float>(
 
 /// Exact (weighted) inertia `Σ w_i ‖x_i − c_{z_i}‖²`.
 fn inertia<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     labels: &[usize],
     centers: &Array2<F>,
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
 ) -> F {
     (0..x.nrows())
         .into_par_iter()
@@ -320,7 +320,7 @@ fn inertia<F: Float>(
 }
 
 /// sklearn's `_tolerance`: `tol · mean(var(X, axis=0))` (unweighted, ddof 0).
-fn scaled_tolerance<F: Float>(x: &Array2<F>, tol: f64) -> F {
+fn scaled_tolerance<F: Float>(x: ArrayView2<F>, tol: f64) -> F {
     if tol == 0.0 {
         return F::zero();
     }
@@ -343,11 +343,11 @@ impl KMeans {
     /// Shared fit used by both unweighted and weighted fits.
     fn fit_inner<F: Float>(
         &self,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedKMeans<F>> {
         let x_std = crate::standard_layout(x);
-        let x: &Array2<F> = &x_std;
+        let x = x_std.view();
         let n_samples = x.nrows();
         let n_features = x.ncols();
 
@@ -400,7 +400,7 @@ impl KMeans {
         for _ in 0..self.effective_n_init() {
             let init = match &self.init {
                 KMeansInit::KMeansPlusPlus => {
-                    kmeans_plusplus(x, self.n_clusters, &mut rng, sample_weight).0
+                    kmeans_plusplus(x.view(), self.n_clusters, &mut rng, sample_weight).0
                 }
                 KMeansInit::Random => {
                     let idx = sample_without_replacement(
@@ -439,7 +439,7 @@ impl KMeans {
 impl<F: Float> FitUnsupervised<F> for KMeans {
     type Fitted = FittedKMeans<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         self.fit_inner(x, None)
     }
 }
@@ -447,17 +447,17 @@ impl<F: Float> FitUnsupervised<F> for KMeans {
 impl<F: Float> FitUnsupervisedWeighted<F> for KMeans {
     type Fitted = FittedKMeans<F>;
 
-    fn fit_unsupervised_weighted(
+    fn fit_unsupervised_weighted_view(
         &self,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_inner(x, sample_weight)
     }
 }
 
 impl<F: Float> Predict<F> for FittedKMeans<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.centroids.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -466,7 +466,7 @@ impl<F: Float> Predict<F> for FittedKMeans<F> {
             )));
         }
         let x_std = crate::standard_layout(x);
-        let x: &Array2<F> = &x_std;
+        let x = x_std.view();
         let (labels, _) = assign_nearest(x, &row_norms_sq(x), &self.centroids);
         Ok(labels.iter().map(|&l| F::from_usize(l).unwrap()).collect())
     }

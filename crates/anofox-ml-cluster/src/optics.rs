@@ -24,7 +24,7 @@ use std::collections::BinaryHeap;
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView2};
 
 /// How clusters are extracted from the reachability plot.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -124,9 +124,9 @@ impl<F: Float> FitUnsupervised<F> for Optics {
     type Fitted = FittedOptics;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -183,7 +183,7 @@ impl<F: Float> FitUnsupervised<F> for Optics {
             // Update the reachability of p's unprocessed neighbours within
             // eps_max.
             let row = x.row(p).to_owned().insert_axis(ndarray::Axis(0));
-            for &(q, d) in &index.radius_neighbors(&row, self.eps_max)?[0] {
+            for &(q, d) in &index.radius_neighbors(row.view(), self.eps_max)?[0] {
                 if processed[q] {
                     continue;
                 }

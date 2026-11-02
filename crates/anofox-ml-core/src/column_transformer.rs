@@ -3,7 +3,7 @@
 //! Similar to sklearn's `ColumnTransformer`, this allows building pipelines
 //! where different feature groups receive different preprocessing.
 
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView1, ArrayView2};
 
 use crate::error::{Result, RustMlError};
 use crate::float::Float;
@@ -108,7 +108,7 @@ fn resolve_columns(selector: &ColumnSelector, n_cols: usize) -> Vec<usize> {
 }
 
 /// Select specific columns from a matrix, returning a new C-contiguous array.
-fn select_columns<F: Float>(x: &Array2<F>, cols: &[usize]) -> Array2<F> {
+fn select_columns<F: Float>(x: ArrayView2<F>, cols: &[usize]) -> Array2<F> {
     x.select(ndarray::Axis(1), cols)
 }
 
@@ -127,7 +127,7 @@ struct FittedBranch<F: Float> {
 }
 
 impl<F: Float> Transform<F> for FittedColumnTransformer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features_in {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -141,7 +141,7 @@ impl<F: Float> Transform<F> for FittedColumnTransformer<F> {
 
         for branch in &self.fitted_branches {
             let sub_x = select_columns(x, &branch.cols);
-            let transformed = branch.fitted.transform(&sub_x)?;
+            let transformed = branch.fitted.transform(sub_x.view())?;
             parts.push(transformed);
         }
 
@@ -156,7 +156,7 @@ impl<F: Float> Transform<F> for FittedColumnTransformer<F> {
 impl<F: Float + 'static> FitUnsupervised<F> for ColumnTransformer<F> {
     type Fitted = FittedColumnTransformer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         Ok(self.fit_with_target(x, None)?.0)
     }
 
@@ -164,8 +164,8 @@ impl<F: Float + 'static> FitUnsupervised<F> for ColumnTransformer<F> {
     /// ones) and returns the training output computed during the fit.
     fn fit_with_target(
         &self,
-        x: &Array2<F>,
-        y: Option<&ndarray::Array1<F>>,
+        x: ArrayView2<F>,
+        y: Option<ArrayView1<F>>,
     ) -> Result<(FittedColumnTransformer<F>, Option<Array2<F>>)> {
         let n_cols = x.ncols();
 
@@ -193,7 +193,7 @@ impl<F: Float + 'static> FitUnsupervised<F> for ColumnTransformer<F> {
             .zip(branch_cols.into_par_iter())
             .map(|(branch, cols)| {
                 let sub_x = select_columns(x, &cols);
-                let (fitted_step, out) = branch.transformer.fit_transform(&sub_x, y)?;
+                let (fitted_step, out) = branch.transformer.fit_transform(sub_x.view(), y)?;
                 Ok((
                     FittedBranch {
                         name: branch.name.clone(),
@@ -272,13 +272,13 @@ mod tests {
 
     impl<F: Float> FitUnsupervised<F> for DoubleScaler {
         type Fitted = FittedDoubleScaler;
-        fn fit(&self, _x: &Array2<F>) -> Result<Self::Fitted> {
+        fn fit_view(&self, _x: ArrayView2<F>) -> Result<Self::Fitted> {
             Ok(FittedDoubleScaler)
         }
     }
 
     impl<F: Float> Transform<F> for FittedDoubleScaler {
-        fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
             Ok(x.mapv(|v| v + v))
         }
     }
@@ -291,13 +291,13 @@ mod tests {
 
     impl<F: Float> FitUnsupervised<F> for IdentityTransformer {
         type Fitted = FittedIdentity;
-        fn fit(&self, _x: &Array2<F>) -> Result<Self::Fitted> {
+        fn fit_view(&self, _x: ArrayView2<F>) -> Result<Self::Fitted> {
             Ok(FittedIdentity)
         }
     }
 
     impl<F: Float> Transform<F> for FittedIdentity {
-        fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+        fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
             Ok(x.to_owned())
         }
     }

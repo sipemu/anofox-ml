@@ -12,7 +12,7 @@
 
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
 use anofox_regression::splines::{Rcs, RcsNorm};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 /// Normalisation of the nonlinear terms (`norm` of `Hmisc::rcspline.eval`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -99,7 +99,7 @@ fn spline_err(j: usize, e: impl std::fmt::Display) -> RustMlError {
 impl<F: Float> FitUnsupervised<F> for RcsTransformer {
     type Fitted = FittedRcsTransformer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -177,7 +177,7 @@ impl<F: Float> FittedRcsTransformer<F> {
 
 impl<F: Float> Transform<F> for FittedRcsTransformer<F> {
     /// Missing (non-finite) inputs give `NaN` in all columns of that feature.
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let d = self.knots.len();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(

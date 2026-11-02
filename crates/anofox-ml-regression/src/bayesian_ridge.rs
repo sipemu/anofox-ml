@@ -30,7 +30,7 @@ fn no_posterior() -> RustMlError {
             .into(),
     )
 }
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 // ---------------------------------------------------------------------------
 // BayesianRidge
@@ -102,14 +102,21 @@ pub struct FittedBayesianRidge {
 impl FittedBayesianRidge {
     /// Posterior predictive standard deviation per query point (sklearn
     /// `predict(X, return_std=True)[1]`).
-    pub fn predict_std(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        check_n_features(x, self.n_features)?;
+    pub fn predict_std<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        check_n_features(x.view(), self.n_features)?;
         let inner = self.inner.as_ref().ok_or_else(no_posterior)?;
-        Ok(col_to_ndarray(&inner.predict_std(&ndarray_to_mat(x))))
+        Ok(col_to_ndarray(
+            &inner.predict_std(&ndarray_to_mat(x.view())),
+        ))
     }
 
     /// Predictive mean and standard deviation (sklearn `return_std=True`).
-    pub fn predict_with_std(&self, x: &Array2<f64>) -> Result<(Array1<f64>, Array1<f64>)> {
+    pub fn predict_with_std<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<(Array1<f64>, Array1<f64>)> {
+        let x: ArrayView2<f64> = x.into();
         Ok((self.predict(x)?, self.predict_std(x)?))
     }
 }
@@ -117,7 +124,7 @@ impl FittedBayesianRidge {
 impl Fit<f64> for BayesianRidge {
     type Fitted = FittedBayesianRidge;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         let fitted = InnerBayesianRidge::builder()
             .with_intercept(self.fit_intercept)
@@ -146,7 +153,7 @@ impl Fit<f64> for BayesianRidge {
 }
 
 impl Predict<f64> for FittedBayesianRidge {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         linear_predict(x, &self.coef, self.intercept)
     }
 }
@@ -228,14 +235,21 @@ pub struct FittedARDRegression {
 impl FittedARDRegression {
     /// Posterior predictive standard deviation per query point (sklearn
     /// `predict(X, return_std=True)[1]`).
-    pub fn predict_std(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        check_n_features(x, self.n_features)?;
+    pub fn predict_std<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        check_n_features(x.view(), self.n_features)?;
         let inner = self.inner.as_ref().ok_or_else(no_posterior)?;
-        Ok(col_to_ndarray(&inner.predict_std(&ndarray_to_mat(x))))
+        Ok(col_to_ndarray(
+            &inner.predict_std(&ndarray_to_mat(x.view())),
+        ))
     }
 
     /// Predictive mean and standard deviation (sklearn `return_std=True`).
-    pub fn predict_with_std(&self, x: &Array2<f64>) -> Result<(Array1<f64>, Array1<f64>)> {
+    pub fn predict_with_std<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<(Array1<f64>, Array1<f64>)> {
+        let x: ArrayView2<f64> = x.into();
         Ok((self.predict(x)?, self.predict_std(x)?))
     }
 }
@@ -243,7 +257,7 @@ impl FittedARDRegression {
 impl Fit<f64> for ARDRegression {
     type Fitted = FittedARDRegression;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         let fitted = InnerArd::builder()
             .with_intercept(self.fit_intercept)
@@ -273,7 +287,7 @@ impl Fit<f64> for ARDRegression {
 }
 
 impl Predict<f64> for FittedARDRegression {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         linear_predict(x, &self.coef, self.intercept)
     }
 }

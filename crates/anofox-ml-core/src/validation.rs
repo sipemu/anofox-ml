@@ -212,7 +212,7 @@ pub fn bootstrap_splits_stratified<F: Float>(
 ) -> Result<Vec<CvSplit>> {
     let n = y.len();
     check_bootstrap(n, n_bootstraps)?;
-    let classes = crate::utils::group_by_class(y);
+    let classes = crate::utils::group_by_class(y.view());
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     Ok((0..n_bootstraps)
         .map(|_| {

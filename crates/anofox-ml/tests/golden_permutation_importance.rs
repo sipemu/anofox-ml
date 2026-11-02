@@ -10,7 +10,7 @@ use anofox_ml::core::{permutation_importance, Predict, Result};
 use anofox_ml::prelude::*;
 use anofox_ml_metrics::r2_score;
 use common::{json_to_array1, json_to_array2, load_golden_data};
-use ndarray::Array1;
+use ndarray::{Array1, ArrayView2};
 
 fn argsort_desc(v: &Array1<f64>) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..v.len()).collect();
@@ -54,7 +54,7 @@ fn test_golden_permutation_importance_ridge_5feat() {
     // Wrap as a Predict-only model to feed permutation_importance.
     struct Wrap(anofox_ml::regression::FittedRidgeRegressor);
     impl Predict<f64> for Wrap {
-        fn predict(&self, x: &ndarray::Array2<f64>) -> Result<Array1<f64>> {
+        fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
             self.0.predict(x)
         }
     }

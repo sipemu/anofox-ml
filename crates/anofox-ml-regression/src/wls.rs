@@ -7,7 +7,7 @@ use crate::summary::{
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::{FittedWls, WlsRegressor as InnerWls};
 use anofox_regression::{FittedRegressor as _, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Weighted Least Squares regression estimator.
 ///
@@ -96,14 +96,14 @@ impl FittedWlsRegressor {
         if !self.inference {
             return Err(crate::summary::not_computed());
         }
-        interval_from(&self.inner, &ndarray_to_mat(x), kind, level)
+        interval_from(&self.inner, &ndarray_to_mat(x.view()), kind, level)
     }
 }
 
 impl Fit<f64> for WlsRegressor {
     type Fitted = FittedWlsRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -122,11 +122,11 @@ impl Fit<f64> for WlsRegressor {
             )));
         }
 
-        crate::convert::resolve_sample_weight(Some(&self.weights), x.nrows())?;
+        crate::convert::resolve_sample_weight(Some(self.weights.view()), x.nrows())?;
         crate::summary::validate_level(self.confidence_level)?;
         let x_mat = ndarray_to_mat(x);
         let y_col = ndarray_to_col(y);
-        let w_col = ndarray_to_col(&self.weights);
+        let w_col = ndarray_to_col(self.weights.view());
 
         let inner_model = InnerWls::builder()
             .with_intercept(self.with_intercept)
@@ -148,7 +148,7 @@ impl Fit<f64> for WlsRegressor {
 }
 
 impl Predict<f64> for FittedWlsRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

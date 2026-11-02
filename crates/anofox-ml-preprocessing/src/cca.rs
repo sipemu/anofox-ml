@@ -19,7 +19,7 @@
 use anofox_ml_core::{Result, RustMlError};
 use faer::linalg::solvers::Svd;
 use faer::Mat;
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, AsArray, Axis, Ix2};
 
 pub struct Cca {
     pub n_components: usize,
@@ -238,7 +238,8 @@ pub struct FittedCca {
 
 impl FittedCca {
     /// X scores of new data: `((X − mean) / std) x_rotations`.
-    pub fn transform_x(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    pub fn transform_x<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
         if x.ncols() != self.x_mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} X features, got {}",
@@ -246,11 +247,12 @@ impl FittedCca {
                 x.ncols()
             )));
         }
-        Ok(((x - &self.x_mean) / &self.x_std).dot(&self.x_rotations))
+        Ok(((&x - &self.x_mean) / &self.x_std).dot(&self.x_rotations))
     }
 
     /// Y scores of new data: `((Y − mean) / std) y_rotations`.
-    pub fn transform_y(&self, y: &Array2<f64>) -> Result<Array2<f64>> {
+    pub fn transform_y<'a>(&self, y: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let y: ArrayView2<f64> = y.into();
         if y.ncols() != self.y_mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} Y features, got {}",
@@ -258,7 +260,7 @@ impl FittedCca {
                 y.ncols()
             )));
         }
-        Ok(((y - &self.y_mean) / &self.y_std).dot(&self.y_rotations))
+        Ok(((&y - &self.y_mean) / &self.y_std).dot(&self.y_rotations))
     }
 }
 

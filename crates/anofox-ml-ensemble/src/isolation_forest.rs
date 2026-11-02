@@ -7,7 +7,7 @@
 //! forest, normalised by the expected length on a sub-sample of that size.
 
 use anofox_ml_core::{FitUnsupervised, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -43,7 +43,7 @@ fn c_factor(n: usize) -> f64 {
 }
 
 fn build_tree(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     indices: &[usize],
     depth: usize,
     max_depth: usize,
@@ -188,7 +188,8 @@ impl FittedIsolationForest {
     /// Higher score → more normal. sklearn returns `-anomaly_score`, where
     /// `anomaly_score = 2^(-E[h(x)] / c(n))` (Liu et al. 2008). We follow
     /// sklearn's sign convention.
-    pub fn score_samples(&self, x: &Array2<f64>) -> Array1<f64> {
+    pub fn score_samples<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Array1<f64> {
+        let x: ArrayView2<f64> = x.into();
         let n = x.nrows();
         let c = c_factor(self.subsample_size);
         let n_trees = self.trees.len() as f64;
@@ -209,15 +210,16 @@ impl FittedIsolationForest {
 impl FittedIsolationForest {
     /// `score_samples - offset` (sklearn `decision_function`): negative for
     /// outliers.
-    pub fn decision_function(&self, x: &Array2<f64>) -> Array1<f64> {
-        self.score_samples(x) - self.threshold
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Array1<f64> {
+        let x: ArrayView2<f64> = x.into();
+        self.score_samples(x.view()) - self.threshold
     }
 }
 
 impl FitUnsupervised<f64> for IsolationForest {
     type Fitted = FittedIsolationForest;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<Self::Fitted> {
         if x.nrows() == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
         }
@@ -275,7 +277,7 @@ impl FitUnsupervised<f64> for IsolationForest {
 
 impl Predict<f64> for FittedIsolationForest {
     /// Return 1.0 for inliers and -1.0 for outliers (sklearn convention).
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -291,7 +293,7 @@ impl Predict<f64> for FittedIsolationForest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_isolation_forest_flags_outlier() {

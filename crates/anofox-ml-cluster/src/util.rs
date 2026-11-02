@@ -6,7 +6,7 @@
 //! entry points guarantee that via [`crate::standard_layout`].
 
 use anofox_ml_core::Float;
-use ndarray::{s, Array1, Array2, ArrayView1};
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2};
 use rand::rngs::StdRng;
 use rand::Rng;
 use rayon::prelude::*;
@@ -56,7 +56,7 @@ pub(crate) fn sq_dist_rows<F: Float>(a: ArrayView1<F>, b: ArrayView1<F>) -> F {
 }
 
 /// Squared L2 norm of every row.
-pub(crate) fn row_norms_sq<F: Float>(x: &Array2<F>) -> Array1<F> {
+pub(crate) fn row_norms_sq<F: Float>(x: ArrayView2<F>) -> Array1<F> {
     x.rows()
         .into_iter()
         .map(|r| r.iter().fold(F::zero(), |acc, &v| acc + v * v))
@@ -81,13 +81,13 @@ pub(crate) fn logsumexp(v: &[f64]) -> f64 {
 /// exact distances (inertia) recompute them for the chosen centroid. Ties are
 /// broken towards the lower centroid index.
 pub(crate) fn assign_nearest<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     x_sq: &Array1<F>,
     centroids: &Array2<F>,
 ) -> (Vec<usize>, Vec<F>) {
     let n = x.nrows();
     let k = centroids.nrows();
-    let c_sq = row_norms_sq(centroids);
+    let c_sq = row_norms_sq(centroids.view());
     let ct = centroids.t();
     let two = F::from_f64(2.0).unwrap();
     let n_chunks = n.div_ceil(CHUNK);
@@ -129,7 +129,7 @@ pub(crate) fn assign_nearest<F: Float>(
 }
 
 /// Exact squared distance of every row to the given centroid row.
-fn sq_dist_to_all<F: Float>(x: &Array2<F>, c: ArrayView1<F>) -> Vec<F> {
+fn sq_dist_to_all<F: Float>(x: ArrayView2<F>, c: ArrayView1<F>) -> Vec<F> {
     let c = c.to_owned();
     let cs = c.as_slice().unwrap();
     (0..x.nrows())
@@ -159,10 +159,10 @@ fn search_cumulative<F: Float>(cum: &[F], r: F) -> usize {
 /// probability ∝ `w_i·D²(x_i)` and keeps the one that minimises the resulting
 /// potential `Σ w_i·D²(x_i)`. Returns the centres and the chosen row indices.
 pub(crate) fn kmeans_plusplus<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     n_clusters: usize,
     rng: &mut StdRng,
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
 ) -> (Array2<F>, Vec<usize>) {
     let n = x.nrows();
     let d = x.ncols();
@@ -243,7 +243,7 @@ pub(crate) fn sample_without_replacement<F: Float>(
     n: usize,
     k: usize,
     rng: &mut StdRng,
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
 ) -> Vec<usize> {
     match sample_weight {
         None => {
@@ -295,7 +295,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1);
         let x = Array2::from_shape_fn((600, 5), |_| rng.gen::<f64>() * 10.0);
         let c = Array2::from_shape_fn((7, 5), |_| rng.gen::<f64>() * 10.0);
-        let (labels, dists) = assign_nearest(&x, &row_norms_sq(&x), &c);
+        let (labels, dists) = assign_nearest(x.view(), &row_norms_sq(x.view()), &c);
         for i in 0..x.nrows() {
             let mut best = (0, f64::INFINITY);
             for k in 0..c.nrows() {
@@ -320,7 +320,7 @@ mod tests {
         ];
         for seed in 0..20 {
             let mut rng = StdRng::seed_from_u64(seed);
-            let (_, idx) = kmeans_plusplus(&x, 3, &mut rng, None);
+            let (_, idx) = kmeans_plusplus(x.view(), 3, &mut rng, None);
             let mut groups: Vec<usize> = idx
                 .iter()
                 .map(|&i| match i {
@@ -340,7 +340,7 @@ mod tests {
         let w = array![1.0, 0.0, 1.0, 0.0, 1.0];
         for seed in 0..20 {
             let mut rng = StdRng::seed_from_u64(seed);
-            let (_, idx) = kmeans_plusplus(&x, 3, &mut rng, Some(&w));
+            let (_, idx) = kmeans_plusplus(x.view(), 3, &mut rng, Some(w.view()));
             for i in idx {
                 assert!(w[i] > 0.0);
             }

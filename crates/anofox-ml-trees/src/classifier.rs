@@ -1,5 +1,5 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 use crate::engine::{grow, GrowParams};
 use crate::node::TreeNode;
@@ -148,12 +148,12 @@ impl<F: Float> Fit<F> for DecisionTreeClassifier {
     type Fitted = FittedDecisionTreeClassifier<F>;
 
     /// Fits with the configured `sample_weight` (if any).
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         let sw = self
             .sample_weight
             .as_ref()
             .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
-        self.fit_impl(x, y, sw.as_ref())
+        self.fit_impl(x, y, sw.as_ref().map(|a| a.view()))
     }
 }
 
@@ -162,11 +162,11 @@ impl<F: Float> FitWeighted<F> for DecisionTreeClassifier {
 
     /// `sample_weight` replaces the configured one; it is multiplied by the
     /// `class_weight`, as in sklearn.
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         match sample_weight {
             Some(sw) => self.fit_impl(x, y, Some(sw)),
@@ -178,9 +178,9 @@ impl<F: Float> FitWeighted<F> for DecisionTreeClassifier {
 impl DecisionTreeClassifier {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedDecisionTreeClassifier<F>> {
         check_xy(x, y)?;
         let rows: Vec<usize> = (0..x.nrows()).collect();
@@ -191,13 +191,15 @@ impl DecisionTreeClassifier {
     /// repeat (a bootstrap draw counts each copy as a sample, exactly as if
     /// the rows had been copied). `sample_weight` is indexed by row of `x`;
     /// `class_weight` is computed over the drawn samples.
-    pub fn fit_on_rows<F: Float>(
+    pub fn fit_on_rows<'a, 'b, F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
         rows: &[usize],
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedDecisionTreeClassifier<F>> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         check_xy(x, y)?;
         check_rows(rows, x.nrows())?;
         if let Some(sw) = sample_weight {
@@ -216,15 +218,18 @@ impl DecisionTreeClassifier {
                     let drawn = Array1::from_iter(rows.iter().map(|&r| sw[r]));
                     anofox_ml_core::check_sample_weight(&drawn, drawn.len())?;
                 }
-                sample_weight.cloned()
+                sample_weight.map(|w| w.to_owned())
             }
             Some(cw) => {
                 let y_drawn = Array1::from_iter(rows.iter().map(|&r| y[r]));
                 let w_drawn =
                     sample_weight.map(|sw| Array1::from_iter(rows.iter().map(|&r| sw[r])));
-                let eff =
-                    anofox_ml_core::effective_sample_weight(&y_drawn, w_drawn.as_ref(), Some(cw))?
-                        .expect("class_weight is set");
+                let eff = anofox_ml_core::effective_sample_weight(
+                    &y_drawn,
+                    w_drawn.as_ref().map(|a| a.view()),
+                    Some(cw),
+                )?
+                .expect("class_weight is set");
                 let mut per_row = Array1::<F>::zeros(y.len());
                 for (&r, &w) in rows.iter().zip(eff.iter()) {
                     per_row[r] = w;
@@ -260,14 +265,21 @@ impl DecisionTreeClassifier {
                 "min_impurity_decrease and ccp_alpha must be non-negative".into(),
             ));
         }
-        let tree = grow(x, y, rows, effective_weights.as_ref(), &params, self.seed);
+        let tree = grow(
+            x,
+            y,
+            rows,
+            effective_weights.as_ref().map(|a| a.view()),
+            &params,
+            self.seed,
+        );
         let tree = crate::node::prune_ccp(tree, self.ccp_alpha, true);
         Ok(FittedDecisionTreeClassifier { tree, n_features })
     }
 }
 
 /// Matching row counts and non-empty data.
-pub(crate) fn check_xy<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<()> {
+pub(crate) fn check_xy<F: Float>(x: ArrayView2<F>, y: ArrayView1<F>) -> Result<()> {
     if x.nrows() != y.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {} elements",
@@ -295,7 +307,7 @@ pub(crate) fn check_rows(rows: &[usize], n: usize) -> Result<()> {
 }
 
 impl<F: Float> Predict<F> for FittedDecisionTreeClassifier<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -335,7 +347,8 @@ impl<F: Float> FittedDecisionTreeClassifier<F> {
     ///
     /// Returns an `Array2<F>` of shape `(n_samples, n_classes)` where each row
     /// sums to 1.0. Classes are sorted in ascending order.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -394,7 +407,7 @@ impl<F: Float> FittedDecisionTreeClassifier<F> {
 }
 
 impl<F: Float> PredictProba<F> for FittedDecisionTreeClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         // Delegate to the inherent method.
         Self::predict_proba(self, x)
     }
@@ -836,7 +849,10 @@ mod regression_tests {
         let a = Fit::fit(&clf, &x, &y).unwrap();
         let b = Fit::fit(&clf, &x_f, &y).unwrap();
         assert_eq!(a.predict(&x).unwrap(), b.predict(&x_f).unwrap());
-        assert_eq!(a.predict_proba(&x).unwrap(), b.predict_proba(&x_f).unwrap());
+        assert_eq!(
+            a.predict_proba(x.view()).unwrap(),
+            b.predict_proba(x_f.view()).unwrap()
+        );
 
         // `x.t().to_owned().t()` is the other common non-standard layout.
         let x_t = x.t().to_owned();
@@ -901,8 +917,8 @@ mod regression_tests {
         let (x_new, _) = data(500, 16);
         let x_new = x_new.mapv(|v| 1.0 - v);
         assert_ne!(
-            t1.predict_proba(&x_new).unwrap(),
-            t2.predict_proba(&x_new).unwrap()
+            t1.predict_proba(x_new.view()).unwrap(),
+            t2.predict_proba(x_new.view()).unwrap()
         );
 
         // Same seed -> identical tree.

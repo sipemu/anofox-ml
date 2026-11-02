@@ -27,7 +27,7 @@ use anofox_regression::solvers::{
     FittedRegressor as _, Regressor as _, TweedieRegressor as InnerTweedie,
 };
 use anofox_regression::{GlmFamily, TweedieFamily};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 use serde::{Deserialize, Serialize};
 
 /// Tweedie GLM regressor.
@@ -106,12 +106,14 @@ impl TweedieRegressor {
 
     /// Fit with an optional offset on the link scale (e.g. `ln(exposure)`
     /// for the log link).
-    pub fn fit_with_offset(
+    pub fn fit_with_offset<'a, 'b>(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
         offset: Option<&Array1<f64>>,
     ) -> Result<FittedTweedieRegressor> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         check_xy(x, y)?;
         let p = self.power;
         if !p.is_finite() || p < 0.0 || (p > 0.0 && p < 1.0) {
@@ -145,7 +147,7 @@ impl TweedieRegressor {
             .compute_inference(self.inference)
             .confidence_level(self.confidence_level);
         if let Some(o) = offset {
-            b = b.offset(ndarray_to_col(o));
+            b = b.offset(ndarray_to_col(o.view()));
         }
         let inner = b
             .build()
@@ -228,8 +230,9 @@ impl FittedTweedieRegressor {
     }
 
     /// Linear predictor `b + Xβ` (link scale, no offset).
-    pub fn predict_linear(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        self.fit.linear_predictor(x, None)
+    pub fn predict_linear<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        self.fit.linear_predictor(x.view(), None)
     }
 
     /// Predicted mean with an offset on the link scale.
@@ -241,7 +244,7 @@ impl FittedTweedieRegressor {
         let fam = TweedieFamily::new(self.power, self.link_power);
         Ok(self
             .fit
-            .linear_predictor(x, Some(offset))?
+            .linear_predictor(x.view(), Some(offset))?
             .mapv(|e| GlmFamily::link_inverse(&fam, e)))
     }
 }
@@ -249,13 +252,13 @@ impl FittedTweedieRegressor {
 impl Fit<f64> for TweedieRegressor {
     type Fitted = FittedTweedieRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_with_offset(x, y, None)
     }
 }
 
 impl Predict<f64> for FittedTweedieRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let fam = TweedieFamily::new(self.power, self.link_power);
         Ok(self
             .fit
@@ -313,7 +316,7 @@ impl GammaRegressor {
         y: &Array1<f64>,
         offset: Option<&Array1<f64>>,
     ) -> Result<FittedTweedieRegressor> {
-        self.inner.fit_with_offset(x, y, offset)
+        self.inner.fit_with_offset(x.view(), y.view(), offset)
     }
 }
 
@@ -328,7 +331,7 @@ pub type FittedGammaRegressor = FittedTweedieRegressor;
 
 impl Fit<f64> for GammaRegressor {
     type Fitted = FittedTweedieRegressor;
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.inner.fit(x, y)
     }
 }

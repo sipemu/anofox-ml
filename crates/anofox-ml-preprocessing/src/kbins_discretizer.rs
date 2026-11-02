@@ -1,6 +1,6 @@
 use crate::quantile::{percentile_sorted, sorted_non_nan};
 use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 /// Strategy for computing bin edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -185,7 +185,7 @@ fn kmeans_1d(x: &[f64], k: usize, lo: f64, hi: f64) -> Vec<f64> {
 impl<F: Float> FitUnsupervised<F> for KBinsDiscretizer {
     type Fitted = FittedKBinsDiscretizer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -286,7 +286,7 @@ impl<F: Float> FittedKBinsDiscretizer<F> {
 }
 
 impl<F: Float> Transform<F> for FittedKBinsDiscretizer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let expected_cols = self.bin_edges.len();
         if x.ncols() != expected_cols {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -344,7 +344,7 @@ impl<F: Float> InverseTransform<F> for FittedKBinsDiscretizer<F> {
     /// Map bin indices (ordinal) or one-hot blocks back to the bin centres
     /// (`(edge[k] + edge[k+1]) / 2`). Like sklearn, a constant feature's
     /// single `(-inf, inf)` bin maps to NaN.
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let nb = self.n_bins_per_feature();
         let n_features = self.bin_edges.len();
         let ordinal: Array2<F> = match self.encode {

@@ -1,5 +1,5 @@
 use anofox_ml_core::{Fit, Float, PartialFit, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 
 use crate::activation::Activation;
 use crate::mlp_classifier::{fitted_accessors, mlp_builders};
@@ -163,8 +163,8 @@ impl MlpRegressor {
     fn fit_impl<F: Float>(
         &self,
         prev: Option<FittedMlpRegressor<F>>,
-        x: &Array2<F>,
-        y: &Array2<F>,
+        x: ArrayView2<F>,
+        y: ArrayView2<F>,
         incremental: bool,
     ) -> Result<FittedMlpRegressor<F>> {
         if x.nrows() != y.nrows() {
@@ -234,7 +234,7 @@ impl MlpRegressor {
         x: &Array2<F>,
         y: &Array2<F>,
     ) -> Result<FittedMlpRegressor<F>> {
-        self.fit_impl(None, x, y, false)
+        self.fit_impl(None, x.view(), y.view(), false)
     }
 
     /// One epoch on a multi-output batch (sklearn `partial_fit`).
@@ -244,7 +244,7 @@ impl MlpRegressor {
         x: &Array2<F>,
         y: &Array2<F>,
     ) -> Result<FittedMlpRegressor<F>> {
-        self.fit_impl(state, x, y, true)
+        self.fit_impl(state, x.view(), y.view(), true)
     }
 
     /// Continue training from `previous` (sklearn `warm_start=True`).
@@ -254,7 +254,12 @@ impl MlpRegressor {
         x: &Array2<F>,
         y: &Array1<F>,
     ) -> Result<FittedMlpRegressor<F>> {
-        self.fit_impl(Some(previous), x, &y.clone().insert_axis(Axis(1)), false)
+        self.fit_impl(
+            Some(previous),
+            x.view(),
+            y.view().insert_axis(Axis(1)),
+            false,
+        )
     }
 
     /// Multi-output variant of [`MlpRegressor::fit_warm_start`].
@@ -264,14 +269,14 @@ impl MlpRegressor {
         x: &Array2<F>,
         y: &Array2<F>,
     ) -> Result<FittedMlpRegressor<F>> {
-        self.fit_impl(Some(previous), x, y, false)
+        self.fit_impl(Some(previous), x.view(), y.view(), false)
     }
 }
 
 impl<F: Float> Fit<F> for MlpRegressor {
     type Fitted = FittedMlpRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -279,18 +284,18 @@ impl<F: Float> Fit<F> for MlpRegressor {
                 y.len()
             )));
         }
-        self.fit_impl(None, x, &y.clone().insert_axis(Axis(1)), false)
+        self.fit_impl(None, x, y.insert_axis(Axis(1)), false)
     }
 }
 
 impl<F: Float> PartialFit<F> for MlpRegressor {
     type Fitted = FittedMlpRegressor<F>;
 
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         _classes: Option<&[F]>,
     ) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
@@ -300,7 +305,7 @@ impl<F: Float> PartialFit<F> for MlpRegressor {
                 y.len()
             )));
         }
-        self.fit_impl(state, x, &y.clone().insert_axis(Axis(1)), true)
+        self.fit_impl(state, x, y.insert_axis(Axis(1)), true)
     }
 }
 
@@ -311,7 +316,8 @@ impl<F: Float> FittedMlpRegressor<F> {
     }
 
     /// Predict all outputs, shape `(n_samples, n_outputs)`.
-    pub fn predict_multi(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_multi<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -331,7 +337,7 @@ impl<F: Float> FittedMlpRegressor<F> {
 impl<F: Float> Predict<F> for FittedMlpRegressor<F> {
     /// Single-output prediction; use [`FittedMlpRegressor::predict_multi`]
     /// for models fitted with several outputs.
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if self.n_outputs() != 1 {
             return Err(RustMlError::InvalidParameter(format!(
                 "model has {} outputs; use predict_multi",

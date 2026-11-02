@@ -1,6 +1,6 @@
 use anofox_ml_core::Float;
 use ndarray::linalg::general_mat_mul;
-use ndarray::{Array2, ArrayView2, Axis, Zip};
+use ndarray::{Array2, ArrayView2, AsArray, Axis, Ix2, Zip};
 use serde::{Deserialize, Serialize};
 
 use crate::activation::Activation;
@@ -41,7 +41,8 @@ impl<F: Float> DenseLayer<F> {
     }
 
     /// Forward pass: z = input @ W + b.
-    pub fn linear(&self, input: &Array2<F>) -> Array2<F> {
+    pub fn linear<'a>(&self, input: impl AsArray<'a, F, Ix2>) -> Array2<F> {
+        let input: ArrayView2<F> = input.into();
         input.dot(&self.weights) + &self.biases
     }
 }

@@ -1,6 +1,6 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -79,7 +79,7 @@ pub(crate) fn default_tol() -> f64 {
 pub(crate) fn percentile<F: Float>(
     values: &[F],
     idx: &[usize],
-    weights: Option<&Array1<F>>,
+    weights: Option<ArrayView1<F>>,
     q: f64,
 ) -> F {
     let mut order: Vec<usize> = idx.to_vec();
@@ -232,7 +232,7 @@ pub struct FittedGradientBoostingRegressor<F: Float> {
 impl<F: Float> Fit<F> for GradientBoostingRegressor {
     type Fitted = FittedGradientBoostingRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None, None)
     }
 }
@@ -241,11 +241,11 @@ impl<F: Float> FitWeighted<F> for GradientBoostingRegressor {
     type Fitted = FittedGradientBoostingRegressor<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight, None)
     }
@@ -258,21 +258,23 @@ impl GradientBoostingRegressor {
     /// stopping the result equals a single fit with `n_estimators` trees.
     /// The early-stopping history restarts, as in sklearn. Asking for fewer
     /// trees than `prev` has is an error; as many returns `prev` unchanged.
-    pub fn fit_warm_start<F: Float>(
+    pub fn fit_warm_start<'a, 'b, F: Float>(
         &self,
         prev: FittedGradientBoostingRegressor<F>,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedGradientBoostingRegressor<F>> {
-        self.fit_impl(x, y, sample_weight, Some(prev))
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
+        self.fit_impl(x.view(), y.view(), sample_weight, Some(prev))
     }
 
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
         prev: Option<FittedGradientBoostingRegressor<F>>,
     ) -> Result<FittedGradientBoostingRegressor<F>> {
         if x.nrows() != y.len() {
@@ -427,7 +429,7 @@ impl GradientBoostingRegressor {
         let mut loss_history = vec![F::infinity(); self.n_iter_no_change.unwrap_or(0)];
 
         for iteration in begin..self.n_estimators {
-            let diff = y - &predictions;
+            let diff = &y - &predictions;
             // Huber threshold: the alpha quantile of |residual| (in-bag).
             let delta = match self.loss {
                 GbLoss::Huber => {
@@ -476,7 +478,13 @@ impl GradientBoostingRegressor {
             let round_params = tree_params.clone().with_seed(tree_seeds.gen());
             let params = &round_params;
             let mut fitted_tree: FittedDecisionTreeRegressor<F> =
-                crate::forest_common::fit_tree_on_rows(params, x, &grad, &in_bag, sample_weight)?;
+                crate::forest_common::fit_tree_on_rows(
+                    params,
+                    x,
+                    grad.view(),
+                    &in_bag,
+                    sample_weight,
+                )?;
 
             // Terminal-region update (sklearn's line search) for the
             // non-squared losses: the leaf's loss-minimising constant of the
@@ -571,7 +579,7 @@ impl GradientBoostingRegressor {
 }
 
 impl<F: Float> Predict<F> for FittedGradientBoostingRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -634,7 +642,7 @@ impl<F: Float> FittedGradientBoostingRegressor<F> {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_basic_regression() {

@@ -1,5 +1,5 @@
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -196,7 +196,8 @@ impl<F: Float> FittedLinearSvc<F> {
     /// (positive = class 1, negative = class 0) or `(n_samples, n_classes)`
     /// scores for multi-class. For consistency, this always returns a 2D array
     /// with shape `(n_samples, n_classifiers)`.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.is_empty() {
             return Err(RustMlError::EmptyInput(
                 "prediction input must not be empty".into(),
@@ -226,7 +227,7 @@ impl<F: Float> FittedLinearSvc<F> {
 }
 
 impl<F: Float> Predict<F> for FittedLinearSvc<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let scores = self.decision_function(x)?;
         let n_samples = x.nrows();
         let mut predictions = Array1::zeros(n_samples);
@@ -260,7 +261,7 @@ impl<F: Float> Predict<F> for FittedLinearSvc<F> {
 }
 
 /// Extract unique sorted class labels from y.
-fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
+fn extract_class_labels<F: Float>(y: ArrayView1<F>) -> Vec<F> {
     let mut labels: Vec<F> = y.to_vec();
     labels.sort_by(anofox_ml_core::labels::label_cmp);
     labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
@@ -285,7 +286,7 @@ fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
 /// Labels must be +1/-1 encoded.
 #[allow(clippy::too_many_arguments)]
 fn fit_binary_linear_svc<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     y: &Array1<F>,
     c: F,
     loss: LinearSvcLoss,
@@ -370,7 +371,7 @@ fn fit_binary_linear_svc<F: Float>(
 impl<F: Float> Fit<F> for LinearSvc {
     type Fitted = FittedLinearSvc<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.validate()?;
 
         if x.is_empty() || y.is_empty() {
@@ -531,7 +532,7 @@ mod tests {
         let svc = LinearSvc::new().with_max_iter(2000);
         let fitted: FittedLinearSvc<f64> = svc.fit(&x, &y).unwrap();
 
-        let scores = fitted.decision_function(&x).unwrap();
+        let scores = fitted.decision_function(x.view()).unwrap();
         assert_eq!(scores.nrows(), x.nrows());
         assert_eq!(scores.ncols(), 1); // binary => 1 classifier
 
@@ -674,7 +675,7 @@ mod tests {
         let fitted: FittedLinearSvc<f64> = svc.fit(&x, &y).unwrap();
 
         let x_empty = Array2::<f64>::zeros((0, 2));
-        let result = fitted.decision_function(&x_empty);
+        let result = fitted.decision_function(x_empty.view());
         assert!(result.is_err());
         match result {
             Err(RustMlError::EmptyInput(_)) => {}

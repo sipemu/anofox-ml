@@ -19,7 +19,7 @@
 
 use anofox_ml_core::{Fit, FitUnsupervised, Predict, Result, RustMlError, Transform};
 use anofox_ml_regression::{BayesianRidge, FittedBayesianRidge};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -290,7 +290,7 @@ fn validate_limit(
 /// The observed data (kept features, empty kept features filled), the
 /// initially imputed working matrix and the missing mask.
 fn initial_imputation(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     initial: &FittedSimpleImputer<f64>,
     is_empty: &[bool],
     keep_empty: bool,
@@ -486,14 +486,14 @@ impl<E: ImputationEstimator> IterativeImputer<E> {
 impl<E: ImputationEstimator> FitUnsupervised<f64> for IterativeImputer<E> {
     type Fitted = FittedIterativeImputer<E::Model>;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<Self::Fitted> {
         Ok(self.fit_transform(x)?.0)
     }
 
     fn fit_with_target(
         &self,
-        x: &Array2<f64>,
-        _y: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        _y: Option<ArrayView1<f64>>,
     ) -> Result<(Self::Fitted, Option<Array2<f64>>)> {
         let (fitted, out) = self.fit_transform(x)?;
         Ok((fitted, Some(out)))
@@ -502,10 +502,11 @@ impl<E: ImputationEstimator> FitUnsupervised<f64> for IterativeImputer<E> {
 
 impl<E: ImputationEstimator> IterativeImputer<E> {
     /// Fit and return the imputed training data (sklearn's `fit_transform`).
-    pub fn fit_transform(
+    pub fn fit_transform<'a>(
         &self,
-        x: &Array2<f64>,
+        x: impl AsArray<'a, f64, Ix2>,
     ) -> Result<(FittedIterativeImputer<E::Model>, Array2<f64>)> {
+        let x: ArrayView2<f64> = x.into();
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -636,7 +637,7 @@ impl<M: ImputationModel> FittedIterativeImputer<M> {
         mut xt: Array2<f64>,
         obs: &Array2<f64>,
         mask: &Array2<bool>,
-        x: &Array2<f64>,
+        x: ArrayView2<f64>,
     ) -> Result<Array2<f64>> {
         ndarray::Zip::from(&mut xt)
             .and(obs)
@@ -675,7 +676,7 @@ impl<M: ImputationModel> FittedIterativeImputer<M> {
 impl<M: ImputationModel> Transform<f64> for FittedIterativeImputer<M> {
     /// Replay the fitted sequence on new data. With `sample_posterior` the
     /// draws restart from `random_state` on every call.
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let (obs, mut xt, mask) =
             initial_imputation(x, &self.initial, &self.is_empty, self.keep_empty_features)?;
         if self.n_iter > 0 && !mask.iter().all(|&m| m) {
@@ -771,7 +772,7 @@ mod tests {
             1e-8,
         );
         // fit_transform gives the same training output.
-        let (_, out) = IterativeImputer::new().fit_transform(&x).unwrap();
+        let (_, out) = IterativeImputer::new().fit_transform(x.view()).unwrap();
         assert_eq!(out, f.transform(&x).unwrap());
     }
 
@@ -898,9 +899,9 @@ mod tests {
             .with_sample_posterior(true)
             .with_bounds(vec![0.0], vec![9.0])
             .with_random_state(3);
-        let (f, a) = imp.fit_transform(&x).unwrap();
+        let (f, a) = imp.fit_transform(x.view()).unwrap();
         assert_eq!(f.n_iter(), 10);
-        let (_, b) = imp.fit_transform(&x).unwrap();
+        let (_, b) = imp.fit_transform(x.view()).unwrap();
         assert_eq!(a, b);
         for (&v, &o) in a.iter().zip(x.iter()) {
             if o.is_nan() {

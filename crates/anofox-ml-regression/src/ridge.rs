@@ -7,7 +7,7 @@ use crate::summary::{
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use anofox_regression::solvers::{FittedRidge, RidgeRegressor as InnerRidge};
 use anofox_regression::{FittedRegressor as _, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Ridge regression estimator with L2 regularization.
 ///
@@ -114,14 +114,14 @@ impl FittedRidgeRegressor {
         if !self.inference {
             return Err(crate::summary::not_computed());
         }
-        interval_from(&self.inner, &ndarray_to_mat(x), kind, level)
+        interval_from(&self.inner, &ndarray_to_mat(x.view()), kind, level)
     }
 }
 
 impl Fit<f64> for RidgeRegressor {
     type Fitted = FittedRidgeRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -175,11 +175,11 @@ impl FitWeighted<f64> for RidgeRegressor {
     /// `r_squared` is the weighted R². Inference is not available for a
     /// weighted fit (`summary` / `predict_interval` return an error).
     /// `None` is identical to [`Fit::fit`].
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         let Some(w) = sample_weight else {
             return self.fit(x, y);
@@ -195,18 +195,18 @@ impl FitWeighted<f64> for RidgeRegressor {
 
         let (x_mean, y_mean) = if self.with_intercept {
             let wsum = w.sum();
-            (w.dot(x) / wsum, w.dot(y) / wsum)
+            (w.dot(&x) / wsum, w.dot(&y) / wsum)
         } else {
             (Array1::zeros(x.ncols()), 0.0)
         };
-        let xs = (x - &x_mean) * &sqrt_w.view().insert_axis(ndarray::Axis(1));
-        let ys = (y - y_mean) * &sqrt_w;
+        let xs = (&x - &x_mean) * &sqrt_w.view().insert_axis(ndarray::Axis(1));
+        let ys = (&y - y_mean) * &sqrt_w;
 
         let fitted = InnerRidge::builder()
             .with_intercept(false)
             .lambda(self.lambda)
             .build()
-            .fit(&ndarray_to_mat(&xs), &ndarray_to_col(&ys))
+            .fit(&ndarray_to_mat(xs.view()), &ndarray_to_col(ys.view()))
             .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
         let (coef, _) = crate::convert::predict_params(fitted.result());
         let intercept = self.with_intercept.then(|| y_mean - x_mean.dot(&coef));
@@ -221,7 +221,7 @@ impl FitWeighted<f64> for RidgeRegressor {
 }
 
 impl Predict<f64> for FittedRidgeRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

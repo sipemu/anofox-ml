@@ -1,6 +1,6 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -189,7 +189,7 @@ pub struct FittedGradientBoostingClassifier<F: Float> {
 impl<F: Float> Fit<F> for GradientBoostingClassifier {
     type Fitted = FittedGradientBoostingClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None, None)
     }
 }
@@ -198,11 +198,11 @@ impl<F: Float> FitWeighted<F> for GradientBoostingClassifier {
     type Fitted = FittedGradientBoostingClassifier<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight, None)
     }
@@ -215,21 +215,23 @@ impl GradientBoostingClassifier {
     /// stopping the result equals a single fit with `n_estimators` rounds.
     /// The early-stopping history restarts, as in sklearn. Asking for fewer
     /// rounds than `prev` has is an error; as many returns `prev` unchanged.
-    pub fn fit_warm_start<F: Float>(
+    pub fn fit_warm_start<'a, 'b, F: Float>(
         &self,
         prev: FittedGradientBoostingClassifier<F>,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedGradientBoostingClassifier<F>> {
-        self.fit_impl(x, y, sample_weight, Some(prev))
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
+        self.fit_impl(x.view(), y.view(), sample_weight, Some(prev))
     }
 
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
         prev: Option<FittedGradientBoostingClassifier<F>>,
     ) -> Result<FittedGradientBoostingClassifier<F>> {
         if x.nrows() != y.len() {
@@ -413,7 +415,7 @@ impl GradientBoostingClassifier {
         for iteration in begin..self.n_estimators {
             // Probabilities from the raw predictions at the start of the
             // round (shared by all K trees of the round).
-            compute_probs(&raw, &mut probs);
+            compute_probs(raw.view(), &mut probs);
 
             // One in-bag sample per round, shared across classes.
             if use_subsample {
@@ -442,12 +444,12 @@ impl GradientBoostingClassifier {
                     crate::forest_common::fit_tree_on_rows(
                         params,
                         x,
-                        &neg_grad,
+                        neg_grad.view(),
                         &in_bag,
                         sample_weight,
                     )?
                 } else {
-                    params.fit_weighted(x, &neg_grad, sample_weight)?
+                    params.fit_weighted_view(x, neg_grad.view(), sample_weight)?
                 };
 
                 // Newton step per leaf over the in-bag samples:
@@ -504,7 +506,7 @@ impl GradientBoostingClassifier {
 }
 
 impl<F: Float> Predict<F> for FittedGradientBoostingClassifier<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let raw = self.raw_predictions(x)?;
         let preds = if self.classes.len() == 2 {
             raw.column(0)
@@ -542,8 +544,9 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
     ///
     /// Shape `(n_samples, 1)` for binary classification (log-odds of the
     /// second class) and `(n_samples, n_classes)` for multiclass.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        self.raw_predictions(x)
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
+        self.raw_predictions(x.view())
     }
 
     /// Predict class probabilities for each sample.
@@ -551,7 +554,8 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
     /// For binary classification, returns shape `(n_samples, 2)` with columns
     /// `[P(class_0), P(class_1)]` (sigmoid of the log-odds). For multiclass,
     /// returns `(n_samples, n_classes)` via softmax of the raw scores.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         let raw = self.raw_predictions(x)?;
         let n_samples = raw.nrows();
         if self.classes.len() == 2 {
@@ -564,7 +568,7 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
             Ok(proba)
         } else {
             let mut proba = Array2::<F>::zeros(raw.raw_dim());
-            compute_probs(&raw, &mut proba);
+            compute_probs(raw.view(), &mut proba);
             Ok(proba)
         }
     }
@@ -601,7 +605,7 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
     }
 
     /// Raw scores: one column per tree set.
-    fn raw_predictions(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn raw_predictions(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -629,7 +633,7 @@ impl<F: Float> FittedGradientBoostingClassifier<F> {
 
 /// Probabilities from raw scores: sigmoid for a single column (binary),
 /// softmax across columns otherwise.
-fn compute_probs<F: Float>(raw: &Array2<F>, probs: &mut Array2<F>) {
+fn compute_probs<F: Float>(raw: ArrayView2<F>, probs: &mut Array2<F>) {
     let n_cols = raw.ncols();
     for (r, mut p) in raw.rows().into_iter().zip(probs.rows_mut()) {
         if n_cols == 1 {
@@ -1188,7 +1192,7 @@ mod tests {
 }
 
 impl<F: Float> PredictProba<F> for FittedGradientBoostingClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
     }
 }

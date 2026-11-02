@@ -35,6 +35,7 @@
 //! assert_ne!(labels[0] as usize, labels[3] as usize);
 //! ```
 
+use ndarray::ArrayView2;
 pub mod affinity_propagation;
 pub mod agglomerative;
 pub mod bgmm;
@@ -70,11 +71,11 @@ pub use spectral::{Affinity, FittedSpectralClustering, SpectralClustering};
 /// `row(i).as_slice()` fast paths never panic on Fortran-order or
 /// transposed input (issue #42).
 pub(crate) fn standard_layout<F: Clone>(
-    x: &ndarray::Array2<F>,
-) -> std::borrow::Cow<'_, ndarray::Array2<F>> {
+    x: ArrayView2<'_, F>,
+) -> ndarray::CowArray<'_, F, ndarray::Ix2> {
     if x.is_standard_layout() {
-        std::borrow::Cow::Borrowed(x)
+        x.into()
     } else {
-        std::borrow::Cow::Owned(x.as_standard_layout().into_owned())
+        x.as_standard_layout().into_owned().into()
     }
 }

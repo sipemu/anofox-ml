@@ -17,7 +17,7 @@
 use anofox_ml_core::{Result, RustMlError};
 use anofox_regression::imputation::{areg_impute, AregImputeOptions, DonorMatch, ImputeVariable};
 use faer::Mat;
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2, AsArray, Ix2};
 
 /// How a column enters the imputation models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -111,7 +111,8 @@ impl AregImputer {
 
     /// Impute `x` (`NaN` = missing). Needs at least two columns, each with at
     /// least two distinct observed values.
-    pub fn impute(&self, x: &Array2<f64>) -> Result<MultipleImputation> {
+    pub fn impute<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<MultipleImputation> {
+        let x: ArrayView2<f64> = x.into();
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }

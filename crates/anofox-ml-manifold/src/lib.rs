@@ -28,7 +28,7 @@ use anofox_ml_neighbors::distance::compute_distance;
 use anofox_ml_neighbors::DistanceMetric;
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 /// Classical (Torgerson) multidimensional scaling, as sklearn's
 /// `ClassicalMDS`: the top eigenvectors of the double-centred squared
@@ -97,9 +97,9 @@ impl<F: Float> FitUnsupervised<F> for ClassicalMds {
     type Fitted = FittedClassicalMds;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         let k = self.n_components;
         if n == 0 {
@@ -114,7 +114,7 @@ impl<F: Float> FitUnsupervised<F> for ClassicalMds {
             // B = Xc Xcᵀ: its nonzero eigenpairs come from Xcᵀ Xc = V S² Vᵀ
             // with eigenvectors Xc V / S.
             let d = x.ncols();
-            let xc = x - &x.mean_axis(Axis(0)).expect("non-empty");
+            let xc = &x - &x.mean_axis(Axis(0)).expect("non-empty");
             let kk = k.min(d);
             let (vals, v) = top_eigen(&xc.t().dot(&xc), kk)?;
             let proj = xc.dot(&v);

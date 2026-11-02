@@ -3,13 +3,13 @@
 //! query votes or averages, optionally weighted by inverse distance.
 
 use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 use crate::distance::DistanceMetric;
 use crate::index::{NeighborAlgorithm, NeighborIndex, RadiusNeighbors};
 use crate::knn_classifier::{argmax_first, encode_classes, neighbor_weights, WeightFunction};
 
-fn check_fit<F: Float>(x: &Array2<F>, y: &Array1<F>, radius: f64) -> Result<()> {
+fn check_fit<F: Float>(x: ArrayView2<F>, y: ArrayView1<F>, radius: f64) -> Result<()> {
     if x.nrows() != y.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {} elements",
@@ -90,7 +90,7 @@ pub struct FittedRadiusNeighborsClassifier<F: Float> {
 impl<F: Float> Fit<F> for RadiusNeighborsClassifier {
     type Fitted = FittedRadiusNeighborsClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         check_fit(x, y, self.radius)?;
         let (classes, y_class) = encode_classes(y);
         Ok(FittedRadiusNeighborsClassifier {
@@ -111,7 +111,8 @@ impl<F: Float> FittedRadiusNeighborsClassifier<F> {
     }
 
     /// Training samples within the radius of every row of `x`.
-    pub fn radius_neighbors(&self, x: &Array2<F>) -> Result<RadiusNeighbors<F>> {
+    pub fn radius_neighbors<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<RadiusNeighbors<F>> {
+        let x: ArrayView2<F> = x.into();
         self.index.radius_neighbors(x, self.radius)
     }
 
@@ -129,7 +130,8 @@ impl<F: Float> FittedRadiusNeighborsClassifier<F> {
     /// Class probabilities: the (weighted) share of each class among the
     /// neighbours. A query without neighbours gets probability 1 for the
     /// outlier label if that is a training class, else all zeros.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         let nbrs = self.radius_neighbors(x)?;
         self.no_neighbour_error(&nbrs)?;
         let outlier_class = self
@@ -159,7 +161,7 @@ impl<F: Float> FittedRadiusNeighborsClassifier<F> {
 impl<F: Float> Predict<F> for FittedRadiusNeighborsClassifier<F> {
     /// The class with the largest (weighted) vote, or the outlier label for
     /// queries without neighbours.
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let nbrs = self.radius_neighbors(x)?;
         self.no_neighbour_error(&nbrs)?;
         let proba = self.predict_proba(x)?;
@@ -176,7 +178,7 @@ impl<F: Float> Predict<F> for FittedRadiusNeighborsClassifier<F> {
 }
 
 impl<F: Float> PredictProba<F> for FittedRadiusNeighborsClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         FittedRadiusNeighborsClassifier::predict_proba(self, x)
     }
 }
@@ -233,7 +235,7 @@ pub struct FittedRadiusNeighborsRegressor<F: Float> {
 impl<F: Float> Fit<F> for RadiusNeighborsRegressor {
     type Fitted = FittedRadiusNeighborsRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         check_fit(x, y, self.radius)?;
         Ok(FittedRadiusNeighborsRegressor {
             index: NeighborIndex::new(x, self.metric, self.algorithm, None)?,
@@ -246,7 +248,8 @@ impl<F: Float> Fit<F> for RadiusNeighborsRegressor {
 
 impl<F: Float> FittedRadiusNeighborsRegressor<F> {
     /// Training samples within the radius of every row of `x`.
-    pub fn radius_neighbors(&self, x: &Array2<F>) -> Result<RadiusNeighbors<F>> {
+    pub fn radius_neighbors<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<RadiusNeighbors<F>> {
+        let x: ArrayView2<F> = x.into();
         self.index.radius_neighbors(x, self.radius)
     }
 }
@@ -254,7 +257,7 @@ impl<F: Float> FittedRadiusNeighborsRegressor<F> {
 impl<F: Float> Predict<F> for FittedRadiusNeighborsRegressor<F> {
     /// (Weighted) mean target of the neighbours; NaN for queries without
     /// neighbours (sklearn).
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let nbrs = self.radius_neighbors(x)?;
         Ok(nbrs
             .iter()

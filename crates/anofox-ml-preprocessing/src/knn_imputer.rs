@@ -15,7 +15,7 @@
 //! n_features)`, in parallel over the rows to impute.
 
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
-use ndarray::{Array2, Axis};
+use ndarray::{Array2, ArrayView2, Axis};
 use rayon::prelude::*;
 
 use crate::missing_indicator::{FittedMissingIndicator, MissingIndicator};
@@ -104,7 +104,7 @@ pub struct FittedKnnImputer<F: Float> {
 impl<F: Float> FitUnsupervised<F> for KnnImputer {
     type Fitted = FittedKnnImputer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -232,7 +232,7 @@ impl<F: Float> FittedKnnImputer<F> {
 }
 
 impl<F: Float> Transform<F> for FittedKnnImputer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let d = self.valid.len();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(

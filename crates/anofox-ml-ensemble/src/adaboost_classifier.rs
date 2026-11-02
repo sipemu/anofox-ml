@@ -1,6 +1,6 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeClassifier, FittedDecisionTreeClassifier, SplitCriterion};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 use crate::forest_common::{argmax_first, class_index, sorted_classes};
 
@@ -88,7 +88,7 @@ pub struct FittedAdaBoostClassifier<F: Float> {
 impl<F: Float> Fit<F> for AdaBoostClassifier {
     type Fitted = FittedAdaBoostClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -97,11 +97,11 @@ impl<F: Float> FitWeighted<F> for AdaBoostClassifier {
     type Fitted = FittedAdaBoostClassifier<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -110,9 +110,9 @@ impl<F: Float> FitWeighted<F> for AdaBoostClassifier {
 impl AdaBoostClassifier {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedAdaBoostClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -246,7 +246,7 @@ impl AdaBoostClassifier {
 }
 
 impl<F: Float> Predict<F> for FittedAdaBoostClassifier<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let dec = self.decision_function(x)?;
         let preds = if self.classes.len() == 2 {
             dec.column(0)
@@ -298,7 +298,8 @@ impl<F: Float> FittedAdaBoostClassifier<F> {
     /// weight. For binary problems the result has a single column
     /// (`score[class_1] - score[class_0]`, positive => `classes[1]`),
     /// otherwise shape `(n_samples, n_classes)`.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -343,7 +344,8 @@ impl<F: Float> FittedAdaBoostClassifier<F> {
     /// `softmax([-d / 2, d / 2])`.
     ///
     /// Returns an `Array2` of shape `(n_samples, n_classes)`.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         let dec = self.decision_function(x)?;
         let n_samples = dec.nrows();
         let n_classes = self.classes.len();
@@ -823,7 +825,7 @@ mod tests {
 }
 
 impl<F: Float> PredictProba<F> for FittedAdaBoostClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
     }
 }

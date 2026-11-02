@@ -4,7 +4,7 @@
 //! fitted per output column). Our existing `Fit` / `Predict` traits assume 1-D
 //! `y`; this wrapper provides a 2-D entry point on top.
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 
 use crate::error::{Result, RustMlError};
 use crate::float::Float;
@@ -13,11 +13,11 @@ use crate::traits::{Fit, Predict};
 /// Internal trait used to abstract over the inner-estimator type without a
 /// blanket impl that conflicts with downstream crates.
 trait MultiFitTemplate<F: Float>: Send + Sync {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>>;
+    fn fit_box(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Box<dyn PredBox<F>>>;
 }
 
 trait PredBox<F: Float>: Send + Sync {
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>>;
+    fn predict_box(&self, x: ArrayView2<F>) -> Result<Array1<F>>;
 }
 
 struct Template<T>(T);
@@ -28,7 +28,7 @@ where
     T: Fit<F> + Send + Sync + Clone,
     T::Fitted: Predict<F> + Send + Sync + 'static,
 {
-    fn fit_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn PredBox<F>>> {
+    fn fit_box(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Box<dyn PredBox<F>>> {
         let est = self.0.clone();
         let fitted = Fit::fit(&est, x, y)?;
         Ok(Box::new(PredHolder(fitted)))
@@ -41,7 +41,7 @@ where
     F: Float,
     P: Predict<F> + Send + Sync,
 {
-    fn predict_box(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_box(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         self.0.predict(x)
     }
 }
@@ -62,7 +62,12 @@ impl<F: Float> MultiOutputRegressor<F> {
         }
     }
 
-    pub fn fit_2d(&self, x: &Array2<F>, y: &Array2<F>) -> Result<FittedMultiOutputRegressor<F>> {
+    pub fn fit_2d<'a>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: &Array2<F>,
+    ) -> Result<FittedMultiOutputRegressor<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.nrows() != y.nrows() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {}",
@@ -77,10 +82,7 @@ impl<F: Float> MultiOutputRegressor<F> {
         // Independent per-target fits run in parallel.
         let fitted = (0..y.ncols())
             .into_par_iter()
-            .map(|k| {
-                self.template
-                    .fit_box(x, &y.index_axis(Axis(1), k).to_owned())
-            })
+            .map(|k| self.template.fit_box(x, y.index_axis(Axis(1), k)))
             .collect::<Result<Vec<_>>>()?;
         Ok(FittedMultiOutputRegressor {
             models: fitted,
@@ -95,7 +97,8 @@ pub struct FittedMultiOutputRegressor<F: Float> {
 }
 
 impl<F: Float> FittedMultiOutputRegressor<F> {
-    pub fn predict_2d(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_2d<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -167,7 +170,12 @@ impl<F: Float> RegressorChain<F> {
         self
     }
 
-    pub fn fit_2d(&self, x: &Array2<F>, y: &Array2<F>) -> Result<FittedRegressorChain<F>> {
+    pub fn fit_2d<'a>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: &Array2<F>,
+    ) -> Result<FittedRegressorChain<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.nrows() != y.nrows() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {}",
@@ -203,7 +211,7 @@ impl<F: Float> RegressorChain<F> {
             let cur_cols = d + step;
             let xs = sub_x(&x_ext, n, cur_cols);
             let yk = y.index_axis(Axis(1), out_idx).to_owned();
-            let m = self.template.fit_box(&xs, &yk)?;
+            let m = self.template.fit_box(xs.view(), yk.view())?;
             // For subsequent steps we feed the *predicted* values of yk
             // (sklearn does this — at fit time it's the true value to avoid
             // exposure bias; we follow sklearn and use the true y at fit).
@@ -229,7 +237,8 @@ pub struct FittedRegressorChain<F: Float> {
 }
 
 impl<F: Float> FittedRegressorChain<F> {
-    pub fn predict_2d(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_2d<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -248,7 +257,7 @@ impl<F: Float> FittedRegressorChain<F> {
         let mut out = Array2::<F>::zeros((n, self.n_outputs));
         for (step, &out_idx) in self.order.iter().enumerate() {
             let xs = sub_x(&x_ext, n, d + step);
-            let pred = self.models[step].predict_box(&xs)?;
+            let pred = self.models[step].predict_box(xs.view())?;
             for i in 0..n {
                 out[[i, out_idx]] = pred[i];
                 x_ext[[i, d + step]] = pred[i];
@@ -276,7 +285,7 @@ pub type FittedClassifierChain<F> = FittedRegressorChain<F>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use ndarray::{array, ArrayView1, ArrayView2};
 
     #[derive(Clone)]
     struct MeanReg;
@@ -284,13 +293,13 @@ mod tests {
 
     impl Fit<f64> for MeanReg {
         type Fitted = FittedMeanReg;
-        fn fit(&self, _x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+        fn fit_view(&self, _x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
             let m = y.iter().sum::<f64>() / y.len() as f64;
             Ok(FittedMeanReg(m))
         }
     }
     impl Predict<f64> for FittedMeanReg {
-        fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
             Ok(Array1::from_elem(x.nrows(), self.0))
         }
     }

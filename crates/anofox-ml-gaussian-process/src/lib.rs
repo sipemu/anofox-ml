@@ -56,7 +56,7 @@ use linalg::{
     cholesky, cholesky_with_jitter, col_to_array1, solve_lower, std_normal, to_array2, to_mat,
     vec_to_col,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -139,7 +139,7 @@ pub struct FittedGaussianProcessRegressor {
 /// log-hyperparameters (`½ tr((ααᵀ − K⁻¹) ∂K/∂θ)`). Non-PD → `-∞`.
 pub(crate) fn lml_with_grad(
     kernel: &GpKernel,
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     y: &Array1<f64>,
     alpha: f64,
     eval_gradient: bool,
@@ -247,7 +247,7 @@ where
 impl Fit<f64> for GaussianProcessRegressor {
     type Fitted = FittedGaussianProcessRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         let n = x.nrows();
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -274,7 +274,7 @@ impl Fit<f64> for GaussianProcessRegressor {
             let s = if s < 10.0 * f64::EPSILON { 1.0 } else { s };
             (m, s, y.mapv(|v| (v - m) / s))
         } else {
-            (0.0, 1.0, y.clone())
+            (0.0, 1.0, y.to_owned())
         };
 
         let alpha = self.alpha;
@@ -308,7 +308,7 @@ impl Fit<f64> for GaussianProcessRegressor {
         };
 
         Ok(FittedGaussianProcessRegressor {
-            x_train: x.clone(),
+            x_train: x.to_owned(),
             y_train: y_norm,
             l_lower: l,
             dual,
@@ -322,7 +322,7 @@ impl Fit<f64> for GaussianProcessRegressor {
 }
 
 impl FittedGaussianProcessRegressor {
-    fn check_features(&self, x: &Array2<f64>) -> Result<()> {
+    fn check_features(&self, x: ArrayView2<f64>) -> Result<()> {
         if x.ncols() != self.x_train.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -334,9 +334,9 @@ impl FittedGaussianProcessRegressor {
     }
 
     /// `(mean, V)` with `V = L⁻¹ K(X_train, X)` (one batched solve).
-    fn mean_and_v(&self, x: &Array2<f64>) -> Result<(Array1<f64>, Mat<f64>)> {
-        self.check_features(x)?;
-        let k_star = self.kernel.cross(x, &self.x_train); // (n_q, n_train)
+    fn mean_and_v(&self, x: ArrayView2<f64>) -> Result<(Array1<f64>, Mat<f64>)> {
+        self.check_features(x.view())?;
+        let k_star = self.kernel.cross(x.view(), self.x_train.view()); // (n_q, n_train)
         let mean = k_star
             .dot(&self.dual)
             .mapv(|v| v * self.y_std + self.y_mean);
@@ -346,9 +346,13 @@ impl FittedGaussianProcessRegressor {
     }
 
     /// Posterior mean and standard deviation (sklearn `return_std=True`).
-    pub fn predict_with_std(&self, x: &Array2<f64>) -> Result<(Array1<f64>, Array1<f64>)> {
+    pub fn predict_with_std<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<(Array1<f64>, Array1<f64>)> {
+        let x: ArrayView2<f64> = x.into();
         let (mean, v) = self.mean_and_v(x)?;
-        let kdiag = self.kernel.diag(x);
+        let kdiag = self.kernel.diag(x.view());
         let s2 = self.y_std * self.y_std;
         let std = Array1::from_shape_fn(x.nrows(), |j| {
             let vsq: f64 = (0..v.nrows()).map(|i| v[(i, j)] * v[(i, j)]).sum();
@@ -358,15 +362,20 @@ impl FittedGaussianProcessRegressor {
     }
 
     /// Posterior standard deviation per query point (in target scale).
-    pub fn predict_std(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    pub fn predict_std<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
         Ok(self.predict_with_std(x)?.1)
     }
 
     /// Posterior mean and full covariance (sklearn `return_cov=True`).
-    pub fn predict_cov(&self, x: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>)> {
+    pub fn predict_cov<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<(Array1<f64>, Array2<f64>)> {
+        let x: ArrayView2<f64> = x.into();
         let (mean, v) = self.mean_and_v(x)?;
         let vtv = to_array2((v.transpose() * &v).as_ref());
-        let mut cov = self.kernel.gram(x) - vtv;
+        let mut cov = self.kernel.gram(x.view()) - vtv;
         let s2 = self.y_std * self.y_std;
         cov.mapv_inplace(|c| c * s2);
         Ok((mean, cov))
@@ -374,7 +383,13 @@ impl FittedGaussianProcessRegressor {
 
     /// Draw `n_samples` functions from the posterior at `x`; returns an
     /// `(n_query, n_samples)` matrix (sklearn `sample_y`).
-    pub fn sample_y(&self, x: &Array2<f64>, n_samples: usize, seed: u64) -> Result<Array2<f64>> {
+    pub fn sample_y<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        n_samples: usize,
+        seed: u64,
+    ) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
         let (mean, cov) = self.predict_cov(x)?;
         let q = x.nrows();
         let eig = faer::linalg::solvers::SelfAdjointEigen::new(to_mat(&cov).as_ref(), Side::Lower)
@@ -414,7 +429,7 @@ impl FittedGaussianProcessRegressor {
         let k = self.kernel.with_theta(theta)?;
         Ok(lml_with_grad(
             &k,
-            &self.x_train,
+            self.x_train.view(),
             &self.y_train,
             self.alpha,
             true,
@@ -428,9 +443,9 @@ impl FittedGaussianProcessRegressor {
 }
 
 impl Predict<f64> for FittedGaussianProcessRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         self.check_features(x)?;
-        let k_star = self.kernel.cross(x, &self.x_train);
+        let k_star = self.kernel.cross(x, self.x_train.view());
         let mean_norm = k_star.dot(&self.dual);
         Ok(mean_norm.mapv(|v| v * self.y_std + self.y_mean))
     }
@@ -456,7 +471,7 @@ pub fn log_marginal_likelihood(
         )));
     }
     kernel.validate(x.ncols())?;
-    Ok(lml_with_grad(kernel, x, y, alpha, false).0)
+    Ok(lml_with_grad(kernel, x.view(), y, alpha, false).0)
 }
 
 /// Log-marginal likelihood and its analytic gradient w.r.t. the free
@@ -475,7 +490,7 @@ pub fn log_marginal_likelihood_with_gradient(
         )));
     }
     kernel.validate(x.ncols())?;
-    Ok(lml_with_grad(kernel, x, y, alpha, true))
+    Ok(lml_with_grad(kernel, x.view(), y, alpha, true))
 }
 
 /// Result of multi-parameter hyperparameter optimisation.
@@ -510,7 +525,7 @@ pub fn optimize_kernel_lbfgs(
         if k.validate(x.ncols()).is_err() {
             return f64::INFINITY;
         }
-        let v = lml_with_grad(&k, x, y, alpha, false).0;
+        let v = lml_with_grad(&k, x.view(), y, alpha, false).0;
         if v.is_finite() {
             -v
         } else {

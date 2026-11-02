@@ -12,7 +12,7 @@
 
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView2};
 
 use crate::distance::DistanceMetric;
 use crate::index::{NeighborAlgorithm, NeighborIndex};
@@ -71,9 +71,9 @@ impl<F: Float> FitUnsupervised<F> for LocalOutlierFactor {
     type Fitted = FittedLocalOutlierFactor;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -89,7 +89,7 @@ impl<F: Float> FitUnsupervised<F> for LocalOutlierFactor {
             LofAlgorithm::BruteForce => NeighborAlgorithm::BruteForce,
             LofAlgorithm::Auto => NeighborAlgorithm::Auto,
         };
-        let index = NeighborIndex::new(x, DistanceMetric::Euclidean, algorithm, Some(k))?;
+        let index = NeighborIndex::new(x.view(), DistanceMetric::Euclidean, algorithm, Some(k))?;
         let (dist, idx) = index.kneighbors_self(k)?;
         let neighbors: Vec<Vec<(usize, f64)>> = (0..n)
             .map(|i| {

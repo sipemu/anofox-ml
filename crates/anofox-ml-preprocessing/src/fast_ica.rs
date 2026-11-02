@@ -20,7 +20,7 @@
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError, Transform};
 use faer::linalg::solvers::{SelfAdjointEigen, Svd};
 use faer::{Mat, Side};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -304,7 +304,7 @@ fn normal(rng: &mut StdRng) -> f64 {
 impl FitUnsupervised<f64> for FastIca {
     type Fitted = FittedFastIca;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<Self::Fitted> {
         let (n, d) = x.dim();
         if n < 2 || d == 0 {
             return Err(RustMlError::EmptyInput("need at least 2 samples".into()));
@@ -327,7 +327,7 @@ impl FitUnsupervised<f64> for FastIca {
 
         let (mean, x1, k_white, xc) = if whiten {
             let mean = x.mean_axis(Axis(0)).unwrap();
-            let xc = x - &mean;
+            let xc = &x - &mean;
             // u (d × r) and d (r) of XT = (d × n), sorted descending.
             let (u, dvals): (Array2<f64>, Vec<f64>) = match self.whiten_solver {
                 IcaWhitenSolver::Svd => {
@@ -421,7 +421,7 @@ impl FitUnsupervised<f64> for FastIca {
 
 impl Transform<f64> for FittedFastIca {
     /// Recovered sources `S = (X − mean) componentsᵀ`.
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -429,13 +429,13 @@ impl Transform<f64> for FittedFastIca {
                 x.ncols()
             )));
         }
-        Ok((x - &self.mean).dot(&self.components.t()))
+        Ok((&x - &self.mean).dot(&self.components.t()))
     }
 }
 
 impl anofox_ml_core::InverseTransform<f64> for FittedFastIca {
     /// `S mixingᵀ + mean` (sklearn `inverse_transform`).
-    fn inverse_transform(&self, s: &Array2<f64>) -> Result<Array2<f64>> {
+    fn inverse_transform_view(&self, s: ArrayView2<f64>) -> Result<Array2<f64>> {
         if s.ncols() != self.mixing.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} components, got {}",

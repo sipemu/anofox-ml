@@ -15,7 +15,7 @@
 //! Not included: EFB, DART, distributed training.
 
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2, ShapeBuilder};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -93,7 +93,7 @@ struct FeatureBins {
 /// reducing the effective split resolution and preventing overfitting on small
 /// datasets.
 fn compute_bins(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     max_bins: usize,
     categorical_features: &[usize],
     min_data_in_bin: usize,
@@ -291,7 +291,7 @@ fn bin_value(v: f64, bins: &FeatureBins) -> u8 {
 
 /// Bin every row of `x` with *existing* (training) bin edges, row-major
 /// (prediction walks one row at a time). Works for any layout of `x`.
-fn bin_matrix(x: &Array2<f64>, all_bins: &[FeatureBins]) -> Array2<u8> {
+fn bin_matrix(x: ArrayView2<f64>, all_bins: &[FeatureBins]) -> Array2<u8> {
     let mut out = Array2::<u8>::zeros((x.nrows(), x.ncols()));
     for (j, bins) in all_bins.iter().enumerate() {
         let col = x.column(j);
@@ -1500,14 +1500,14 @@ impl Default for LgbmRegressor {
 #[derive(Debug, Clone)]
 pub struct LgbmFitOptions<'a> {
     /// Optional per-sample weights (length = n_samples).
-    pub sample_weight: Option<&'a Array1<f64>>,
+    pub sample_weight: Option<ArrayView1<'a, f64>>,
     /// Optional initial scores / baseline predictions (length = n_samples).
     /// Used instead of the default baseline.
-    pub init_score: Option<&'a Array1<f64>>,
+    pub init_score: Option<ArrayView1<'a, f64>>,
     /// Optional evaluation set (X_eval, y_eval) for early stopping.
     pub eval_set: Option<(&'a Array2<f64>, &'a Array1<f64>)>,
     /// Optional per-sample weights for the eval set.
-    pub eval_sample_weight: Option<&'a Array1<f64>>,
+    pub eval_sample_weight: Option<ArrayView1<'a, f64>>,
     /// Print training progress every N iterations (0 = silent).
     pub verbose: usize,
 }
@@ -1653,7 +1653,7 @@ fn weighted_percentile(values: &[f64], weights: &[f64], alpha: f64) -> f64 {
 }
 
 /// Median of `values[rows]`, weighted when `weights` is given.
-fn rows_median(values: &[f64], rows: &[usize], weights: Option<&Array1<f64>>) -> f64 {
+fn rows_median(values: &[f64], rows: &[usize], weights: Option<ArrayView1<f64>>) -> f64 {
     let mut v: Vec<f64> = rows.iter().map(|&i| values[i]).collect();
     match weights {
         Some(w) => {
@@ -1673,7 +1673,7 @@ fn renew_leaf_outputs(
     binned_x: &Array2<u8>,
     rows: Vec<usize>,
     residuals: &[f64],
-    weights: Option<&Array1<f64>>,
+    weights: Option<ArrayView1<f64>>,
 ) {
     match node {
         TreeNode::Leaf { value } => {
@@ -1705,13 +1705,17 @@ fn renew_leaf_outputs(
 
 /// LightGBM's Python package drops sample weights that are all 1, which
 /// selects the unweighted percentile formulas; this keeps that behaviour.
-fn effective_sample_weight(w: Option<&Array1<f64>>) -> Option<&Array1<f64>> {
+fn effective_sample_weight(w: Option<ArrayView1<f64>>) -> Option<ArrayView1<f64>> {
     w.filter(|w| w.iter().any(|&v| v != 1.0))
 }
 
 /// Initial score of a regression objective: the weighted mean (squared
 /// error, Huber) or the weighted median (L1), as LightGBM's `BoostFromScore`.
-fn regression_baseline(y: &[f64], weights: Option<&Array1<f64>>, objective: LgbmObjective) -> f64 {
+fn regression_baseline(
+    y: &[f64],
+    weights: Option<ArrayView1<f64>>,
+    objective: LgbmObjective,
+) -> f64 {
     if objective == LgbmObjective::RegressionL1 {
         let rows: Vec<usize> = (0..y.len()).collect();
         return rows_median(y, &rows, weights);
@@ -1750,12 +1754,14 @@ fn sample_rows(n: usize, frac: f64, rng: &mut StdRng) -> Vec<usize> {
 
 impl LgbmRegressor {
     /// Fit with additional options (sample weights, init score, eval set, early stopping).
-    pub fn fit_with_eval(
+    pub fn fit_with_eval<'a, 'b>(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
         opts: &LgbmFitOptions<'_>,
     ) -> Result<FittedLgbmRegressor> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -1833,7 +1839,10 @@ impl LgbmRegressor {
         // binned with the training bin edges: trees split on training bin
         // indices, so bins computed from the eval data would mean something
         // else entirely.
-        let eval_binned = opts.eval_set.as_ref().map(|(xe, _)| bin_matrix(xe, &bins));
+        let eval_binned = opts
+            .eval_set
+            .as_ref()
+            .map(|(xe, _)| bin_matrix(xe.view(), &bins));
         let eval_y: Option<Vec<f64>> = opts.eval_set.as_ref().map(|(_, ye)| ye.to_vec());
         let mut eval_preds: Option<Vec<f64>> = opts
             .eval_set
@@ -1976,7 +1985,7 @@ impl LgbmRegressor {
 fn eval_loss(
     y: &[f64],
     preds: &[f64],
-    weights: Option<&Array1<f64>>,
+    weights: Option<ArrayView1<f64>>,
     objective: LgbmObjective,
     huber_delta: f64,
 ) -> f64 {
@@ -2013,7 +2022,7 @@ fn eval_loss(
 impl Fit<f64> for LgbmRegressor {
     type Fitted = FittedLgbmRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_with_eval(x, y, &LgbmFitOptions::default())
     }
 }
@@ -2021,11 +2030,11 @@ impl Fit<f64> for LgbmRegressor {
 impl FitWeighted<f64> for LgbmRegressor {
     type Fitted = FittedLgbmRegressor;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         let opts = LgbmFitOptions {
             sample_weight,
@@ -2036,7 +2045,7 @@ impl FitWeighted<f64> for LgbmRegressor {
 }
 
 impl Predict<f64> for FittedLgbmRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -2242,7 +2251,7 @@ impl LgbmClassifier {
     }
 
     /// Compute per-sample class weights from the class_weight strategy.
-    fn compute_class_weights(&self, y: &Array1<f64>) -> Result<Vec<f64>> {
+    fn compute_class_weights(&self, y: ArrayView1<f64>) -> Result<Vec<f64>> {
         match &self.class_weight {
             None => Ok(vec![1.0; y.len()]),
             Some(cw) => Ok(anofox_ml_core::compute_sample_weight(cw, y)?.to_vec()),
@@ -2296,7 +2305,8 @@ impl FittedLgbmClassifier {
         }
     }
 
-    pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -2345,12 +2355,14 @@ impl FittedLgbmClassifier {
 
 impl LgbmClassifier {
     /// Fit with additional options (sample_weight, init_score, eval_set, early stopping).
-    pub fn fit_with_eval(
+    pub fn fit_with_eval<'a, 'b>(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
         opts: &LgbmFitOptions<'_>,
     ) -> Result<FittedLgbmClassifier> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -2421,7 +2433,7 @@ impl LgbmClassifier {
 
         // Eval set: binned with the TRAINING bin edges, labels mapped to
         // class indices.
-        let eval_binned = opts.eval_set.map(|(xe, _)| bin_matrix(xe, &bins));
+        let eval_binned = opts.eval_set.map(|(xe, _)| bin_matrix(xe.view(), &bins));
         let eval_class_idx: Option<Vec<usize>> = match opts.eval_set {
             Some((_, ye)) => Some(
                 ye.iter()
@@ -2780,7 +2792,7 @@ impl EarlyStopState {
 impl Fit<f64> for LgbmClassifier {
     type Fitted = FittedLgbmClassifier;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_with_eval(x, y, &LgbmFitOptions::default())
     }
 }
@@ -2788,11 +2800,11 @@ impl Fit<f64> for LgbmClassifier {
 impl FitWeighted<f64> for LgbmClassifier {
     type Fitted = FittedLgbmClassifier;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         let opts = LgbmFitOptions {
             sample_weight,
@@ -2803,7 +2815,7 @@ impl FitWeighted<f64> for LgbmClassifier {
 }
 
 impl Predict<f64> for FittedLgbmClassifier {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let proba = self.predict_proba(x)?;
         let n = x.nrows();
         let mut preds = Array1::zeros(n);
@@ -3154,7 +3166,7 @@ mod tests {
         ]);
 
         let opts = LgbmFitOptions {
-            sample_weight: Some(&sw),
+            sample_weight: Some(sw.view()),
             ..Default::default()
         };
 
@@ -3192,7 +3204,7 @@ mod tests {
         let init = Array1::from_vec(y.to_vec());
 
         let opts = LgbmFitOptions {
-            init_score: Some(&init),
+            init_score: Some(init.view()),
             ..Default::default()
         };
 
@@ -3785,7 +3797,7 @@ mod tests {
         let sw = Array1::from_vec(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
 
         let opts = LgbmFitOptions {
-            sample_weight: Some(&sw),
+            sample_weight: Some(sw.view()),
             ..Default::default()
         };
 
@@ -4065,7 +4077,7 @@ mod tests {
         let sw = Array1::from_vec(vec![1.0, 1.0]);
 
         let opts = LgbmFitOptions {
-            sample_weight: Some(&sw),
+            sample_weight: Some(sw.view()),
             ..Default::default()
         };
 
@@ -4079,7 +4091,7 @@ mod tests {
         let init = Array1::from_vec(vec![0.0, 0.0]);
 
         let opts = LgbmFitOptions {
-            init_score: Some(&init),
+            init_score: Some(init.view()),
             ..Default::default()
         };
 
@@ -4415,16 +4427,30 @@ mod early_stopping_regression_tests {
     #[test]
     fn eval_rows_use_training_bins() {
         let (x, _) = reg_data(200, 1, 0.0);
-        let (binned, bins) = compute_bins(&x, DEFAULT_MAX_BINS, &[], 3, BinningMethod::LightGbm, 0);
+        let (binned, bins) = compute_bins(
+            x.view(),
+            DEFAULT_MAX_BINS,
+            &[],
+            3,
+            BinningMethod::LightGbm,
+            0,
+        );
         // A subset (e.g. an eval split) has a different distribution; with
         // its own edges its bins would not match the training bins.
         let rows: Vec<usize> = (0..200).filter(|&i| x[[i, 0]] > 0.5).collect();
         let sub = x.select(ndarray::Axis(0), &rows);
-        let eb = bin_matrix(&sub, &bins);
+        let eb = bin_matrix(sub.view(), &bins);
         for (k, &i) in rows.iter().enumerate() {
             assert_eq!(eb.row(k), binned.row(i));
         }
-        let (own, _) = compute_bins(&sub, DEFAULT_MAX_BINS, &[], 3, BinningMethod::LightGbm, 0);
+        let (own, _) = compute_bins(
+            sub.view(),
+            DEFAULT_MAX_BINS,
+            &[],
+            3,
+            BinningMethod::LightGbm,
+            0,
+        );
         assert_ne!(own, eb, "sanity: own-edge binning differs");
     }
 
@@ -4576,7 +4602,7 @@ mod early_stopping_regression_tests {
         let (x, y) = clf_data(40, 11, 2, 0.0);
         let sw = Array1::<f64>::ones(39);
         let opts = LgbmFitOptions {
-            sample_weight: Some(&sw),
+            sample_weight: Some(sw.view()),
             ..Default::default()
         };
         match LgbmClassifier::new().fit_with_eval(&x, &y, &opts) {

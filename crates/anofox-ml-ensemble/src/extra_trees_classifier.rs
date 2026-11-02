@@ -2,7 +2,7 @@ use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::node::TreeNode;
 use anofox_ml_trees::split::SplitCriterion;
 use anofox_ml_trees::MaxFeatures;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -126,7 +126,7 @@ pub struct FittedExtraTreesClassifier<F: Float> {
 impl<F: Float> Fit<F> for ExtraTreesClassifier {
     type Fitted = FittedExtraTreesClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -135,11 +135,11 @@ impl<F: Float> FitWeighted<F> for ExtraTreesClassifier {
     type Fitted = FittedExtraTreesClassifier<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -148,9 +148,9 @@ impl<F: Float> FitWeighted<F> for ExtraTreesClassifier {
 impl ExtraTreesClassifier {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedExtraTreesClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -210,7 +210,7 @@ impl ExtraTreesClassifier {
 impl<F: Float> Predict<F> for FittedExtraTreesClassifier<F> {
     /// Predict the class with the highest mean leaf probability across trees
     /// (sklearn semantics). Ties go to the smallest class label.
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let proba = self.proba_matrix(x)?;
         let classes = self.classes();
         Ok(Array1::from_iter(
@@ -227,7 +227,7 @@ fn default_criterion() -> SplitCriterion {
 }
 
 impl<F: Float> anofox_ml_core::PredictProba<F> for FittedExtraTreesClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.proba_matrix(x)
     }
 }
@@ -271,11 +271,11 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
         for t in &self.trees {
             collect_leaf_classes(&t.tree, &mut all);
         }
-        sorted_classes(&Array1::from_vec(all))
+        sorted_classes(Array1::from_vec(all).view())
     }
 
     /// Mean leaf class-probabilities, shape `(n_samples, n_classes)`.
-    fn proba_matrix(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn proba_matrix(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -329,8 +329,9 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
 
     /// Class probabilities (mean leaf probabilities over the trees), shape
     /// `(n_samples, n_classes)`; columns follow [`classes`](Self::classes).
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        self.proba_matrix(x)
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
+        self.proba_matrix(x.view())
     }
 
     /// Number of trees in the ensemble.

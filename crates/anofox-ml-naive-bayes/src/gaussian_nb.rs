@@ -2,7 +2,7 @@ use anofox_ml_core::{
     Fit, FitWeighted, Float, PartialFit, Predict, PredictLogProba, PredictProba, Result,
     RustMlError,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix1, Ix2};
 
 use crate::common::{
     argmax_labels, check_n_features, check_partial_fit_classes, check_priors, check_xy,
@@ -66,14 +66,16 @@ impl GaussianNB {
     /// On the first call (`state = None`) the class set is taken from
     /// `classes` (or from `y` when omitted). `epsilon` is recomputed from each
     /// batch exactly like sklearn. Labels outside the class set are an error.
-    pub fn partial_fit_weighted<F: Float>(
+    pub fn partial_fit_weighted<'a, 'b, F: Float>(
         &self,
         state: Option<FittedGaussianNB<F>>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
         classes: Option<&[F]>,
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedGaussianNB<F>> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         self.validate()?;
         check_xy(x, y, sample_weight)?;
         let n_features = x.ncols();
@@ -295,7 +297,8 @@ impl<F: Float> FittedGaussianNB<F> {
     /// term is evaluated per class with whole-array operations. (The GEMM
     /// expansion `x²/σ² − 2xμ/σ² + μ²/σ²` is deliberately avoided: it
     /// suffers catastrophic cancellation when `|x − μ| ≪ |x|`.)
-    pub fn joint_log_likelihood(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn joint_log_likelihood<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         check_n_features(x, self.theta.ncols())?;
         let consts_owned;
         let consts = if self.jll_const.len() == self.class_labels.len() {
@@ -309,7 +312,7 @@ impl<F: Float> FittedGaussianNB<F> {
         for (ci, &c) in consts.iter().enumerate() {
             let mu = self.theta.row(ci);
             let inv_var = self.sigma.row(ci).mapv(|v| F::one() / v);
-            let mut z = x - &mu;
+            let mut z = &x - &mu;
             z.mapv_inplace(|v| v * v);
             let quad = z.dot(&inv_var);
             jll.column_mut(ci).assign(&quad.mapv(|q| c - half * q));
@@ -321,11 +324,11 @@ impl<F: Float> FittedGaussianNB<F> {
 impl<F: Float> FitWeighted<F> for GaussianNB {
     type Fitted = FittedGaussianNB<F>;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         check_xy(x, y, sample_weight)?;
         let classes = sorted_unique(&y.to_vec());
@@ -336,7 +339,7 @@ impl<F: Float> FitWeighted<F> for GaussianNB {
 impl<F: Float> Fit<F> for GaussianNB {
     type Fitted = FittedGaussianNB<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_weighted(x, y, None)
     }
 }
@@ -344,11 +347,11 @@ impl<F: Float> Fit<F> for GaussianNB {
 impl<F: Float> PartialFit<F> for GaussianNB {
     type Fitted = FittedGaussianNB<F>;
 
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         classes: Option<&[F]>,
     ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(state, x, y, classes, None)
@@ -356,20 +359,20 @@ impl<F: Float> PartialFit<F> for GaussianNB {
 }
 
 impl<F: Float> Predict<F> for FittedGaussianNB<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let jll = self.joint_log_likelihood(x)?;
         Ok(argmax_labels(&jll, &self.class_labels))
     }
 }
 
 impl<F: Float> PredictProba<F> for FittedGaussianNB<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }
 
 impl<F: Float> PredictLogProba<F> for FittedGaussianNB<F> {
-    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_log_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(log_proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }
@@ -998,7 +1001,7 @@ mod sklearn_parity {
                 &x.slice(s).to_owned(),
                 &y.slice(ndarray::s![..5]).to_owned(),
                 Some(&[0.0, 1.0, 2.0]),
-                Some(&w.slice(ndarray::s![..5]).to_owned()),
+                Some(w.slice(ndarray::s![..5])),
             )
             .unwrap();
         let m = nb
@@ -1007,7 +1010,7 @@ mod sklearn_parity {
                 &x.slice(s2).to_owned(),
                 &y.slice(ndarray::s![5..]).to_owned(),
                 None,
-                Some(&w.slice(ndarray::s![5..]).to_owned()),
+                Some(w.slice(ndarray::s![5..])),
             )
             .unwrap();
         assert!((m.epsilon().unwrap() - 6.140000000000001e-09).abs() < 1e-20);

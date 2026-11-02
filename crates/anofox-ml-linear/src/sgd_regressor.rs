@@ -10,7 +10,7 @@ use crate::sgd_common::{
     LearningRate, Penalty, SgdConfig, SgdWeights, Stopping,
 };
 use anofox_ml_core::{Fit, FitWeighted, Float, PartialFit, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -199,7 +199,7 @@ impl SgdRegressor {
         }
     }
 
-    fn validate(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+    fn validate(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<()> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -271,8 +271,8 @@ impl<F: Float> FittedSgdRegressor<F> {
 
 /// R² of `(w, b)` on the rows `idx` (higher is better).
 fn r2_on(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
     sw: Option<&[f64]>,
     idx: &[usize],
     w: &Array1<f64>,
@@ -298,9 +298,9 @@ fn r2_on(
 impl SgdRegressor {
     fn train(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
         state: Option<FittedSgdRegressor<f64>>,
         partial: bool,
     ) -> Result<FittedSgdRegressor<f64>> {
@@ -412,7 +412,7 @@ impl SgdRegressor {
 impl Fit<f64> for SgdRegressor {
     type Fitted = FittedSgdRegressor<f64>;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.train(x, y, None, None, false)
     }
 }
@@ -422,11 +422,11 @@ impl FitWeighted<f64> for SgdRegressor {
 
     /// Each SGD update is scaled by the sample's weight (sklearn); the
     /// early-stopping R² is weighted too.
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         self.train(x, y, sample_weight, None, false)
     }
@@ -438,11 +438,11 @@ impl PartialFit<f64> for SgdRegressor {
     /// Run exactly one SGD epoch over the batch, resuming from `state`
     /// (weights, averaged weights and the learning-rate counter `t_`).
     /// `classes` is ignored; `tol` / `early_stopping` do not apply.
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
         _classes: Option<&[f64]>,
     ) -> Result<Self::Fitted> {
         self.train(x, y, None, state, true)
@@ -450,7 +450,7 @@ impl PartialFit<f64> for SgdRegressor {
 }
 
 impl Predict<f64> for FittedSgdRegressor<f64> {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -467,6 +467,7 @@ impl Predict<f64> for FittedSgdRegressor<f64> {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
+    use ndarray::Array2;
 
     fn make_linear_data() -> (Array2<f64>, Array1<f64>) {
         // y = 2 + 3*x1 + 0.5*x2

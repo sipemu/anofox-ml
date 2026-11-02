@@ -1,5 +1,5 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 use crate::classifier::{check_rows, check_xy};
 use crate::engine::{grow, GrowParams};
@@ -132,12 +132,12 @@ impl<F: Float> Fit<F> for DecisionTreeRegressor {
     type Fitted = FittedDecisionTreeRegressor<F>;
 
     /// Fits with the configured `sample_weight` (if any).
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         let sw = self
             .sample_weight
             .as_ref()
             .map(|sw| sw.mapv(|v| F::from_f64(v).unwrap()));
-        self.fit_impl(x, y, sw.as_ref())
+        self.fit_impl(x, y, sw.as_ref().map(|a| a.view()))
     }
 }
 
@@ -145,11 +145,11 @@ impl<F: Float> FitWeighted<F> for DecisionTreeRegressor {
     type Fitted = FittedDecisionTreeRegressor<F>;
 
     /// `sample_weight` replaces the configured one.
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         match sample_weight {
             Some(sw) => self.fit_impl(x, y, Some(sw)),
@@ -161,9 +161,9 @@ impl<F: Float> FitWeighted<F> for DecisionTreeRegressor {
 impl DecisionTreeRegressor {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedDecisionTreeRegressor<F>> {
         check_xy(x, y)?;
         if let Some(sw) = sample_weight {
@@ -176,13 +176,15 @@ impl DecisionTreeRegressor {
     /// Fit on the sample `rows` of `(x, y)` without copying `X`. Rows may
     /// repeat (a bootstrap draw counts each copy as a sample, exactly as if
     /// the rows had been copied). `sample_weight` is indexed by row of `x`.
-    pub fn fit_on_rows<F: Float>(
+    pub fn fit_on_rows<'a, 'b, F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
         rows: &[usize],
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedDecisionTreeRegressor<F>> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         check_xy(x, y)?;
         check_rows(rows, x.nrows())?;
         if let Some(sw) = sample_weight {
@@ -230,7 +232,7 @@ impl DecisionTreeRegressor {
 }
 
 impl<F: Float> Predict<F> for FittedDecisionTreeRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -274,7 +276,8 @@ impl<F: Float> FittedDecisionTreeRegressor<F> {
     /// Index of the leaf each row of `x` ends up in (like sklearn's
     /// `apply`, but with leaves numbered `0..n_leaves()` in pre-order, left
     /// subtree first).
-    pub fn apply(&self, x: &Array2<F>) -> Result<Vec<usize>> {
+    pub fn apply<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Vec<usize>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -316,7 +319,7 @@ fn tree_n_samples<F: Float>(node: &TreeNode<F>) -> usize {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn fit_weighted_integer_weights_equal_duplicated_rows() {

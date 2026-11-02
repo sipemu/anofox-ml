@@ -4,7 +4,7 @@
 //! `missing_values = NaN` and dense output.
 
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 /// Which features get an indicator column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -80,7 +80,7 @@ impl FittedMissingIndicator {
 impl<F: Float> FitUnsupervised<F> for MissingIndicator {
     type Fitted = FittedMissingIndicator;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -100,7 +100,7 @@ impl<F: Float> FitUnsupervised<F> for MissingIndicator {
 }
 
 impl<F: Float> Transform<F> for FittedMissingIndicator {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features_in {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

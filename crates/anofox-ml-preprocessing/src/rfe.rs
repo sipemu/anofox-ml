@@ -8,7 +8,7 @@
 //! `n_features_to_select` remain.
 
 use anofox_ml_core::{default_cv_splits, CvSplit, Fit, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 pub type ImportanceFn = dyn Fn(&Array2<f64>, &Array1<f64>) -> Result<Array1<f64>> + Send + Sync;
 
@@ -52,12 +52,13 @@ pub struct FittedRfe {
 }
 
 impl FittedRfe {
-    pub fn transform(&self, x: &Array2<f64>) -> Array2<f64> {
+    pub fn transform<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Array2<f64> {
+        let x: ArrayView2<f64> = x.into();
         select_cols_mask(x, &self.support)
     }
 }
 
-fn select_cols(x: &Array2<f64>, cols: &[usize]) -> Array2<f64> {
+fn select_cols(x: ArrayView2<f64>, cols: &[usize]) -> Array2<f64> {
     let mut out = Array2::<f64>::zeros((x.nrows(), cols.len()));
     for (k, &c) in cols.iter().enumerate() {
         for i in 0..x.nrows() {
@@ -74,8 +75,8 @@ fn select_cols(x: &Array2<f64>, cols: &[usize]) -> Array2<f64> {
 /// subset (this is where RFECV scores the path). Returns `(support,
 /// ranking)` with sklearn's `ranking_` semantics.
 fn elimination_path(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
     n_features_to_select: usize,
     step: usize,
     importance: &ImportanceFn,
@@ -86,6 +87,8 @@ fn elimination_path(
             "step must be at least 1".into(),
         ));
     }
+    // The importance callback takes owned arrays.
+    let y = &y.to_owned();
     let d = x.ncols();
     let mut support = vec![true; d];
     let mut ranking = vec![1usize; d];
@@ -123,7 +126,13 @@ fn elimination_path(
 }
 
 impl Rfe {
-    pub fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedRfe> {
+    pub fn fit<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+    ) -> Result<FittedRfe> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {}",
@@ -219,7 +228,13 @@ impl Rfecv {
         self
     }
 
-    pub fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedRfecv> {
+    pub fn fit<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+    ) -> Result<FittedRfecv> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         let n = x.nrows();
         let d = x.ncols();
         if n != y.len() {
@@ -269,16 +284,16 @@ impl Rfecv {
             let mut scores = Vec::new();
             let mut sizes = Vec::new();
             elimination_path(
-                &x_train,
-                &y_train,
+                x_train.view(),
+                y_train.view(),
                 min_select,
                 self.step,
                 self.importance.as_ref(),
                 |active| {
                     let s = (self.score)(
-                        &select_cols(&x_train, active),
+                        &select_cols(x_train.view(), active),
                         &y_train,
-                        &select_cols(&x_test, active),
+                        &select_cols(x_test.view(), active),
                         &y_test,
                     )?;
                     scores.push(s);
@@ -329,7 +344,7 @@ impl Rfecv {
     }
 }
 
-fn select_cols_mask(x: &Array2<f64>, mask: &[bool]) -> Array2<f64> {
+fn select_cols_mask(x: ArrayView2<f64>, mask: &[bool]) -> Array2<f64> {
     let cols: Vec<usize> = mask
         .iter()
         .enumerate()
@@ -355,12 +370,13 @@ pub struct FittedRfecv {
 }
 
 impl FittedRfecv {
-    pub fn transform(&self, x: &Array2<f64>) -> Array2<f64> {
+    pub fn transform<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Array2<f64> {
+        let x: ArrayView2<f64> = x.into();
         self.inner.transform(x)
     }
 }
 
-fn select_rows(x: &Array2<f64>, idx: &[usize]) -> Array2<f64> {
+fn select_rows(x: ArrayView2<f64>, idx: &[usize]) -> Array2<f64> {
     let mut out = Array2::<f64>::zeros((idx.len(), x.ncols()));
     for (k, &i) in idx.iter().enumerate() {
         for j in 0..x.ncols() {
@@ -370,7 +386,7 @@ fn select_rows(x: &Array2<f64>, idx: &[usize]) -> Array2<f64> {
     out
 }
 
-fn select_elements(y: &Array1<f64>, idx: &[usize]) -> Array1<f64> {
+fn select_elements(y: ArrayView1<f64>, idx: &[usize]) -> Array1<f64> {
     Array1::from_vec(idx.iter().map(|&i| y[i]).collect())
 }
 
@@ -402,7 +418,8 @@ pub struct FittedSequentialFeatureSelector {
 }
 
 impl FittedSequentialFeatureSelector {
-    pub fn transform(&self, x: &Array2<f64>) -> Array2<f64> {
+    pub fn transform<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Array2<f64> {
+        let x: ArrayView2<f64> = x.into();
         let cols: Vec<usize> = self
             .support
             .iter()
@@ -421,13 +438,21 @@ impl FittedSequentialFeatureSelector {
 }
 
 impl SequentialFeatureSelector {
-    pub fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedSequentialFeatureSelector> {
+    pub fn fit<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+    ) -> Result<FittedSequentialFeatureSelector> {
+        let x: ArrayView2<f64> = x.into();
+        let y: ArrayView1<f64> = y.into();
         let d = x.ncols();
         if self.n_features_to_select == 0 || self.n_features_to_select > d {
             return Err(RustMlError::InvalidParameter("invalid k".into()));
         }
         let mut selected: Vec<usize> = Vec::with_capacity(self.n_features_to_select);
         let mut remaining: Vec<usize> = (0..d).collect();
+        // The score callback takes owned arrays.
+        let y = &y.to_owned();
 
         while selected.len() < self.n_features_to_select {
             let mut best_score = f64::NEG_INFINITY;
@@ -456,7 +481,7 @@ impl SequentialFeatureSelector {
 }
 
 /// Check that `x` has one column per entry of a fitted feature mask.
-fn check_support(x: &Array2<f64>, support: &[bool]) -> Result<()> {
+fn check_support(x: ArrayView2<f64>, support: &[bool]) -> Result<()> {
     if x.ncols() != support.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "expected {} features, got {}",
@@ -469,13 +494,13 @@ fn check_support(x: &Array2<f64>, support: &[bool]) -> Result<()> {
 
 impl Fit<f64> for Rfe {
     type Fitted = FittedRfe;
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedRfe> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<FittedRfe> {
         Rfe::fit(self, x, y)
     }
 }
 
 impl Transform<f64> for FittedRfe {
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         check_support(x, &self.support)?;
         Ok(FittedRfe::transform(self, x))
     }
@@ -483,13 +508,13 @@ impl Transform<f64> for FittedRfe {
 
 impl Fit<f64> for Rfecv {
     type Fitted = FittedRfecv;
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedRfecv> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<FittedRfecv> {
         Rfecv::fit(self, x, y)
     }
 }
 
 impl Transform<f64> for FittedRfecv {
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         check_support(x, &self.inner.support)?;
         Ok(FittedRfecv::transform(self, x))
     }
@@ -497,13 +522,17 @@ impl Transform<f64> for FittedRfecv {
 
 impl Fit<f64> for SequentialFeatureSelector {
     type Fitted = FittedSequentialFeatureSelector;
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedSequentialFeatureSelector> {
+    fn fit_view(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+    ) -> Result<FittedSequentialFeatureSelector> {
         SequentialFeatureSelector::fit(self, x, y)
     }
 }
 
 impl Transform<f64> for FittedSequentialFeatureSelector {
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         check_support(x, &self.support)?;
         Ok(FittedSequentialFeatureSelector::transform(self, x))
     }
@@ -555,7 +584,7 @@ mod tests {
         let y = Array1::from_vec(yv);
 
         let rfe = Rfe::new(2, dummy_importance);
-        let fitted = rfe.fit(&x, &y).unwrap();
+        let fitted = rfe.fit(x.view(), y.view()).unwrap();
         assert!(fitted.support[0]);
         assert!(fitted.support[2]);
         assert!(!fitted.support[1]);
@@ -670,12 +699,12 @@ mod tests {
         // time" instead of sklearn's elimination-round rank.
         let (x, y) = data();
         // RFE(LinearRegression(), n_features_to_select=2).ranking_
-        let f = Rfe::new(2, ols_importance).fit(&x, &y).unwrap();
+        let f = Rfe::new(2, ols_importance).fit(x.view(), y.view()).unwrap();
         assert_eq!(f.ranking, vec![1, 3, 1, 4, 2, 5]);
         // RFE(LinearRegression(), n_features_to_select=1, step=2).ranking_
         let f = Rfe::new(1, ols_importance)
             .with_step(2)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         assert_eq!(f.ranking, vec![1, 3, 2, 4, 3, 4]);
     }
@@ -689,7 +718,7 @@ mod tests {
         let folds = anofox_ml_core::k_fold(30, 3).unwrap();
         let f = Rfecv::new(1, ols_importance, ols_r2)
             .with_cv_splits(folds.clone())
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         assert_eq!(f.sizes, vec![1, 2, 3, 4, 5, 6]);
         let expected = [
@@ -711,7 +740,7 @@ mod tests {
         let f = Rfecv::new(1, ols_importance, ols_r2)
             .with_step(2)
             .with_cv_splits(folds)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         assert_eq!(f.sizes, vec![1, 2, 4, 6]);
         assert_eq!(f.n_features_selected, 4);
@@ -725,12 +754,12 @@ mod tests {
         let a = Rfecv::new(1, ols_importance, ols_r2)
             .with_cv_folds(3)
             .with_random_state(5)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         let b = Rfecv::new(1, ols_importance, ols_r2)
             .with_cv_folds(3)
             .with_random_state(5)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         assert_eq!(a.cv_scores, b.cv_scores);
         assert!(a.inner.support[0] && a.inner.support[2]);

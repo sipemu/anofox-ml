@@ -1,7 +1,7 @@
 use crate::special::{brent_minimize, fminbound};
 use crate::standard_scaler::is_constant_feature;
 use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 /// Power-transform family used by [`PowerTransformer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -239,7 +239,7 @@ fn box_cox_normmax(col: &[f64]) -> f64 {
 impl<F: Float> FitUnsupervised<F> for PowerTransformer {
     type Fitted = FittedPowerTransformer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -314,7 +314,7 @@ impl<F: Float> FitUnsupervised<F> for PowerTransformer {
 }
 
 impl<F: Float> Transform<F> for FittedPowerTransformer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.lambdas.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -350,7 +350,7 @@ impl<F: Float> Transform<F> for FittedPowerTransformer<F> {
 }
 
 impl<F: Float> InverseTransform<F> for FittedPowerTransformer<F> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.lambdas.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

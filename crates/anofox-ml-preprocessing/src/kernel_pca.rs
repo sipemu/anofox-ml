@@ -7,7 +7,7 @@
 use anofox_ml_core::{FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KpcaKernel {
@@ -57,7 +57,7 @@ pub struct FittedKernelPca {
 
 /// Kernel matrix via one GEMM: every kernel here is a function of `a·b`
 /// (and of `‖a‖²`, `‖b‖²` for RBF).
-fn build_kernel(x_a: &Array2<f64>, x_b: &Array2<f64>, k: &KpcaKernel) -> Array2<f64> {
+fn build_kernel(x_a: ArrayView2<f64>, x_b: ArrayView2<f64>, k: &KpcaKernel) -> Array2<f64> {
     let g = x_a.dot(&x_b.t());
     match k {
         KpcaKernel::Linear => g,
@@ -81,7 +81,7 @@ fn build_kernel(x_a: &Array2<f64>, x_b: &Array2<f64>, k: &KpcaKernel) -> Array2<
 impl FitUnsupervised<f64> for KernelPca {
     type Fitted = FittedKernelPca;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<Self::Fitted> {
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -160,7 +160,7 @@ impl FitUnsupervised<f64> for KernelPca {
         }
 
         Ok(FittedKernelPca {
-            x_train: x.clone(),
+            x_train: x.to_owned(),
             alphas,
             eigenvalues,
             row_means,
@@ -171,7 +171,7 @@ impl FitUnsupervised<f64> for KernelPca {
 }
 
 impl Transform<f64> for FittedKernelPca {
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let n_train = self.x_train.nrows();
         if x.ncols() != self.x_train.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -181,7 +181,7 @@ impl Transform<f64> for FittedKernelPca {
             )));
         }
         let n_new = x.nrows();
-        let mut k_new = build_kernel(x, &self.x_train, &self.kernel);
+        let mut k_new = build_kernel(x, self.x_train.view(), &self.kernel);
         // Centre: K_new[i,j] - K_new_row_mean[i] - K_train_row_mean[j] + global_mean
         // Compute row means of k_new along training axis.
         let new_row_means: Array1<f64> = Array1::from_vec(
@@ -217,7 +217,7 @@ impl InverseTransform<f64> for FittedKernelPca {
     /// polynomial. Mirrors sklearn's `KernelPCA(fit_inverse_transform=False)`
     /// fallback (sklearn's full pre-image solver is iterative and not yet
     /// implemented here).
-    fn inverse_transform(&self, t: &Array2<f64>) -> Result<Array2<f64>> {
+    fn inverse_transform_view(&self, t: ArrayView2<f64>) -> Result<Array2<f64>> {
         let k = self.alphas.ncols();
         if t.ncols() != k {
             return Err(RustMlError::ShapeMismatch(format!(

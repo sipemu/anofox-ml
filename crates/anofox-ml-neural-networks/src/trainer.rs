@@ -214,8 +214,8 @@ pub(crate) fn train<F: Float>(
     cfg: &TrainConfig,
     state: &mut TrainState<F>,
     kind: OutputKind,
-    x: &Array2<F>,
-    y: &Array2<F>,
+    x: ArrayView2<F>,
+    y: ArrayView2<F>,
     rng: &mut StdRng,
     incremental: bool,
     strata: Option<&[usize]>,
@@ -238,8 +238,8 @@ fn fit_lbfgs<F: Float>(
     cfg: &TrainConfig,
     state: &mut TrainState<F>,
     kind: OutputKind,
-    x: &Array2<F>,
-    y: &Array2<F>,
+    x: ArrayView2<F>,
+    y: ArrayView2<F>,
 ) -> Result<()> {
     let mut p0 = Vec::with_capacity(n_params(&state.layers));
     pack(&state.layers, &mut p0);
@@ -333,8 +333,8 @@ fn fit_stochastic<F: Float>(
     cfg: &TrainConfig,
     state: &mut TrainState<F>,
     kind: OutputKind,
-    x: &Array2<F>,
-    y: &Array2<F>,
+    x: ArrayView2<F>,
+    y: ArrayView2<F>,
     rng: &mut StdRng,
     incremental: bool,
     strata: Option<&[usize]>,
@@ -359,12 +359,12 @@ fn fit_stochastic<F: Float>(
         }
         split = (select_rows(x, &tr), select_rows(y, &tr));
         (
-            &split.0,
-            &split.1,
+            split.0.view(),
+            split.1.view(),
             Some((select_rows(x, &va), select_rows(y, &va))),
         )
     } else {
-        (x, y, None)
+        (x.view(), y.view(), None)
     };
 
     let n = x_train.nrows();
@@ -400,8 +400,8 @@ fn fit_stochastic<F: Float>(
                     &mut grads,
                 )
             } else if cfg.shuffle {
-                let xb = select_rows(x_train, &idx[start..end]);
-                let yb = select_rows(y_train, &idx[start..end]);
+                let xb = select_rows(x_train.view(), &idx[start..end]);
+                let yb = select_rows(y_train.view(), &idx[start..end]);
                 backprop(
                     &state.layers,
                     cfg.activation,

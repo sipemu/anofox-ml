@@ -25,7 +25,7 @@
 use anofox_ml_core::{
     FitUnsupervised, FitUnsupervisedWeighted, Float, Predict, Result, RustMlError,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -174,7 +174,7 @@ impl<F: Float> FittedMiniBatchKMeans<F> {
 
 /// Labels and weighted inertia of `x` for `centers` (sklearn
 /// `_labels_inertia`).
-fn labels_inertia<F: Float>(x: &Array2<F>, w: &[F], centers: &Array2<F>) -> (Vec<usize>, f64) {
+fn labels_inertia<F: Float>(x: ArrayView2<F>, w: &[F], centers: &Array2<F>) -> (Vec<usize>, f64) {
     let (labels, dists) = assign_nearest(x, &row_norms_sq(x), centers);
     let inertia = dists
         .iter()
@@ -187,7 +187,7 @@ fn labels_inertia<F: Float>(x: &Array2<F>, w: &[F], centers: &Array2<F>) -> (Vec
 impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
     type Fitted = FittedMiniBatchKMeans<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         self.fit_unsupervised_weighted(x, None)
     }
 }
@@ -195,13 +195,13 @@ impl<F: Float + Send + Sync> FitUnsupervised<F> for MiniBatchKMeans {
 impl<F: Float + Send + Sync> FitUnsupervisedWeighted<F> for MiniBatchKMeans {
     type Fitted = FittedMiniBatchKMeans<F>;
 
-    fn fit_unsupervised_weighted(
+    fn fit_unsupervised_weighted_view(
         &self,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         let x_std = crate::standard_layout(x);
-        let x: &Array2<F> = &x_std;
+        let x = x_std.view();
         let (n, d) = x.dim();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -261,13 +261,15 @@ impl<F: Float + Send + Sync> FitUnsupervisedWeighted<F> for MiniBatchKMeans {
             let xs = x.select(Axis(0), &sub);
             let ws: Array1<F> = sub.iter().map(|&i| w[i]).collect();
             let centers = match self.init {
-                MiniBatchInit::KMeansPlusPlus => kmeans_plusplus(&xs, k, &mut rng, Some(&ws)).0,
+                MiniBatchInit::KMeansPlusPlus => {
+                    kmeans_plusplus(xs.view(), k, &mut rng, Some(ws.view())).0
+                }
                 MiniBatchInit::Random => {
-                    let rows = sample_without_replacement(xs.nrows(), k, &mut rng, Some(&ws));
+                    let rows = sample_without_replacement(xs.nrows(), k, &mut rng, Some(ws.view()));
                     xs.select(Axis(0), &rows)
                 }
             };
-            let (_, inertia) = labels_inertia(&x_valid, &w_valid, &centers);
+            let (_, inertia) = labels_inertia(x_valid.view(), &w_valid, &centers);
             if best.as_ref().is_none_or(|(b, _)| inertia < *b) {
                 best = Some((inertia, centers));
             }
@@ -298,7 +300,7 @@ impl<F: Float + Send + Sync> FitUnsupervisedWeighted<F> for MiniBatchKMeans {
 
             // `_mini_batch_step`: label with the current centres, then move
             // every centre to the weighted mean of old mass and new samples.
-            let (labels, batch_inertia) = labels_inertia(&xb, &wb, &centers);
+            let (labels, batch_inertia) = labels_inertia(xb.view(), &wb, &centers);
             let mut new_centers = centers.clone();
             let mut sums = Array2::<F>::zeros((k, d));
             let mut wsum = vec![F::zero(); k];
@@ -393,7 +395,7 @@ impl<F: Float + Send + Sync> FitUnsupervisedWeighted<F> for MiniBatchKMeans {
 }
 
 impl<F: Float> Predict<F> for FittedMiniBatchKMeans<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.centroids.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -402,7 +404,7 @@ impl<F: Float> Predict<F> for FittedMiniBatchKMeans<F> {
             )));
         }
         let x_std = crate::standard_layout(x);
-        let x: &Array2<F> = &x_std;
+        let x = x_std.view();
         let (labels, _) = assign_nearest(x, &row_norms_sq(x), &self.centroids);
         Ok(labels.iter().map(|&k| F::from_usize(k).unwrap()).collect())
     }
@@ -448,7 +450,7 @@ mod tests {
         let x = array![[0.0_f64], [1.0], [10.0], [12.0]];
         let w = [1.0, 1.0, 1.0, 1.0];
         let centers = array![[0.5_f64], [11.0]];
-        let (labels, inertia) = labels_inertia(&x, &w, &centers);
+        let (labels, inertia) = labels_inertia(x.view(), &w, &centers);
         assert_eq!(labels, vec![0, 0, 1, 1]);
         assert!((inertia - (0.25 + 0.25 + 1.0 + 1.0)).abs() < 1e-12);
     }

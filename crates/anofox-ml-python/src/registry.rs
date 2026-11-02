@@ -7,7 +7,7 @@ use anofox_ml_core::{
     DecisionFunction, Fit, FitUnsupervised, FitUnsupervisedWeighted, FitWeighted, InverseTransform,
     Predict, PredictProba, Result, Transform,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
 use anofox_ml_cluster as cluster;
@@ -42,7 +42,7 @@ impl LinearFit {
         }
     }
 
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.coef.len() {
             return Err(anofox_ml_core::RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -58,9 +58,9 @@ impl LinearFit {
 fn sup<C: Fit<f64>>(
     k: &str,
     c: &C,
-    x: &Array2<f64>,
-    y: Option<&Array1<f64>>,
-    w: Option<&Array1<f64>>,
+    x: ArrayView2<f64>,
+    y: Option<ArrayView1<f64>>,
+    w: Option<ArrayView1<f64>>,
 ) -> Result<C::Fitted> {
     no_weight(k, w)?;
     c.fit(x, need_y(k, y)?)
@@ -70,11 +70,11 @@ fn sup<C: Fit<f64>>(
 fn wsup<C: FitWeighted<f64>>(
     k: &str,
     c: &C,
-    x: &Array2<f64>,
-    y: Option<&Array1<f64>>,
-    w: Option<&Array1<f64>>,
+    x: ArrayView2<f64>,
+    y: Option<ArrayView1<f64>>,
+    w: Option<ArrayView1<f64>>,
 ) -> Result<C::Fitted> {
-    c.fit_weighted(x, need_y(k, y)?, w)
+    c.fit_weighted_view(x, need_y(k, y)?, w)
 }
 
 /// Fitted TargetEncoder plus the cross-fitted encoding of its training data
@@ -90,8 +90,8 @@ struct TargetEncoderFit {
 fn unsup<C: FitUnsupervised<f64>>(
     k: &str,
     c: &C,
-    x: &Array2<f64>,
-    w: Option<&Array1<f64>>,
+    x: ArrayView2<f64>,
+    w: Option<ArrayView1<f64>>,
 ) -> Result<C::Fitted> {
     no_weight(k, w)?;
     FitUnsupervised::fit(c, x)
@@ -538,7 +538,7 @@ registry! {
     StandardScaler {
         config: pre::StandardScaler = Default::default(),
         fitted: pre::FittedStandardScaler<f64>,
-        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
     }
@@ -578,7 +578,7 @@ registry! {
     SimpleImputer {
         config: pre::SimpleImputer<f64> = Default::default(),
         fitted: pre::FittedSimpleImputer<f64>,
-        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
     MissingIndicator {
@@ -707,14 +707,14 @@ registry! {
     KMeans {
         config: cluster::KMeans = Default::default(),
         fitted: cluster::FittedKMeans<f64>,
-        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
         predict: |m, x| m.predict(x),
         labels: |m| m.labels().clone(),
     }
     MiniBatchKMeans {
         config: cluster::MiniBatchKMeans = Default::default(),
         fitted: cluster::FittedMiniBatchKMeans<f64>,
-        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
         predict: |m, x| m.predict(x),
         labels: |m| m.labels().clone(),
     }

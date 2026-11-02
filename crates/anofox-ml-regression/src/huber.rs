@@ -8,7 +8,7 @@ use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::FittedHuber;
 use anofox_regression::solvers::HuberRegressor as InnerHuber;
 use anofox_regression::{FittedRegressor as _, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
 /// Huber robust regression estimator.
 ///
@@ -122,7 +122,7 @@ impl FittedHuberRegressor {
 impl Fit<f64> for HuberRegressor {
     type Fitted = FittedHuberRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -162,7 +162,7 @@ impl Fit<f64> for HuberRegressor {
 }
 
 impl Predict<f64> for FittedHuberRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

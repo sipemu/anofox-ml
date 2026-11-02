@@ -19,7 +19,7 @@
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Predict, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, AsArray, Axis, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -103,12 +103,13 @@ pub struct FittedMeanShift {
 /// sklearn's `estimate_bandwidth`: the mean distance of every sample to its
 /// `⌊quantile · n⌋`-th nearest sample (itself included), computed on a
 /// random subset of `n_samples` rows if given.
-pub fn estimate_bandwidth(
-    x: &Array2<f64>,
+pub fn estimate_bandwidth<'a>(
+    x: impl AsArray<'a, f64, Ix2>,
     quantile: f64,
     n_samples: Option<usize>,
     seed: u64,
 ) -> Result<f64> {
+    let x: ArrayView2<f64> = x.into();
     if x.nrows() == 0 {
         return Err(RustMlError::EmptyInput("empty input".into()));
     }
@@ -124,26 +125,26 @@ pub fn estimate_bandwidth(
             idx.shuffle(&mut StdRng::seed_from_u64(seed));
             idx.truncate(m.max(1));
             sub = x.select(Axis(0), &idx);
-            &sub
+            sub.view()
         }
-        _ => x,
+        _ => x.view(),
     };
     let k = ((x.nrows() as f64 * quantile) as usize).max(1);
     let index = NeighborIndex::new(
-        x,
+        x.view(),
         DistanceMetric::Euclidean,
         NeighborAlgorithm::Auto,
         Some(k),
     )?;
-    let (d, _) = index.kneighbors(x, k)?;
+    let (d, _) = index.kneighbors(x.view(), k)?;
     Ok(d.column(k - 1).sum() / x.nrows() as f64)
 }
 
 /// sklearn's `get_bin_seeds`: grid cells (rounded half to even) holding at
 /// least `min_bin_freq` samples, in first-seen order, as single precision.
-fn bin_seeds(x: &Array2<f64>, bin_size: f64, min_bin_freq: usize) -> Array2<f64> {
+fn bin_seeds(x: ArrayView2<f64>, bin_size: f64, min_bin_freq: usize) -> Array2<f64> {
     if bin_size == 0.0 {
-        return x.clone();
+        return x.to_owned();
     }
     let mut cells: Vec<(Vec<f64>, usize)> = Vec::new();
     let mut lookup: std::collections::HashMap<Vec<u64>, usize> = std::collections::HashMap::new();
@@ -167,7 +168,7 @@ fn bin_seeds(x: &Array2<f64>, bin_size: f64, min_bin_freq: usize) -> Array2<f64>
         .map(|c| &c.0)
         .collect();
     if kept.len() == x.nrows() {
-        return x.clone();
+        return x.to_owned();
     }
     let d = x.ncols();
     Array2::from_shape_fn((kept.len(), d), |(i, j)| {
@@ -179,9 +180,9 @@ impl<F: Float> FitUnsupervised<F> for MeanShift {
     type Fitted = FittedMeanShift;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -205,7 +206,7 @@ impl<F: Float> FitUnsupervised<F> for MeanShift {
             }
             Some(s) => s.clone(),
             None if self.bin_seeding => bin_seeds(x, bandwidth, self.min_bin_freq),
-            None => x.clone(),
+            None => x.to_owned(),
         };
 
         let index =
@@ -219,7 +220,7 @@ impl<F: Float> FitUnsupervised<F> for MeanShift {
                 let mut done = 0usize;
                 loop {
                     let q = mean.view().insert_axis(Axis(0)).to_owned();
-                    let nb = &index.radius_neighbors(&q, bandwidth)?[0];
+                    let nb = &index.radius_neighbors(q.view(), bandwidth)?[0];
                     if nb.is_empty() {
                         return Ok((mean.to_vec(), 0, done));
                     }
@@ -266,12 +267,12 @@ impl<F: Float> FitUnsupervised<F> for MeanShift {
         let d = x.ncols();
         let sorted = Array2::from_shape_fn((modes.len(), d), |(i, j)| modes[i].0[j]);
         let center_index = NeighborIndex::new(
-            &sorted,
+            sorted.view(),
             DistanceMetric::Euclidean,
             NeighborAlgorithm::Auto,
             None,
         )?;
-        let near = center_index.radius_neighbors(&sorted, bandwidth)?;
+        let near = center_index.radius_neighbors(sorted.view(), bandwidth)?;
         let mut unique = vec![true; modes.len()];
         for i in 0..modes.len() {
             if unique[i] {
@@ -285,7 +286,7 @@ impl<F: Float> FitUnsupervised<F> for MeanShift {
         let cluster_centers = sorted.select(Axis(0), &keep);
 
         let (dist, idx) = NeighborIndex::new(
-            &cluster_centers,
+            cluster_centers.view(),
             DistanceMetric::Euclidean,
             NeighborAlgorithm::Auto,
             Some(1),
@@ -308,7 +309,7 @@ impl<F: Float> FitUnsupervised<F> for MeanShift {
 }
 
 impl FittedMeanShift {
-    fn predict_f64(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_f64(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let d = self.cluster_centers.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -318,21 +319,21 @@ impl FittedMeanShift {
             )));
         }
         let (_, idx) = NeighborIndex::new(
-            &self.cluster_centers,
+            self.cluster_centers.view(),
             DistanceMetric::Euclidean,
             NeighborAlgorithm::Auto,
             Some(1),
         )?
-        .kneighbors(x, 1)?;
+        .kneighbors(x.view(), 1)?;
         Ok(idx.column(0).mapv(|v| v as f64))
     }
 }
 
 impl<F: Float> Predict<F> for FittedMeanShift {
     /// Index of the nearest cluster centre.
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         Ok(anofox_ml_core::from_f64(
-            self.predict_f64(&anofox_ml_core::as_f64(x))?,
+            self.predict_f64(anofox_ml_core::as_f64(x).view())?,
         ))
     }
 }

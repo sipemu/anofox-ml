@@ -17,7 +17,7 @@
 use anofox_ml_core::{Fit, Predict, PredictProba, Result, RustMlError};
 use faer::linalg::solvers::Solve;
 use faer::Mat;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 use crate::linalg::{cholesky, col_to_array1, solve_lower, vec_to_col};
 use crate::{optimise_kernel, GpKernel};
@@ -177,7 +177,7 @@ fn posterior_mode(
 /// (R&W Algorithm 5.1, as in sklearn).
 fn gpc_lml_with_grad(
     kernel: &GpKernel,
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     y: &Array1<f64>,
     max_iter: usize,
     tol: f64,
@@ -222,7 +222,7 @@ fn gpc_lml_with_grad(
     (pm.lml, grad)
 }
 
-fn validate_xy(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+fn validate_xy(x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<()> {
     if y.len() != x.nrows() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {}",
@@ -236,7 +236,7 @@ fn validate_xy(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
     Ok(())
 }
 
-fn sorted_classes(y: &Array1<f64>) -> Vec<f64> {
+fn sorted_classes(y: ArrayView1<f64>) -> Vec<f64> {
     let mut classes: Vec<f64> = y.iter().copied().collect();
     classes.sort_by(|a, b| a.total_cmp(b));
     classes.dedup();
@@ -246,7 +246,7 @@ fn sorted_classes(y: &Array1<f64>) -> Vec<f64> {
 impl Fit<f64> for GaussianProcessClassifier {
     type Fitted = FittedGaussianProcessClassifier;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         validate_xy(x, y)?;
         self.kernel.validate(x.ncols())?;
         let classes = sorted_classes(y);
@@ -277,7 +277,7 @@ impl Fit<f64> for GaussianProcessClassifier {
             RustMlError::InvalidParameter("Laplace posterior mode failed (non-finite)".into())
         })?;
         Ok(FittedGaussianProcessClassifier {
-            x_train: x.clone(),
+            x_train: x.to_owned(),
             alpha: &yb - &pm.pi,
             l_lower: pm.llt.L().to_owned(),
             w_sqrt: pm.w_sr,
@@ -316,7 +316,11 @@ fn predictive_probability(mean: f64, var: f64) -> f64 {
 impl FittedGaussianProcessClassifier {
     /// Latent posterior mean and variance at query points (one batched
     /// triangular solve).
-    pub fn latent_mean_var(&self, x: &Array2<f64>) -> Result<(Array1<f64>, Array1<f64>)> {
+    pub fn latent_mean_var<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<(Array1<f64>, Array1<f64>)> {
+        let x: ArrayView2<f64> = x.into();
         if x.ncols() != self.x_train.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -324,7 +328,7 @@ impl FittedGaussianProcessClassifier {
                 x.ncols()
             )));
         }
-        let k_star = self.kernel.cross(&self.x_train, x); // (n_train, n_q)
+        let k_star = self.kernel.cross(self.x_train.view(), x); // (n_train, n_q)
         let mean = k_star.t().dot(&self.alpha);
         let ws_k = Mat::<f64>::from_fn(k_star.nrows(), k_star.ncols(), |i, j| {
             self.w_sqrt[i] * k_star[[i, j]]
@@ -358,9 +362,9 @@ pub fn classifier_log_marginal_likelihood(
     kernel: &GpKernel,
     theta: &[f64],
 ) -> Result<(f64, Vec<f64>)> {
-    validate_xy(x, y)?;
+    validate_xy(x.view(), y.view())?;
     kernel.validate(x.ncols())?;
-    let classes = sorted_classes(y);
+    let classes = sorted_classes(y.view());
     if classes.len() != 2 {
         return Err(RustMlError::InvalidParameter(format!(
             "GPC expects 2 classes, found {}",
@@ -369,11 +373,11 @@ pub fn classifier_log_marginal_likelihood(
     }
     let yb = y.mapv(|v| if v == classes[1] { 1.0 } else { 0.0 });
     let k = kernel.with_theta(theta)?;
-    Ok(gpc_lml_with_grad(&k, x, &yb, 100, 1e-10, true))
+    Ok(gpc_lml_with_grad(&k, x.view(), &yb, 100, 1e-10, true))
 }
 
 impl Predict<f64> for FittedGaussianProcessClassifier {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         // sklearn: sign of the latent mean.
         let (mean, _) = self.latent_mean_var(x)?;
         Ok(mean.mapv(|f| {
@@ -387,7 +391,7 @@ impl Predict<f64> for FittedGaussianProcessClassifier {
 }
 
 impl PredictProba<f64> for FittedGaussianProcessClassifier {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let (mean, var) = self.latent_mean_var(x)?;
         let n = mean.len();
         let mut out = Array2::<f64>::zeros((n, 2));
@@ -475,7 +479,7 @@ impl FittedMulticlassGaussianProcessClassifier {
 impl Fit<f64> for MulticlassGaussianProcessClassifier {
     type Fitted = FittedMulticlassGaussianProcessClassifier;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         validate_xy(x, y)?;
         let classes = sorted_classes(y);
         if classes.len() < 2 {
@@ -507,7 +511,7 @@ impl Fit<f64> for MulticlassGaussianProcessClassifier {
 }
 
 impl Predict<f64> for FittedMulticlassGaussianProcessClassifier {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if self.binary.len() == 1 {
             return self.binary[0].predict(x);
         }
@@ -525,7 +529,7 @@ impl Predict<f64> for FittedMulticlassGaussianProcessClassifier {
 }
 
 impl PredictProba<f64> for FittedMulticlassGaussianProcessClassifier {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         if self.binary.len() == 1 {
             return self.binary[0].predict_proba(x);
         }

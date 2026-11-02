@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use anofox_ml_core::Float;
-use ndarray::Array2;
+use ndarray::{ArrayView2, AsArray, Ix2};
 
 use crate::distance::DistanceMetric;
 
@@ -104,7 +104,8 @@ impl<F: Float> KBest<F> {
 
 impl<F: Float> KdTree<F> {
     /// Build over the rows of `x` (any layout).
-    pub fn build(x: &Array2<F>, leaf_size: usize) -> Self {
+    pub fn build<'a>(x: impl AsArray<'a, F, Ix2>, leaf_size: usize) -> Self {
+        let x: ArrayView2<F> = x.into();
         let (n, d) = x.dim();
         let leaf_size = leaf_size.max(1);
         let mut tree = KdTree {
@@ -125,7 +126,13 @@ impl<F: Float> KdTree<F> {
         tree
     }
 
-    fn build_node(&mut self, x: &Array2<F>, start: usize, end: usize, leaf_size: usize) -> usize {
+    fn build_node(
+        &mut self,
+        x: ArrayView2<F>,
+        start: usize,
+        end: usize,
+        leaf_size: usize,
+    ) -> usize {
         let d = self.d;
         let id = self.nodes.len();
         self.nodes.push(Node {

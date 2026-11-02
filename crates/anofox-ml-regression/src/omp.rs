@@ -11,7 +11,7 @@
 //! one `Xᵀr` product plus `O(n·k + k²)`.
 
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrthogonalMatchingPursuit {
@@ -78,7 +78,7 @@ fn cholesky_solve(l: &Array2<f64>, m: usize, b: &[f64]) -> Vec<f64> {
 impl Fit<f64> for OrthogonalMatchingPursuit {
     type Fitted = FittedOrthogonalMatchingPursuit;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         crate::convert::check_xy(x, y)?;
         if let Some(t) = self.tol {
             if !(t >= 0.0) {
@@ -94,8 +94,8 @@ impl Fit<f64> for OrthogonalMatchingPursuit {
         } else {
             (Array1::zeros(d), 0.0)
         };
-        let xc = x - &x_mean;
-        let yc = y - y_mean;
+        let xc = &x - &x_mean;
+        let yc = &y - y_mean;
 
         let max_k = match (self.tol, self.n_nonzero_coefs) {
             (Some(_), _) => d,
@@ -193,7 +193,7 @@ impl Fit<f64> for OrthogonalMatchingPursuit {
 }
 
 impl Predict<f64> for FittedOrthogonalMatchingPursuit {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

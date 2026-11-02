@@ -18,7 +18,7 @@
 
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -158,11 +158,11 @@ impl<F: Float> FitUnsupervised<F> for GaussianMixture {
     type Fitted = FittedGaussianMixture;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let x_std = crate::standard_layout(x);
-        let x: &Array2<f64> = &x_std;
+        let x = x_std.view();
         let n = x.nrows();
         let d = x.ncols();
         let k = self.n_components;
@@ -229,7 +229,7 @@ impl GaussianMixture {
         Ok(())
     }
 
-    fn single_fit(&self, x: &Array2<f64>, rng: &mut StdRng) -> Result<FittedGaussianMixture> {
+    fn single_fit(&self, x: ArrayView2<f64>, rng: &mut StdRng) -> Result<FittedGaussianMixture> {
         let n = x.nrows();
         let k = self.n_components;
         let ct = self.covariance_type;
@@ -282,7 +282,7 @@ impl GaussianMixture {
 }
 
 impl FittedGaussianMixture {
-    fn check_x(&self, x: &Array2<f64>) -> Result<()> {
+    fn check_x(&self, x: ArrayView2<f64>) -> Result<()> {
         let d = self.means.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -308,7 +308,7 @@ impl FittedGaussianMixture {
     }
 
     /// `log p(x_i | k) + log w_k`, `n × k`.
-    fn weighted_log_prob(&self, x: &Array2<f64>) -> Array2<f64> {
+    fn weighted_log_prob(&self, x: ArrayView2<f64>) -> Array2<f64> {
         let pc = self
             .prec_chol()
             .expect("precision Cholesky of fitted covariances");
@@ -318,20 +318,22 @@ impl FittedGaussianMixture {
         lp
     }
 
-    fn weighted_log_prob_checked(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn weighted_log_prob_checked(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.check_x(x)?;
         self.prec_chol()?;
-        let x_std = crate::standard_layout(x);
-        Ok(self.weighted_log_prob(&x_std))
+        let x_std = crate::standard_layout(x.view());
+        Ok(self.weighted_log_prob(x_std.view()))
     }
 
     /// Per-sample log-likelihood `log p(x_i)` (sklearn `score_samples`).
-    pub fn score_samples(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        Ok(log_prob_resp(self.weighted_log_prob_checked(x)?).0)
+    pub fn score_samples<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        Ok(log_prob_resp(self.weighted_log_prob_checked(x.view())?).0)
     }
 
     /// Mean per-sample log-likelihood (sklearn `score`).
-    pub fn score(&self, x: &Array2<f64>) -> Result<f64> {
+    pub fn score<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<f64> {
+        let x: ArrayView2<f64> = x.into();
         let s = self.score_samples(x)?;
         s.mean()
             .ok_or_else(|| RustMlError::EmptyInput("empty input".into()))
@@ -343,15 +345,17 @@ impl FittedGaussianMixture {
     }
 
     /// Bayesian information criterion on `x` (lower is better).
-    pub fn bic(&self, x: &Array2<f64>) -> Result<f64> {
+    pub fn bic<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<f64> {
+        let x: ArrayView2<f64> = x.into();
         let n = x.nrows() as f64;
-        Ok(-2.0 * self.score(x)? * n + self.n_parameters() as f64 * n.ln())
+        Ok(-2.0 * self.score(x.view())? * n + self.n_parameters() as f64 * n.ln())
     }
 
     /// Akaike information criterion on `x` (lower is better).
-    pub fn aic(&self, x: &Array2<f64>) -> Result<f64> {
+    pub fn aic<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<f64> {
+        let x: ArrayView2<f64> = x.into();
         let n = x.nrows() as f64;
-        Ok(-2.0 * self.score(x)? * n + 2.0 * self.n_parameters() as f64)
+        Ok(-2.0 * self.score(x.view())? * n + 2.0 * self.n_parameters() as f64)
     }
 
     /// Whether EM converged (sklearn `converged_`).
@@ -366,7 +370,7 @@ impl FittedGaussianMixture {
 }
 
 impl FittedGaussianMixture {
-    fn predict_f64(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_f64(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let wlp = self.weighted_log_prob_checked(x)?;
         Ok(wlp
             .rows()
@@ -385,24 +389,24 @@ impl FittedGaussianMixture {
 }
 
 impl<F: Float> Predict<F> for FittedGaussianMixture {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         Ok(anofox_ml_core::from_f64(
-            self.predict_f64(&anofox_ml_core::as_f64(x))?,
+            self.predict_f64(anofox_ml_core::as_f64(x).view())?,
         ))
     }
 }
 
 impl FittedGaussianMixture {
-    fn predict_proba_f64(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_f64(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let (_, log_resp) = log_prob_resp(self.weighted_log_prob_checked(x)?);
         Ok(log_resp.mapv(f64::exp))
     }
 }
 
 impl<F: Float> PredictProba<F> for FittedGaussianMixture {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(anofox_ml_core::from_f64(
-            self.predict_proba_f64(&anofox_ml_core::as_f64(x))?,
+            self.predict_proba_f64(anofox_ml_core::as_f64(x).view())?,
         ))
     }
 }
@@ -444,7 +448,7 @@ mod tests {
                 assert_ne!(labels[i], l0, "{ct:?}");
             }
             // Final E-step: reported log-likelihood belongs to the final params.
-            assert!((fitted.log_likelihood - fitted.score(&x).unwrap()).abs() < 1e-12);
+            assert!((fitted.log_likelihood - fitted.score(x.view()).unwrap()).abs() < 1e-12);
         }
     }
 
@@ -459,7 +463,7 @@ mod tests {
         assert!(err.to_string().contains("reg_covar"), "{err}");
         // The default reg_covar makes it well-posed.
         let ok = GaussianMixture::new(2).fit(&x).unwrap();
-        assert!(ok.score(&x).unwrap().is_finite());
+        assert!(ok.score(x.view()).unwrap().is_finite());
     }
 }
 

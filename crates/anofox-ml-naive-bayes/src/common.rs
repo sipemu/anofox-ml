@@ -4,7 +4,7 @@
 //! predict_log_proba` conversions of `_BaseNB`.
 
 use anofox_ml_core::{Float, Result, RustMlError};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 /// Smallest admissible smoothing parameter when `force_alpha = false`
 /// (sklearn's `_ALPHA_MIN`).
@@ -25,7 +25,7 @@ pub(crate) fn sorted_unique<F: Float>(values: &[F]) -> Vec<F> {
 
 /// Map every label in `y` to its index in the sorted `classes`, erroring on
 /// labels that are not part of `classes` (sklearn raises `ValueError`).
-pub(crate) fn encode_labels<F: Float>(y: &Array1<F>, classes: &[F]) -> Result<Vec<usize>> {
+pub(crate) fn encode_labels<F: Float>(y: ArrayView1<F>, classes: &[F]) -> Result<Vec<usize>> {
     let tol = label_tol::<F>();
     y.iter()
         .map(|&v| {
@@ -65,9 +65,9 @@ pub(crate) fn check_partial_fit_classes<F: Float>(
 
 /// Common shape checks for `fit` / `partial_fit`.
 pub(crate) fn check_xy<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
-    sample_weight: Option<&Array1<F>>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
+    sample_weight: Option<ArrayView1<F>>,
 ) -> Result<()> {
     if x.is_empty() || y.is_empty() {
         return Err(RustMlError::EmptyInput(
@@ -99,7 +99,7 @@ pub(crate) fn check_xy<F: Float>(
 }
 
 /// Feature-count check at prediction time.
-pub(crate) fn check_n_features<F: Float>(x: &Array2<F>, expected: usize) -> Result<()> {
+pub(crate) fn check_n_features<F: Float>(x: ArrayView2<F>, expected: usize) -> Result<()> {
     if x.ncols() != expected {
         return Err(RustMlError::ShapeMismatch(format!(
             "expected {} features, got {}",
@@ -115,7 +115,7 @@ pub(crate) fn check_n_features<F: Float>(x: &Array2<F>, expected: usize) -> Resu
 pub(crate) fn weighted_one_hot<F: Float>(
     idx: &[usize],
     n_classes: usize,
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
 ) -> Array2<F> {
     let mut y = Array2::<F>::zeros((idx.len(), n_classes));
     for (i, &c) in idx.iter().enumerate() {

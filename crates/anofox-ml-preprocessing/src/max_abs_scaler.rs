@@ -2,7 +2,7 @@ use anofox_ml_core::{
     FitUnsupervised, Float, InverseTransform, PartialFitUnsupervised, Result, RustMlError,
     Transform,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 /// Parameters for MaxAbsScaler (unfitted state).
 ///
@@ -38,7 +38,7 @@ pub struct FittedMaxAbsScaler<F: Float> {
 impl<F: Float> FitUnsupervised<F> for MaxAbsScaler {
     type Fitted = FittedMaxAbsScaler<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         self.partial_fit(None, x)
     }
 }
@@ -48,7 +48,11 @@ impl<F: Float> PartialFitUnsupervised<F> for MaxAbsScaler {
 
     /// sklearn's `MaxAbsScaler.partial_fit`: the running per-feature maximum
     /// absolute value is updated with each batch (NaN ignored).
-    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn partial_fit_view(
+        &self,
+        state: Option<Self::Fitted>,
+        x: ArrayView2<F>,
+    ) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -77,7 +81,7 @@ impl<F: Float> PartialFitUnsupervised<F> for MaxAbsScaler {
 }
 
 impl<F: Float> Transform<F> for FittedMaxAbsScaler<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.max_abs.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -100,7 +104,7 @@ impl<F: Float> Transform<F> for FittedMaxAbsScaler<F> {
 }
 
 impl<F: Float> InverseTransform<F> for FittedMaxAbsScaler<F> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.max_abs.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

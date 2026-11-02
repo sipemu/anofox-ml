@@ -1,6 +1,6 @@
 use crate::quantile::{percentile_sorted, sorted_non_nan};
 use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 /// Parameters for RobustScaler (unfitted state).
 ///
@@ -57,7 +57,7 @@ pub struct FittedRobustScaler<F: Float> {
 impl<F: Float> FitUnsupervised<F> for RobustScaler {
     type Fitted = FittedRobustScaler<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -90,7 +90,7 @@ impl<F: Float> FitUnsupervised<F> for RobustScaler {
 }
 
 impl<F: Float> Transform<F> for FittedRobustScaler<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.median.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -115,7 +115,7 @@ impl<F: Float> Transform<F> for FittedRobustScaler<F> {
 }
 
 impl<F: Float> InverseTransform<F> for FittedRobustScaler<F> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.median.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

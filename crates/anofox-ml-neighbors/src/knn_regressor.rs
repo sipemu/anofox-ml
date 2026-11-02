@@ -1,5 +1,5 @@
 use anofox_ml_core::{Fit, Float, Predict, Result};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::distance::DistanceMetric;
 use crate::index::{NeighborAlgorithm, NeighborIndex};
@@ -66,7 +66,7 @@ pub struct FittedKnnRegressor<F: Float> {
 impl<F: Float> Fit<F> for KnnRegressor {
     type Fitted = FittedKnnRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         check_knn_fit(x, y, self.n_neighbors)?;
         Ok(FittedKnnRegressor {
             index: NeighborIndex::new(x, self.metric, self.algorithm, Some(self.n_neighbors))?,
@@ -94,7 +94,7 @@ pub(crate) fn weighted_mean<F: Float>(
 }
 
 impl<F: Float + Send + Sync> Predict<F> for FittedKnnRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let (dist, idx) = self.index.kneighbors(x, self.n_neighbors)?;
         Ok(Array1::from_shape_fn(x.nrows(), |i| {
             let d = dist.row(i).to_vec();
@@ -116,7 +116,8 @@ impl<F: Float> FittedKnnRegressor<F> {
         x: &Array2<F>,
         k: Option<usize>,
     ) -> Result<(Array2<F>, Array2<usize>)> {
-        self.index.kneighbors(x, k.unwrap_or(self.n_neighbors))
+        self.index
+            .kneighbors(x.view(), k.unwrap_or(self.n_neighbors))
     }
 }
 

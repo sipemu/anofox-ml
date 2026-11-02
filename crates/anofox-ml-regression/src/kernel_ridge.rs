@@ -12,7 +12,7 @@ use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use anofox_ml_svm::SvmKernel;
 use faer::linalg::solvers::Solve;
 use faer::Side;
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 /// Kernel ridge regression estimator.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -57,7 +57,7 @@ pub struct FittedKernelRidge {
 impl Fit<f64> for KernelRidge {
     type Fitted = FittedKernelRidge;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_weighted(x, y, None)
     }
 }
@@ -65,11 +65,11 @@ impl Fit<f64> for KernelRidge {
 impl FitWeighted<f64> for KernelRidge {
     type Fitted = FittedKernelRidge;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         crate::convert::check_xy(x, y)?;
         if self.alpha < 0.0 {
@@ -97,7 +97,7 @@ impl FitWeighted<f64> for KernelRidge {
         // sklearn KernelRidge with sample_weight w solves (K W + α I) α = W y.
         // Use the symmetric reformulation: K' = √W K √W, y' = √W y, then
         // solve (K' + α I) α' = y' and back-transform α_dual = √W α'.
-        let mut rhs = y.clone();
+        let mut rhs = y.to_owned();
         if let Some(sw) = &sqrt_w {
             k *= &sw.view().insert_axis(Axis(1));
             k *= &sw.view().insert_axis(Axis(0));
@@ -106,7 +106,7 @@ impl FitWeighted<f64> for KernelRidge {
         k.diag_mut().mapv_inplace(|v| v + self.alpha);
 
         // Only the lower triangle is read by the Cholesky factorisation.
-        let k_mat = ndarray_to_mat(&k);
+        let k_mat = ndarray_to_mat(k.view());
         let llt = faer::linalg::solvers::Llt::new(k_mat.as_ref(), Side::Lower)
             .map_err(|e| RustMlError::InvalidParameter(format!("Cholesky failed: {e:?}")))?;
         let sol = llt.solve(ndarray_to_col(&rhs));
@@ -116,7 +116,7 @@ impl FitWeighted<f64> for KernelRidge {
         }
 
         Ok(FittedKernelRidge {
-            x_train: x.clone(),
+            x_train: x.to_owned(),
             dual_coef: dual,
             kernel,
         })
@@ -124,7 +124,7 @@ impl FitWeighted<f64> for KernelRidge {
 }
 
 impl Predict<f64> for FittedKernelRidge {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.x_train.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

@@ -10,7 +10,7 @@
 use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::utils::stratified_k_fold;
 use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::forest_common::{class_index, select_rows, sorted_classes};
 
@@ -29,11 +29,11 @@ pub enum StackMethod {
 }
 
 trait FitProbaBox<F: Float>: Send + Sync {
-    fn fit_proba_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ProbaBox<F>>>;
+    fn fit_proba_box(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Box<dyn ProbaBox<F>>>;
 }
 
 trait ProbaBox<F: Float>: Send + Sync {
-    fn predict_proba_box(&self, x: &Array2<F>) -> Result<Array2<F>>;
+    fn predict_proba_box(&self, x: ArrayView2<F>) -> Result<Array2<F>>;
 }
 
 /// Wrapper for estimators whose Fitted type implements both Predict and PredictProba.
@@ -45,7 +45,7 @@ where
     T: Fit<F> + Send + Sync,
     T::Fitted: Predict<F> + PredictProba<F> + Send + Sync + 'static,
 {
-    fn fit_proba_box(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Box<dyn ProbaBox<F>>> {
+    fn fit_proba_box(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Box<dyn ProbaBox<F>>> {
         let fitted = Fit::fit(&self.0, x, y)?;
         Ok(Box::new(fitted))
     }
@@ -56,7 +56,7 @@ where
     F: Float,
     T: PredictProba<F> + Send + Sync,
 {
-    fn predict_proba_box(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_box(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.predict_proba(x)
     }
 }
@@ -164,7 +164,7 @@ impl<F: Float> FittedStackingClassifier<F> {
 impl<F: Float + 'static> Fit<F> for StackingClassifier<F> {
     type Fitted = FittedStackingClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         if self.base_estimators.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "StackingClassifier needs at least one base estimator".into(),
@@ -201,8 +201,8 @@ impl<F: Float + 'static> Fit<F> for StackingClassifier<F> {
                         let x_train = select_rows(x, train_idx);
                         let y_train = select_elements(y, train_idx);
                         let x_test = select_rows(x, test_idx);
-                        let fitted = b.fit_box(&x_train, &y_train)?;
-                        let preds = fitted.predict_box(&x_test)?;
+                        let fitted = b.fit_box(x_train.view(), y_train.view())?;
+                        let preds = fitted.predict_box(x_test.view())?;
                         for (li, &gi) in test_idx.iter().enumerate() {
                             col[gi] = preds[li];
                         }
@@ -216,16 +216,16 @@ impl<F: Float + 'static> Fit<F> for StackingClassifier<F> {
                         let x_train = select_rows(x, train_idx);
                         let y_train = select_elements(y, train_idx);
                         let x_test = select_rows(x, test_idx);
-                        let fitted = b.fit_proba_box(&x_train, &y_train)?;
-                        let probs = fitted.predict_proba_box(&x_test)?;
-                        let col_map = proba_column_map(&classes, &y_train, probs.ncols())?;
+                        let fitted = b.fit_proba_box(x_train.view(), y_train.view())?;
+                        let probs = fitted.predict_proba_box(x_test.view())?;
+                        let col_map = proba_column_map(&classes, y_train.view(), probs.ncols())?;
                         for (li, &gi) in test_idx.iter().enumerate() {
                             for (c, &gc) in col_map.iter().enumerate() {
                                 buf[[gi, gc]] = probs[[li, c]];
                             }
                         }
                     }
-                    push_proba_columns(&mut meta_cols, &buf);
+                    push_proba_columns(&mut meta_cols, buf.view());
                 }
             }
         }
@@ -238,7 +238,7 @@ impl<F: Float + 'static> Fit<F> for StackingClassifier<F> {
             }
         }
 
-        let fitted_meta = self.meta_estimator.fit_box(&meta_features, y)?;
+        let fitted_meta = self.meta_estimator.fit_box(meta_features.view(), y)?;
 
         let mut fitted_base = Vec::with_capacity(self.base_estimators.len());
         for (name, est) in &self.base_estimators {
@@ -259,7 +259,7 @@ impl<F: Float + 'static> Fit<F> for StackingClassifier<F> {
 }
 
 impl<F: Float> Predict<F> for FittedStackingClassifier<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -284,7 +284,7 @@ impl<F: Float> Predict<F> for FittedStackingClassifier<F> {
                             self.classes.len()
                         )));
                     }
-                    push_proba_columns(&mut meta_cols, &probs);
+                    push_proba_columns(&mut meta_cols, probs.view());
                 }
             }
         }
@@ -294,7 +294,7 @@ impl<F: Float> Predict<F> for FittedStackingClassifier<F> {
                 meta_features[[i, c]] = col[i];
             }
         }
-        self.fitted_meta.predict_box(&meta_features)
+        self.fitted_meta.predict_box(meta_features.view())
     }
 }
 
@@ -304,13 +304,13 @@ impl<F: Float> Predict<F> for FittedStackingClassifier<F> {
 /// (missing classes keep probability 0).
 fn proba_column_map<F: Float>(
     classes: &[F],
-    y_train: &Array1<F>,
+    y_train: ArrayView1<F>,
     n_cols: usize,
 ) -> Result<Vec<usize>> {
     if n_cols == classes.len() {
         return Ok((0..n_cols).collect());
     }
-    let fold_classes = sorted_classes(y_train);
+    let fold_classes = sorted_classes(y_train.view());
     if n_cols != fold_classes.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "base estimator predict_proba returned {} columns, but its training fold has {} classes \
@@ -329,14 +329,14 @@ fn proba_column_map<F: Float>(
 /// Append probability meta-features: all columns for multiclass, only the
 /// positive-class column for binary problems (sklearn drops the first,
 /// perfectly collinear column).
-fn push_proba_columns<F: Float>(meta_cols: &mut Vec<Array1<F>>, probs: &Array2<F>) {
+fn push_proba_columns<F: Float>(meta_cols: &mut Vec<Array1<F>>, probs: ArrayView2<F>) {
     let first = usize::from(probs.ncols() == 2);
     for c in first..probs.ncols() {
         meta_cols.push(probs.column(c).to_owned());
     }
 }
 
-fn select_elements<F: Float>(y: &Array1<F>, indices: &[usize]) -> Array1<F> {
+fn select_elements<F: Float>(y: ArrayView1<F>, indices: &[usize]) -> Array1<F> {
     Array1::from_vec(indices.iter().map(|&i| y[i]).collect())
 }
 
@@ -469,23 +469,26 @@ mod tests {
     fn test_proba_column_map_scatters_missing_class() {
         let classes = [0.0, 1.0, 2.0];
         let y_train = array![0.0, 2.0, 2.0];
-        assert_eq!(proba_column_map(&classes, &y_train, 2).unwrap(), vec![0, 2]);
         assert_eq!(
-            proba_column_map(&classes, &y_train, 3).unwrap(),
+            proba_column_map(&classes, y_train.view(), 2).unwrap(),
+            vec![0, 2]
+        );
+        assert_eq!(
+            proba_column_map(&classes, y_train.view(), 3).unwrap(),
             vec![0, 1, 2]
         );
-        assert!(proba_column_map(&classes, &y_train, 1).is_err());
+        assert!(proba_column_map(&classes, y_train.view(), 1).is_err());
     }
 
     #[test]
     fn test_binary_proba_drops_first_column() {
         let probs = array![[0.2, 0.8], [0.6, 0.4]];
         let mut cols = Vec::new();
-        push_proba_columns(&mut cols, &probs);
+        push_proba_columns(&mut cols, probs.view());
         assert_eq!(cols, vec![array![0.8, 0.4]]);
         let probs3 = array![[0.2, 0.3, 0.5]];
         let mut cols = Vec::new();
-        push_proba_columns(&mut cols, &probs3);
+        push_proba_columns(&mut cols, probs3.view());
         assert_eq!(cols.len(), 3);
     }
 

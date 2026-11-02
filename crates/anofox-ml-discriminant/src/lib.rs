@@ -15,10 +15,10 @@
 use anofox_ml_core::{Fit, Predict, PredictProba, Result, RustMlError, Transform};
 use faer::linalg::solvers::{SelfAdjointEigen, Solve, Svd};
 use faer::{Mat, Side};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Common helpers.
-fn class_indices(y: &Array1<f64>) -> (Vec<f64>, Vec<Vec<usize>>) {
+fn class_indices(y: ArrayView1<f64>) -> (Vec<f64>, Vec<Vec<usize>>) {
     let mut classes: Vec<f64> = y.iter().copied().collect();
     classes.sort_by(anofox_ml_core::labels::label_cmp);
     classes.dedup();
@@ -35,7 +35,7 @@ fn class_indices(y: &Array1<f64>) -> (Vec<f64>, Vec<Vec<usize>>) {
     (classes, groups)
 }
 
-fn class_mean(x: &Array2<f64>, idx: &[usize]) -> Array1<f64> {
+fn class_mean(x: ArrayView2<f64>, idx: &[usize]) -> Array1<f64> {
     let d = x.ncols();
     let mut m = Array1::<f64>::zeros(d);
     for &i in idx {
@@ -112,10 +112,10 @@ fn lda_projection(
 // ---------------------------------------------------------------------------
 
 /// Biased (maximum-likelihood) covariance of the rows of `x`.
-fn empirical_covariance(x: &Array2<f64>) -> Array2<f64> {
+fn empirical_covariance(x: ArrayView2<f64>) -> Array2<f64> {
     let n = x.nrows().max(1) as f64;
     let mean = x.mean_axis(ndarray::Axis(0)).expect("non-empty");
-    let xc = x - &mean;
+    let xc = &x - &mean;
     xc.t().dot(&xc) / n
 }
 
@@ -145,14 +145,17 @@ pub fn ledoit_wolf(x: &Array2<f64>) -> (Array2<f64>, f64) {
     let delta = (delta_ - 2.0 * mu * emp_trace.sum() + d as f64 * mu * mu) / d as f64;
     let beta = beta.min(delta);
     let shrinkage = if beta == 0.0 { 0.0 } else { beta / delta };
-    (shrunk(&empirical_covariance(x), shrinkage), shrinkage)
+    (
+        shrunk(&empirical_covariance(x.view()), shrinkage),
+        shrinkage,
+    )
 }
 
 /// Oracle Approximating Shrinkage covariance and its coefficient (sklearn
 /// `covariance.oas`).
 pub fn oas(x: &Array2<f64>) -> (Array2<f64>, f64) {
     let (n, d) = x.dim();
-    let emp = empirical_covariance(x);
+    let emp = empirical_covariance(x.view());
     let alpha = emp.mapv(|v| v * v).mean().unwrap_or(0.0);
     let mu = (0..d).map(|i| emp[[i, i]]).sum::<f64>() / d as f64;
     let num = alpha + mu * mu;
@@ -273,7 +276,7 @@ pub struct FittedLinearDiscriminantAnalysis {
 }
 
 /// sklearn's `_cov(X, shrinkage)`.
-fn shrunk_class_cov(x: &Array2<f64>, shrinkage: Shrinkage) -> Result<Array2<f64>> {
+fn shrunk_class_cov(x: ArrayView2<f64>, shrinkage: Shrinkage) -> Result<Array2<f64>> {
     Ok(match shrinkage {
         Shrinkage::None => empirical_covariance(x),
         Shrinkage::Fixed(a) => {
@@ -299,7 +302,7 @@ fn shrunk_class_cov(x: &Array2<f64>, shrinkage: Shrinkage) -> Result<Array2<f64>
                     }
                 })
                 .collect();
-            let xs = (x - &mean) / &sc;
+            let xs = (&x - &mean) / &sc;
             let (s, _) = ledoit_wolf(&xs);
             let d = sc.len();
             Array2::from_shape_fn((d, d), |(i, j)| sc[i] * s[[i, j]] * sc[j])
@@ -314,7 +317,7 @@ fn to_mat(a: &Array2<f64>) -> Mat<f64> {
 impl Fit<f64> for LinearDiscriminantAnalysis {
     type Fitted = FittedLinearDiscriminantAnalysis;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -426,7 +429,7 @@ impl Fit<f64> for LinearDiscriminantAnalysis {
                 let mut sw = Array2::<f64>::zeros((d, d));
                 for (g, pi) in groups.iter().zip(&priors) {
                     let xg = x.select(ndarray::Axis(0), g);
-                    sw.scaled_add(*pi, &shrunk_class_cov(&xg, self.shrinkage)?);
+                    sw.scaled_add(*pi, &shrunk_class_cov(xg.view(), self.shrinkage)?);
                 }
                 let solve = |b: &Array1<f64>| -> Result<Array1<f64>> {
                     let m = to_mat(&sw);
@@ -483,7 +486,7 @@ impl Fit<f64> for LinearDiscriminantAnalysis {
 }
 
 impl FittedLinearDiscriminantAnalysis {
-    fn check(&self, x: &Array2<f64>) -> Result<()> {
+    fn check(&self, x: ArrayView2<f64>) -> Result<()> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -495,7 +498,7 @@ impl FittedLinearDiscriminantAnalysis {
     }
 
     /// Per-class scores `(n, K)`.
-    fn scores(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn scores(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.check(x)?;
         let k = self.coef.len();
         let w = Array2::from_shape_fn((self.n_features, k), |(j, c)| self.coef[c][j]);
@@ -536,14 +539,14 @@ impl Transform<f64> for FittedLinearDiscriminantAnalysis {
     /// sklearn `transform`: `(X − xbar) @ scalings` for `Svd`, `X @ scalings`
     /// for `Eigen` (first `min(K − 1, d)` components); `Lsqr` cannot
     /// transform.
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.check(x)?;
         let m = (self.classes.len() - 1)
             .min(self.n_features)
             .min(self.scalings.ncols());
         let sc = self.scalings.slice(ndarray::s![.., ..m]);
         match self.solver {
-            LdaSolver::Svd => Ok((x - &self.xbar).dot(&sc)),
+            LdaSolver::Svd => Ok((&x - &self.xbar).dot(&sc)),
             LdaSolver::Eigen => Ok(x.dot(&sc)),
             LdaSolver::Lsqr => Err(RustMlError::InvalidParameter(
                 "transform is not supported by the Lsqr solver".into(),
@@ -553,13 +556,13 @@ impl Transform<f64> for FittedLinearDiscriminantAnalysis {
 }
 
 impl Predict<f64> for FittedLinearDiscriminantAnalysis {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         Ok(argmax_labels(&self.scores(x)?, &self.classes))
     }
 }
 
 impl PredictProba<f64> for FittedLinearDiscriminantAnalysis {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         Ok(softmax_rows(self.scores(x)?))
     }
 }
@@ -620,7 +623,7 @@ pub struct FittedQuadraticDiscriminantAnalysis {
 impl Fit<f64> for QuadraticDiscriminantAnalysis {
     type Fitted = FittedQuadraticDiscriminantAnalysis;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -693,7 +696,7 @@ impl Fit<f64> for QuadraticDiscriminantAnalysis {
 
 impl FittedQuadraticDiscriminantAnalysis {
     /// Per-class log posterior scores `(n, K)` (sklearn `_decision_function`).
-    fn scores(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn scores(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -705,7 +708,7 @@ impl FittedQuadraticDiscriminantAnalysis {
         let mut out = Array2::<f64>::zeros((x.nrows(), k));
         for c in 0..k {
             let w = &self.rotations[c] / &self.scalings[c].mapv(|s| s.sqrt());
-            let z = (x - &self.means[c]).dot(&w);
+            let z = (&x - &self.means[c]).dot(&w);
             let logdet: f64 = self.scalings[c].mapv(f64::ln).sum();
             let col = z.mapv(|v| v * v).sum_axis(ndarray::Axis(1));
             for i in 0..x.nrows() {
@@ -717,13 +720,13 @@ impl FittedQuadraticDiscriminantAnalysis {
 }
 
 impl Predict<f64> for FittedQuadraticDiscriminantAnalysis {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         Ok(argmax_labels(&self.scores(x)?, &self.classes))
     }
 }
 
 impl PredictProba<f64> for FittedQuadraticDiscriminantAnalysis {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         Ok(softmax_rows(self.scores(x)?))
     }
 }
@@ -735,13 +738,13 @@ impl anofox_ml_core::PredictLogProba<f64> for FittedLinearDiscriminantAnalysis {
 impl anofox_ml_core::PredictLogProba<f64> for FittedQuadraticDiscriminantAnalysis {}
 
 impl anofox_ml_core::DecisionFunction<f64> for FittedLinearDiscriminantAnalysis {
-    fn decision_function(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn decision_function_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.scores(x)
     }
 }
 
 impl anofox_ml_core::DecisionFunction<f64> for FittedQuadraticDiscriminantAnalysis {
-    fn decision_function(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn decision_function_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.scores(x)
     }
 }
@@ -972,7 +975,7 @@ mod tests {
         let mut wc = Array2::<f64>::zeros((v.ncols(), v.ncols()));
         for k in 0..fitted.classes.len() {
             let idx: Vec<usize> = (0..n).filter(|&i| y[i] == k as f64).collect();
-            let mu = class_mean(&t, &idx);
+            let mu = class_mean(t.view(), &idx);
             outer_subtract_accum(&t, &mu, &idx, &mut wc);
         }
         wc.mapv_inplace(|v| v / n as f64);

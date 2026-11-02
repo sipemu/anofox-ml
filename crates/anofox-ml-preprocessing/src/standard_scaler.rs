@@ -2,7 +2,7 @@ use anofox_ml_core::{
     FitUnsupervised, FitUnsupervisedWeighted, Float, InverseTransform, PartialFitUnsupervised,
     Result, RustMlError, Transform,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Parameters for StandardScaler (unfitted state).
 ///
@@ -63,7 +63,7 @@ pub struct FittedStandardScaler<F: Float> {
 impl<F: Float> FitUnsupervised<F> for StandardScaler {
     type Fitted = FittedStandardScaler<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         self.partial_fit_weighted(None, x, None)
     }
 }
@@ -73,30 +73,34 @@ impl<F: Float> FitUnsupervisedWeighted<F> for StandardScaler {
 
     /// `fit(X, sample_weight=...)`: weighted mean and (population) variance,
     /// as sklearn's `StandardScaler`.
-    fn fit_unsupervised_weighted(
+    fn fit_unsupervised_weighted_view(
         &self,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
-        self.partial_fit_weighted(None, x, sample_weight)
+        self.partial_fit_weighted_view(None, x, sample_weight)
     }
 }
 
 impl<F: Float> PartialFitUnsupervised<F> for StandardScaler {
     type Fitted = FittedStandardScaler<F>;
 
-    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn partial_fit_view(
+        &self,
+        state: Option<Self::Fitted>,
+        x: ArrayView2<F>,
+    ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(state, x, None)
     }
 
     /// sklearn's `StandardScaler.partial_fit`: the batch statistics are merged
     /// into the running ones with `_incremental_mean_and_var` (Chan et al.),
     /// per feature and ignoring NaN.
-    fn partial_fit_weighted(
+    fn partial_fit_weighted_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
@@ -210,7 +214,7 @@ impl<F: Float> PartialFitUnsupervised<F> for StandardScaler {
 }
 
 impl<F: Float> Transform<F> for FittedStandardScaler<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -235,7 +239,7 @@ impl<F: Float> Transform<F> for FittedStandardScaler<F> {
 }
 
 impl<F: Float> InverseTransform<F> for FittedStandardScaler<F> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

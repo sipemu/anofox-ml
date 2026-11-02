@@ -1,7 +1,7 @@
 use anofox_ml_core::{
     FitUnsupervised, FitUnsupervisedWeighted, Float, Result, RustMlError, Transform,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 use crate::missing_indicator::{FittedMissingIndicator, MissingIndicator};
 use std::collections::HashMap;
@@ -186,7 +186,7 @@ fn column_most_frequent<F: Float>(values: &[F], w: &[F]) -> Option<F> {
 impl<F: Float> FitUnsupervised<F> for SimpleImputer<F> {
     type Fitted = FittedSimpleImputer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         self.fit_unsupervised_weighted(x, None)
     }
 }
@@ -197,15 +197,16 @@ impl<F: Float> FitUnsupervisedWeighted<F> for SimpleImputer<F> {
     /// Fit with per-sample weights: weighted mean, weighted median and
     /// weighted mode (an extension; sklearn's `SimpleImputer` has no
     /// `sample_weight`). Unit weights give the unweighted statistics.
-    fn fit_unsupervised_weighted(
+    fn fit_unsupervised_weighted_view(
         &self,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
         let ones;
+        let owned;
         let w: &[F] = match sample_weight {
             Some(w) => {
                 if w.len() != x.nrows() {
@@ -220,7 +221,8 @@ impl<F: Float> FitUnsupervisedWeighted<F> for SimpleImputer<F> {
                         "sample_weight must be finite and non-negative".into(),
                     ));
                 }
-                w.as_slice().expect("1-D array is contiguous")
+                owned = w.to_vec();
+                &owned
             }
             None => {
                 ones = vec![F::one(); x.nrows()];
@@ -266,7 +268,7 @@ impl<F: Float> FitUnsupervisedWeighted<F> for SimpleImputer<F> {
 }
 
 impl<F: Float> Transform<F> for FittedSimpleImputer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.fill_values.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

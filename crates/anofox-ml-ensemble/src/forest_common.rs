@@ -1,7 +1,5 @@
 //! Helpers shared by the random-forest / extra-trees / bagging ensembles.
 
-use std::borrow::Cow;
-
 use anofox_ml_core::{Float, Result, RustMlError};
 use anofox_ml_trees::node::TreeNode;
 use anofox_ml_trees::split::{
@@ -9,7 +7,7 @@ use anofox_ml_trees::split::{
     find_random_split_weighted, make_leaf, select_feature_subset, splitmix64, SplitCriterion,
 };
 use anofox_ml_trees::MaxFeatures;
-use ndarray::{Array1, Array2};
+use ndarray::{Array2, ArrayView1, ArrayView2, CowArray, Ix2};
 
 /// Validate a `max_features` setting against the data and resolve it to a
 /// concrete per-split feature count (`None` = all features).
@@ -41,24 +39,24 @@ pub(crate) fn is_identity(feature_indices: &[usize], n_features: usize) -> bool 
 /// tree), so this borrows `x`; models deserialized from older versions that
 /// stored a per-tree column subset get the matching sub-matrix.
 pub(crate) fn tree_input<'a, F: Float>(
-    x: &'a Array2<F>,
+    x: ArrayView2<'a, F>,
     feature_indices: &[usize],
-) -> Cow<'a, Array2<F>> {
+) -> CowArray<'a, F, Ix2> {
     if is_identity(feature_indices, x.ncols()) {
-        Cow::Borrowed(x)
+        x.into()
     } else {
         let n_rows = x.nrows();
         let mut out = Array2::<F>::zeros((n_rows, feature_indices.len()));
         for (j_new, &j) in feature_indices.iter().enumerate() {
             out.column_mut(j_new).assign(&x.column(j));
         }
-        Cow::Owned(out)
+        out.into()
     }
 }
 
 /// Copy the given rows (all columns) of `x` into a new standard-layout matrix.
 /// Works for any memory layout of `x`.
-pub(crate) fn select_rows<F: Float>(x: &Array2<F>, row_indices: &[usize]) -> Array2<F> {
+pub(crate) fn select_rows<F: Float>(x: ArrayView2<F>, row_indices: &[usize]) -> Array2<F> {
     let mut out = Array2::<F>::zeros((row_indices.len(), x.ncols()));
     for (r_new, &r) in row_indices.iter().enumerate() {
         out.row_mut(r_new).assign(&x.row(r));
@@ -72,10 +70,10 @@ pub(crate) trait FitOnRows<F: Float> {
     type Fitted;
     fn fit_rows(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         rows: &[usize],
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted>;
 }
 
@@ -83,12 +81,12 @@ impl<F: Float> FitOnRows<F> for anofox_ml_trees::DecisionTreeClassifier {
     type Fitted = anofox_ml_trees::FittedDecisionTreeClassifier<F>;
     fn fit_rows(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         rows: &[usize],
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
-        self.fit_on_rows(x, y, rows, sample_weight)
+        self.fit_on_rows(x.view(), y.view(), rows, sample_weight)
     }
 }
 
@@ -96,12 +94,12 @@ impl<F: Float> FitOnRows<F> for anofox_ml_trees::DecisionTreeRegressor {
     type Fitted = anofox_ml_trees::FittedDecisionTreeRegressor<F>;
     fn fit_rows(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         rows: &[usize],
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
-        self.fit_on_rows(x, y, rows, sample_weight)
+        self.fit_on_rows(x.view(), y.view(), rows, sample_weight)
     }
 }
 
@@ -110,10 +108,10 @@ impl<F: Float> FitOnRows<F> for anofox_ml_trees::DecisionTreeRegressor {
 /// information about the weighting and is fitted unweighted.
 pub(crate) fn fit_tree_on_rows<F, T>(
     tree: &T,
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     rows: &[usize],
-    sample_weight: Option<&Array1<F>>,
+    sample_weight: Option<ArrayView1<F>>,
 ) -> Result<T::Fitted>
 where
     F: Float,
@@ -137,9 +135,9 @@ pub(crate) fn argmax_first<F: Float>(values: impl IntoIterator<Item = F>) -> usi
 }
 
 /// Sorted, de-duplicated class labels of `y`.
-pub(crate) fn sorted_classes<F: Float>(y: &Array1<F>) -> Vec<F> {
+pub(crate) fn sorted_classes<F: Float>(y: ArrayView1<F>) -> Vec<F> {
     let all: Vec<usize> = (0..y.len()).collect();
-    anofox_ml_trees::split::count_classes(y, &all)
+    anofox_ml_trees::split::count_classes(y.view(), &all)
         .into_iter()
         .map(|(c, _)| c)
         .collect()
@@ -169,18 +167,18 @@ pub(crate) struct ExtraTreeParams {
 /// independent derived streams); children get SplitMix64-derived seeds so
 /// every node position in every tree sees independent randomness.
 pub(crate) fn build_extra_tree<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     indices: &[usize],
     depth: usize,
     params: &ExtraTreeParams,
     node_seed: u64,
-    weights: Option<&Array1<F>>,
+    weights: Option<ArrayView1<F>>,
 ) -> TreeNode<F> {
     let n_samples = indices.len();
     let impurity = match weights {
-        Some(w) => compute_weighted_impurity(y, indices, w, params.criterion),
-        None => compute_impurity(y, indices, params.criterion),
+        Some(w) => compute_weighted_impurity(y.view(), indices, w.view(), params.criterion),
+        None => compute_impurity(y.view(), indices, params.criterion),
     };
 
     let should_stop = n_samples < params.min_samples_split
@@ -188,14 +186,14 @@ pub(crate) fn build_extra_tree<F: Float>(
         || impurity < F::from_f64(1e-15).unwrap();
 
     if should_stop {
-        return make_leaf(y, indices, params.criterion, weights);
+        return make_leaf(y.view(), indices, params.criterion, weights);
     }
 
     let threshold_seed = splitmix64(node_seed ^ 0x5EED_7123_A5A5_0001);
     let find = |features: &[usize]| {
         find_random_split_weighted(
-            x,
-            y,
+            x.view(),
+            y.view(),
             indices,
             params.criterion,
             params.min_samples_leaf,
@@ -246,7 +244,7 @@ pub(crate) fn build_extra_tree<F: Float>(
                     .map(|w| indices.iter().fold(F::zero(), |a, &i| a + w[i])),
             }
         }
-        None => make_leaf(y, indices, params.criterion, weights),
+        None => make_leaf(y.view(), indices, params.criterion, weights),
     }
 }
 
