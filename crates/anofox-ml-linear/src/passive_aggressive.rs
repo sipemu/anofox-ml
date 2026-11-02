@@ -392,7 +392,7 @@ impl Fit<f64> for PassiveAggressiveRegressor {
         Ok(FittedPassiveAggressiveRegressor {
             coef: Array1::from_shape_fn(x.ncols(), |j| res.coefficients[j]),
             intercept: res.intercept.unwrap_or(0.0),
-            n_iter: fitted.n_iter(),
+            n_iter: anofox_regression::prelude::IterativeFit::iterations(&fitted),
         })
     }
 }
@@ -419,9 +419,11 @@ impl PartialFit<f64> for PassiveAggressiveRegressor {
                         x.ncols()
                     )));
                 }
-                PaState {
-                    weights: s.coef.to_vec(),
-                    intercept: s.intercept,
+                {
+                    let mut st = PaState::new(s.coef.len());
+                    st.weights = s.coef.to_vec();
+                    st.intercept = s.intercept;
+                    st
                 }
             }
             None => PaState::new(x.ncols()),

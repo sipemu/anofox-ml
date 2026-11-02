@@ -8,6 +8,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### Correctness parity with sklearn (round 2)
 
+- **anofox-regression 0.9.0** (its API cleanup). The changes here are
+  mechanical: `with_intercept` builders, the `BayesianRidgeRegressor` /
+  `ArdRegressor` renames, `IterativeFit::iterations`, option setters for
+  the now `#[non_exhaustive]` structs, and faer column accessors. No
+  results change. The remaining #72 parity tests (LassoLars,
+  BayesianRidge / ARD `predict_std`, multinomial / L1 logistic regression)
+  still fail with 0.9.0 and stay ignored.
+
 - **anofox-regression 0.8.0.** It fixes several #72 findings:
   - the elastic-net single fit (#187);
   - penalised Poisson / Gamma / Tweedie IRLS convergence;

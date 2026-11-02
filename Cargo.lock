@@ -318,9 +318,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-regression"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e721bbed9fdab2939db386a9103e0d31d605b87979c38e80f83547fee843f4dc"
+checksum = "ea0589e0c2bd036aa7df2d278f206079a4b332d09e2287da237af01feace6b9f"
 dependencies = [
  "basin",
  "faer",

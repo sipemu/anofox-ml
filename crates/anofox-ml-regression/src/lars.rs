@@ -112,7 +112,7 @@ impl Lars {
         };
         let mut b = LarsRegressor::builder()
             .method(method)
-            .fit_intercept(self.fit_intercept);
+            .with_intercept(self.fit_intercept);
         if self.lasso && self.alpha > 0.0 {
             // sklearn's alpha is the max correlation / n; upstream's is raw.
             b = b.alpha(self.alpha * n);
