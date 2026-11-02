@@ -350,7 +350,6 @@ fn test_glm_alpha_matches_sklearn() {
 }
 
 #[test]
-#[ignore = "upstream anofox-regression 0.7 penalised IRLS does not converge (#72)"]
 fn test_glm_large_alpha_matches_sklearn() {
     for &(name, alpha, weighted, expected) in SK {
         if weighted || CONVERGING.contains(&(name, alpha)) {
@@ -370,12 +369,14 @@ fn test_glm_large_alpha_matches_sklearn() {
 }
 
 #[test]
-#[ignore = "sklearn's default alpha = 1.0 is blocked on upstream IRLS convergence (#72)"]
 fn test_glm_default_alpha_is_sklearn_default() {
-    // Once upstream converges at alpha = 1, switch the wrappers' default
-    // alpha to 1.0 (sklearn) and re-enable this test.
+    // The wrappers default to sklearn's alpha = 1.0.
     let x = x();
-    let f = PoissonRegressor::new().fit(&x, &a(&YP)).unwrap();
+    let f = PoissonRegressor::new()
+        .with_tol(1e-12)
+        .with_max_iter(1000)
+        .fit(&x, &a(&YP))
+        .unwrap();
     check(
         f.intercept(),
         &f.coefficients(),
@@ -383,7 +384,11 @@ fn test_glm_default_alpha_is_sklearn_default() {
         1e-6,
         "poisson default",
     );
-    let f = GammaRegressor::new().fit(&x, &a(&YG)).unwrap();
+    let f = GammaRegressor::new()
+        .with_tol(1e-12)
+        .with_max_iter(1000)
+        .fit(&x, &a(&YG))
+        .unwrap();
     check(
         f.intercept(),
         &f.coefficients(),
@@ -391,7 +396,11 @@ fn test_glm_default_alpha_is_sklearn_default() {
         1e-6,
         "gamma default",
     );
-    let f = TweedieRegressor::new(1.5).fit(&x, &a(&YT)).unwrap();
+    let f = TweedieRegressor::new(1.5)
+        .with_tol(1e-12)
+        .with_max_iter(1000)
+        .fit(&x, &a(&YT))
+        .unwrap();
     check(
         f.intercept(),
         &f.coefficients(),
@@ -405,6 +414,7 @@ fn test_glm_default_alpha_is_sklearn_default() {
 fn test_poisson_inference_matches_statsmodels() {
     // statsmodels 0.14.5 GLM(Poisson).fit()
     let f = PoissonRegressor::new()
+        .with_alpha(0.0)
         .with_inference(true)
         .with_tol(1e-12)
         .fit(&x(), &a(&YP))
@@ -449,6 +459,7 @@ fn test_gamma_inference_matches_statsmodels_pearson_scale() {
     // statsmodels GLM(Gamma(log)).fit(): scale = Pearson chi2 / df; SEs
     // identical to R's summary.glm; p-values from t(n - p) as in R.
     let f = GammaRegressor::new()
+        .with_alpha(0.0)
         .with_inference(true)
         .with_tol(1e-12)
         .with_max_iter(1000)

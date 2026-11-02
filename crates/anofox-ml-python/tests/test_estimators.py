@@ -173,13 +173,13 @@ def test_parity_with_sklearn():
         tree.DecisionTreeClassifier(max_depth=3, random_state=0).fit(X, y_multi).predict(X))
 
 
-@pytest.mark.xfail(reason="anofox-regression lasso penalty convention (#72)", strict=True)
 def test_lasso_parity_with_sklearn():
     from sklearn import linear_model
 
     np.testing.assert_allclose(
         am.Lasso(alpha=0.1).fit(X, y_reg).predict(X),
-        linear_model.Lasso(alpha=0.1).fit(X, y_reg).predict(X), atol=1e-5)
+        linear_model.Lasso(alpha=0.1, tol=1e-12, max_iter=100_000).fit(X, y_reg).predict(X),
+        atol=1e-6)
 
 
 def test_sklearn_clone_grid_search_and_pipeline():

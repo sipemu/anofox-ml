@@ -8,6 +8,28 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### Correctness parity with sklearn (round 2)
 
+- **anofox-regression 0.8.0.** It fixes several #72 findings:
+  - the elastic-net single fit (#187);
+  - penalised Poisson / Gamma / Tweedie IRLS convergence;
+  - the RANSAC tie-break;
+  - Theil-Sen.
+
+  What changes here:
+  - Lasso and ElasticNet get an opt-in sklearn penalty scale
+    (`with_sklearn_alpha`). It is an exact translation to upstream's raw
+    objective, `λ = n·α·(1 + r)` with mixing `2r/(1 + r)` for
+    `l1_ratio = r`, and uses a tight tolerance. Python `Lasso` /
+    `ElasticNet` use it and now match sklearn (about 1e-7 relative).
+  - **Breaking:** `PoissonRegressor`, `GammaRegressor` and
+    `TweedieRegressor` default to sklearn's `alpha = 1.0` (Rust and
+    Python); `alpha = 0` gives the unpenalised fit. `BinomialRegressor`
+    keeps 0.
+  - The GLM parity tests at sklearn's alpha are enabled again.
+  - Still blocked (#72): sample weights for Poisson / Gamma / Tweedie,
+    multinomial / L1 logistic regression, the LassoLars drop rule,
+    BayesianRidge / ARD `predict_std`, Huber, the Quantile L1 penalty and
+    the B-spline basis.
+
 - **HistGradientBoosting bins like sklearn.** The engine gets
   `BinningMethod::{LightGbm, Sklearn}`, and the HGB facades use sklearn's
   `_BinMapper` thresholds: midpoints between distinct values, or

@@ -778,13 +778,7 @@ class Ridge(_LinearAttrs, RegressorMixin, BaseEstimator):
 
 
 class Lasso(_LinearAttrs, RegressorMixin, BaseEstimator):
-    """L1-penalised least squares.
-
-    ``alpha`` is passed to anofox-regression's ``lambda``. Its penalty
-    convention does not yet match sklearn's ``(1 / 2n) ||y - Xw||² +
-    alpha ||w||₁``, so coefficients differ from sklearn's for the same
-    ``alpha`` (tracked upstream, sipemu/anofox-ml#72).
-    """
+    """L1-penalised least squares with sklearn's ``alpha`` scale."""
 
     _kind = "LassoRegressor"
 
@@ -793,15 +787,12 @@ class Lasso(_LinearAttrs, RegressorMixin, BaseEstimator):
         self.fit_intercept = fit_intercept
 
     def _rust_params(self, X, y):
-        return {"lambda": float(self.alpha), "with_intercept": self.fit_intercept}
+        return {"lambda": float(self.alpha), "with_intercept": self.fit_intercept,
+                "sklearn_scale": True}
 
 
 class ElasticNet(_LinearAttrs, RegressorMixin, BaseEstimator):
-    """Elastic-net penalised least squares (``alpha``, ``l1_ratio``).
-
-    As for :class:`Lasso`, ``alpha`` is anofox-regression's ``lambda`` and
-    does not yet follow sklearn's scaling (sipemu/anofox-ml#72).
-    """
+    """Elastic-net penalised least squares (sklearn's ``alpha``, ``l1_ratio``)."""
 
     _kind = "ElasticNetRegressor"
 
@@ -812,7 +803,7 @@ class ElasticNet(_LinearAttrs, RegressorMixin, BaseEstimator):
 
     def _rust_params(self, X, y):
         return {"lambda": float(self.alpha), "alpha": float(self.l1_ratio),
-                "with_intercept": self.fit_intercept}
+                "with_intercept": self.fit_intercept, "sklearn_scale": True}
 
 
 class HuberRegressor(_LinearAttrs, RegressorMixin, BaseEstimator):
@@ -917,7 +908,7 @@ class LogisticRegression(ClassifierMixin, BaseEstimator):
 
 
 class _Glm(_LinearAttrs, RegressorMixin, BaseEstimator):
-    def __init__(self, alpha=0.0, fit_intercept=True, max_iter=100, tol=1e-8):
+    def __init__(self, alpha=1.0, fit_intercept=True, max_iter=100, tol=1e-8):
         self.alpha = alpha
         self.fit_intercept = fit_intercept
         self.max_iter = max_iter
@@ -948,7 +939,7 @@ class GammaRegressor(_Glm):
 class TweedieRegressor(_Glm):
     _kind = "TweedieRegressor"
 
-    def __init__(self, power=0.0, alpha=0.0, link="auto", fit_intercept=True, max_iter=100,
+    def __init__(self, power=0.0, alpha=1.0, link="auto", fit_intercept=True, max_iter=100,
                  tol=1e-8):
         super().__init__(alpha, fit_intercept, max_iter, tol)
         self.power = power
