@@ -104,7 +104,7 @@ impl Default for LassoCrossValidated {
 }
 
 /// A fitted Lasso regression model selected via cross-validation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedLassoCrossValidated {
     cv: PathCv,
     intercept: Option<f64>,

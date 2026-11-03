@@ -23,6 +23,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `save_binary`, `load_binary`, `BINARY_MAGIC`, `JSON_FORMAT_VERSION`. The
   `*_bincode*` functions and `BINCODE_MAGIC` are deprecated aliases (they
   write version 2). Python pickles use version 2; older pickles still load.
+- `RidgeCrossValidated`, `LassoCrossValidated`, `ElasticNetCrossValidated`,
+  `IsotonicRegressor` and `TransformedTargetRegressor` fitted models are
+  serializable. `FittedIsotonicRegressor` stores its R² instead of the
+  upstream fit. `TransformedTargetRegressor` takes a `TargetTransform`
+  (`with_transform`: `Identity`, `Log`, `Log1p`, `Sqrt`); `new(regressor,
+  func, inverse_func)` keeps working as `TargetTransform::Custom`, which
+  cannot be saved. The remaining OLS / Ridge / Lasso / ElasticNet / WLS /
+  Huber / Quantile wrappers wait for serde support in anofox-regression
+  (sipemu/anofox-regression#321).
 - Golden fixtures (`crates/anofox-ml/tests/fixtures/persistence/v1`, `v2`):
   17 fitted models per format version with their saved predictions; the
   `persistence_compat` test loads all of them.
