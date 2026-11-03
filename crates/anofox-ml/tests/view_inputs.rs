@@ -80,7 +80,11 @@ macro_rules! check_transformer {
 check_supervised!(decision_tree, DecisionTreeRegressor::new(), false);
 check_supervised!(random_forest, RandomForestClassifier::new(10), true);
 check_supervised!(gradient_boosting, GradientBoostingRegressor::new(), false);
-check_supervised!(hist_gradient_boosting, HistGradientBoostingRegressor::new(), false);
+check_supervised!(
+    hist_gradient_boosting,
+    HistGradientBoostingRegressor::new(),
+    false
+);
 check_supervised!(knn, KnnClassifier::new(3), true);
 check_supervised!(gaussian_nb, GaussianNB::new(), true);
 check_supervised!(lda, LinearDiscriminantAnalysis::new(), true);
