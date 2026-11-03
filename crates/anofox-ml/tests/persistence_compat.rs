@@ -18,7 +18,7 @@ use ndarray::{Array1, Array2};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Format versions with committed fixtures.
-const VERSIONS: &[u32] = &[1];
+const VERSIONS: &[u32] = &[1, 2];
 
 fn fixture_dir(version: u32) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -57,7 +57,7 @@ fn write_fixture<M: Serialize>(name: &str, model: &M, out: &[f64]) {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join(format!("{name}.bin")),
-        persistence::to_bincode_bytes(model).unwrap(),
+        persistence::to_binary_bytes(model).unwrap(),
     )
     .unwrap();
     std::fs::write(
@@ -86,7 +86,7 @@ where
             &std::fs::read_to_string(dir.join(format!("{name}.expected.json"))).unwrap(),
         )
         .unwrap();
-        let model: M = persistence::from_bincode_bytes(&bytes)
+        let model: M = persistence::from_binary_bytes(&bytes)
             .unwrap_or_else(|e| panic!("v{version} fixture {name} no longer loads: {e}"));
         let got = out(&model);
         assert_eq!(got.len(), expected.len(), "v{version} {name}");
