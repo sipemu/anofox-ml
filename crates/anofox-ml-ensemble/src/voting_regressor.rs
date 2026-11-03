@@ -2,7 +2,7 @@
 
 use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 struct NamedEstimator<F: Float> {
     name: String,
@@ -64,7 +64,13 @@ impl<F: Float> FittedVotingRegressor<F> {
     }
 
     /// Compute R² score on the given data.
-    pub fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<f64> {
+    pub fn score<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+    ) -> Result<f64> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         let preds = self.predict(x)?;
         let n = y.len();
         let y_mean = y.iter().copied().fold(F::zero(), |a, b| a + b) / F::from_usize(n).unwrap();
@@ -88,7 +94,7 @@ impl<F: Float> FittedVotingRegressor<F> {
 impl<F: Float + 'static> Fit<F> for VotingRegressor<F> {
     type Fitted = FittedVotingRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         if self.estimators.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "VotingRegressor needs at least one estimator".into(),
@@ -122,7 +128,7 @@ impl<F: Float + 'static> Fit<F> for VotingRegressor<F> {
 }
 
 impl<F: Float> Predict<F> for FittedVotingRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

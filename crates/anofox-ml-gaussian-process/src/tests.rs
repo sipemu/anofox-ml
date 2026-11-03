@@ -618,7 +618,7 @@ fn gpc_objective_is_finite_for_large_latents() {
     .fit(&x, &y)
     .unwrap();
     assert!(fitted.log_marginal_likelihood_value().is_finite());
-    let (mean, _) = fitted.latent_mean_var(&x).unwrap();
+    let (mean, _) = fitted.latent_mean_var(x.view()).unwrap();
     assert!(
         mean.iter().any(|&f| f > 1.0),
         "latents should exceed 1: {mean:?}"

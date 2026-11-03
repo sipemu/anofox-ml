@@ -1,7 +1,7 @@
 use anofox_ml_core::{
     Fit, FitWeighted, Float, PartialFit, Predict, PredictLogProba, PredictProba, Result,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix1, Ix2};
 
 use crate::common::{
     argmax_labels, check_alpha, check_n_features, class_log_prior, log_proba_from_jll,
@@ -115,21 +115,23 @@ impl BernoulliNB {
 
     /// Incremental fit with optional per-sample weights (sklearn's
     /// `partial_fit(X, y, classes, sample_weight)`).
-    pub fn partial_fit_weighted<F: Float>(
+    pub fn partial_fit_weighted<'a, 'b, F: Float>(
         &self,
         state: Option<FittedBernoulliNB<F>>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
         classes: Option<&[F]>,
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedBernoulliNB<F>> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         check_alpha(self.alpha, self.force_alpha)?;
         let threshold = F::from_f64(self.binarize_threshold).unwrap();
         let x_bin = binarize(x, threshold);
         let prev = state
             .map(|s| Counts::from_parts(s.class_labels, s.class_count, s.feature_count))
             .transpose()?;
-        let counts = accumulate(prev, &x_bin, y, classes, sample_weight)?;
+        let counts = accumulate(prev, x_bin.view(), y, classes, sample_weight)?;
         self.finish(counts, threshold)
     }
 }
@@ -140,7 +142,7 @@ impl Default for BernoulliNB {
     }
 }
 
-fn binarize<F: Float>(x: &Array2<F>, threshold: F) -> Array2<F> {
+fn binarize<F: Float>(x: ArrayView2<F>, threshold: F) -> Array2<F> {
     x.mapv(|v| if v > threshold { F::one() } else { F::zero() })
 }
 
@@ -197,7 +199,8 @@ impl<F: Float> FittedBernoulliNB<F> {
 
     /// Joint log-likelihood, shape `(n_samples, n_classes)`:
     /// `X_bin · (log p − log(1−p))ᵀ + Σ_j log(1−p_j) + log_prior`.
-    pub fn joint_log_likelihood(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn joint_log_likelihood<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         check_n_features(x, self.log_feature_prob.ncols())?;
         let x_bin = binarize(x, self.binarize_threshold);
         let diff = &self.log_feature_prob - &self.log_feature_neg_prob;
@@ -210,7 +213,8 @@ impl<F: Float> FittedBernoulliNB<F> {
     ///
     /// Returns an array of shape `(n_samples, n_classes)` where each row sums
     /// to 1.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         Ok(proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }
@@ -218,11 +222,11 @@ impl<F: Float> FittedBernoulliNB<F> {
 impl<F: Float> FitWeighted<F> for BernoulliNB {
     type Fitted = FittedBernoulliNB<F>;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(None, x, y, None, sample_weight)
     }
@@ -231,7 +235,7 @@ impl<F: Float> FitWeighted<F> for BernoulliNB {
 impl<F: Float> Fit<F> for BernoulliNB {
     type Fitted = FittedBernoulliNB<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.partial_fit_weighted(None, x, y, None, None)
     }
 }
@@ -239,11 +243,11 @@ impl<F: Float> Fit<F> for BernoulliNB {
 impl<F: Float> PartialFit<F> for BernoulliNB {
     type Fitted = FittedBernoulliNB<F>;
 
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         classes: Option<&[F]>,
     ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(state, x, y, classes, None)
@@ -251,20 +255,20 @@ impl<F: Float> PartialFit<F> for BernoulliNB {
 }
 
 impl<F: Float> Predict<F> for FittedBernoulliNB<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let jll = self.joint_log_likelihood(x)?;
         Ok(argmax_labels(&jll, &self.class_labels))
     }
 }
 
 impl<F: Float> PredictProba<F> for FittedBernoulliNB<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
     }
 }
 
 impl<F: Float> PredictLogProba<F> for FittedBernoulliNB<F> {
-    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_log_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(log_proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }
@@ -310,7 +314,7 @@ mod tests {
         let fitted: FittedBernoulliNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
 
         let x_test = array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]];
-        let proba = fitted.predict_proba(&x_test).unwrap();
+        let proba = fitted.predict_proba(x_test.view()).unwrap();
 
         for i in 0..proba.nrows() {
             let row_sum: f64 = proba.row(i).iter().sum();
@@ -352,8 +356,8 @@ mod tests {
         let fitted_large: FittedBernoulliNB<f64> = Fit::fit(&nb_large, &x_train, &y_train).unwrap();
 
         let x_test = array![[1.0, 0.0]];
-        let proba_small = fitted_small.predict_proba(&x_test).unwrap();
-        let proba_large = fitted_large.predict_proba(&x_test).unwrap();
+        let proba_small = fitted_small.predict_proba(x_test.view()).unwrap();
+        let proba_large = fitted_large.predict_proba(x_test.view()).unwrap();
 
         // With small alpha, class 0 probability should be more extreme.
         assert!(
@@ -456,7 +460,7 @@ mod tests {
         let fitted: FittedBernoulliNB<f64> = Fit::fit(&nb, &x_train, &y_train).unwrap();
 
         let x_test = array![[1.0]];
-        let result = fitted.predict_proba(&x_test);
+        let result = fitted.predict_proba(x_test.view());
         assert!(result.is_err());
         match result {
             Err(RustMlError::ShapeMismatch(_)) => {}
@@ -499,7 +503,7 @@ mod sklearn_parity {
             .fit_weighted(&x, &y, Some(&w))
             .unwrap();
         assert_close2(
-            &m.predict_proba(&t).unwrap(),
+            &m.predict_proba(t.view()).unwrap(),
             &[
                 &[0.9861878646810236, 0.01381213531897653],
                 &[0.026946248142374372, 0.9730537518576254],
@@ -538,11 +542,11 @@ mod sklearn_parity {
                 &x.slice(ndarray::s![3.., ..]).to_owned(),
                 &y.slice(ndarray::s![3..]).to_owned(),
                 None,
-                Some(&w.slice(ndarray::s![3..]).to_owned()),
+                Some(w.slice(ndarray::s![3..])),
             )
             .unwrap();
         assert_close2(
-            &m.predict_proba(&t).unwrap(),
+            &m.predict_proba(t.view()).unwrap(),
             &[
                 &[0.9688638028007635, 0.031136197199236736],
                 &[0.03302000316309905, 0.966979996836901],

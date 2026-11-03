@@ -9,7 +9,7 @@
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError, Transform};
 use faer::linalg::solvers::Svd;
 use faer::Mat;
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -150,7 +150,7 @@ impl Nmf {
 ///    with positive sign (sign-fix).
 /// 3. Each subsequent component splits the next singular vectors into their
 ///    positive and negative parts and picks whichever has higher norm.
-fn nndsvd_init(x: &Array2<f64>, k: usize) -> Result<(Array2<f64>, Array2<f64>)> {
+fn nndsvd_init(x: ArrayView2<f64>, k: usize) -> Result<(Array2<f64>, Array2<f64>)> {
     let n = x.nrows();
     let d = x.ncols();
     let mat = Mat::<f64>::from_fn(n, d, |i, j| x[[i, j]]);
@@ -272,7 +272,7 @@ const EPSILON: f64 = f64::EPSILON;
 
 /// β-divergence `D(X || W H)` (sklearn `_beta_divergence`, square-rooted
 /// for β = 2 as sklearn reports it).
-fn beta_divergence(x: &Array2<f64>, w: &Array2<f64>, h: &Array2<f64>, beta: f64) -> f64 {
+fn beta_divergence(x: ArrayView2<f64>, w: &Array2<f64>, h: &Array2<f64>, beta: f64) -> f64 {
     if beta == 2.0 {
         let x_norm = x.mapv(|v| v * v).sum();
         let norm_wh = (w.t().dot(w) * h.dot(&h.t())).sum();
@@ -301,7 +301,7 @@ fn beta_divergence(x: &Array2<f64>, w: &Array2<f64>, h: &Array2<f64>, beta: f64)
 
 /// One CD sweep over `W` (sklearn `_update_coordinate_descent`); returns the
 /// projected-gradient violation.
-fn cd_update(x: &Array2<f64>, w: &mut Array2<f64>, ht: &Array2<f64>, l1: f64, l2: f64) -> f64 {
+fn cd_update(x: ArrayView2<f64>, w: &mut Array2<f64>, ht: &Array2<f64>, l1: f64, l2: f64) -> f64 {
     let k = w.ncols();
     let mut hht = ht.t().dot(ht);
     let mut xht = x.dot(ht);
@@ -345,15 +345,22 @@ fn gamma(beta: f64) -> f64 {
 
 /// Multiplicative update of `W` for `X ≈ W H` (sklearn
 /// `_multiplicative_update_w`).
-fn mu_update_w(x: &Array2<f64>, w: &mut Array2<f64>, h: &Array2<f64>, beta: f64, l1: f64, l2: f64) {
+fn mu_update_w(
+    x: ArrayView2<f64>,
+    w: &mut Array2<f64>,
+    h: &Array2<f64>,
+    beta: f64,
+    l1: f64,
+    l2: f64,
+) {
     let (numerator, mut denominator) = if beta == 2.0 {
         (x.dot(&h.t()), w.dot(&h.dot(&h.t())))
     } else {
         let wh = w.dot(h).mapv(|v| v.max(EPSILON));
         let num = if beta == 1.0 {
-            (x / &wh).dot(&h.t())
+            (&x / &wh).dot(&h.t())
         } else {
-            (x * &wh.mapv(|v| v.powf(beta - 2.0))).dot(&h.t())
+            (&x * &wh.mapv(|v| v.powf(beta - 2.0))).dot(&h.t())
         };
         let den = if beta == 1.0 {
             let hsum = h.sum_axis(ndarray::Axis(1));
@@ -383,7 +390,7 @@ fn mu_update_w(x: &Array2<f64>, w: &mut Array2<f64>, h: &Array2<f64>, beta: f64,
 /// Run the solver. With `update_h = false` only `W` is updated.
 #[allow(clippy::too_many_arguments)]
 fn solve_nmf(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     w: &mut Array2<f64>,
     h: &mut Array2<f64>,
     p: &NmfParams,
@@ -401,7 +408,7 @@ fn solve_nmf(
                 n_iter = it;
                 let mut violation = cd_update(x, w, &ht, p.l1_w, p.l2_w);
                 if update_h {
-                    violation += cd_update(&xt, &mut ht, w, l1_h, l2_h);
+                    violation += cd_update(xt.view(), &mut ht, w, l1_h, l2_h);
                 }
                 if it == 1 {
                     violation_init = violation;
@@ -424,7 +431,7 @@ fn solve_nmf(
                     // H update = W update on the transposed problem.
                     let mut ht = h.t().to_owned();
                     let wt = w.t().to_owned();
-                    mu_update_w(&x.t().to_owned(), &mut ht, &wt, p.beta, l1_h, l2_h);
+                    mu_update_w(x.t().to_owned().view(), &mut ht, &wt, p.beta, l1_h, l2_h);
                     *h = ht.t().to_owned();
                 }
                 if p.tol > 0.0 && it % 10 == 0 {
@@ -443,7 +450,7 @@ fn solve_nmf(
 impl FitUnsupervised<f64> for Nmf {
     type Fitted = FittedNmf;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<Self::Fitted> {
         let n = x.nrows();
         let d = x.ncols();
         let k = self.n_components;
@@ -526,7 +533,12 @@ impl FitUnsupervised<f64> for Nmf {
 impl FittedNmf {
     /// `W` for new data with `H` fixed (sklearn `transform`): the solver is
     /// re-run from `W = sqrt(mean(X) / k)` with the fitted settings.
-    pub fn transform(&self, x: &Array2<f64>, max_iter: usize) -> Result<Array2<f64>> {
+    pub fn transform<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        max_iter: usize,
+    ) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
         let h = &self.components;
         if x.ncols() != h.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -567,7 +579,7 @@ impl FittedNmf {
 }
 
 impl Transform<f64> for FittedNmf {
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let max_iter = self.params.map_or(200, |p| p.max_iter);
         FittedNmf::transform(self, x, max_iter)
     }
@@ -590,7 +602,7 @@ mod tests {
         let _ = recon;
         let recon = fitted.components.clone();
         // The transform should give us back something whose product is close.
-        let w = fitted.transform(&x, 200).unwrap();
+        let w = fitted.transform(x.view(), 200).unwrap();
         let approx = w.dot(&recon);
         let mut err = 0.0;
         for i in 0..x.nrows() {

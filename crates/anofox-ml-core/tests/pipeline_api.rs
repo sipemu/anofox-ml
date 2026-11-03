@@ -6,7 +6,7 @@ use anofox_ml_core::{
     cross_val_score_weighted_with_splits, k_fold, ColumnSelector, ColumnTransformer, FeatureUnion,
     Fit, FitUnsupervised, Pipeline, Predict, PredictProba, Result, Supervised, Transform,
 };
-use ndarray::{array, Array1, Array2, Axis};
+use ndarray::{array, Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 /// Supervised transformer: keeps the single column most correlated with y.
 #[derive(Clone)]
@@ -15,8 +15,8 @@ struct FittedKeepBest(usize);
 
 impl Fit<f64> for KeepBest {
     type Fitted = FittedKeepBest;
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedKeepBest> {
-        let yc = y - y.mean().unwrap();
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<FittedKeepBest> {
+        let yc = &y - y.mean().unwrap();
         let best = (0..x.ncols())
             .max_by(|&a, &b| {
                 let s = |j: usize| {
@@ -31,7 +31,7 @@ impl Fit<f64> for KeepBest {
 }
 
 impl Transform<f64> for FittedKeepBest {
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         Ok(x.select(Axis(1), &[self.0]))
     }
 }
@@ -43,20 +43,20 @@ struct FittedSlope(f64);
 
 impl Fit<f64> for Slope {
     type Fitted = FittedSlope;
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<FittedSlope> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<FittedSlope> {
         let c = x.column(0);
-        Ok(FittedSlope(c.dot(y) / c.dot(&c)))
+        Ok(FittedSlope(c.dot(&y) / c.dot(&c)))
     }
 }
 
 impl Predict<f64> for FittedSlope {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         Ok(x.column(0).mapv(|v| v * self.0))
     }
 }
 
 impl PredictProba<f64> for FittedSlope {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let p = x.column(0).mapv(|v| 1.0 / (1.0 + (-v * self.0).exp()));
         let mut out = Array2::zeros((x.nrows(), 2));
         out.column_mut(1).assign(&p);

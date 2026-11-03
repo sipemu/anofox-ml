@@ -3,7 +3,7 @@
 //! Mirrors sklearn's `class_weight` parameter and
 //! `sklearn.utils.class_weight.compute_sample_weight`.
 
-use ndarray::Array1;
+use ndarray::{Array1, ArrayView1, AsArray, Ix1};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, RustMlError};
@@ -22,11 +22,12 @@ pub enum ClassWeight {
 
 /// Per-sample weights implied by `class_weight` for the labels `y`
 /// (sklearn's `compute_sample_weight(class_weight, y)`).
-pub fn compute_sample_weight<F: Float>(
+pub fn compute_sample_weight<'a, F: Float>(
     class_weight: &ClassWeight,
-    y: &Array1<F>,
+    y: impl AsArray<'a, F, Ix1>,
 ) -> Result<Array1<F>> {
-    let (classes, idx) = encode_labels(y)?;
+    let y: ArrayView1<F> = y.into();
+    let (classes, idx) = encode_labels(&y)?;
     let per_class: Vec<F> = match class_weight {
         ClassWeight::Balanced => {
             let mut counts = vec![0usize; classes.len()];
@@ -65,7 +66,11 @@ pub fn compute_sample_weight<F: Float>(
 
 /// Validate optional sample weights: length `n`, finite, non-negative and
 /// not all zero.
-pub fn check_sample_weight<F: Float>(sample_weight: &Array1<F>, n: usize) -> Result<()> {
+pub fn check_sample_weight<'a, F: Float>(
+    sample_weight: impl AsArray<'a, F, Ix1>,
+    n: usize,
+) -> Result<()> {
+    let sample_weight: ArrayView1<F> = sample_weight.into();
     if sample_weight.len() != n {
         return Err(RustMlError::ShapeMismatch(format!(
             "sample_weight has {} elements but X has {} rows",
@@ -91,17 +96,18 @@ pub fn check_sample_weight<F: Float>(sample_weight: &Array1<F>, n: usize) -> Res
 
 /// Effective per-sample weights: `sample_weight × class weights`, as sklearn
 /// combines them. Returns `None` when neither is given.
-pub fn effective_sample_weight<F: Float>(
-    y: &Array1<F>,
-    sample_weight: Option<&Array1<F>>,
+pub fn effective_sample_weight<'a, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
+    sample_weight: Option<ArrayView1<F>>,
     class_weight: Option<&ClassWeight>,
 ) -> Result<Option<Array1<F>>> {
-    if let Some(w) = sample_weight {
+    let y: ArrayView1<F> = y.into();
+    if let Some(w) = &sample_weight {
         check_sample_weight(w, y.len())?;
     }
     Ok(match (sample_weight, class_weight) {
         (None, None) => None,
-        (Some(w), None) => Some(w.clone()),
+        (Some(w), None) => Some(w.to_owned()),
         (None, Some(cw)) => Some(compute_sample_weight(cw, y)?),
         (Some(w), Some(cw)) => Some(compute_sample_weight(cw, y)? * w),
     })
@@ -140,13 +146,13 @@ mod tests {
     fn effective_weight_multiplies() {
         let y = array![0.0, 1.0, 1.0, 1.0];
         let sw = array![2.0, 1.0, 0.0, 1.0];
-        let w = effective_sample_weight(&y, Some(&sw), Some(&ClassWeight::Balanced))
+        let w = effective_sample_weight(&y, Some(sw.view()), Some(&ClassWeight::Balanced))
             .unwrap()
             .unwrap();
         assert_eq!(w.to_vec(), vec![4.0, 2.0 / 3.0, 0.0, 2.0 / 3.0]);
         assert!(effective_sample_weight::<f64>(&y, None, None)
             .unwrap()
             .is_none());
-        assert!(effective_sample_weight(&y, Some(&array![1.0]), None).is_err());
+        assert!(effective_sample_weight(&y, Some(array![1.0].view()), None).is_err());
     }
 }

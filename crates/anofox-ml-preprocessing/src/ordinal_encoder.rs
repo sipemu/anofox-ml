@@ -1,5 +1,5 @@
 use anofox_ml_core::{Result, RustMlError};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2, AsArray, Ix2};
 use std::collections::HashMap;
 
 /// What [`OrdinalEncoder`] does with categories not seen during fit.
@@ -206,7 +206,11 @@ impl FittedOrdinalEncoder {
 
     /// Inverse of [`transform_f64`](Self::transform_f64): codes back to
     /// string columns; the `unknown_value` code decodes to `None`.
-    pub fn inverse_transform_f64(&self, x: &Array2<f64>) -> Result<Vec<Vec<Option<String>>>> {
+    pub fn inverse_transform_f64<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<Vec<Vec<Option<String>>>> {
+        let x: ArrayView2<f64> = x.into();
         if x.ncols() != self.vocabularies.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} columns, got {}",

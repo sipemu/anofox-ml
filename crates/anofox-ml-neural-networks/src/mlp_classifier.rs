@@ -1,5 +1,5 @@
 use anofox_ml_core::{Fit, Float, PartialFit, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 
 use crate::activation::Activation;
 use crate::network::{predict_output, DenseLayer, OutputKind};
@@ -345,7 +345,8 @@ fn argmax<'a, F: Float + 'a>(it: impl Iterator<Item = &'a F>) -> usize {
 
 impl<F: Float> FittedMlpClassifier<F> {
     /// Return class probability estimates.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -384,8 +385,8 @@ impl MlpClassifier {
     fn fit_impl<F: Float>(
         &self,
         prev: Option<FittedMlpClassifier<F>>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         incremental: bool,
         classes: Option<&[F]>,
     ) -> Result<FittedMlpClassifier<F>> {
@@ -481,7 +482,7 @@ impl MlpClassifier {
             &mut state,
             kind,
             x,
-            &targets,
+            targets.view(),
             &mut rng,
             incremental,
             Some(&strata),
@@ -513,14 +514,14 @@ impl MlpClassifier {
         x: &Array2<F>,
         y: &Array1<F>,
     ) -> Result<FittedMlpClassifier<F>> {
-        self.fit_impl(Some(previous), x, y, false, None)
+        self.fit_impl(Some(previous), x.view(), y.view(), false, None)
     }
 }
 
 impl<F: Float> Fit<F> for MlpClassifier {
     type Fitted = FittedMlpClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(None, x, y, false, None)
     }
 }
@@ -531,11 +532,11 @@ impl<F: Float> Fit<F> for MlpClassifier {
 impl<F: Float> PartialFit<F> for MlpClassifier {
     type Fitted = FittedMlpClassifier<F>;
 
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         classes: Option<&[F]>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(state, x, y, true, classes)
@@ -543,7 +544,7 @@ impl<F: Float> PartialFit<F> for MlpClassifier {
 }
 
 impl<F: Float> Predict<F> for FittedMlpClassifier<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let probs = self.predict_proba(x)?;
         let half = F::from_f64(0.5).unwrap();
         Ok(probs
@@ -640,7 +641,7 @@ mod tests {
             ..Default::default()
         };
         let fitted: FittedMlpClassifier<f64> = mlp.fit(&x, &y).unwrap();
-        let proba = fitted.predict_proba(&x).unwrap();
+        let proba = fitted.predict_proba(x.view()).unwrap();
         assert_eq!(proba.ncols(), 2);
         for row in proba.rows() {
             assert_abs_diff_eq!(row.sum(), 1.0, epsilon = 1e-6);
@@ -700,8 +701,8 @@ mod tests {
             batch_size: None,
             ..Default::default()
         };
-        let p1 = mlp.fit(&x, &y).unwrap().predict_proba(&x).unwrap();
-        let p2 = mlp.fit(&x, &y).unwrap().predict_proba(&x).unwrap();
+        let p1 = mlp.fit(&x, &y).unwrap().predict_proba(x.view()).unwrap();
+        let p2 = mlp.fit(&x, &y).unwrap().predict_proba(x.view()).unwrap();
         for (a, b) in p1.iter().zip(p2.iter()) {
             assert_abs_diff_eq!(*a, *b, epsilon = 1e-12);
         }

@@ -3,7 +3,7 @@
 
 use crate::util::{FitPredBox, PredBox};
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Stacking regressor.
 ///
@@ -64,7 +64,7 @@ impl<F: Float> FittedStackingRegressor<F> {
 impl<F: Float + 'static> Fit<F> for StackingRegressor<F> {
     type Fitted = FittedStackingRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         if self.base_estimators.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "StackingRegressor needs at least one base estimator".into(),
@@ -95,8 +95,8 @@ impl<F: Float + 'static> Fit<F> for StackingRegressor<F> {
                 let y_train = select_elements(y, train_idx);
                 let x_test = crate::forest_common::select_rows(x, test_idx);
 
-                let fitted = est.fit_box(&x_train, &y_train)?;
-                let preds = fitted.predict_box(&x_test)?;
+                let fitted = est.fit_box(x_train.view(), y_train.view())?;
+                let preds = fitted.predict_box(x_test.view())?;
 
                 for (li, &gi) in test_idx.iter().enumerate() {
                     meta_features[[gi, bi]] = preds[li];
@@ -105,7 +105,7 @@ impl<F: Float + 'static> Fit<F> for StackingRegressor<F> {
         }
 
         // Fit meta-estimator on stacked predictions
-        let fitted_meta = self.meta_estimator.fit_box(&meta_features, y)?;
+        let fitted_meta = self.meta_estimator.fit_box(meta_features.view(), y)?;
 
         // Refit base estimators on full data
         let mut fitted_base = Vec::with_capacity(n_base);
@@ -123,7 +123,7 @@ impl<F: Float + 'static> Fit<F> for StackingRegressor<F> {
 }
 
 impl<F: Float> Predict<F> for FittedStackingRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -143,7 +143,7 @@ impl<F: Float> Predict<F> for FittedStackingRegressor<F> {
             }
         }
 
-        self.fitted_meta.predict_box(&meta_features)
+        self.fitted_meta.predict_box(meta_features.view())
     }
 }
 
@@ -164,7 +164,7 @@ fn simple_k_fold(n: usize, k: usize) -> Vec<(Vec<usize>, Vec<usize>)> {
     folds
 }
 
-fn select_elements<F: Float>(y: &Array1<F>, indices: &[usize]) -> Array1<F> {
+fn select_elements<F: Float>(y: ArrayView1<F>, indices: &[usize]) -> Array1<F> {
     Array1::from_vec(indices.iter().map(|&i| y[i]).collect())
 }
 

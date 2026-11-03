@@ -12,7 +12,7 @@
 
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView2};
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Linkage {
@@ -73,7 +73,7 @@ fn condensed(n: usize, i: usize, j: usize) -> usize {
     n * i - i * (i + 1) / 2 + (j - i - 1)
 }
 
-fn euclid(x: &Array2<f64>, i: usize, j: usize) -> f64 {
+fn euclid(x: ArrayView2<f64>, i: usize, j: usize) -> f64 {
     x.row(i)
         .iter()
         .zip(x.row(j))
@@ -87,7 +87,7 @@ type Merge = (usize, usize, f64);
 
 /// sklearn's `mst_linkage_core` (Prim on the complete graph, distances on
 /// the fly).
-fn single_linkage(x: &Array2<f64>) -> Vec<Merge> {
+fn single_linkage(x: ArrayView2<f64>) -> Vec<Merge> {
     let n = x.nrows();
     let mut merged = vec![false; n];
     let mut d = vec![f64::INFINITY; n];
@@ -122,7 +122,7 @@ fn single_linkage(x: &Array2<f64>) -> Vec<Merge> {
 }
 
 /// scipy's `nn_chain` with the Lance–Williams update of `linkage`.
-fn nn_chain(x: &Array2<f64>, linkage: Linkage) -> Vec<Merge> {
+fn nn_chain(x: ArrayView2<f64>, linkage: Linkage) -> Vec<Merge> {
     let n = x.nrows();
     let mut dist = vec![0.0_f64; n * (n - 1) / 2];
     for i in 0..n {
@@ -326,9 +326,9 @@ impl<F: Float> FitUnsupervised<F> for AgglomerativeClustering {
     type Fitted = FittedAgglomerativeClustering;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));

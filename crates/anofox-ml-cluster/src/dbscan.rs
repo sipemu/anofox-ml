@@ -1,6 +1,6 @@
 use anofox_ml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 
 /// Parameters for DBSCAN clustering (unfitted state).
@@ -133,9 +133,9 @@ impl<F: Float> FittedDbscan<F> {
 impl<F: Float> FitUnsupervised<F> for Dbscan {
     type Fitted = FittedDbscan<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_std = crate::standard_layout(x);
-        let x: &Array2<F> = &x_std;
+        let x = x_std.view();
         let n_samples = x.nrows();
         let n_features = x.ncols();
 
@@ -158,8 +158,8 @@ impl<F: Float> FitUnsupervised<F> for Dbscan {
 
         // Every eps-neighbourhood up front (each point counts itself), as
         // sklearn, through the shared neighbour index.
-        let index = NeighborIndex::new(x, self.metric, self.algorithm, None)?;
-        let neighborhoods = index.radius_neighbors(x, eps)?;
+        let index = NeighborIndex::new(x.view(), self.metric, self.algorithm, None)?;
+        let neighborhoods = index.radius_neighbors(x.view(), eps)?;
         let is_core: Vec<bool> = neighborhoods
             .iter()
             .map(|nb| nb.len() >= self.min_samples)
@@ -256,7 +256,7 @@ impl<F: Float> Predict<F> for FittedDbscan<F> {
     /// [`labels`](FittedDbscan::labels) for border points reachable from
     /// several clusters (fit assigns them to the first cluster that reaches
     /// them, predict to the nearest core sample).
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -296,7 +296,7 @@ impl<F: Float> Predict<F> for FittedDbscan<F> {
             )
         } else {
             NeighborIndex::new(
-                &self.components,
+                self.components.view(),
                 self.metric,
                 NeighborAlgorithm::Auto,
                 Some(1),

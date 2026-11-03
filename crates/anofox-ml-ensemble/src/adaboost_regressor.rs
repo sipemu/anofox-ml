@@ -1,7 +1,7 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::split::cmp_nan_last;
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
 use rand::rngs::StdRng;
@@ -112,7 +112,7 @@ pub struct FittedAdaBoostRegressor<F: Float> {
 impl<F: Float> Fit<F> for AdaBoostRegressor {
     type Fitted = FittedAdaBoostRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -121,11 +121,11 @@ impl<F: Float> FitWeighted<F> for AdaBoostRegressor {
     type Fitted = FittedAdaBoostRegressor<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -134,9 +134,9 @@ impl<F: Float> FitWeighted<F> for AdaBoostRegressor {
 impl AdaBoostRegressor {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedAdaBoostRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -202,7 +202,7 @@ impl AdaBoostRegressor {
 
             // Fit weak learner on the bootstrap sample (without copying X).
             let fitted_tree: FittedDecisionTreeRegressor<F> =
-                tree_params.fit_on_rows(x, y, &bootstrap_indices, None)?;
+                tree_params.fit_on_rows(x.view(), y.view(), &bootstrap_indices, None)?;
 
             // Predict on the *full* training set.
             let preds = fitted_tree.predict(x)?;
@@ -282,7 +282,7 @@ impl AdaBoostRegressor {
 }
 
 impl<F: Float> Predict<F> for FittedAdaBoostRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -374,7 +374,7 @@ fn weighted_median<F: Float>(preds: &[F], weights: &[F]) -> F {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_weighted_median_not_mean() {

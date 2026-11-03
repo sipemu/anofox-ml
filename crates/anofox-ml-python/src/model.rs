@@ -13,7 +13,7 @@
 
 use anofox_ml_core::persistence::{self, ModelBundle};
 use anofox_ml_core::{Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Output of a prediction method that may be 1-D or 2-D.
@@ -52,29 +52,29 @@ pub(crate) trait DynModel: Send + Sync {
     fn is_fitted(&self) -> bool;
     fn fit(
         &mut self,
-        x: &Array2<f64>,
-        y: Option<&Array1<f64>>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: Option<ArrayView1<f64>>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<()>;
     fn to_bytes(&self) -> Result<Vec<u8>>;
     fn fitted_json(&self) -> Result<String>;
 
-    fn predict(&self, _x: &Array2<f64>) -> Result<Out> {
+    fn predict(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "predict"))
     }
-    fn predict_proba(&self, _x: &Array2<f64>) -> Result<Out> {
+    fn predict_proba(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_proba"))
     }
-    fn decision_function(&self, _x: &Array2<f64>) -> Result<Out> {
+    fn decision_function(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "decision_function"))
     }
-    fn transform(&self, _x: &Array2<f64>) -> Result<Out> {
+    fn transform(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "transform"))
     }
-    fn inverse_transform(&self, _x: &Array2<f64>) -> Result<Out> {
+    fn inverse_transform(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "inverse_transform"))
     }
-    fn score_samples(&self, _x: &Array2<f64>) -> Result<Out> {
+    fn score_samples(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "score_samples"))
     }
     /// Per-sample result of the training fit (cluster labels, outlier
@@ -148,12 +148,15 @@ impl<C: Serialize + DeserializeOwned, M: Serialize + DeserializeOwned> Est<C, M>
 }
 
 /// Require `y` for a supervised fit.
-pub(crate) fn need_y<'a>(kind: &str, y: Option<&'a Array1<f64>>) -> Result<&'a Array1<f64>> {
+pub(crate) fn need_y<'a>(
+    kind: &str,
+    y: Option<ArrayView1<'a, f64>>,
+) -> Result<ArrayView1<'a, f64>> {
     y.ok_or_else(|| RustMlError::InvalidParameter(format!("{kind}.fit needs y")))
 }
 
 /// Reject `sample_weight` for estimators without weighted fitting.
-pub(crate) fn no_weight(kind: &str, w: Option<&Array1<f64>>) -> Result<()> {
+pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
     match w {
         Some(_) => Err(RustMlError::InvalidParameter(format!(
             "{kind} does not accept sample_weight"
@@ -212,9 +215,9 @@ macro_rules! registry {
                 #[allow(unused_variables)]
                 fn fit(
                     &mut self,
-                    $x: &ndarray::Array2<f64>,
-                    $y: Option<&ndarray::Array1<f64>>,
-                    $w: Option<&ndarray::Array1<f64>>,
+                    $x: ndarray::ArrayView2<f64>,
+                    $y: Option<ndarray::ArrayView1<f64>>,
+                    $w: Option<ndarray::ArrayView1<f64>>,
                 ) -> anofox_ml_core::Result<()> {
                     #[allow(non_snake_case, dead_code)]
                     const K: &str = stringify!($kind);
@@ -311,7 +314,7 @@ macro_rules! registry {
         }
     };
     (@cap $kind:ident, $cap:ident, $m:ident, $x:ident, $body:expr) => {
-        fn $cap(&self, $x: &ndarray::Array2<f64>) -> anofox_ml_core::Result<$crate::model::Out> {
+        fn $cap(&self, $x: ndarray::ArrayView2<f64>) -> anofox_ml_core::Result<$crate::model::Out> {
             let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
             Ok($crate::model::Out::from($body?))
         }

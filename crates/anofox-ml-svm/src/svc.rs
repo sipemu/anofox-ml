@@ -2,7 +2,7 @@ use anofox_ml_core::{
     DecisionFunction, Fit, FitWeighted, Float, Predict, PredictLogProba, PredictProba, Result,
     RustMlError,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -284,7 +284,7 @@ impl<F: Float> FittedSvc<F> {
 
     /// Pairwise decision values (libsvm convention: positive favours the
     /// first class of the pair), shape `(n_samples, n_pairs)`.
-    fn pairwise_decision(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn pairwise_decision(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput(
                 "prediction input must not be empty".into(),
@@ -323,7 +323,8 @@ impl<F: Float> FittedSvc<F> {
     /// * More classes, `Ovr` (default): shape `(n_samples, n_classes)` with
     ///   one-vs-one votes plus a confidence term, as sklearn.
     /// * More classes, `Ovo`: shape `(n_samples, n_classes·(n_classes−1)/2)`.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         let dec = self.pairwise_decision(x)?;
         let k = self.class_labels.len();
         if k == 2 {
@@ -337,7 +338,8 @@ impl<F: Float> FittedSvc<F> {
 
     /// Platt-scaled class probabilities with Wu–Lin–Weng pairwise coupling
     /// (libsvm). Requires `probability = true` at fit time.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if !self.probability {
             return Err(RustMlError::InvalidParameter(
                 "predict_proba is not available when fitted with probability=false".into(),
@@ -397,7 +399,7 @@ fn ovr_decision_function<F: Float>(dec: &Array2<F>, k: usize) -> Array2<F> {
 }
 
 impl<F: Float> Predict<F> for FittedSvc<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let k = self.class_labels.len();
         if self.break_ties && k > 2 && self.decision_function_shape == DecisionFunctionShape::Ovr {
             let d = self.decision_function(x)?;
@@ -438,13 +440,13 @@ impl<F: Float> Predict<F> for FittedSvc<F> {
 }
 
 impl<F: Float> DecisionFunction<F> for FittedSvc<F> {
-    fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn decision_function_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         FittedSvc::decision_function(self, x)
     }
 }
 
 impl<F: Float> PredictProba<F> for FittedSvc<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         FittedSvc::predict_proba(self, x)
     }
 }
@@ -455,7 +457,7 @@ impl<F: Float> PredictLogProba<F> for FittedSvc<F> {}
 impl<F: Float> anofox_ml_core::ClassifierScore<F> for FittedSvc<F> {}
 
 /// Extract unique sorted class labels from y.
-fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
+fn extract_class_labels<F: Float>(y: ArrayView1<F>) -> Vec<F> {
     let mut labels: Vec<F> = y.to_vec();
     labels.sort_by(anofox_ml_core::labels::label_cmp);
     labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
@@ -790,8 +792,8 @@ impl Svc {
     /// libsvm's ν dual; `self.c` and class weights are ignored.
     pub(crate) fn fit_nu<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         nu: f64,
     ) -> Result<FittedSvc<F>> {
         self.fit_impl(x, y, None, Formulation::Nu(nu))
@@ -799,9 +801,9 @@ impl Svc {
 
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
         formulation: Formulation,
     ) -> Result<FittedSvc<F>> {
         self.validate()?;
@@ -979,7 +981,7 @@ impl Svc {
 impl<F: Float> Fit<F> for Svc {
     type Fitted = FittedSvc<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None, Formulation::C)
     }
 }
@@ -988,11 +990,11 @@ impl<F: Float> FitWeighted<F> for Svc {
     type Fitted = FittedSvc<F>;
 
     /// Per-sample weights rescale the upper bound: `C_i = C · w_{y_i} · sw_i`.
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight, Formulation::C)
     }
@@ -1130,7 +1132,7 @@ mod tests {
             .with_max_iter(5000);
         let fitted: FittedSvc<f64> = svc.fit(&x, &y).unwrap();
 
-        let scores = fitted.decision_function(&x).unwrap();
+        let scores = fitted.decision_function(x.view()).unwrap();
         assert_eq!(scores.nrows(), x.nrows());
         assert_eq!(scores.ncols(), 1); // binary
 
@@ -1302,7 +1304,7 @@ mod tests {
         let fitted: FittedSvc<f64> = svc.fit(&x, &y).unwrap();
 
         let x_empty = Array2::<f64>::zeros((0, 2));
-        let result = fitted.decision_function(&x_empty);
+        let result = fitted.decision_function(x_empty.view());
         assert!(result.is_err());
         match result {
             Err(RustMlError::EmptyInput(_)) => {}
@@ -1421,12 +1423,12 @@ mod sklearn_parity {
         assert_eq!(m.pairs.len(), 3);
         let pairs: Vec<(usize, usize)> = m.pairs.iter().map(|p| (p.class_i, p.class_j)).collect();
         assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)]);
-        assert_eq!(m.decision_function(&t).unwrap().dim(), (6, 3));
+        assert_eq!(m.decision_function(t.view()).unwrap().dim(), (6, 3));
         let ovo: FittedSvc<f64> = Svc::new()
             .with_decision_function_shape(DecisionFunctionShape::Ovo)
             .fit(&x, &y)
             .unwrap();
-        assert_eq!(ovo.decision_function(&t).unwrap().dim(), (6, 3));
+        assert_eq!(ovo.decision_function(t.view()).unwrap().dim(), (6, 3));
         // support_ is grouped by class and sorted within each class.
         let sup = m.support();
         assert_eq!(m.n_support_per_class().iter().sum::<usize>(), sup.len());
@@ -1440,7 +1442,7 @@ mod sklearn_parity {
         // Binary: one column, positive favours class_labels[1].
         let yb = y.mapv(|v| if v == 1.0 { 1.0 } else { 0.0 });
         let b: FittedSvc<f64> = Svc::new().fit(&x, &yb).unwrap();
-        let d = b.decision_function(&x).unwrap();
+        let d = b.decision_function(x.view()).unwrap();
         let p = b.predict(&x).unwrap();
         assert_eq!(d.ncols(), 1);
         for i in 0..x.nrows() {
@@ -1523,7 +1525,7 @@ mod sklearn_parity {
         // conf = [0.1 + (-0.1), -0.1 + 2.0, 0.1 - 2.0] -> class 1 wins with
         // break_ties.
         let m = constant_model([0.1, -0.1, 2.0], true);
-        let d = m.decision_function(&x).unwrap();
+        let d = m.decision_function(x.view()).unwrap();
         assert!(d.row(0).iter().all(|&v| v > 0.5 && v < 1.5));
         assert_eq!(m.predict(&x).unwrap()[0], 20.0);
         let m = constant_model([0.1, -0.1, 2.0], false);
@@ -1561,7 +1563,7 @@ mod sklearn_parity {
             .fit(&x, &y)
             .unwrap();
         assert_close(
-            &m.decision_function(&t).unwrap(),
+            &m.decision_function(t.view()).unwrap(),
             &[
                 &[2.207271797413894, -0.15133313254751832, 0.8505532596656649],
                 &[-0.14969666361607104, 2.2058677536797933, 0.8518614645077831],
@@ -1583,7 +1585,7 @@ mod sklearn_parity {
             .with_max_iter(10_000)
             .fit(&x, &y)
             .unwrap();
-        let p = m.predict_proba(&t).unwrap();
+        let p = m.predict_proba(t.view()).unwrap();
         // sklearn SVC(probability=True, random_state=0). The internal CV
         // folds differ (different RNG), so only compare loosely.
         let sk = [
@@ -1611,7 +1613,7 @@ mod sklearn_parity {
         assert!(a.iter().all(|&v| v < 0.0), "A must be negative: {a:?}");
         // predict_proba without probability=true is an error.
         let m: FittedSvc<f64> = Svc::new().fit(&x, &y).unwrap();
-        assert!(m.predict_proba(&t).is_err());
+        assert!(m.predict_proba(t.view()).is_err());
     }
 
     #[test]
@@ -1623,8 +1625,8 @@ mod sklearn_parity {
             .with_probability(true)
             .fit(&x, &yb)
             .unwrap();
-        let p = m.predict_proba(&t).unwrap();
-        let d = m.decision_function(&t).unwrap();
+        let p = m.predict_proba(t.view()).unwrap();
+        let d = m.decision_function(t.view()).unwrap();
         let (a, b) = m.prob_params().unwrap();
         for i in 0..t.nrows() {
             // libsvm: P(class 0) = sigmoid(A * f + B) with f = -decision.
@@ -1679,8 +1681,8 @@ mod sklearn_parity {
             .unwrap();
         assert_eq!(pre.support(), lin.support());
         let kt = t.dot(&x.t());
-        let a = lin.decision_function(&t).unwrap();
-        let b = pre.decision_function(&kt).unwrap();
+        let a = lin.decision_function(t.view()).unwrap();
+        let b = pre.decision_function(kt.view()).unwrap();
         assert!((&a - &b).iter().all(|d| d.abs() < 1e-12));
         assert_eq!(lin.predict(&t).unwrap(), pre.predict(&kt).unwrap());
         // Wrong shapes are rejected.
@@ -1704,7 +1706,7 @@ mod sklearn_parity {
             _ => 1.0,
         });
         let swm: FittedSvc<f64> = base.fit_weighted(&x, &y, Some(&sw)).unwrap();
-        let d = cw.decision_function(&t).unwrap() - swm.decision_function(&t).unwrap();
+        let d = cw.decision_function(t.view()).unwrap() - swm.decision_function(t.view()).unwrap();
         assert!(d.iter().all(|v| v.abs() < 1e-12));
         // Balanced weights: n / (k * n_c) = 1 for equal class sizes.
         let idx: Vec<usize> = (0..30).map(|i| i / 10).collect();
@@ -1791,7 +1793,7 @@ mod sklearn_parity {
             .fit(&x, &y)
             .unwrap();
         assert_close(
-            &ovo.decision_function(&t).unwrap(),
+            &ovo.decision_function(t.view()).unwrap(),
             &[
                 &[1.1366567442342639, 0.9370257855164766, -0.06420023111184084],
                 &[-0.37317404913661645, 0.427095036367066, 0.6565335291340861],
@@ -1818,7 +1820,7 @@ mod sklearn_parity {
             .fit(&x, &yb)
             .unwrap();
         assert_close(
-            &b.decision_function(&t).unwrap(),
+            &b.decision_function(t.view()).unwrap(),
             &[
                 &[-1.1507742796892788],
                 &[0.5740728445792119],

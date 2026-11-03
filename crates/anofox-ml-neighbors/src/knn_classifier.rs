@@ -1,5 +1,5 @@
 use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 use crate::distance::DistanceMetric;
 use crate::index::{NeighborAlgorithm, NeighborIndex};
@@ -95,7 +95,7 @@ pub struct FittedKnnClassifier<F: Float> {
 }
 
 /// Check `X`/`y` and `n_neighbors` for the k-nearest-neighbour estimators.
-pub(crate) fn check_knn_fit<F: Float>(x: &Array2<F>, y: &Array1<F>, k: usize) -> Result<()> {
+pub(crate) fn check_knn_fit<F: Float>(x: ArrayView2<F>, y: ArrayView1<F>, k: usize) -> Result<()> {
     if x.nrows() != y.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {} elements",
@@ -122,7 +122,7 @@ pub(crate) fn check_knn_fit<F: Float>(x: &Array2<F>, y: &Array1<F>, k: usize) ->
 }
 
 /// Sorted distinct labels and the class index of every label.
-pub(crate) fn encode_classes<F: Float>(y: &Array1<F>) -> (Vec<F>, Vec<usize>) {
+pub(crate) fn encode_classes<F: Float>(y: ArrayView1<F>) -> (Vec<F>, Vec<usize>) {
     let mut classes: Vec<F> = y.to_vec();
     classes.sort_by(crate::total_cmp);
     classes.dedup_by(|a, b| crate::total_cmp(a, b).is_eq());
@@ -140,7 +140,7 @@ pub(crate) fn encode_classes<F: Float>(y: &Array1<F>) -> (Vec<F>, Vec<usize>) {
 impl<F: Float> Fit<F> for KnnClassifier {
     type Fitted = FittedKnnClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         check_knn_fit(x, y, self.n_neighbors)?;
         let index = NeighborIndex::new(x, self.metric, self.algorithm, Some(self.n_neighbors))?;
         let (classes, y_class) = encode_classes(y);
@@ -157,7 +157,7 @@ impl<F: Float> Fit<F> for KnnClassifier {
 impl<F: Float + Send + Sync> Predict<F> for FittedKnnClassifier<F> {
     /// The class with the largest (weighted) vote; ties go to the smallest
     /// label, as in sklearn.
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let proba = self.predict_proba(x)?;
         Ok(proba
             .rows()
@@ -196,12 +196,14 @@ impl<F: Float> FittedKnnClassifier<F> {
         x: &Array2<F>,
         k: Option<usize>,
     ) -> Result<(Array2<F>, Array2<usize>)> {
-        self.index.kneighbors(x, k.unwrap_or(self.n_neighbors))
+        self.index
+            .kneighbors(x.view(), k.unwrap_or(self.n_neighbors))
     }
 
     /// Class probabilities: the (weighted) share of each class among the
     /// neighbours.
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         let (dist, idx) = self.index.kneighbors(x, self.n_neighbors)?;
         let mut proba = Array2::zeros((x.nrows(), self.classes.len()));
         for (i, mut row) in proba.rows_mut().into_iter().enumerate() {
@@ -220,7 +222,7 @@ impl<F: Float> FittedKnnClassifier<F> {
 }
 
 impl<F: Float> PredictProba<F> for FittedKnnClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         FittedKnnClassifier::predict_proba(self, x)
     }
 }

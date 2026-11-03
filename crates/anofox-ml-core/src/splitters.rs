@@ -162,7 +162,7 @@ pub fn stratified_group_k_fold<F: Float>(
     }
     let (unique, group_idx) = encode_groups(groups);
     check_n_splits_groups(k, unique.len())?;
-    let classes = crate::utils::group_by_class(y);
+    let classes = crate::utils::group_by_class(y.view());
     let n_classes = classes.len();
     let mut class_of = vec![0usize; y.len()];
     for (c, members) in classes.iter().enumerate() {

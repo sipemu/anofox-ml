@@ -9,7 +9,7 @@ use anofox_regression::solvers::{
     FittedOls, FittedWls, OlsRegressor as InnerOls, WlsRegressor as InnerWls,
 };
 use anofox_regression::{FittedRegressor, RegressionResult, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Ordinary Least Squares regression estimator.
 ///
@@ -129,18 +129,18 @@ impl FittedOlsRegressor {
         kind: IntervalKind,
         level: f64,
     ) -> Result<PredictionInterval> {
-        self.check_features(x)?;
+        self.check_features(x.view())?;
         if !self.inference {
             return Err(crate::summary::not_computed());
         }
-        let x_mat = ndarray_to_mat(x);
+        let x_mat = ndarray_to_mat(x.view());
         match &self.inner {
             OlsInner::Ols(m) => interval_from(m, &x_mat, kind, level),
             OlsInner::Wls(m) => interval_from(m, &x_mat, kind, level),
         }
     }
 
-    fn check_features(&self, x: &Array2<f64>) -> Result<()> {
+    fn check_features(&self, x: ArrayView2<f64>) -> Result<()> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -155,7 +155,7 @@ impl FittedOlsRegressor {
 impl Fit<f64> for OlsRegressor {
     type Fitted = FittedOlsRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         crate::convert::check_xy(x, y)?;
         crate::summary::validate_level(self.confidence_level)?;
 
@@ -187,11 +187,11 @@ impl FitWeighted<f64> for OlsRegressor {
     type Fitted = FittedOlsRegressor;
 
     /// Weighted least squares; `None` is identical to [`Fit::fit`].
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         let Some(w) = sample_weight else {
             return self.fit(x, y);
@@ -201,7 +201,7 @@ impl FitWeighted<f64> for OlsRegressor {
         let w = crate::convert::resolve_sample_weight(Some(w), y.len())?;
         let fitted = InnerWls::builder()
             .with_intercept(self.with_intercept)
-            .weights(ndarray_to_col(&w))
+            .weights(ndarray_to_col(w.view()))
             .compute_inference(self.inference)
             .confidence_level(self.confidence_level)
             .build()
@@ -219,7 +219,7 @@ impl FitWeighted<f64> for OlsRegressor {
 }
 
 impl Predict<f64> for FittedOlsRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         self.check_features(x)?;
         crate::convert::linear_predict(x, &self.coef, self.intercept)
     }

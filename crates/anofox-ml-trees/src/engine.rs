@@ -15,7 +15,7 @@
 //! did) with plain arrays instead of a hash map.
 
 use anofox_ml_core::Float;
-use ndarray::{Array1, Array2};
+use ndarray::{ArrayView1, ArrayView2};
 
 use crate::node::TreeNode;
 use crate::split::{
@@ -47,10 +47,10 @@ pub(crate) struct GrowParams {
 /// Grow a tree on the sample slots `rows` (row indices into `x` / `y`,
 /// repeats allowed). `weights` are per row of `x`.
 pub(crate) fn grow<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     rows: &[usize],
-    weights: Option<&Array1<F>>,
+    weights: Option<ArrayView1<F>>,
     params: &GrowParams,
     seed: u64,
 ) -> TreeNode<F> {
@@ -92,9 +92,9 @@ pub(crate) fn grow<F: Float>(
         None => F::from_usize(m).unwrap(),
     };
     let mut g = Grower {
-        y,
+        y: y.reborrow(),
         rows,
-        weights,
+        weights: weights.map(|w| w.reborrow()),
         params,
         total_weight,
         cols,
@@ -159,9 +159,9 @@ fn from_arena<F: Float>(arena: &mut Vec<Option<Slot<F>>>, id: usize) -> TreeNode
 }
 
 struct Grower<'a, F: Float> {
-    y: &'a Array1<F>,
+    y: ArrayView1<'a, F>,
     rows: &'a [usize],
-    weights: Option<&'a Array1<F>>,
+    weights: Option<ArrayView1<'a, F>>,
     params: &'a GrowParams,
     /// Total (weighted) number of samples of the tree.
     total_weight: F,
@@ -406,6 +406,7 @@ impl<F: Float> Grower<'_, F> {
                 WeightedRegressionAccumulator::new(self.y, indices, w),
             ),
             (Some((cls, k)), w) => {
+                let w = w.map(|w| w.reborrow());
                 // Classes in order of first appearance in the node.
                 let mut local = vec![usize::MAX; *k];
                 let mut n_local = 0;
@@ -528,7 +529,7 @@ impl<F: Float> Grower<'_, F> {
 struct EncodedClassAccumulator<'a, F: Float> {
     cls: &'a [u32],
     local: Vec<usize>,
-    weights: Option<&'a Array1<F>>,
+    weights: Option<ArrayView1<'a, F>>,
     left: Vec<F>,
     right: Vec<F>,
     left_counts: Vec<usize>,
@@ -548,7 +549,7 @@ impl<F: Float> EncodedClassAccumulator<'_, F> {
 }
 
 impl<F: Float> SplitAccumulator<F> for EncodedClassAccumulator<'_, F> {
-    fn reset(&mut self, _y: &Array1<F>, indices: &[usize]) {
+    fn reset(&mut self, _y: ArrayView1<F>, indices: &[usize]) {
         self.left.fill(F::zero());
         self.right.fill(F::zero());
         self.left_counts.fill(0);
@@ -568,7 +569,7 @@ impl<F: Float> SplitAccumulator<F> for EncodedClassAccumulator<'_, F> {
     }
 
     #[inline]
-    fn move_to_left(&mut self, _y: &Array1<F>, row: usize) {
+    fn move_to_left(&mut self, _y: ArrayView1<F>, row: usize) {
         let c = self.class_of_row(row);
         self.left_counts[c] += 1;
         self.right_counts[c] -= 1;

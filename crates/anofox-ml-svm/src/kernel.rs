@@ -1,5 +1,5 @@
 use anofox_ml_core::{Float, Result, RustMlError};
-use ndarray::{Array2, ArrayView1};
+use ndarray::{Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 /// Kernel coefficient `γ` for the RBF, polynomial and sigmoid kernels.
 ///
@@ -43,7 +43,8 @@ impl Gamma {
     }
 
     /// Resolve `Scale` / `Auto` against training data.
-    pub fn resolve<F: Float>(&self, x: &Array2<F>) -> f64 {
+    pub fn resolve<'a, F: Float>(&self, x: impl AsArray<'a, F, Ix2>) -> f64 {
+        let x: ArrayView2<F> = x.into();
         let n_features = x.ncols().max(1) as f64;
         match self {
             Gamma::Value(v) => *v,
@@ -236,7 +237,8 @@ impl SvmKernel {
 
     /// Return a copy with `Gamma::Scale` / `Gamma::Auto` replaced by their
     /// values for the training data `x` (sklearn resolves `gamma` at fit).
-    pub fn resolve<F: Float>(&self, x: &Array2<F>) -> SvmKernel {
+    pub fn resolve<'a, F: Float>(&self, x: impl AsArray<'a, F, Ix2>) -> SvmKernel {
+        let x: ArrayView2<F> = x.into();
         match self {
             SvmKernel::Rbf { gamma } => SvmKernel::Rbf {
                 gamma: Gamma::Value(gamma.resolve(x)),
@@ -313,7 +315,7 @@ impl SvmKernel {
 /// Kernel matrix `K[i, j] = k(a_i, b_j)`. For the precomputed kernel `a`
 /// already *is* the kernel matrix and is returned as-is.
 pub(crate) fn kernel_matrix<F: Float>(
-    a: &Array2<F>,
+    a: ArrayView2<F>,
     b: &Array2<F>,
     kernel: &SvmKernel,
 ) -> Array2<F> {
@@ -330,8 +332,9 @@ impl SvmKernel {
     /// # Panics
     ///
     /// Same conditions as [`compute`](Self::compute).
-    pub fn matrix<F: Float>(&self, a: &Array2<F>, b: &Array2<F>) -> Array2<F> {
-        self.matrix_impl(a, b, false)
+    pub fn matrix<'a, F: Float>(&self, a: impl AsArray<'a, F, Ix2>, b: &Array2<F>) -> Array2<F> {
+        let a: ArrayView2<F> = a.into();
+        self.matrix_impl(a, b.view(), false)
     }
 
     /// Symmetric Gram matrix `k(X, X)`. The RBF diagonal is exactly 1.
@@ -339,11 +342,12 @@ impl SvmKernel {
     /// # Panics
     ///
     /// Same conditions as [`compute`](Self::compute).
-    pub fn gram<F: Float>(&self, x: &Array2<F>) -> Array2<F> {
-        self.matrix_impl(x, x, true)
+    pub fn gram<'a, F: Float>(&self, x: impl AsArray<'a, F, Ix2>) -> Array2<F> {
+        let x: ArrayView2<F> = x.into();
+        self.matrix_impl(x.view(), x, true)
     }
 
-    fn matrix_impl<F: Float>(&self, a: &Array2<F>, b: &Array2<F>, same: bool) -> Array2<F> {
+    fn matrix_impl<F: Float>(&self, a: ArrayView2<F>, b: ArrayView2<F>, same: bool) -> Array2<F> {
         let g = |gamma: &Gamma| -> F {
             let v = match gamma {
                 Gamma::Value(v) => *v,
@@ -428,7 +432,7 @@ mod tests {
             SvmKernel::poly(3, 0.5, 1.0),
             SvmKernel::sigmoid(0.2, -0.1),
         ] {
-            let k = kernel.matrix(&a, &b);
+            let k = kernel.matrix(a.view(), &b);
             let g = kernel.gram(&a);
             for i in 0..3 {
                 for j in 0..2 {
@@ -540,14 +544,18 @@ mod tests {
             .map(|v: &f64| (v - mean).powi(2))
             .sum::<f64>()
             / 6.0;
-        assert_abs_diff_eq!(Gamma::Scale.resolve(&x), 1.0 / (2.0 * var), epsilon = 1e-14);
-        assert_abs_diff_eq!(Gamma::Auto.resolve(&x), 0.5, epsilon = 1e-14);
-        assert_abs_diff_eq!(Gamma::Value(0.3).resolve(&x), 0.3, epsilon = 1e-14);
+        assert_abs_diff_eq!(
+            Gamma::Scale.resolve(x.view()),
+            1.0 / (2.0 * var),
+            epsilon = 1e-14
+        );
+        assert_abs_diff_eq!(Gamma::Auto.resolve(x.view()), 0.5, epsilon = 1e-14);
+        assert_abs_diff_eq!(Gamma::Value(0.3).resolve(x.view()), 0.3, epsilon = 1e-14);
         // Constant data: sklearn falls back to gamma = 1.
         let c = array![[2.0, 2.0], [2.0, 2.0]];
-        assert_abs_diff_eq!(Gamma::Scale.resolve(&c), 1.0, epsilon = 1e-14);
+        assert_abs_diff_eq!(Gamma::Scale.resolve(c.view()), 1.0, epsilon = 1e-14);
         assert_eq!(
-            SvmKernel::default().resolve(&x),
+            SvmKernel::default().resolve(x.view()),
             SvmKernel::Rbf {
                 gamma: Gamma::Value(1.0 / (2.0 * var))
             }
@@ -572,7 +580,7 @@ mod tests {
         use anofox_ml_core::{Fit, FitUnsupervised, Predict};
         let x = array![[0.0, 1.0], [1.0, 0.5], [2.0, 2.5], [3.0, 1.0], [4.0, 3.5]];
         let y = array![0.0, 1.0, 2.0, 3.0, 4.0];
-        let k = SvmKernel::default().resolve(&x);
+        let k = SvmKernel::default().resolve(x.view());
         let svr: crate::FittedSvr<f64> = crate::Svr::new().fit(&x, &y).unwrap();
         assert_eq!(svr.predict(&x).unwrap().len(), 5);
         let nusvr: crate::FittedNuSvr<f64> = crate::NuSvr::new().fit(&x, &y).unwrap();

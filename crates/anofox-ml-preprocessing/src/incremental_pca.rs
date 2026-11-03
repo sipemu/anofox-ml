@@ -13,7 +13,7 @@ use anofox_ml_core::{
 };
 use faer::linalg::solvers::Svd;
 use faer::Mat;
-use ndarray::{s, Array1, Array2, Axis};
+use ndarray::{s, Array1, Array2, ArrayView2, Axis};
 
 use crate::pca::{svd_flip_rows, FittedPca};
 
@@ -87,7 +87,7 @@ fn gen_batches(n: usize, batch_size: usize, min_batch_size: usize) -> Vec<(usize
 impl<F: Float> FitUnsupervised<F> for IncrementalPca {
     type Fitted = FittedIncrementalPca<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let (n, d) = x.dim();
         if n == 0 || d == 0 {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
@@ -109,7 +109,11 @@ impl<F: Float> FitUnsupervised<F> for IncrementalPca {
 impl<F: Float> PartialFitUnsupervised<F> for IncrementalPca {
     type Fitted = FittedIncrementalPca<F>;
 
-    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn partial_fit_view(
+        &self,
+        state: Option<Self::Fitted>,
+        x: ArrayView2<F>,
+    ) -> Result<Self::Fitted> {
         let (n, d) = x.dim();
         if n == 0 || d == 0 {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
@@ -239,13 +243,13 @@ impl<F: Float> PartialFitUnsupervised<F> for IncrementalPca {
 }
 
 impl<F: Float> Transform<F> for FittedIncrementalPca<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.pca.transform(x)
     }
 }
 
 impl<F: Float> InverseTransform<F> for FittedIncrementalPca<F> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.pca.inverse_transform(x)
     }
 }

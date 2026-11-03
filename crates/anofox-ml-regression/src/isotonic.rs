@@ -4,7 +4,7 @@ use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::{FittedIsotonic, IsotonicRegressor as InnerIsotonic};
 use anofox_regression::{FittedRegressor as _, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Handling of inputs outside the training range at prediction time
 /// (sklearn `out_of_bounds`).
@@ -78,7 +78,7 @@ impl FittedIsotonicRegressor {
 impl Fit<f64> for IsotonicRegressor {
     type Fitted = FittedIsotonicRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -110,7 +110,7 @@ impl Fit<f64> for IsotonicRegressor {
         xs.sort_by(f64::total_cmp);
         xs.dedup();
         let knots = Array2::from_shape_vec((xs.len(), 1), xs.clone()).expect("one column");
-        let ys = col_to_ndarray(&fitted.predict(&ndarray_to_mat(&knots))).to_vec();
+        let ys = col_to_ndarray(&fitted.predict(&ndarray_to_mat(knots.view()))).to_vec();
         Ok(FittedIsotonicRegressor {
             inner: fitted,
             x_thresholds: xs,
@@ -121,7 +121,7 @@ impl Fit<f64> for IsotonicRegressor {
 }
 
 impl Predict<f64> for FittedIsotonicRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != 1 {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected 1 feature, got {}",

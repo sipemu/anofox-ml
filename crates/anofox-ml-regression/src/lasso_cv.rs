@@ -13,7 +13,7 @@ use crate::elastic_net_cv::{
     default_alphas, path_cv, r_squared, sorted_alphas, CdOptions, FoldSpec, PathCv,
 };
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Lasso regression with cross-validated alpha selection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -161,7 +161,7 @@ impl FittedLassoCrossValidated {
 impl Fit<f64> for LassoCrossValidated {
     type Fitted = FittedLassoCrossValidated;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         if self.n_alphas == 0 || !(self.eps > 0.0 && self.eps < 1.0) {
             return Err(RustMlError::InvalidParameter(
@@ -189,7 +189,7 @@ impl Fit<f64> for LassoCrossValidated {
 }
 
 impl Predict<f64> for FittedLassoCrossValidated {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         crate::convert::linear_predict(x, &self.cv.coef, self.intercept.unwrap_or(0.0))
     }
 }
@@ -421,8 +421,8 @@ mod tests {
         let mut opts = opts;
         opts.tol = 1e-12;
         let path = anofox_regression::solvers::path::fit_path(
-            &crate::convert::ndarray_to_mat(&x),
-            &crate::convert::ndarray_to_col(&y),
+            &crate::convert::ndarray_to_mat(x.view()),
+            &crate::convert::ndarray_to_col(y.view()),
             &f.alphas().to_vec(),
             &opts,
         )

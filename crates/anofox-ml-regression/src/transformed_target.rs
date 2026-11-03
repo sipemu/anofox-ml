@@ -5,7 +5,7 @@
 //! is applied element-wise to predictions of the underlying regressor.
 
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
 type ScalarFn = fn(f64) -> f64;
 
@@ -46,7 +46,7 @@ where
 {
     type Fitted = FittedTransformedTargetRegressor<R::Fitted>;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -92,7 +92,7 @@ impl<F> Predict<f64> for FittedTransformedTargetRegressor<F>
 where
     F: Predict<f64>,
 {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let raw = self.inner.predict(x)?;
         Ok(raw.mapv(self.inverse_func))
     }

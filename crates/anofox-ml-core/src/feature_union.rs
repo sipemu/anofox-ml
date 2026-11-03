@@ -1,4 +1,4 @@
-use ndarray::{Array2, Axis};
+use ndarray::{Array2, ArrayView1, ArrayView2, Axis};
 
 use crate::error::{Result, RustMlError};
 use crate::float::Float;
@@ -87,7 +87,7 @@ fn concat_columns<F: Float>(arrays: &[Array2<F>]) -> Result<Array2<F>> {
 impl<F: Float + 'static> FitUnsupervised<F> for FeatureUnion<F> {
     type Fitted = FittedFeatureUnion<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         Ok(self.fit_with_target(x, None)?.0)
     }
 
@@ -95,8 +95,8 @@ impl<F: Float + 'static> FitUnsupervised<F> for FeatureUnion<F> {
     /// ones) and returns the training output computed during the fit.
     fn fit_with_target(
         &self,
-        x: &Array2<F>,
-        y: Option<&ndarray::Array1<F>>,
+        x: ArrayView2<F>,
+        y: Option<ArrayView1<F>>,
     ) -> Result<(FittedFeatureUnion<F>, Option<Array2<F>>)> {
         if self.branches.is_empty() {
             return Err(RustMlError::InvalidParameter(
@@ -124,7 +124,7 @@ impl<F: Float + 'static> FitUnsupervised<F> for FeatureUnion<F> {
 
 /// Implement `Transform` so the blanket `TransformStep` wrapper works.
 impl<F: Float> Transform<F> for FittedFeatureUnion<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let mut outputs = Vec::with_capacity(self.branches.len());
         for (_, branch) in &self.branches {
             outputs.push(branch.transform(x)?);
@@ -137,6 +137,7 @@ impl<F: Float> Transform<F> for FittedFeatureUnion<F> {
 mod tests {
     use super::*;
     use crate::pipeline::{FitPredict, Pipeline, PredictStep};
+    use crate::traits::{Fit, Predict};
     use ndarray::{array, Array1};
     use std::any::Any;
 
@@ -147,8 +148,8 @@ mod tests {
     impl FitTransform<f64> for Doubler {
         fn fit_transform(
             &self,
-            x: &Array2<f64>,
-            _y: Option<&Array1<f64>>,
+            x: ArrayView2<f64>,
+            _y: Option<ArrayView1<f64>>,
         ) -> Result<(Box<dyn TransformStep<f64>>, Array2<f64>)> {
             let transformed = x.mapv(|v| v * 2.0);
             Ok((Box::new(FittedDoubler), transformed))
@@ -156,7 +157,7 @@ mod tests {
     }
 
     impl TransformStep<f64> for FittedDoubler {
-        fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        fn transform(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
             Ok(x.mapv(|v| v * 2.0))
         }
         fn as_any(&self) -> &dyn Any {
@@ -171,8 +172,8 @@ mod tests {
     impl FitTransform<f64> for Tripler {
         fn fit_transform(
             &self,
-            x: &Array2<f64>,
-            _y: Option<&Array1<f64>>,
+            x: ArrayView2<f64>,
+            _y: Option<ArrayView1<f64>>,
         ) -> Result<(Box<dyn TransformStep<f64>>, Array2<f64>)> {
             let transformed = x.mapv(|v| v * 3.0);
             Ok((Box::new(FittedTripler), transformed))
@@ -180,7 +181,7 @@ mod tests {
     }
 
     impl TransformStep<f64> for FittedTripler {
-        fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+        fn transform(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
             Ok(x.mapv(|v| v * 3.0))
         }
         fn as_any(&self) -> &dyn Any {
@@ -195,15 +196,15 @@ mod tests {
     impl FitPredict<f64> for MeanPredictor {
         fn fit_predict_step(
             &self,
-            _x: &Array2<f64>,
-            _y: &Array1<f64>,
+            _x: ArrayView2<f64>,
+            _y: ArrayView1<f64>,
         ) -> Result<Box<dyn PredictStep<f64>>> {
             Ok(Box::new(FittedMeanPredictor))
         }
     }
 
     impl PredictStep<f64> for FittedMeanPredictor {
-        fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
             Ok(x.mean_axis(ndarray::Axis(1)).unwrap())
         }
         fn as_any(&self) -> &dyn Any {
@@ -218,7 +219,7 @@ mod tests {
             .push("triple", Tripler);
 
         let x = array![[1.0, 2.0], [3.0, 4.0]];
-        let (fitted, transformed) = union.fit_transform(&x, None).unwrap();
+        let (fitted, transformed) = union.fit_transform(x.view(), None).unwrap();
 
         // 2 original cols x 2 branches = 4 cols
         assert_eq!(transformed.ncols(), 4);
@@ -232,7 +233,7 @@ mod tests {
 
         // Transform on new data
         let new_x = array![[10.0, 20.0]];
-        let result = fitted.transform(&new_x).unwrap();
+        let result = fitted.transform(new_x.view()).unwrap();
         assert_eq!(result.ncols(), 4);
         assert_eq!(result[[0, 0]], 20.0);
         assert_eq!(result[[0, 2]], 30.0);
@@ -245,7 +246,7 @@ mod tests {
             .push("triple", Tripler);
 
         let x = array![[1.0, 2.0], [3.0, 4.0]];
-        let (fitted_step, _) = union.fit_transform(&x, None).unwrap();
+        let (fitted_step, _) = union.fit_transform(x.view(), None).unwrap();
 
         let fitted_union = fitted_step
             .as_any()
@@ -264,7 +265,7 @@ mod tests {
         let union = FeatureUnion::new().push("a", Doubler).push("b", Tripler);
 
         let x = array![[1.0], [2.0]];
-        let (fitted_step, _) = union.fit_transform(&x, None).unwrap();
+        let (fitted_step, _) = union.fit_transform(x.view(), None).unwrap();
 
         let fitted_union = fitted_step
             .as_any()
@@ -297,6 +298,6 @@ mod tests {
     fn test_feature_union_empty_errors() {
         let union = FeatureUnion::<f64>::new();
         let x = array![[1.0], [2.0]];
-        assert!(union.fit_transform(&x, None).is_err());
+        assert!(union.fit_transform(x.view(), None).is_err());
     }
 }

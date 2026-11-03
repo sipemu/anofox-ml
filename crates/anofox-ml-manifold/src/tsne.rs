@@ -33,7 +33,7 @@ use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use faer::linalg::solvers::SelfAdjointEigen;
 use faer::{Mat, Side};
-use ndarray::{Array2, Axis};
+use ndarray::{Array2, ArrayView2, Axis};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -248,7 +248,7 @@ fn joint_sparse(x: &Array2<f64>, perplexity: f64, k: usize) -> Result<SparseP> {
     let n = x.nrows();
     let desired_entropy = (perplexity as f32 as f64).ln();
     let index = NeighborIndex::new(
-        x,
+        x.view(),
         DistanceMetric::Euclidean,
         NeighborAlgorithm::Auto,
         Some(k),
@@ -736,9 +736,9 @@ impl<F: Float> FitUnsupervised<F> for TSne {
     type Fitted = FittedTSne;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         let k = self.n_components;
         if n < 2 {

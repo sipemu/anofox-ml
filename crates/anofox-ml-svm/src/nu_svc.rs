@@ -5,7 +5,7 @@
 //! on the fraction of support vectors.
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 use crate::kernel::SvmKernel;
 use crate::svc::{self, DecisionFunctionShape};
@@ -161,13 +161,15 @@ impl<F: Float> FittedNuSvc<F> {
 
     /// Decision function; see [`FittedSvc::decision_function`](crate::FittedSvc::decision_function)
     /// for the shapes.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        self.inner.decision_function(x)
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
+        self.inner.decision_function(x.view())
     }
 
     /// Platt-scaled class probabilities (requires `probability = true`).
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        self.inner.predict_proba(x)
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
+        self.inner.predict_proba(x.view())
     }
 
     /// The underlying fitted C-SVC.
@@ -177,25 +179,25 @@ impl<F: Float> FittedNuSvc<F> {
 }
 
 impl<F: Float> anofox_ml_core::DecisionFunction<F> for FittedNuSvc<F> {
-    fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn decision_function_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.inner.decision_function(x)
     }
 }
 
 impl<F: Float> anofox_ml_core::PredictProba<F> for FittedNuSvc<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         self.inner.predict_proba(x)
     }
 }
 
 impl<F: Float> Predict<F> for FittedNuSvc<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         self.inner.predict(x)
     }
 }
 
 /// Extract unique sorted class labels from y.
-fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
+fn extract_class_labels<F: Float>(y: ArrayView1<F>) -> Vec<F> {
     let mut labels: Vec<F> = y.to_vec();
     labels.sort_by(anofox_ml_core::labels::label_cmp);
     labels.dedup_by(|a, b| (*a - *b).abs() < F::from_f64(1e-12).unwrap());
@@ -205,7 +207,7 @@ fn extract_class_labels<F: Float>(y: &Array1<F>) -> Vec<F> {
 impl<F: Float> Fit<F> for NuSvc {
     type Fitted = FittedNuSvc<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.validate()?;
 
         if x.is_empty() || y.is_empty() {

@@ -3,7 +3,7 @@
 //! the neighbour estimators here and the clustering / manifold crates.
 
 use anofox_ml_core::{Float, Result, RustMlError};
-use ndarray::{Array2, ArrayView1};
+use ndarray::{Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 use rayon::prelude::*;
 
 use crate::distance::DistanceMetric;
@@ -77,23 +77,25 @@ impl<F: Float> NeighborIndex<F> {
     /// Build an index over the rows of `x` with sklearn's leaf size (30).
     ///
     /// `n_neighbors` is only a hint for [`NeighborAlgorithm::Auto`].
-    pub fn new(
-        x: &Array2<F>,
+    pub fn new<'a>(
+        x: impl AsArray<'a, F, Ix2>,
         metric: DistanceMetric,
         algorithm: NeighborAlgorithm,
         n_neighbors: Option<usize>,
     ) -> Result<Self> {
+        let x: ArrayView2<F> = x.into();
         Self::with_leaf_size(x, metric, algorithm, n_neighbors, DEFAULT_LEAF_SIZE)
     }
 
     /// [`new`](Self::new) with an explicit KD-tree leaf size.
-    pub fn with_leaf_size(
-        x: &Array2<F>,
+    pub fn with_leaf_size<'a>(
+        x: impl AsArray<'a, F, Ix2>,
         metric: DistanceMetric,
         algorithm: NeighborAlgorithm,
         n_neighbors: Option<usize>,
         leaf_size: usize,
     ) -> Result<Self> {
+        let x: ArrayView2<F> = x.into();
         metric.validate()?;
         let metric = metric.canonical();
         let (n, d) = x.dim();
@@ -141,7 +143,7 @@ impl<F: Float> NeighborIndex<F> {
         &self.data
     }
 
-    fn check_query(&self, q: &Array2<F>) -> Result<()> {
+    fn check_query(&self, q: ArrayView2<F>) -> Result<()> {
         if q.ncols() != self.data.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} columns, got {}",
@@ -211,7 +213,7 @@ impl<F: Float> NeighborIndex<F> {
 
     /// Neighbour candidates of every query row: the `Knn(k)` nearest or all
     /// within reduced radius `Radius(r)`, sorted by (distance, index).
-    fn query_rows(&self, q: &Array2<F>, query: Query<F>) -> Vec<Vec<Cand<F>>> {
+    fn query_rows(&self, q: ArrayView2<F>, query: Query<F>) -> Vec<Vec<Cand<F>>> {
         if self.tree.is_none() && self.metric == DistanceMetric::Euclidean {
             return self.euclidean_brute_rows(q, query);
         }
@@ -226,7 +228,7 @@ impl<F: Float> NeighborIndex<F> {
     /// the k-th smallest, or the radius, plus a bound on its rounding
     /// error), which are then ranked by exact distances. Results equal
     /// [`knn_one`](Self::knn_one) / [`radius_one`](Self::radius_one).
-    fn euclidean_brute_rows(&self, q: &Array2<F>, query: Query<F>) -> Vec<Vec<Cand<F>>> {
+    fn euclidean_brute_rows(&self, q: ArrayView2<F>, query: Query<F>) -> Vec<Vec<Cand<F>>> {
         const BLOCK: usize = 64;
         let q = q.as_standard_layout();
         let x = &self.data;
@@ -301,7 +303,7 @@ impl<F: Float> NeighborIndex<F> {
     /// Run `f` on every query row (in parallel for many queries).
     fn per_row<T: Send>(
         &self,
-        q: &Array2<F>,
+        q: ArrayView2<F>,
         f: impl Fn(usize, &[F]) -> T + Sync + Send,
     ) -> Vec<T> {
         let q = q.as_standard_layout();
@@ -328,7 +330,12 @@ impl<F: Float> NeighborIndex<F> {
 
     /// Distances and indices of the `k` nearest training samples of every
     /// row of `q`, each row sorted by distance (sklearn's `kneighbors`).
-    pub fn kneighbors(&self, q: &Array2<F>, k: usize) -> Result<(Array2<F>, Array2<usize>)> {
+    pub fn kneighbors<'a>(
+        &self,
+        q: impl AsArray<'a, F, Ix2>,
+        k: usize,
+    ) -> Result<(Array2<F>, Array2<usize>)> {
+        let q: ArrayView2<F> = q.into();
         self.check_query(q)?;
         self.check_k(k)?;
         let rows = self.query_rows(q, Query::Knn(k));
@@ -345,7 +352,7 @@ impl<F: Float> NeighborIndex<F> {
                 self.n_samples()
             )));
         }
-        let mut rows = self.query_rows(&self.data, Query::Knn(k + 1));
+        let mut rows = self.query_rows(self.data.view(), Query::Knn(k + 1));
         for (i, c) in rows.iter_mut().enumerate() {
             // Drop the sample itself, or the farthest candidate when
             // duplicates with lower indices pushed it out.
@@ -373,7 +380,12 @@ impl<F: Float> NeighborIndex<F> {
 
     /// Training samples within distance `radius` (inclusive) of every row
     /// of `q` (sklearn's `radius_neighbors(sort_results=True)`).
-    pub fn radius_neighbors(&self, q: &Array2<F>, radius: F) -> Result<RadiusNeighbors<F>> {
+    pub fn radius_neighbors<'a>(
+        &self,
+        q: impl AsArray<'a, F, Ix2>,
+        radius: F,
+    ) -> Result<RadiusNeighbors<F>> {
+        let q: ArrayView2<F> = q.into();
         self.check_query(q)?;
         let r_red = self.metric.dist_to_rdist(radius);
         let rows = self.query_rows(q, Query::Radius(r_red));
@@ -383,7 +395,7 @@ impl<F: Float> NeighborIndex<F> {
     /// Other training samples within `radius` of every training sample.
     pub fn radius_neighbors_self(&self, radius: F) -> RadiusNeighbors<F> {
         let r_red = self.metric.dist_to_rdist(radius);
-        let mut rows = self.query_rows(&self.data, Query::Radius(r_red));
+        let mut rows = self.query_rows(self.data.view(), Query::Radius(r_red));
         for (i, c) in rows.iter_mut().enumerate() {
             c.retain(|c| c.1 != i);
         }

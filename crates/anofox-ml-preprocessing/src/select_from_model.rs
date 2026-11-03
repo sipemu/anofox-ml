@@ -1,6 +1,6 @@
 use crate::quantile::{percentile_sorted, sorted_non_nan};
 use anofox_ml_core::{Float, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2, AsArray, Ix2};
 
 /// Importance threshold rule for [`SelectFromModel`] (sklearn's
 /// `threshold` parameter). Features whose (absolute) importance is
@@ -126,7 +126,8 @@ impl SelectFromModel {
     /// Fit on a 2-D coefficient matrix of shape `(n_targets, n_features)`
     /// (e.g. a multi-class linear model's `coef_`). Each feature's
     /// importance is the `norm_order`-norm of its column.
-    pub fn fit_coef(&self, coef: &Array2<f64>) -> Result<FittedSelectFromModel> {
+    pub fn fit_coef<'a>(&self, coef: impl AsArray<'a, f64, Ix2>) -> Result<FittedSelectFromModel> {
+        let coef: ArrayView2<f64> = coef.into();
         let p = self.norm_order;
         if p.is_nan() || p < 1.0 {
             return Err(RustMlError::InvalidParameter(
@@ -247,7 +248,7 @@ impl FittedSelectFromModel {
 }
 
 impl<F: Float> Transform<F> for FittedSelectFromModel {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features_in {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

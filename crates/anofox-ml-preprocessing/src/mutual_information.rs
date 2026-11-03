@@ -15,7 +15,7 @@
 //! in **nats** (natural logarithm).
 
 use anofox_ml_core::{looks_like_class_labels, Fit, Float, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -294,8 +294,8 @@ fn scale_and_jitter(v: &mut [f64], rng: &mut StdRng) {
 
 /// sklearn `_estimate_mi`.
 fn estimate_mi<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     discrete_target: bool,
     discrete_features: &DiscreteFeatures,
     n_neighbors: usize,
@@ -356,26 +356,44 @@ fn estimate_mi<F: Float>(
 
 /// Mutual information between each feature and a **continuous** target
 /// (sklearn `mutual_info_regression`), in nats.
-pub fn mutual_info_regression<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn mutual_info_regression<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     discrete_features: &DiscreteFeatures,
     n_neighbors: usize,
     seed: u64,
 ) -> Result<Array1<F>> {
-    estimate_mi(x, y, false, discrete_features, n_neighbors, seed)
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
+    estimate_mi(
+        x.view(),
+        y.view(),
+        false,
+        discrete_features,
+        n_neighbors,
+        seed,
+    )
 }
 
 /// Mutual information between each feature and a **discrete** target
 /// (sklearn `mutual_info_classif`), in nats.
-pub fn mutual_info_classif<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn mutual_info_classif<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     discrete_features: &DiscreteFeatures,
     n_neighbors: usize,
     seed: u64,
 ) -> Result<Array1<F>> {
-    estimate_mi(x, y, true, discrete_features, n_neighbors, seed)
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
+    estimate_mi(
+        x.view(),
+        y.view(),
+        true,
+        discrete_features,
+        n_neighbors,
+        seed,
+    )
 }
 
 /// Parameters for `MutualInformationSelector` (unfitted state).
@@ -495,7 +513,7 @@ impl<F: Float> FittedMutualInformationSelector<F> {
 impl<F: Float> Fit<F> for MutualInformationSelector {
     type Fitted = FittedMutualInformationSelector<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         let (n_samples, n_features) = x.dim();
 
         if n_samples == 0 || n_features == 0 {
@@ -524,7 +542,7 @@ impl<F: Float> Fit<F> for MutualInformationSelector {
         }
 
         let discrete_target = match self.target {
-            MiTarget::Auto => looks_like_class_labels(y),
+            MiTarget::Auto => looks_like_class_labels(&y),
             MiTarget::Discrete => true,
             MiTarget::Continuous => false,
         };
@@ -559,7 +577,7 @@ pub(crate) fn top_k_indices<F: Float>(scores: &Array1<F>, k: usize) -> Vec<usize
 }
 
 impl<F: Float> Transform<F> for FittedMutualInformationSelector<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features_in {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -1042,18 +1060,20 @@ mod tests {
         let (x, y, _) = data();
         let x3 = x.slice(ndarray::s![.., 0..3]).to_owned();
         // mutual_info_regression(X[:, :3], y, random_state=0)
-        let mi = mutual_info_regression(&x3, &y, &DiscreteFeatures::Auto, 3, 0).unwrap();
+        let mi =
+            mutual_info_regression(x3.view(), y.view(), &DiscreteFeatures::Auto, 3, 0).unwrap();
         assert_close(&mi, &REG_CONT);
         // Independent of the noise seed for tie-free data.
-        let mi = mutual_info_regression(&x3, &y, &DiscreteFeatures::Auto, 3, 99).unwrap();
+        let mi =
+            mutual_info_regression(x3.view(), y.view(), &DiscreteFeatures::Auto, 3, 99).unwrap();
         assert_close(&mi, &REG_CONT);
         // discrete_features=[F, F, F, T]
         let mask = DiscreteFeatures::Mask(vec![false, false, false, true]);
-        let mi = mutual_info_regression(&x, &y, &mask, 3, 0).unwrap();
+        let mi = mutual_info_regression(x.view(), y.view(), &mask, 3, 0).unwrap();
         assert_close(&mi, &REG_MASK);
         let idx = DiscreteFeatures::Indices(vec![3]);
         assert_close(
-            &mutual_info_regression(&x, &y, &idx, 3, 0).unwrap(),
+            &mutual_info_regression(x.view(), y.view(), &idx, 3, 0).unwrap(),
             &REG_MASK,
         );
     }
@@ -1062,13 +1082,13 @@ mod tests {
     fn test_mutual_info_classif_matches_sklearn() {
         let (x, _, y) = data();
         let x3 = x.slice(ndarray::s![.., 0..3]).to_owned();
-        let mi = mutual_info_classif(&x3, &y, &DiscreteFeatures::Auto, 3, 0).unwrap();
+        let mi = mutual_info_classif(x3.view(), y.view(), &DiscreteFeatures::Auto, 3, 0).unwrap();
         assert_close(&mi, &CLS_CONT);
-        let mi = mutual_info_classif(&x3, &y, &DiscreteFeatures::Auto, 5, 0).unwrap();
+        let mi = mutual_info_classif(x3.view(), y.view(), &DiscreteFeatures::Auto, 5, 0).unwrap();
         assert_close(&mi, &CLS_K5);
         // Discrete feature vs discrete target -> contingency-table MI.
         let mask = DiscreteFeatures::Mask(vec![false, false, false, true]);
-        let mi = mutual_info_classif(&x, &y, &mask, 3, 0).unwrap();
+        let mi = mutual_info_classif(x.view(), y.view(), &mask, 3, 0).unwrap();
         assert_close(&mi, &CLS_MASK);
     }
 

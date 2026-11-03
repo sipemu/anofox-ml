@@ -11,7 +11,7 @@
 //! Prediction: sign(f(x)), +1 = inlier, -1 = outlier
 
 use anofox_ml_core::{FitUnsupervised, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2, AsArray, Ix2};
 
 use crate::kernel::SvmKernel;
 
@@ -152,7 +152,8 @@ impl<F: Float> FittedOneClassSvm<F> {
     /// `f(x) = sum_i alpha_i K(x_i, x) - rho`
     ///
     /// Positive values indicate inliers, negative values indicate outliers.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array1<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -183,8 +184,9 @@ impl<F: Float> FittedOneClassSvm<F> {
 
     /// Unshifted scores `sum_i alpha_i K(x_i, x)` (sklearn's `score_samples`
     /// = `decision_function + offset_`).
-    pub fn score_samples(&self, x: &Array2<F>) -> Result<Array1<F>> {
-        Ok(self.decision_function(x)? + self.rho)
+    pub fn score_samples<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array1<F>> {
+        let x: ArrayView2<F> = x.into();
+        Ok(self.decision_function(x.view())? + self.rho)
     }
 
     /// sklearn's `offset_` (= rho): `decision_function = score_samples - offset`.
@@ -194,7 +196,7 @@ impl<F: Float> FittedOneClassSvm<F> {
 }
 
 impl<F: Float> Predict<F> for FittedOneClassSvm<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let scores = self.decision_function(x)?;
         let one = F::one();
         Ok(scores.mapv(|s| if s >= F::zero() { one } else { -one }))
@@ -204,7 +206,7 @@ impl<F: Float> Predict<F> for FittedOneClassSvm<F> {
 impl<F: Float> FitUnsupervised<F> for OneClassSvm {
     type Fitted = FittedOneClassSvm<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         self.validate()?;
 
         if x.is_empty() {
@@ -372,7 +374,7 @@ mod tests {
             fitted.rho(),
             sk_rho * scale
         );
-        let dec = fitted.decision_function(&x).unwrap();
+        let dec = fitted.decision_function(x.view()).unwrap();
         for (i, (d, e)) in dec.iter().zip(sk_dec.iter()).enumerate() {
             assert!(
                 (d - e * scale).abs() < 1e-5,
@@ -587,7 +589,7 @@ mod tests {
 
         // Decision function for far-away outliers should be negative.
         let x_outliers = array![[10.0, 10.0], [-10.0, -10.0]];
-        let scores = fitted.decision_function(&x_outliers).unwrap();
+        let scores = fitted.decision_function(x_outliers.view()).unwrap();
         for &s in scores.iter() {
             assert!(
                 s < 0.0,

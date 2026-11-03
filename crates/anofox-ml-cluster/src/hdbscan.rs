@@ -24,7 +24,7 @@
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView2};
 
 /// Flat-cluster extraction strategy (sklearn `cluster_selection_method`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -132,7 +132,7 @@ fn euclid(a: &[f64], b: &[f64]) -> f64 {
 /// Prim MST over the mutual-reachability graph, computing distances on the
 /// fly (O(n) memory; sklearn's `mst_from_data_matrix`). Returns `n - 1`
 /// edges `(u, v, weight)` in insertion order.
-fn mst_prim(x: &Array2<f64>, core: &[f64], n: usize) -> Vec<(usize, usize, f64)> {
+fn mst_prim(x: ArrayView2<f64>, core: &[f64], n: usize) -> Vec<(usize, usize, f64)> {
     let row = |i: usize| x.row(i).to_slice().expect("standard layout");
     let mr = |i: usize, j: usize| euclid(row(i), row(j)).max(core[i]).max(core[j]);
     let mut in_tree = vec![false; n];
@@ -443,9 +443,9 @@ impl<F: Float> FitUnsupervised<F> for Hdbscan {
     type Fitted = FittedHdbscan;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -463,7 +463,7 @@ impl<F: Float> FitUnsupervised<F> for Hdbscan {
             });
         }
         let x_std = crate::standard_layout(x);
-        let x: &Array2<f64> = &x_std;
+        let x = x_std.view();
 
         // Core distances: k-th smallest distance counting the point itself,
         // k = min_samples — identical to sklearn.
@@ -502,7 +502,7 @@ impl<F: Float> FitUnsupervised<F> for Hdbscan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{array, ShapeBuilder};
+    use ndarray::{array, Array2, ShapeBuilder};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 

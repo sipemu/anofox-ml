@@ -21,7 +21,7 @@ fn test_golden_lgbm_sample_weight_matches_behavior() {
     let sw = json_to_array1(&case["sample_weight"]);
 
     let opts = LgbmFitOptions {
-        sample_weight: Some(&sw),
+        sample_weight: Some(sw.view()),
         ..Default::default()
     };
 

@@ -94,7 +94,7 @@ fn subsample_order<F: Float>(y: &Array1<F>, seed: u64) -> Vec<usize> {
     // Member j of a class of size m gets key (j + 0.5) / m: sorting by key
     // interleaves the classes proportionally; ties are broken randomly.
     let mut keyed: Vec<(f64, f64, usize)> = Vec::with_capacity(n);
-    for mut members in group_by_class(y) {
+    for mut members in group_by_class(y.view()) {
         members.shuffle(&mut rng);
         let m = members.len() as f64;
         for (j, i) in members.into_iter().enumerate() {

@@ -2,7 +2,7 @@ use anofox_ml_core::{
     FitUnsupervised, Float, InverseTransform, PartialFitUnsupervised, Result, RustMlError,
     Transform,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 /// Parameters for MinMaxScaler (unfitted state).
 ///
@@ -51,7 +51,7 @@ pub struct FittedMinMaxScaler<F: Float> {
 impl<F: Float> FitUnsupervised<F> for MinMaxScaler<F> {
     type Fitted = FittedMinMaxScaler<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         self.partial_fit(None, x)
     }
 }
@@ -61,7 +61,11 @@ impl<F: Float> PartialFitUnsupervised<F> for MinMaxScaler<F> {
 
     /// sklearn's `MinMaxScaler.partial_fit`: the running per-feature min and
     /// max are widened by each batch (NaN ignored).
-    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn partial_fit_view(
+        &self,
+        state: Option<Self::Fitted>,
+        x: ArrayView2<F>,
+    ) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -107,7 +111,7 @@ impl<F: Float> PartialFitUnsupervised<F> for MinMaxScaler<F> {
 }
 
 impl<F: Float> Transform<F> for FittedMinMaxScaler<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.data_min.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -134,7 +138,7 @@ impl<F: Float> Transform<F> for FittedMinMaxScaler<F> {
 }
 
 impl<F: Float> InverseTransform<F> for FittedMinMaxScaler<F> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.data_min.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

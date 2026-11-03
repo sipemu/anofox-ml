@@ -12,7 +12,7 @@
 use anofox_ml_core::{FitUnsupervised, InverseTransform, Result, RustMlError, Transform};
 use faer::linalg::solvers::Svd;
 use faer::Mat;
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 use crate::pca::svd_flip_rows;
 
@@ -52,7 +52,7 @@ impl FittedTruncatedSvd {
 }
 
 /// Column-wise population variance (`np.var(a, axis=0)`).
-fn population_variance(a: &Array2<f64>) -> Array1<f64> {
+fn population_variance(a: ArrayView2<f64>) -> Array1<f64> {
     let n = a.nrows().max(1) as f64;
     let mean = a.sum_axis(Axis(0)) / n;
     let mut var = Array1::<f64>::zeros(a.ncols());
@@ -68,7 +68,7 @@ fn population_variance(a: &Array2<f64>) -> Array1<f64> {
 impl FitUnsupervised<f64> for TruncatedSvd {
     type Fitted = FittedTruncatedSvd;
 
-    fn fit(&self, x: &Array2<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<Self::Fitted> {
         let (n, d) = x.dim();
         if n == 0 || d == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -99,7 +99,7 @@ impl FitUnsupervised<f64> for TruncatedSvd {
 
         // sklearn: explained_variance_ = var(X_transformed, axis=0) (ddof=0),
         // explained_variance_ratio_ = explained_variance_ / var(X).sum().
-        let ev = population_variance(&x.dot(&components));
+        let ev = population_variance(x.dot(&components).view());
         let total_var: f64 = population_variance(x).sum();
         let evr = if total_var > 0.0 {
             &ev / total_var
@@ -118,7 +118,7 @@ impl FitUnsupervised<f64> for TruncatedSvd {
 }
 
 impl Transform<f64> for FittedTruncatedSvd {
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -134,7 +134,7 @@ impl InverseTransform<f64> for FittedTruncatedSvd {
     /// Reconstruct the original-space representation from the projection
     /// `transform(X) = X V_k`. The inverse mapping is `T @ V_kᵀ`, valid up to
     /// the rank-`k` approximation error.
-    fn inverse_transform(&self, t: &Array2<f64>) -> Result<Array2<f64>> {
+    fn inverse_transform_view(&self, t: ArrayView2<f64>) -> Result<Array2<f64>> {
         if t.ncols() != self.components.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} components, got {}",

@@ -7,7 +7,7 @@ use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::{ElasticNetRegressor as InnerElasticNet, FittedElasticNet};
 use anofox_regression::{FittedRegressor as _, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
 /// Lasso regression estimator with pure L1 regularization.
 ///
@@ -84,7 +84,7 @@ impl FittedLassoRegressor {
 impl Fit<f64> for LassoRegressor {
     type Fitted = FittedLassoRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -136,7 +136,7 @@ impl Fit<f64> for LassoRegressor {
 }
 
 impl Predict<f64> for FittedLassoRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -155,7 +155,7 @@ impl Predict<f64> for FittedLassoRegressor {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_lasso_basic() {

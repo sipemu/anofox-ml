@@ -105,7 +105,7 @@ fn weighted_l1_matches_lightgbm() {
     let (x, y) = data_num();
     let w = weights_num();
     let opts = LgbmFitOptions {
-        sample_weight: Some(&w),
+        sample_weight: Some(w.view()),
         ..Default::default()
     };
     let m = base()
@@ -166,7 +166,7 @@ fn weighted_l2_baseline_matches_lightgbm() {
     let (x, y) = data_num();
     let w = weights_num();
     let opts = LgbmFitOptions {
-        sample_weight: Some(&w),
+        sample_weight: Some(w.view()),
         ..Default::default()
     };
     let m = base().fit_with_eval(&x, &y, &opts).unwrap();
@@ -282,7 +282,7 @@ fn weighted_binary_baseline_matches_lightgbm() {
     let yb = y.mapv(|v| if v > 6.0 { 1.0 } else { 0.0 });
     let w = weights_num();
     let opts = LgbmFitOptions {
-        sample_weight: Some(&w),
+        sample_weight: Some(w.view()),
         ..Default::default()
     };
     let m = classifier().fit_with_eval(&x, &yb, &opts).unwrap();
@@ -322,7 +322,7 @@ fn weighted_multiclass_baseline_matches_lightgbm() {
     });
     let w = weights_num();
     let opts = LgbmFitOptions {
-        sample_weight: Some(&w),
+        sample_weight: Some(w.view()),
         ..Default::default()
     };
     let m = classifier().fit_with_eval(&x, &y3, &opts).unwrap();

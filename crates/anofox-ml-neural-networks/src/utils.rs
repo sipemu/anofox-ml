@@ -1,5 +1,5 @@
 use anofox_ml_core::Float;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2, AsArray, Ix2};
 
 /// Numerically stable softmax: subtract row max before exp.
 ///
@@ -73,7 +73,8 @@ pub fn shuffle_indices(indices: &mut [usize], rng: &mut impl rand::Rng) {
 }
 
 /// Select rows from a 2D array by index (works for any memory layout).
-pub fn select_rows<F: Float>(x: &Array2<F>, indices: &[usize]) -> Array2<F> {
+pub fn select_rows<'a, F: Float>(x: impl AsArray<'a, F, Ix2>, indices: &[usize]) -> Array2<F> {
+    let x: ArrayView2<F> = x.into();
     x.select(ndarray::Axis(0), indices)
 }
 

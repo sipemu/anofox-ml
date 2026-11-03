@@ -1,4 +1,13 @@
-use ndarray::{Array1, Array2};
+//! Core estimator traits.
+//!
+//! Implementors write the `*_view` methods, which take `ndarray` views so a
+//! caller's slice, column subset or borrowed NumPy buffer reaches the
+//! estimator without a copy. Callers use the un-suffixed methods (`fit`,
+//! `predict`, `transform`, ...), which accept anything that converts to a view
+//! (`&Array2<F>`, `ArrayView2<F>`, `&ArrayView2<F>`, ...) and forward to the
+//! view method.
+
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 use crate::error::Result;
 use crate::float::Float;
@@ -9,54 +18,104 @@ use crate::float::Float;
 /// making it a compile error to predict with unfitted parameters.
 pub trait Fit<F: Float> {
     type Fitted;
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted>;
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted>;
+
+    /// Fit on anything that views as a matrix and a vector (`&Array2`,
+    /// `ArrayView2`, ...). Forwards to [`fit_view`](Self::fit_view).
+    fn fit<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+    ) -> Result<Self::Fitted>
+    where
+        Self: Sized,
+    {
+        self.fit_view(x.into(), y.into())
+    }
 
     /// Pipeline hook for supervised transformers: fit and optionally return
-    /// the transformed training data. The default calls [`fit`](Self::fit)
-    /// and returns `None` (the pipeline then calls `transform`). Transformers
-    /// whose training output differs from `fit(X, y).transform(X)` override
-    /// it — e.g. `TargetEncoder`, whose `fit_transform` is cross-fitted.
+    /// the transformed training data. The default calls
+    /// [`fit_view`](Self::fit_view) and returns `None` (the pipeline then
+    /// calls `transform`). Transformers whose training output differs from
+    /// `fit(X, y).transform(X)` override it — e.g. `TargetEncoder`, whose
+    /// `fit_transform` is cross-fitted.
     fn fit_transform_supervised(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
     ) -> Result<(Self::Fitted, Option<Array2<F>>)> {
-        Ok((self.fit(x, y)?, None))
+        Ok((self.fit_view(x, y)?, None))
     }
 }
 
 /// Unsupervised learning: fit on X only (e.g., scalers, PCA).
 pub trait FitUnsupervised<F: Float> {
     type Fitted;
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted>;
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted>;
+
+    /// Fit on anything that views as a matrix. Forwards to
+    /// [`fit_view`](Self::fit_view).
+    fn fit<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Self::Fitted>
+    where
+        Self: Sized,
+    {
+        self.fit_view(x.into())
+    }
 
     /// Pipeline hook: fit with the pipeline's target (if any), optionally
     /// returning the transformed training data so it need not be
-    /// recomputed. The default ignores `y`, calls [`fit`](Self::fit) and
-    /// returns `None`. Composite transformers override it to forward `y` to
-    /// supervised branches and to transform in a single pass.
+    /// recomputed. The default ignores `y`, calls [`fit_view`](Self::fit_view)
+    /// and returns `None`. Composite transformers override it to forward `y`
+    /// to supervised branches and to transform in a single pass.
     fn fit_with_target(
         &self,
-        x: &Array2<F>,
-        _y: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        _y: Option<ArrayView1<F>>,
     ) -> Result<(Self::Fitted, Option<Array2<F>>)> {
-        Ok((self.fit(x)?, None))
+        Ok((self.fit_view(x)?, None))
     }
 }
 
 /// Predict target values from input features.
 pub trait Predict<F: Float> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>>;
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>>;
+
+    /// Predict on anything that views as a matrix. Forwards to
+    /// [`predict_view`](Self::predict_view).
+    fn predict<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array1<F>>
+    where
+        Self: Sized,
+    {
+        self.predict_view(x.into())
+    }
 }
 
 /// Transform input features (e.g., scaling, encoding).
 pub trait Transform<F: Float> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>>;
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>>;
+
+    /// Transform anything that views as a matrix. Forwards to
+    /// [`transform_view`](Self::transform_view).
+    fn transform<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>>
+    where
+        Self: Sized,
+    {
+        self.transform_view(x.into())
+    }
 }
 
 /// Reverse a transformation back to the original space.
 pub trait InverseTransform<F: Float> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>>;
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>>;
+
+    /// Inverse-transform anything that views as a matrix. Forwards to
+    /// [`inverse_transform_view`](Self::inverse_transform_view).
+    fn inverse_transform<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>>
+    where
+        Self: Sized,
+    {
+        self.inverse_transform_view(x.into())
+    }
 }
 
 /// Produce a probability distribution over classes (classifier) or a posterior
@@ -68,7 +127,16 @@ pub trait InverseTransform<F: Float> {
 /// Mirrors sklearn's `predict_proba` (and partially `predict_std` for
 /// probabilistic regressors like Bayesian Ridge / Gaussian Process).
 pub trait PredictProba<F: Float> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>>;
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>>;
+
+    /// Class probabilities for anything that views as a matrix. Forwards to
+    /// [`predict_proba_view`](Self::predict_proba_view).
+    fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>>
+    where
+        Self: Sized,
+    {
+        self.predict_proba_view(x.into())
+    }
 }
 
 /// Supervised fit with optional per-sample weights.
@@ -79,12 +147,26 @@ pub trait PredictProba<F: Float> {
 /// should be identical to `Fit::fit(x, y)`.
 pub trait FitWeighted<F: Float> {
     type Fitted;
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted>;
+
+    /// Weighted fit on anything that views as a matrix and a vector.
+    /// Forwards to [`fit_weighted_view`](Self::fit_weighted_view).
+    fn fit_weighted<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted>
+    where
+        Self: Sized,
+    {
+        self.fit_weighted_view(x.into(), y.into(), sample_weight.map(|w| w.view()))
+    }
 }
 
 /// Incremental / online fit.
@@ -97,13 +179,28 @@ pub trait FitWeighted<F: Float> {
 /// where the label space is not derivable from a single mini-batch.
 pub trait PartialFit<F: Float> {
     type Fitted;
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         classes: Option<&[F]>,
     ) -> Result<Self::Fitted>;
+
+    /// Incremental fit on anything that views as a matrix and a vector.
+    /// Forwards to [`partial_fit_view`](Self::partial_fit_view).
+    fn partial_fit<'a, 'b>(
+        &self,
+        state: Option<Self::Fitted>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+        classes: Option<&[F]>,
+    ) -> Result<Self::Fitted>
+    where
+        Self: Sized,
+    {
+        self.partial_fit_view(state, x.into(), y.into(), classes)
+    }
 }
 
 /// Incremental / online fit for unsupervised estimators (scalers,
@@ -114,22 +211,53 @@ pub trait PartialFit<F: Float> {
 /// data set one after another gives the same model as one `fit` on all of it.
 pub trait PartialFitUnsupervised<F: Float> {
     type Fitted;
-    fn partial_fit(&self, state: Option<Self::Fitted>, x: &Array2<F>) -> Result<Self::Fitted>;
+    fn partial_fit_view(
+        &self,
+        state: Option<Self::Fitted>,
+        x: ArrayView2<F>,
+    ) -> Result<Self::Fitted>;
+
+    /// Incremental fit on anything that views as a matrix. Forwards to
+    /// [`partial_fit_view`](Self::partial_fit_view).
+    fn partial_fit<'a>(
+        &self,
+        state: Option<Self::Fitted>,
+        x: impl AsArray<'a, F, Ix2>,
+    ) -> Result<Self::Fitted>
+    where
+        Self: Sized,
+    {
+        self.partial_fit_view(state, x.into())
+    }
 
     /// `partial_fit(X, sample_weight=...)`. The default accepts only
     /// `sample_weight = None`; estimators with weighted statistics override it.
-    fn partial_fit_weighted(
+    fn partial_fit_weighted_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         match sample_weight {
-            None => self.partial_fit(state, x),
+            None => self.partial_fit_view(state, x),
             Some(_) => Err(crate::error::RustMlError::InvalidParameter(
                 "this estimator does not support sample_weight in partial_fit".into(),
             )),
         }
+    }
+
+    /// Weighted incremental fit on anything that views as a matrix. Forwards
+    /// to [`partial_fit_weighted_view`](Self::partial_fit_weighted_view).
+    fn partial_fit_weighted<'a>(
+        &self,
+        state: Option<Self::Fitted>,
+        x: impl AsArray<'a, F, Ix2>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted>
+    where
+        Self: Sized,
+    {
+        self.partial_fit_weighted_view(state, x.into(), sample_weight.map(|w| w.view()))
     }
 }
 
@@ -141,11 +269,24 @@ pub trait PartialFitUnsupervised<F: Float> {
 /// `FitUnsupervised::fit(x)`.
 pub trait FitUnsupervisedWeighted<F: Float> {
     type Fitted;
-    fn fit_unsupervised_weighted(
+    fn fit_unsupervised_weighted_view(
         &self,
-        x: &Array2<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted>;
+
+    /// Weighted fit on anything that views as a matrix. Forwards to
+    /// [`fit_unsupervised_weighted_view`](Self::fit_unsupervised_weighted_view).
+    fn fit_unsupervised_weighted<'a>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        sample_weight: Option<&Array1<F>>,
+    ) -> Result<Self::Fitted>
+    where
+        Self: Sized,
+    {
+        self.fit_unsupervised_weighted_view(x.into(), sample_weight.map(|w| w.view()))
+    }
 }
 
 /// Log-probability output. Default implementation takes `log(predict_proba)`
@@ -153,10 +294,19 @@ pub trait FitUnsupervisedWeighted<F: Float> {
 ///
 /// Mirrors sklearn's `predict_log_proba`.
 pub trait PredictLogProba<F: Float>: PredictProba<F> {
-    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
-        let p = self.predict_proba(x)?;
+    fn predict_log_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
+        let p = self.predict_proba_view(x)?;
         let eps = F::from_f64(1e-300).unwrap();
         Ok(p.mapv(|v| if v < eps { eps.ln() } else { v.ln() }))
+    }
+
+    /// Log-probabilities for anything that views as a matrix. Forwards to
+    /// [`predict_log_proba_view`](Self::predict_log_proba_view).
+    fn predict_log_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>>
+    where
+        Self: Sized,
+    {
+        self.predict_log_proba_view(x.into())
     }
 }
 
@@ -165,7 +315,16 @@ pub trait PredictLogProba<F: Float>: PredictProba<F> {
 /// for multi-class (sklearn returns 1-D for binary; we always return 2-D for
 /// consistency).
 pub trait DecisionFunction<F: Float> {
-    fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>>;
+    fn decision_function_view(&self, x: ArrayView2<F>) -> Result<Array2<F>>;
+
+    /// Decision scores for anything that views as a matrix. Forwards to
+    /// [`decision_function_view`](Self::decision_function_view).
+    fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>>
+    where
+        Self: Sized,
+    {
+        self.decision_function_view(x.into())
+    }
 }
 
 /// Default scoring for regressors: R² (coefficient of determination).
@@ -173,8 +332,12 @@ pub trait DecisionFunction<F: Float> {
 /// Mirrors `sklearn.base.RegressorMixin.score`. Higher is better; 1.0 is
 /// perfect prediction, 0.0 means equivalent to predicting `y.mean()`.
 pub trait RegressorScore<F: Float>: Predict<F> {
-    fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<F> {
-        let pred = self.predict(x)?;
+    fn score<'a, 'b>(&self, x: impl AsArray<'a, F, Ix2>, y: impl AsArray<'b, F, Ix1>) -> Result<F>
+    where
+        Self: Sized,
+    {
+        let y: ArrayView1<F> = y.into();
+        let pred = self.predict_view(x.into())?;
         let n = y.len();
         if n != pred.len() {
             return Err(crate::error::RustMlError::ShapeMismatch(format!(
@@ -209,8 +372,12 @@ pub trait RegressorScore<F: Float>: Predict<F> {
 ///
 /// Mirrors `sklearn.base.ClassifierMixin.score`.
 pub trait ClassifierScore<F: Float>: Predict<F> {
-    fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<F> {
-        let pred = self.predict(x)?;
+    fn score<'a, 'b>(&self, x: impl AsArray<'a, F, Ix2>, y: impl AsArray<'b, F, Ix1>) -> Result<F>
+    where
+        Self: Sized,
+    {
+        let y: ArrayView1<F> = y.into();
+        let pred = self.predict_view(x.into())?;
         let n = y.len();
         if n != pred.len() {
             return Err(crate::error::RustMlError::ShapeMismatch(format!(
@@ -237,7 +404,7 @@ mod tests {
     /// Predicts a fixed vector regardless of `x`.
     struct Fixed(Array1<f64>);
     impl Predict<f64> for Fixed {
-        fn predict(&self, _x: &Array2<f64>) -> Result<Array1<f64>> {
+        fn predict_view(&self, _x: ArrayView2<f64>) -> Result<Array1<f64>> {
             Ok(self.0.clone())
         }
     }

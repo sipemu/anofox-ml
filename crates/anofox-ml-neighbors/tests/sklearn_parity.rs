@@ -23,8 +23,8 @@ fn data() -> (Array2<f64>, Array2<f64>) {
 
 fn check_knn(metric: DistanceMetric, algo: NeighborAlgorithm, idx: &[usize], dist: &[f64]) {
     let (x, q) = data();
-    let index = NeighborIndex::new(&x, metric, algo, Some(4)).unwrap();
-    let (d, i) = index.kneighbors(&q, 4).unwrap();
+    let index = NeighborIndex::new(x.view(), metric, algo, Some(4)).unwrap();
+    let (d, i) = index.kneighbors(q.view(), 4).unwrap();
     assert_eq!(
         i.iter().copied().collect::<Vec<_>>(),
         idx,
@@ -167,21 +167,25 @@ fn kneighbors_match_sklearn() {
     );
     // The KD-tree cannot serve cosine distances.
     let (x, _) = data();
-    assert!(
-        NeighborIndex::new(&x, DistanceMetric::Cosine, NeighborAlgorithm::KdTree, None).is_err()
-    );
+    assert!(NeighborIndex::new(
+        x.view(),
+        DistanceMetric::Cosine,
+        NeighborAlgorithm::KdTree,
+        None
+    )
+    .is_err());
 }
 
 #[test]
 fn self_and_radius_queries_match_sklearn() {
     let (x, q) = data();
     for algo in [NeighborAlgorithm::KdTree, NeighborAlgorithm::BruteForce] {
-        let index = NeighborIndex::new(&x, DistanceMetric::Euclidean, algo, None).unwrap();
+        let index = NeighborIndex::new(x.view(), DistanceMetric::Euclidean, algo, None).unwrap();
         let (_, i) = index.kneighbors_self(3).unwrap();
         let first: Vec<usize> = i.rows().into_iter().take(3).flatten().copied().collect();
         assert_eq!(first, [21, 190, 140, 158, 61, 27, 79, 22, 146]);
 
-        let r = index.radius_neighbors(&q, 0.12).unwrap();
+        let r = index.radius_neighbors(q.view(), 0.12).unwrap();
         let ids: Vec<Vec<usize>> = r.iter().map(|v| v.iter().map(|p| p.0).collect()).collect();
         assert_eq!(
             ids,
@@ -236,7 +240,7 @@ fn estimators_match_sklearn() {
         1.0,
         0.0,
     ];
-    for (a, b) in knn.predict_proba(&qz).unwrap().iter().zip(expected) {
+    for (a, b) in knn.predict_proba(qz.view()).unwrap().iter().zip(expected) {
         assert_abs_diff_eq!(*a, b, epsilon = 1e-12);
     }
 
@@ -264,7 +268,7 @@ fn estimators_match_sklearn() {
         0.0,
         0.0,
     ];
-    for (a, b) in rc.predict_proba(&qo).unwrap().iter().zip(expected) {
+    for (a, b) in rc.predict_proba(qo.view()).unwrap().iter().zip(expected) {
         assert_abs_diff_eq!(*a, b, epsilon = 1e-12);
     }
     assert_eq!(rc.predict(&qo).unwrap().to_vec(), [2.0, 1.0, 1.0, 1.0, 5.0]);
@@ -302,12 +306,13 @@ fn kdtree_matches_brute_force_with_ties() {
         DistanceMetric::Minkowski(1.5),
     ] {
         let kd =
-            NeighborIndex::with_leaf_size(&x, metric, NeighborAlgorithm::KdTree, None, 5).unwrap();
-        let bf = NeighborIndex::new(&x, metric, NeighborAlgorithm::BruteForce, None).unwrap();
+            NeighborIndex::with_leaf_size(x.view(), metric, NeighborAlgorithm::KdTree, None, 5)
+                .unwrap();
+        let bf = NeighborIndex::new(x.view(), metric, NeighborAlgorithm::BruteForce, None).unwrap();
         for k in [1, 7, 50] {
             assert_eq!(
-                kd.kneighbors(&q, k).unwrap(),
-                bf.kneighbors(&q, k).unwrap(),
+                kd.kneighbors(q.view(), k).unwrap(),
+                bf.kneighbors(q.view(), k).unwrap(),
                 "{metric:?} k={k}"
             );
             assert_eq!(
@@ -317,8 +322,8 @@ fn kdtree_matches_brute_force_with_ties() {
         }
         for r in [0.0, 1.0, 2.5] {
             assert_eq!(
-                kd.radius_neighbors(&q, r).unwrap(),
-                bf.radius_neighbors(&q, r).unwrap()
+                kd.radius_neighbors(q.view(), r).unwrap(),
+                bf.radius_neighbors(q.view(), r).unwrap()
             );
             assert_eq!(kd.radius_neighbors_self(r), bf.radius_neighbors_self(r));
         }
@@ -326,7 +331,7 @@ fn kdtree_matches_brute_force_with_ties() {
 
     // Precomputed distances.
     let bf = NeighborIndex::new(
-        &x,
+        x.view(),
         DistanceMetric::Euclidean,
         NeighborAlgorithm::BruteForce,
         None,
@@ -338,15 +343,15 @@ fn kdtree_matches_brute_force_with_ties() {
         })
     };
     let pre = NeighborIndex::new(
-        &dist(&x),
+        (dist(&x)).view(),
         DistanceMetric::Precomputed,
         NeighborAlgorithm::Auto,
         None,
     )
     .unwrap();
     assert!(!pre.uses_tree());
-    let (dp, ip) = pre.kneighbors(&dist(&q), 7).unwrap();
-    let (db, ib) = bf.kneighbors(&q, 7).unwrap();
+    let (dp, ip) = pre.kneighbors((dist(&q)).view(), 7).unwrap();
+    let (db, ib) = bf.kneighbors(q.view(), 7).unwrap();
     assert_eq!(ip, ib);
     for (a, b) in dp.iter().zip(&db) {
         assert_abs_diff_eq!(*a, *b, epsilon = 1e-12);
@@ -361,7 +366,7 @@ fn kdtree_matches_brute_force_with_ties() {
 fn auto_rule_and_validation() {
     let (x, _) = data();
     let auto = |m, k| {
-        NeighborIndex::new(&x, m, NeighborAlgorithm::Auto, k)
+        NeighborIndex::new(x.view(), m, NeighborAlgorithm::Auto, k)
             .unwrap()
             .uses_tree()
     };
@@ -371,7 +376,7 @@ fn auto_rule_and_validation() {
     assert!(!auto(DistanceMetric::Euclidean, Some(100)));
     let wide = Array2::from_shape_fn((50, 16), |(i, j)| ((i * j) % 5) as f64);
     assert!(!NeighborIndex::new(
-        &wide,
+        wide.view(),
         DistanceMetric::Euclidean,
         NeighborAlgorithm::Auto,
         Some(3)
@@ -379,7 +384,7 @@ fn auto_rule_and_validation() {
     .unwrap()
     .uses_tree());
     assert!(NeighborIndex::new(
-        &x,
+        x.view(),
         DistanceMetric::Minkowski(0.5),
         NeighborAlgorithm::Auto,
         None

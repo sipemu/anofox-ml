@@ -2,7 +2,7 @@ use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::node::TreeNode;
 use anofox_ml_trees::split::SplitCriterion;
 use anofox_ml_trees::MaxFeatures;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -108,7 +108,7 @@ pub struct FittedExtraTreesRegressor<F: Float> {
 impl<F: Float> Fit<F> for ExtraTreesRegressor {
     type Fitted = FittedExtraTreesRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -117,11 +117,11 @@ impl<F: Float> FitWeighted<F> for ExtraTreesRegressor {
     type Fitted = FittedExtraTreesRegressor<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -130,9 +130,9 @@ impl<F: Float> FitWeighted<F> for ExtraTreesRegressor {
 impl ExtraTreesRegressor {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedExtraTreesRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -185,7 +185,7 @@ impl ExtraTreesRegressor {
 }
 
 impl<F: Float> Predict<F> for FittedExtraTreesRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -272,7 +272,7 @@ fn tree_n_samples<F: Float>(node: &TreeNode<F>) -> usize {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_basic_regression() {
@@ -544,6 +544,7 @@ mod tests {
 
     mod prop_tests {
         use super::*;
+        use ndarray::Array2;
         use proptest::prelude::*;
 
         /// Generate deterministic regression data.

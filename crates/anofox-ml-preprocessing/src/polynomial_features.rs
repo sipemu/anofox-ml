@@ -1,5 +1,5 @@
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 /// Generates polynomial and interaction features.
 ///
@@ -132,7 +132,7 @@ fn enumerate_terms(
 impl<F: Float> FitUnsupervised<F> for PolynomialFeatures {
     type Fitted = FittedPolynomialFeatures<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -165,7 +165,7 @@ impl<F: Float> FitUnsupervised<F> for PolynomialFeatures {
 }
 
 impl<F: Float> Transform<F> for FittedPolynomialFeatures<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

@@ -3,7 +3,7 @@
 use anofox_ml_core::{
     Fit, FitWeighted, Float, PartialFit, Predict, PredictLogProba, PredictProba, Result,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix1, Ix2};
 
 use crate::common::{
     argmax_labels, check_alpha, check_n_features, class_log_prior, log_proba_from_jll,
@@ -114,14 +114,16 @@ impl ComplementNB {
     }
 
     /// Incremental fit with optional per-sample weights.
-    pub fn partial_fit_weighted<F: Float>(
+    pub fn partial_fit_weighted<'a, 'b, F: Float>(
         &self,
         state: Option<FittedComplementNB<F>>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
         classes: Option<&[F]>,
-        sample_weight: Option<&Array1<F>>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedComplementNB<F>> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         check_alpha(self.alpha, self.force_alpha)?;
         check_non_negative(x, "ComplementNB")?;
         let prev = state
@@ -178,7 +180,8 @@ impl<F: Float> FittedComplementNB<F> {
 
     /// Joint log-likelihood `X · feature_log_probᵀ` (plus the log prior when
     /// only one class exists, as sklearn).
-    pub fn joint_log_likelihood(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn joint_log_likelihood<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         check_n_features(x, self.feature_log_prob.ncols())?;
         let mut jll = x.dot(&self.feature_log_prob.t());
         if self.class_labels.len() == 1 {
@@ -191,11 +194,11 @@ impl<F: Float> FittedComplementNB<F> {
 impl<F: Float> FitWeighted<F> for ComplementNB {
     type Fitted = FittedComplementNB<F>;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(None, x, y, None, sample_weight)
     }
@@ -204,7 +207,7 @@ impl<F: Float> FitWeighted<F> for ComplementNB {
 impl<F: Float> Fit<F> for ComplementNB {
     type Fitted = FittedComplementNB<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.partial_fit_weighted(None, x, y, None, None)
     }
 }
@@ -212,11 +215,11 @@ impl<F: Float> Fit<F> for ComplementNB {
 impl<F: Float> PartialFit<F> for ComplementNB {
     type Fitted = FittedComplementNB<F>;
 
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         classes: Option<&[F]>,
     ) -> Result<Self::Fitted> {
         self.partial_fit_weighted(state, x, y, classes, None)
@@ -224,20 +227,20 @@ impl<F: Float> PartialFit<F> for ComplementNB {
 }
 
 impl<F: Float> Predict<F> for FittedComplementNB<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let jll = self.joint_log_likelihood(x)?;
         Ok(argmax_labels(&jll, &self.class_labels))
     }
 }
 
 impl<F: Float> PredictProba<F> for FittedComplementNB<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }
 
 impl<F: Float> PredictLogProba<F> for FittedComplementNB<F> {
-    fn predict_log_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_log_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(log_proba_from_jll(self.joint_log_likelihood(x)?))
     }
 }

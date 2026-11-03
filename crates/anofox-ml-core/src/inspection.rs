@@ -100,7 +100,7 @@ where
 mod tests {
     use super::*;
     use crate::traits::Predict;
-    use ndarray::array;
+    use ndarray::{array, ArrayView2};
 
     // A trivial linear model wired up directly to exercise the importance loop.
     struct Linear {
@@ -108,7 +108,7 @@ mod tests {
         bias: f64,
     }
     impl Predict<f64> for Linear {
-        fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
             let mut out = Array1::<f64>::from_elem(x.nrows(), self.bias);
             for i in 0..x.nrows() {
                 for j in 0..x.ncols() {

@@ -23,9 +23,9 @@ use anofox_regression::solvers::{
     FittedRegressor as _, RansacRegressor as InnerRansac, Regressor as _,
     TheilSenRegressor as InnerTheilSen,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
-fn check_finite(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+fn check_finite(x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<()> {
     if x.iter().chain(y.iter()).any(|v| !v.is_finite()) {
         return Err(RustMlError::InvalidParameter(
             "X and y must not contain NaN or infinite values".into(),
@@ -114,7 +114,7 @@ pub struct FittedRansacRegressor {
 impl Fit<f64> for RansacRegressor {
     type Fitted = FittedRansacRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         check_finite(x, y)?;
         let (n, d) = x.dim();
@@ -164,7 +164,7 @@ impl Fit<f64> for RansacRegressor {
 }
 
 impl Predict<f64> for FittedRansacRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         linear_predict(x, &self.coef, self.intercept)
     }
 }
@@ -243,7 +243,7 @@ pub struct FittedTheilSenRegressor {
 impl Fit<f64> for TheilSenRegressor {
     type Fitted = FittedTheilSenRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         check_finite(x, y)?;
         let (n, d) = x.dim();
@@ -283,7 +283,7 @@ impl Fit<f64> for TheilSenRegressor {
 }
 
 impl Predict<f64> for FittedTheilSenRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         linear_predict(x, &self.coef, self.intercept)
     }
 }
@@ -294,6 +294,7 @@ impl anofox_ml_core::RegressorScore<f64> for FittedTheilSenRegressor {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array2;
 
     fn line_with_outliers() -> (Array2<f64>, Array1<f64>) {
         let mut x = Vec::new();

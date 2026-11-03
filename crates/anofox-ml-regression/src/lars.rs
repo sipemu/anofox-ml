@@ -19,7 +19,7 @@ use crate::convert::{
 };
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::{FittedRegressor as _, LarsMethod, LarsRegressor, Regressor as _};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// LARS / LassoLars estimator.
 ///
@@ -90,7 +90,7 @@ impl Lars {
         self
     }
 
-    fn path(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<LarsPath> {
+    fn path(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<LarsPath> {
         check_xy(x, y)?;
         if self.n_nonzero_coefs == 0 {
             return Err(RustMlError::InvalidParameter("need at least 1 coef".into()));
@@ -103,7 +103,7 @@ impl Lars {
         self.path_upstream(x, y)
     }
 
-    fn path_upstream(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<LarsPath> {
+    fn path_upstream(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<LarsPath> {
         let n = x.nrows() as f64;
         let method = if self.lasso {
             LarsMethod::Lasso
@@ -201,7 +201,7 @@ pub struct FittedLars {
 impl Fit<f64> for Lars {
     type Fitted = FittedLars;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         let path = self.path(x, y)?;
         Ok(FittedLars {
             n_iter: path.alphas.len().saturating_sub(1),
@@ -216,7 +216,7 @@ impl Fit<f64> for Lars {
 }
 
 impl Predict<f64> for FittedLars {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         linear_predict(x, &self.coef, self.intercept)
     }
 }
@@ -296,7 +296,7 @@ pub struct FittedLassoLarsIC {
 
 /// Residual variance of the least-squares fit (sklearn
 /// `LassoLarsIC._estimate_noise_variance`).
-fn ols_noise_variance(x: &Array2<f64>, y: &Array1<f64>, fit_intercept: bool) -> Result<f64> {
+fn ols_noise_variance(x: ArrayView2<f64>, y: ArrayView1<f64>, fit_intercept: bool) -> Result<f64> {
     let (n, p) = x.dim();
     let dof = n as isize - p as isize - isize::from(fit_intercept);
     if dof <= 0 {
@@ -318,7 +318,7 @@ fn ols_noise_variance(x: &Array2<f64>, y: &Array1<f64>, fit_intercept: bool) -> 
 impl Fit<f64> for LassoLarsIC {
     type Fitted = FittedLassoLarsIC;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         let n = x.nrows();
         let path = Lars::lasso(self.max_features.unwrap_or(usize::MAX))
             .with_fit_intercept(self.fit_intercept)
@@ -341,7 +341,7 @@ impl Fit<f64> for LassoLarsIC {
         let mut dfs = vec![0usize; steps];
         for l in 0..steps {
             let c = path.coef_path.column(l);
-            let resid = y - &x.dot(&c) - path.intercepts[l];
+            let resid = &y - &x.dot(&c) - path.intercepts[l];
             let rss = resid.dot(&resid);
             dfs[l] = c.iter().filter(|v| v.abs() > f64::EPSILON).count();
             crit[l] = n as f64 * (2.0 * std::f64::consts::PI * sigma2).ln()
@@ -384,7 +384,7 @@ impl Fit<f64> for LassoLarsIC {
 }
 
 impl Predict<f64> for FittedLassoLarsIC {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         self.fitted.predict(x)
     }
 }

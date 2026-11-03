@@ -12,7 +12,7 @@
 
 use anofox_ml_core::{Fit, Predict, Result, RustMlError, Transform};
 use anofox_regression::solvers::{FittedRegressor as _, PlsRegressor, Regressor as _};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 #[derive(Debug, Clone)]
 pub struct PlsRegression {
@@ -91,7 +91,7 @@ fn sample_std(v: ndarray::ArrayView1<f64>, mean: f64) -> f64 {
 impl Fit<f64> for PlsRegression {
     type Fitted = FittedPlsRegression;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {}",
@@ -130,8 +130,8 @@ impl Fit<f64> for PlsRegression {
         } else {
             (Array1::ones(d), 1.0)
         };
-        let xs = (x - &x_mean) / &x_std;
-        let ys = (y - y_mean) / y_std;
+        let xs = (&x - &x_mean) / &x_std;
+        let ys = (&y - y_mean) / y_std;
 
         // Upstream's unit-norm scores T̃ = Xs R̃.
         let t_up = fitted.scores();
@@ -191,7 +191,7 @@ impl Fit<f64> for PlsRegression {
 }
 
 impl FittedPlsRegression {
-    fn check(&self, x: &Array2<f64>) -> Result<()> {
+    fn check(&self, x: ArrayView2<f64>) -> Result<()> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -204,7 +204,7 @@ impl FittedPlsRegression {
 }
 
 impl Predict<f64> for FittedPlsRegression {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         self.check(x)?;
         Ok(x.dot(&self.coef) + self.intercept)
     }
@@ -212,14 +212,14 @@ impl Predict<f64> for FittedPlsRegression {
 
 impl Transform<f64> for FittedPlsRegression {
     /// X scores of new rows (sklearn `transform`): `((X − mean) / std) · R`.
-    fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.check(x)?;
         if self.x_rotations.nrows() != self.n_features {
             return Err(RustMlError::NotFitted(
                 "rotations not available (model deserialized from an older version)".into(),
             ));
         }
-        Ok(((x - &self.x_mean) / &self.x_std).dot(&self.x_rotations))
+        Ok(((&x - &self.x_mean) / &self.x_std).dot(&self.x_rotations))
     }
 }
 

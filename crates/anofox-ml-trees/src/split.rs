@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anofox_ml_core::Float;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 /// Convert a Float value to a u64 key suitable for HashMap use.
 /// Uses f64 bit representation for exact equality matching.
@@ -185,32 +185,36 @@ pub struct BestSplit<F: Float> {
 /// Uses an incremental class-count / running-sum approach so that each
 /// candidate threshold is evaluated in O(k) (classification, k = n_classes)
 /// or O(1) (regression) instead of O(n).
-pub fn find_best_split<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn find_best_split<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     indices: &[usize],
     criterion: SplitCriterion,
     min_samples_leaf: usize,
 ) -> Option<BestSplit<F>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
     let all_features: Vec<usize> = (0..x.ncols()).collect();
     find_best_split_with_features(x, y, indices, criterion, min_samples_leaf, &all_features)
 }
 
 /// Like [`find_best_split`] but only considers the given feature indices.
-pub fn find_best_split_with_features<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn find_best_split_with_features<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     indices: &[usize],
     criterion: SplitCriterion,
     min_samples_leaf: usize,
     feature_indices: &[usize],
 ) -> Option<BestSplit<F>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
     let n = indices.len();
     if n < 2 * min_samples_leaf {
         return None;
     }
 
-    let parent_impurity = compute_impurity(y, indices, criterion);
+    let parent_impurity = compute_impurity(y.view(), indices, criterion);
 
     match criterion {
         SplitCriterion::Gini | SplitCriterion::Entropy => find_best_split_classification(
@@ -241,7 +245,7 @@ pub fn find_best_split_with_features<F: Float>(
 /// pairs sorted by feature value.
 #[inline]
 fn sort_feature_pairs<F: Float>(
-    x: &Array2<F>,
+    x: ArrayView2<F>,
     indices: &[usize],
     feature: usize,
     sorted_pairs: &mut Vec<(F, usize)>,
@@ -284,9 +288,9 @@ pub(crate) fn try_update_best_split<F: Float>(
 /// from the "right" partition to the "left" partition.
 pub(crate) trait SplitAccumulator<F: Float> {
     /// Reset the accumulator with all samples in "right".
-    fn reset(&mut self, y: &Array1<F>, indices: &[usize]);
+    fn reset(&mut self, y: ArrayView1<F>, indices: &[usize]);
     /// Move sample `idx` from right to left.
-    fn move_to_left(&mut self, y: &Array1<F>, idx: usize);
+    fn move_to_left(&mut self, y: ArrayView1<F>, idx: usize);
     /// Compute weighted impurity: (n_left/n)*left + (n_right/n)*right.
     fn weighted_impurity(&self, n: usize) -> F;
     /// Number of samples currently in the left partition.
@@ -315,7 +319,7 @@ struct ClassificationAccumulator<F: Float> {
 
 impl<F: Float> ClassificationAccumulator<F> {
     /// Create a new accumulator, building the class_map once.
-    fn new(y: &Array1<F>, indices: &[usize]) -> Self {
+    fn new(y: ArrayView1<F>, indices: &[usize]) -> Self {
         let class_map = build_class_map(y, indices);
         let n_classes = class_map.len();
 
@@ -338,7 +342,7 @@ impl<F: Float> ClassificationAccumulator<F> {
 }
 
 impl<F: Float> SplitAccumulator<F> for ClassificationAccumulator<F> {
-    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+    fn reset(&mut self, y: ArrayView1<F>, indices: &[usize]) {
         // Reuse existing Vecs — just zero and refill counts.
         self.left_counts.fill(0);
         self.right_counts.fill(0);
@@ -350,7 +354,7 @@ impl<F: Float> SplitAccumulator<F> for ClassificationAccumulator<F> {
         self.n_right = indices.len();
     }
 
-    fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
+    fn move_to_left(&mut self, y: ArrayView1<F>, idx: usize) {
         let cls = self.class_map[&float_key(y[idx])];
         self.left_counts[cls] += 1;
         self.right_counts[cls] -= 1;
@@ -394,7 +398,7 @@ pub(crate) struct RegressionAccumulator<F: Float> {
 }
 
 impl<F: Float> RegressionAccumulator<F> {
-    pub(crate) fn new(y: &Array1<F>, indices: &[usize]) -> Self {
+    pub(crate) fn new(y: ArrayView1<F>, indices: &[usize]) -> Self {
         let mut total_sum = F::zero();
         let mut total_sum_sq = F::zero();
         for &i in indices {
@@ -415,7 +419,7 @@ impl<F: Float> RegressionAccumulator<F> {
 }
 
 impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
-    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+    fn reset(&mut self, y: ArrayView1<F>, indices: &[usize]) {
         self.left_sum = F::zero();
         self.left_sum_sq = F::zero();
         self.right_sum = F::zero();
@@ -429,7 +433,7 @@ impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
         self.n_right = indices.len();
     }
 
-    fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
+    fn move_to_left(&mut self, y: ArrayView1<F>, idx: usize) {
         let v = y[idx];
         self.left_sum += v;
         self.left_sum_sq += v * v;
@@ -461,7 +465,7 @@ impl<F: Float> SplitAccumulator<F> for RegressionAccumulator<F> {
 /// Classification accumulator over per-class weight totals. With unit
 /// weights it performs exactly the arithmetic of the unweighted one.
 struct WeightedClassificationAccumulator<'w, F: Float> {
-    weights: &'w Array1<F>,
+    weights: ArrayView1<'w, F>,
     left: Vec<F>,
     right: Vec<F>,
     left_weight: F,
@@ -474,9 +478,9 @@ struct WeightedClassificationAccumulator<'w, F: Float> {
 
 impl<'w, F: Float> WeightedClassificationAccumulator<'w, F> {
     fn new(
-        y: &Array1<F>,
+        y: ArrayView1<F>,
         indices: &[usize],
-        weights: &'w Array1<F>,
+        weights: ArrayView1<'w, F>,
         criterion: SplitCriterion,
     ) -> Self {
         let class_map = build_class_map(y, indices);
@@ -498,7 +502,7 @@ impl<'w, F: Float> WeightedClassificationAccumulator<'w, F> {
 }
 
 impl<F: Float> SplitAccumulator<F> for WeightedClassificationAccumulator<'_, F> {
-    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+    fn reset(&mut self, y: ArrayView1<F>, indices: &[usize]) {
         self.left.fill(F::zero());
         self.right.fill(F::zero());
         self.left_weight = F::zero();
@@ -512,7 +516,7 @@ impl<F: Float> SplitAccumulator<F> for WeightedClassificationAccumulator<'_, F> 
         self.n_right = indices.len();
     }
 
-    fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
+    fn move_to_left(&mut self, y: ArrayView1<F>, idx: usize) {
         let w = self.weights[idx];
         let cls = self.class_map[&float_key(y[idx])];
         self.left[cls] += w;
@@ -554,7 +558,7 @@ impl<F: Float> SplitAccumulator<F> for WeightedClassificationAccumulator<'_, F> 
 /// With unit weights it performs exactly the arithmetic of the unweighted
 /// one.
 pub(crate) struct WeightedRegressionAccumulator<'w, F: Float> {
-    weights: &'w Array1<F>,
+    weights: ArrayView1<'w, F>,
     left: [F; 3],
     right: [F; 3],
     n_left: usize,
@@ -562,7 +566,7 @@ pub(crate) struct WeightedRegressionAccumulator<'w, F: Float> {
 }
 
 impl<'w, F: Float> WeightedRegressionAccumulator<'w, F> {
-    pub(crate) fn new(y: &Array1<F>, indices: &[usize], weights: &'w Array1<F>) -> Self {
+    pub(crate) fn new(y: ArrayView1<F>, indices: &[usize], weights: ArrayView1<'w, F>) -> Self {
         let mut acc = Self {
             weights,
             left: [F::zero(); 3],
@@ -583,7 +587,7 @@ impl<'w, F: Float> WeightedRegressionAccumulator<'w, F> {
 }
 
 impl<F: Float> SplitAccumulator<F> for WeightedRegressionAccumulator<'_, F> {
-    fn reset(&mut self, y: &Array1<F>, indices: &[usize]) {
+    fn reset(&mut self, y: ArrayView1<F>, indices: &[usize]) {
         self.left = [F::zero(); 3];
         self.right = [F::zero(); 3];
         for &i in indices {
@@ -596,7 +600,7 @@ impl<F: Float> SplitAccumulator<F> for WeightedRegressionAccumulator<'_, F> {
         self.n_right = indices.len();
     }
 
-    fn move_to_left(&mut self, y: &Array1<F>, idx: usize) {
+    fn move_to_left(&mut self, y: ArrayView1<F>, idx: usize) {
         let (w, v) = (self.weights[idx], y[idx]);
         let d = [w, w * v, w * v * v];
         for k in 0..3 {
@@ -667,8 +671,8 @@ pub(crate) fn evaluate_candidate_split<F: Float, A: SplitAccumulator<F>>(
 /// allocations (e.g. HashMap/Vec for class counts).
 #[allow(clippy::too_many_arguments)]
 fn find_best_split_inner<F, A>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     indices: &[usize],
     min_samples_leaf: usize,
     feature_indices: &[usize],
@@ -738,8 +742,8 @@ where
 /// Classification split finding with incremental class counts.
 #[allow(clippy::too_many_arguments)]
 fn find_best_split_classification<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     indices: &[usize],
     criterion: SplitCriterion,
     min_samples_leaf: usize,
@@ -762,15 +766,15 @@ fn find_best_split_classification<F: Float>(
 
 /// Regression split finding with running sum and sum-of-squares.
 fn find_best_split_regression<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     indices: &[usize],
     min_samples_leaf: usize,
     feature_indices: &[usize],
     n: usize,
     parent_impurity: F,
 ) -> Option<BestSplit<F>> {
-    let acc = RegressionAccumulator::<F>::new(y, indices);
+    let acc = RegressionAccumulator::<F>::new(y.view(), indices);
     find_best_split_inner(
         x,
         y,
@@ -784,7 +788,7 @@ fn find_best_split_regression<F: Float>(
 }
 
 /// Build a mapping from class label (as f64 bits) to contiguous index.
-fn build_class_map<F: Float>(y: &Array1<F>, indices: &[usize]) -> HashMap<u64, usize> {
+fn build_class_map<F: Float>(y: ArrayView1<F>, indices: &[usize]) -> HashMap<u64, usize> {
     let mut map = HashMap::new();
     let mut next_idx = 0;
     for &i in indices {
@@ -869,11 +873,12 @@ pub(crate) fn impurity_from_weights<F: Float, I: Iterator<Item = F>>(
 
 /// Compute impurity for a subset of samples.
 #[inline]
-pub fn compute_impurity<F: Float>(
-    y: &Array1<F>,
+pub fn compute_impurity<'a, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
     indices: &[usize],
     criterion: SplitCriterion,
 ) -> F {
+    let y: ArrayView1<F> = y.into();
     match criterion {
         SplitCriterion::Gini => gini(y, indices),
         SplitCriterion::Entropy => entropy(y, indices),
@@ -882,7 +887,7 @@ pub fn compute_impurity<F: Float>(
 }
 
 #[inline]
-fn gini<F: Float>(y: &Array1<F>, indices: &[usize]) -> F {
+fn gini<F: Float>(y: ArrayView1<F>, indices: &[usize]) -> F {
     let n = F::from_usize(indices.len()).unwrap();
     let class_counts = count_classes(y, indices);
 
@@ -898,7 +903,7 @@ fn gini<F: Float>(y: &Array1<F>, indices: &[usize]) -> F {
 }
 
 #[inline]
-fn entropy<F: Float>(y: &Array1<F>, indices: &[usize]) -> F {
+fn entropy<F: Float>(y: ArrayView1<F>, indices: &[usize]) -> F {
     let n = F::from_usize(indices.len()).unwrap();
     let class_counts = count_classes(y, indices);
 
@@ -918,7 +923,7 @@ fn entropy<F: Float>(y: &Array1<F>, indices: &[usize]) -> F {
 }
 
 #[inline]
-fn mse_impurity<F: Float>(y: &Array1<F>, indices: &[usize]) -> F {
+fn mse_impurity<F: Float>(y: ArrayView1<F>, indices: &[usize]) -> F {
     let n = F::from_usize(indices.len()).unwrap();
     let mean: F = indices.iter().map(|&i| y[i]).fold(F::zero(), |a, b| a + b) / n;
 
@@ -930,7 +935,11 @@ fn mse_impurity<F: Float>(y: &Array1<F>, indices: &[usize]) -> F {
 }
 
 /// Count occurrences of each class in a subset.
-pub fn count_classes<F: Float>(y: &Array1<F>, indices: &[usize]) -> Vec<(F, usize)> {
+pub fn count_classes<'a, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
+    indices: &[usize],
+) -> Vec<(F, usize)> {
+    let y: ArrayView1<F> = y.into();
     let mut map: HashMap<u64, (F, usize)> = HashMap::new();
     for &i in indices {
         let val = y[i];
@@ -947,7 +956,12 @@ pub fn count_classes<F: Float>(y: &Array1<F>, indices: &[usize]) -> Vec<(F, usiz
 /// Classification ties are broken in favour of the smallest class label
 /// (sklearn's `argmax` over sorted classes).
 #[inline]
-pub fn leaf_value<F: Float>(y: &Array1<F>, indices: &[usize], criterion: SplitCriterion) -> F {
+pub fn leaf_value<'a, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
+    indices: &[usize],
+    criterion: SplitCriterion,
+) -> F {
+    let y: ArrayView1<F> = y.into();
     match criterion {
         SplitCriterion::Mse => {
             let n = F::from_usize(indices.len()).unwrap();
@@ -971,14 +985,16 @@ pub fn leaf_value<F: Float>(y: &Array1<F>, indices: &[usize], criterion: SplitCr
 ///
 /// For each feature, picks a random threshold between the min and max value,
 /// then evaluates the resulting split. Returns the best across all features.
-pub fn find_random_split<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn find_random_split<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     indices: &[usize],
     criterion: SplitCriterion,
     min_samples_leaf: usize,
     seed: u64,
 ) -> Option<BestSplit<F>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
     let all_features: Vec<usize> = (0..x.ncols()).collect();
     find_random_split_with_features(
         x,
@@ -993,15 +1009,17 @@ pub fn find_random_split<F: Float>(
 
 /// Like [`find_random_split`] but only considers the given feature indices
 /// (used for per-split feature subsampling, `max_features`).
-pub fn find_random_split_with_features<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn find_random_split_with_features<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     indices: &[usize],
     criterion: SplitCriterion,
     min_samples_leaf: usize,
     feature_indices: &[usize],
     seed: u64,
 ) -> Option<BestSplit<F>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
     find_random_split_weighted(
         x,
         y,
@@ -1018,24 +1036,26 @@ pub fn find_random_split_with_features<F: Float>(
 /// impurities and child fractions are weighted; `min_samples_leaf` still
 /// counts samples, as in sklearn.
 #[allow(clippy::too_many_arguments)]
-pub fn find_random_split_weighted<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn find_random_split_weighted<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     indices: &[usize],
     criterion: SplitCriterion,
     min_samples_leaf: usize,
     feature_indices: &[usize],
     seed: u64,
-    weights: Option<&Array1<F>>,
+    weights: Option<ArrayView1<F>>,
 ) -> Option<BestSplit<F>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
     let n = indices.len();
     if n < 2 * min_samples_leaf {
         return None;
     }
 
     let impurity = |idx: &[usize]| match weights {
-        Some(w) => compute_weighted_impurity(y, idx, w, criterion),
-        None => compute_impurity(y, idx, criterion),
+        Some(w) => compute_weighted_impurity(y.view(), idx, w.view(), criterion),
+        None => compute_impurity(y.view(), idx, criterion),
     };
     let mass = |idx: &[usize]| match weights {
         Some(w) => idx.iter().fold(F::zero(), |a, &i| a + w[i]),
@@ -1144,20 +1164,23 @@ pub use anofox_ml_core::ClassWeight;
 
 /// Compute per-sample weights from a class weight strategy (sklearn's
 /// `compute_sample_weight`; labels are matched exactly).
-pub fn compute_sample_weights_from_class_weight<F: Float>(
-    y: &Array1<F>,
+pub fn compute_sample_weights_from_class_weight<'a, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
     class_weight: &ClassWeight,
 ) -> anofox_ml_core::Result<Array1<F>> {
+    let y: ArrayView1<F> = y.into();
     anofox_ml_core::compute_sample_weight(class_weight, y)
 }
 
 /// Compute weighted impurity for a subset of samples.
-pub fn compute_weighted_impurity<F: Float>(
-    y: &Array1<F>,
+pub fn compute_weighted_impurity<'a, 'b, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
     indices: &[usize],
-    weights: &Array1<F>,
+    weights: impl AsArray<'b, F, Ix1>,
     criterion: SplitCriterion,
 ) -> F {
+    let y: ArrayView1<F> = y.into();
+    let weights: ArrayView1<F> = weights.into();
     let total_weight: F = indices
         .iter()
         .map(|&i| weights[i])
@@ -1193,12 +1216,14 @@ pub fn compute_weighted_impurity<F: Float>(
 }
 
 /// Compute weighted leaf value.
-pub fn weighted_leaf_value<F: Float>(
-    y: &Array1<F>,
+pub fn weighted_leaf_value<'a, 'b, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
     indices: &[usize],
-    weights: &Array1<F>,
+    weights: impl AsArray<'b, F, Ix1>,
     criterion: SplitCriterion,
 ) -> F {
+    let y: ArrayView1<F> = y.into();
+    let weights: ArrayView1<F> = weights.into();
     match criterion {
         SplitCriterion::Mse => {
             let total_weight: F = indices
@@ -1231,11 +1256,13 @@ pub fn weighted_leaf_value<F: Float>(
 }
 
 /// Count weighted occurrences of each class.
-pub fn weighted_count_classes<F: Float>(
-    y: &Array1<F>,
+pub fn weighted_count_classes<'a, 'b, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
     indices: &[usize],
-    weights: &Array1<F>,
+    weights: impl AsArray<'b, F, Ix1>,
 ) -> Vec<(F, F)> {
+    let y: ArrayView1<F> = y.into();
+    let weights: ArrayView1<F> = weights.into();
     let mut map: HashMap<u64, (F, F)> = HashMap::new();
     for &i in indices {
         let val = y[i];
@@ -1252,21 +1279,24 @@ pub fn weighted_count_classes<F: Float>(
 /// Find the best split considering sample weights.
 ///
 /// Like [`find_best_split`] but weights each sample's contribution to impurity.
-pub fn find_best_split_weighted<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn find_best_split_weighted<'a, 'b, 'c, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     indices: &[usize],
-    weights: &Array1<F>,
+    weights: impl AsArray<'c, F, Ix1>,
     criterion: SplitCriterion,
     min_samples_leaf: usize,
     feature_indices: &[usize],
 ) -> Option<BestSplit<F>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
+    let weights: ArrayView1<F> = weights.into();
     let n = indices.len();
     if n < 2 * min_samples_leaf {
         return None;
     }
 
-    let parent_impurity = compute_weighted_impurity(y, indices, weights, criterion);
+    let parent_impurity = compute_weighted_impurity(y.view(), indices, weights.view(), criterion);
     match criterion {
         SplitCriterion::Mse => find_best_split_inner(
             x,
@@ -1276,7 +1306,7 @@ pub fn find_best_split_weighted<F: Float>(
             feature_indices,
             n,
             parent_impurity,
-            WeightedRegressionAccumulator::new(y, indices, weights),
+            WeightedRegressionAccumulator::new(y.view(), indices, weights),
         ),
         SplitCriterion::Gini | SplitCriterion::Entropy => find_best_split_inner(
             x,
@@ -1294,12 +1324,13 @@ pub fn find_best_split_weighted<F: Float>(
 /// Leaf node for `indices`: the (weighted) leaf value, its impurity and,
 /// for classification, the class counts (and per-class weights when
 /// weighted).
-pub fn make_leaf<F: Float>(
-    y: &Array1<F>,
+pub fn make_leaf<'a, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
     indices: &[usize],
     criterion: SplitCriterion,
-    weights: Option<&Array1<F>>,
+    weights: Option<ArrayView1<F>>,
 ) -> crate::node::TreeNode<F> {
+    let y: ArrayView1<F> = y.into();
     let (value, impurity) = match weights {
         Some(w) => (
             weighted_leaf_value(y, indices, w, criterion),
@@ -1334,21 +1365,21 @@ mod tests {
     fn test_gini_pure() {
         let y = array![1.0, 1.0, 1.0];
         let indices = vec![0, 1, 2];
-        assert_abs_diff_eq!(gini(&y, &indices), 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(gini(y.view(), &indices), 0.0, epsilon = 1e-10);
     }
 
     #[test]
     fn test_gini_balanced() {
         let y = array![0.0, 1.0];
         let indices = vec![0, 1];
-        assert_abs_diff_eq!(gini(&y, &indices), 0.5, epsilon = 1e-10);
+        assert_abs_diff_eq!(gini(y.view(), &indices), 0.5, epsilon = 1e-10);
     }
 
     #[test]
     fn test_mse_pure() {
         let y = array![5.0, 5.0, 5.0];
         let indices = vec![0, 1, 2];
-        assert_abs_diff_eq!(mse_impurity(&y, &indices), 0.0, epsilon = 1e-10);
+        assert_abs_diff_eq!(mse_impurity(y.view(), &indices), 0.0, epsilon = 1e-10);
     }
 
     #[test]
@@ -1357,7 +1388,7 @@ mod tests {
         let y = array![0.0, 0.0, 1.0, 1.0];
         let indices = vec![0, 1, 2, 3];
 
-        let split = find_best_split(&x, &y, &indices, SplitCriterion::Gini, 1).unwrap();
+        let split = find_best_split(x.view(), y.view(), &indices, SplitCriterion::Gini, 1).unwrap();
         // Should split between 2.0 and 3.0
         assert!(split.threshold > 2.0 && split.threshold < 3.0);
     }
@@ -1368,7 +1399,7 @@ mod tests {
         let y = array![1.0, 1.5, 10.0, 10.5];
         let indices = vec![0, 1, 2, 3];
 
-        let split = find_best_split(&x, &y, &indices, SplitCriterion::Mse, 1).unwrap();
+        let split = find_best_split(x.view(), y.view(), &indices, SplitCriterion::Mse, 1).unwrap();
         // Should split between 2.0 and 3.0
         assert!(split.threshold > 2.0 && split.threshold < 3.0);
         assert_eq!(split.left_indices.len(), 2);
@@ -1379,7 +1410,7 @@ mod tests {
     fn test_count_classes_uses_exact_bits() {
         let y = array![0.0, 1.0, 0.0, 2.0, 1.0];
         let indices = vec![0, 1, 2, 3, 4];
-        let counts = count_classes(&y, &indices);
+        let counts = count_classes(y.view(), &indices);
         assert_eq!(counts.len(), 3);
         // Sorted by value: (0.0, 2), (1.0, 2), (2.0, 1)
         assert_eq!(counts[0].1, 2); // class 0.0
@@ -1393,7 +1424,8 @@ mod tests {
         let y = array![0.0, 0.0, 1.0, 1.0];
         let indices = vec![0, 1, 2, 3];
 
-        let split = find_best_split(&x, &y, &indices, SplitCriterion::Entropy, 1).unwrap();
+        let split =
+            find_best_split(x.view(), y.view(), &indices, SplitCriterion::Entropy, 1).unwrap();
         assert!(split.threshold > 2.0 && split.threshold < 3.0);
     }
 
@@ -1404,7 +1436,7 @@ mod tests {
         let indices = vec![0, 1, 2, 3];
 
         // min_samples_leaf=3 means no valid split with 4 samples
-        let split = find_best_split(&x, &y, &indices, SplitCriterion::Gini, 3);
+        let split = find_best_split(x.view(), y.view(), &indices, SplitCriterion::Gini, 3);
         assert!(split.is_none());
     }
 }

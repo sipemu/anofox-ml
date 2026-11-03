@@ -17,7 +17,7 @@
 use anofox_ml_core::{FitUnsupervised, Float, InverseTransform, Result, RustMlError, Transform};
 use faer::linalg::solvers::{SelfAdjointEigen, Svd};
 use faer::{Mat, Side};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 /// Parameters for PCA (unfitted state).
 ///
@@ -111,7 +111,7 @@ pub(crate) fn svd_flip_rows(vt: &mut Array2<f64>) -> Vec<f64> {
 impl<F: Float> FitUnsupervised<F> for Pca {
     type Fitted = FittedPca<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let (n_samples, n_features) = x.dim();
 
         if n_samples == 0 || n_features == 0 {
@@ -272,7 +272,7 @@ impl<F: Float> FittedPca<F> {
 }
 
 impl<F: Float> Transform<F> for FittedPca<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let n_features = self.mean.len();
         if x.ncols() != n_features {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -283,7 +283,7 @@ impl<F: Float> Transform<F> for FittedPca<F> {
         }
 
         // Center and project: (X - mean) @ components.T
-        let centered = x - &self.mean;
+        let centered = &x - &self.mean;
         let mut out = centered.dot(&self.components.t());
         if self.whiten {
             out /= &self.whiten_scale();
@@ -293,7 +293,7 @@ impl<F: Float> Transform<F> for FittedPca<F> {
 }
 
 impl<F: Float> InverseTransform<F> for FittedPca<F> {
-    fn inverse_transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn inverse_transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let n_components = self.components.nrows();
         if x.ncols() != n_components {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -305,7 +305,7 @@ impl<F: Float> InverseTransform<F> for FittedPca<F> {
 
         // Reconstruct: X_reduced @ components + mean (undoing whitening first).
         if self.whiten {
-            let scaled = x * &self.explained_variance.mapv(|v| v.max(F::zero()).sqrt());
+            let scaled = &x * &self.explained_variance.mapv(|v| v.max(F::zero()).sqrt());
             Ok(scaled.dot(&self.components) + &self.mean)
         } else {
             Ok(x.dot(&self.components) + &self.mean)

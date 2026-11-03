@@ -28,7 +28,7 @@ use anofox_ml_core::{
 use anofox_regression::solvers::{
     BinomialRegressor as InnerBinomial, FittedRegressor as _, Regressor as _,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 use serde::{Deserialize, Serialize};
 
 fn blocked(what: &str) -> RustMlError {
@@ -223,7 +223,7 @@ impl LogisticRegressor {
 
     fn fit_binary(
         &self,
-        x: &Array2<f64>,
+        x: ArrayView2<f64>,
         y01: &Array1<f64>,
         w: &Array1<f64>,
         inference: bool,
@@ -236,11 +236,11 @@ impl LogisticRegressor {
             .compute_inference(inference)
             .confidence_level(self.confidence_level);
         if w.iter().any(|&v| v != 1.0) {
-            b = b.weights(ndarray_to_col(w));
+            b = b.weights(ndarray_to_col(w.view()));
         }
         let inner = b
             .build()
-            .fit(&ndarray_to_mat(x), &ndarray_to_col(y01))
+            .fit(&ndarray_to_mat(x), &ndarray_to_col(y01.view()))
             .map_err(upstream_err)?;
         let res = inner.result();
         let summary = if inference {
@@ -332,7 +332,7 @@ impl FittedLogisticRegressor {
             .ok_or_else(crate::summary::not_computed)
     }
 
-    fn check(&self, x: &Array2<f64>) -> Result<()> {
+    fn check(&self, x: ArrayView2<f64>) -> Result<()> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -343,7 +343,7 @@ impl FittedLogisticRegressor {
         Ok(())
     }
 
-    fn scores(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn scores(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.check(x)?;
         let mut s = x.dot(&self.coef.t());
         s += &self.intercepts.view().insert_axis(Axis(0));
@@ -351,7 +351,8 @@ impl FittedLogisticRegressor {
     }
 
     /// Class probabilities, shape `(n, K)` (columns follow [`Self::classes`]).
-    pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
         let s = self.scores(x)?;
         let n = s.nrows();
         let k = self.classes.len();
@@ -400,18 +401,20 @@ impl FittedLogisticRegressor {
     /// Decision scores: `(n, 1)` log-odds of the positive class for binary
     /// problems (sklearn's 1-D output as a column), `(n, K)` linear scores
     /// otherwise.
-    pub fn decision_function(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
-        self.scores(x)
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        self.scores(x.view())
     }
 
     /// Classification accuracy.
-    pub fn score(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<f64> {
+    pub fn score<'a>(&self, x: impl AsArray<'a, f64, Ix2>, y: &Array1<f64>) -> Result<f64> {
+        let x: ArrayView2<f64> = x.into();
         ClassifierScore::score(self, x, y)
     }
 }
 
 /// Map `y` to class indices of the sorted unique labels.
-fn encode_labels(y: &Array1<f64>) -> Result<(Vec<f64>, Vec<usize>)> {
+fn encode_labels(y: ArrayView1<f64>) -> Result<(Vec<f64>, Vec<usize>)> {
     if y.iter().any(|v| !v.is_finite()) {
         return Err(RustMlError::InvalidParameter(
             "class labels must be finite".into(),
@@ -434,7 +437,7 @@ fn encode_labels(y: &Array1<f64>) -> Result<(Vec<f64>, Vec<usize>)> {
 impl Fit<f64> for LogisticRegressor {
     type Fitted = FittedLogisticRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_weighted(x, y, None)
     }
 }
@@ -442,11 +445,11 @@ impl Fit<f64> for LogisticRegressor {
 impl FitWeighted<f64> for LogisticRegressor {
     type Fitted = FittedLogisticRegressor;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         crate::convert::check_xy(x, y)?;
         self.validate()?;
@@ -556,7 +559,7 @@ impl FitWeighted<f64> for LogisticRegressor {
 }
 
 impl Predict<f64> for FittedLogisticRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if self.classes.len() == 2 {
             let s = self.scores(x)?;
             return Ok(s.column(0).mapv(|v| {
@@ -582,7 +585,7 @@ impl Predict<f64> for FittedLogisticRegressor {
 }
 
 impl PredictProba<f64> for FittedLogisticRegressor {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         FittedLogisticRegressor::predict_proba(self, x)
     }
 }
@@ -590,7 +593,7 @@ impl PredictProba<f64> for FittedLogisticRegressor {
 impl PredictLogProba<f64> for FittedLogisticRegressor {}
 
 impl DecisionFunction<f64> for FittedLogisticRegressor {
-    fn decision_function(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn decision_function_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.scores(x)
     }
 }
@@ -630,7 +633,7 @@ mod tests {
     fn test_predict_proba_shape_and_range() {
         let (x, y) = toy();
         let fitted = LogisticRegressor::new().fit(&x, &y).unwrap();
-        let probs = fitted.predict_proba(&x).unwrap();
+        let probs = fitted.predict_proba(x.view()).unwrap();
         assert_eq!(probs.dim(), (8, 2));
         for row in probs.rows() {
             assert!((row.sum() - 1.0).abs() < 1e-12);

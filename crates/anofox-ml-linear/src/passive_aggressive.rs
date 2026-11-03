@@ -13,7 +13,7 @@ use anofox_ml_core::{Fit, PartialFit, Predict, Result, RustMlError};
 use anofox_regression::solvers::{
     FittedRegressor as _, PaLoss, PaState, PassiveAggressiveRegressor as InnerPa, Regressor as _,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -97,7 +97,7 @@ pub struct FittedPassiveAggressiveClassifier {
 impl PassiveAggressiveClassifier {
     /// One binary PA run with targets `±1` (sklearn `_plain_sgd` with
     /// `learning_rate = pa1 / pa2`).
-    fn fit_binary(&self, x: &Array2<f64>, yb: &[f64], seed: u64) -> (Array1<f64>, f64) {
+    fn fit_binary(&self, x: ArrayView2<f64>, yb: &[f64], seed: u64) -> (Array1<f64>, f64) {
         let (n, d) = x.dim();
         let mut w = Array1::<f64>::zeros(d);
         let mut b = 0.0_f64;
@@ -160,7 +160,7 @@ impl PassiveAggressiveClassifier {
 impl Fit<f64> for PassiveAggressiveClassifier {
     type Fitted = FittedPassiveAggressiveClassifier;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -171,7 +171,7 @@ impl Fit<f64> for PassiveAggressiveClassifier {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
-        let (classes, _) = anofox_ml_core::encode_labels(y)?;
+        let (classes, _) = anofox_ml_core::encode_labels(&y)?;
         if classes.len() < 2 {
             return Err(RustMlError::InvalidParameter(
                 "PassiveAggressiveClassifier needs at least 2 classes".into(),
@@ -209,7 +209,8 @@ impl Fit<f64> for PassiveAggressiveClassifier {
 impl FittedPassiveAggressiveClassifier {
     /// Signed distances to the hyperplanes: `(n, 1)` for binary problems,
     /// else `(n, n_classes)`.
-    pub fn decision_function(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
         if x.ncols() != self.coef.ncols() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -222,7 +223,7 @@ impl FittedPassiveAggressiveClassifier {
 }
 
 impl Predict<f64> for FittedPassiveAggressiveClassifier {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let df = self.decision_function(x)?;
         Ok(df
             .rows()
@@ -363,7 +364,7 @@ pub struct FittedPassiveAggressiveRegressor {
     pub n_iter: usize,
 }
 
-fn check_xy(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+fn check_xy(x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<()> {
     if x.nrows() != y.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {} elements",
@@ -380,7 +381,7 @@ fn check_xy(x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
 impl Fit<f64> for PassiveAggressiveRegressor {
     type Fitted = FittedPassiveAggressiveRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         let xm = faer::Mat::from_fn(x.nrows(), x.ncols(), |i, j| x[[i, j]]);
         let yc = faer::Col::from_fn(y.len(), |i| y[i]);
@@ -402,11 +403,11 @@ impl PartialFit<f64> for PassiveAggressiveRegressor {
 
     /// One pass over the batch in row order, resuming from `state`
     /// (sklearn `partial_fit` with `shuffle=False`). `classes` is ignored.
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
         _classes: Option<&[f64]>,
     ) -> Result<Self::Fitted> {
         check_xy(x, y)?;
@@ -447,7 +448,7 @@ impl PartialFit<f64> for PassiveAggressiveRegressor {
 }
 
 impl Predict<f64> for FittedPassiveAggressiveRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.coef.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

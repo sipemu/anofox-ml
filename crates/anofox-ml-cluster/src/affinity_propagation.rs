@@ -23,7 +23,7 @@
 
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AffinityPropagation {
@@ -174,9 +174,9 @@ impl<F: Float> FitUnsupervised<F> for AffinityPropagation {
     type Fitted = FittedAffinityPropagation;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         if n == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
@@ -332,7 +332,7 @@ impl AffinityPropagation {
     ///
     /// The r and a matrices are stored only on these edges. The
     /// max-over-N(i) and sum-over-N⁻¹(k) updates run in O(degree) per row.
-    fn fit_sparse(&self, x: &Array2<f64>, k: usize) -> Result<FittedAffinityPropagation> {
+    fn fit_sparse(&self, x: ArrayView2<f64>, k: usize) -> Result<FittedAffinityPropagation> {
         let n = x.nrows();
         let d = x.ncols();
         let k = k.min(n.saturating_sub(1));

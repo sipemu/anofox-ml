@@ -10,7 +10,7 @@
 //! importances and the engine's histogram subtraction come with it.
 
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 use crate::lgbm::{
     BinningMethod, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassifier, LgbmRegressor,
@@ -204,15 +204,16 @@ impl FittedHistGradientBoostingClassifier {
     }
 
     /// Class probabilities, columns in [`classes`](Self::classes) order.
-    pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
-        self.inner.predict_proba(x)
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        self.inner.predict_proba(x.view())
     }
 }
 
 impl Fit<f64> for HistGradientBoostingRegressor {
     type Fitted = FittedHistGradientBoostingRegressor;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_weighted(x, y, None)
     }
 }
@@ -220,14 +221,14 @@ impl Fit<f64> for HistGradientBoostingRegressor {
 impl FitWeighted<f64> for HistGradientBoostingRegressor {
     type Fitted = FittedHistGradientBoostingRegressor;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         Ok(FittedHistGradientBoostingRegressor {
-            inner: self.engine()?.fit_weighted(x, y, sample_weight)?,
+            inner: self.engine()?.fit_weighted_view(x, y, sample_weight)?,
         })
     }
 }
@@ -235,7 +236,7 @@ impl FitWeighted<f64> for HistGradientBoostingRegressor {
 impl Fit<f64> for HistGradientBoostingClassifier {
     type Fitted = FittedHistGradientBoostingClassifier;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_weighted(x, y, None)
     }
 }
@@ -243,32 +244,32 @@ impl Fit<f64> for HistGradientBoostingClassifier {
 impl FitWeighted<f64> for HistGradientBoostingClassifier {
     type Fitted = FittedHistGradientBoostingClassifier;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         Ok(FittedHistGradientBoostingClassifier {
-            inner: self.engine()?.fit_weighted(x, y, sample_weight)?,
+            inner: self.engine()?.fit_weighted_view(x, y, sample_weight)?,
         })
     }
 }
 
 impl Predict<f64> for FittedHistGradientBoostingRegressor {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         self.inner.predict(x)
     }
 }
 
 impl Predict<f64> for FittedHistGradientBoostingClassifier {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         self.inner.predict(x)
     }
 }
 
 impl anofox_ml_core::PredictProba<f64> for FittedHistGradientBoostingClassifier {
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.inner.predict_proba(x)
     }
 }

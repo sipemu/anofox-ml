@@ -27,7 +27,7 @@
 
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Predict, PredictProba, Result, RustMlError};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -331,7 +331,7 @@ impl VbState {
 /// `E_q[log π_k] + E_q[log N(x_i | μ_k, Λ_k⁻¹)]`, `n × k` (sklearn
 /// `_estimate_weighted_log_prob` of the Bayesian mixture).
 fn weighted_log_prob(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     means: &Array2<f64>,
     prec_chol: &[Array2<f64>],
     dof: &Array1<f64>,
@@ -388,7 +388,7 @@ fn lower_bound(log_resp: &Array2<f64>, s: &VbState, ct: CovarianceType, d: usize
 }
 
 impl BayesianGaussianMixture {
-    fn priors(&self, x: &Array2<f64>) -> Result<Priors> {
+    fn priors(&self, x: ArrayView2<f64>) -> Result<Priors> {
         let n = x.nrows();
         let d = x.ncols();
         let nu0 = self.degrees_of_freedom_prior.unwrap_or(d as f64);
@@ -414,7 +414,7 @@ impl BayesianGaussianMixture {
             None => mean.clone(),
         };
         // Empirical covariance with ddof = 1 (numpy `np.cov(X.T)`).
-        let centred = x - &mean;
+        let centred = &x - &mean;
         let emp = centred.t().dot(&centred) / (n as f64 - 1.0);
         let cov_prior = match self.covariance_type {
             CovarianceType::Full | CovarianceType::Tied => emp,
@@ -434,7 +434,7 @@ impl BayesianGaussianMixture {
 
     fn single_fit(
         &self,
-        x: &Array2<f64>,
+        x: ArrayView2<f64>,
         p: &Priors,
         rng: &mut StdRng,
     ) -> Result<(VbState, f64, usize, bool)> {
@@ -469,11 +469,11 @@ impl<F: Float> FitUnsupervised<F> for BayesianGaussianMixture {
     type Fitted = FittedBayesianGaussianMixture;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let x_std = crate::standard_layout(x);
-        let x: &Array2<f64> = &x_std;
+        let x = x_std.view();
         let n = x.nrows();
         let k = self.n_components;
         if n == 0 {
@@ -531,7 +531,7 @@ impl<F: Float> FitUnsupervised<F> for BayesianGaussianMixture {
 // ───── Predict helpers ─────────────────────────────────────────────────────
 
 impl FittedBayesianGaussianMixture {
-    fn weighted_log_prob_checked(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn weighted_log_prob_checked(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let d = self.means.ncols();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -540,7 +540,7 @@ impl FittedBayesianGaussianMixture {
                 x.ncols()
             )));
         }
-        let x_std = crate::standard_layout(x);
+        let x_std = crate::standard_layout(x.view());
         let computed;
         let pc = if self.precisions_cholesky.is_empty() {
             computed = precision_cholesky(&self.covariances, self.covariance_type)?;
@@ -549,7 +549,7 @@ impl FittedBayesianGaussianMixture {
             &self.precisions_cholesky
         };
         Ok(weighted_log_prob(
-            &x_std,
+            x_std.view(),
             &self.means,
             pc,
             &self.dof_posterior,
@@ -566,7 +566,7 @@ impl FittedBayesianGaussianMixture {
 }
 
 impl FittedBayesianGaussianMixture {
-    fn predict_f64(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_f64(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let wlp = self.weighted_log_prob_checked(x)?;
         Ok(wlp
             .rows()
@@ -585,24 +585,24 @@ impl FittedBayesianGaussianMixture {
 }
 
 impl<F: Float> Predict<F> for FittedBayesianGaussianMixture {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         Ok(anofox_ml_core::from_f64(
-            self.predict_f64(&anofox_ml_core::as_f64(x))?,
+            self.predict_f64(anofox_ml_core::as_f64(x).view())?,
         ))
     }
 }
 
 impl FittedBayesianGaussianMixture {
-    fn predict_proba_f64(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_f64(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let (_, log_resp) = log_prob_resp(self.weighted_log_prob_checked(x)?);
         Ok(log_resp.mapv(f64::exp))
     }
 }
 
 impl<F: Float> PredictProba<F> for FittedBayesianGaussianMixture {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Ok(anofox_ml_core::from_f64(
-            self.predict_proba_f64(&anofox_ml_core::as_f64(x))?,
+            self.predict_proba_f64(anofox_ml_core::as_f64(x).view())?,
         ))
     }
 }

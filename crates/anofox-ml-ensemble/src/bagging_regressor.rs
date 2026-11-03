@@ -1,6 +1,6 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor, MaxFeatures};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2, AsArray, Ix2};
 use rayon::prelude::*;
 
 use crate::bagging_common::{add_importances, out_of_bag, select_columns, BagSampling};
@@ -126,7 +126,7 @@ pub struct FittedBaggingRegressor<F: Float> {
 impl<F: Float> Fit<F> for BaggingRegressor {
     type Fitted = FittedBaggingRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -136,11 +136,11 @@ impl<F: Float> FitWeighted<F> for BaggingRegressor {
 
     /// Per-sample weights (sklearn's `sample_weight`), applied on top of
     /// the bootstrap counts.
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -149,9 +149,9 @@ impl<F: Float> FitWeighted<F> for BaggingRegressor {
 impl BaggingRegressor {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedBaggingRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -186,7 +186,7 @@ impl BaggingRegressor {
                 let xs = select_columns(x, &plan.features);
                 crate::forest_common::fit_tree_on_rows(
                     &tree_params.clone().with_seed(plan.seed),
-                    &xs,
+                    xs.view(),
                     y,
                     &plan.rows,
                     sample_weight,
@@ -233,7 +233,7 @@ impl BaggingRegressor {
 }
 
 /// R² over the samples whose prediction is not NaN.
-fn r2_where_defined<F: Float>(y: &Array1<F>, pred: &Array1<F>) -> f64 {
+fn r2_where_defined<F: Float>(y: ArrayView1<F>, pred: &Array1<F>) -> f64 {
     let pairs: Vec<(f64, f64)> = y
         .iter()
         .zip(pred)
@@ -254,7 +254,7 @@ fn r2_where_defined<F: Float>(y: &Array1<F>, pred: &Array1<F>) -> f64 {
 }
 
 impl<F: Float> Predict<F> for FittedBaggingRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -327,7 +327,8 @@ impl<F: Float> FittedBaggingRegressor<F> {
     }
 
     /// Compute R-squared score on the given data.
-    pub fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<f64> {
+    pub fn score<'a>(&self, x: impl AsArray<'a, F, Ix2>, y: &Array1<F>) -> Result<f64> {
+        let x: ArrayView2<F> = x.into();
         let preds = self.predict(x)?;
         let n = y.len();
         let y_mean = y.iter().copied().fold(F::zero(), |a, b| a + b) / F::from_usize(n).unwrap();
@@ -352,7 +353,7 @@ impl<F: Float> FittedBaggingRegressor<F> {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_basic_regression() {

@@ -2,7 +2,7 @@ use anofox_ml_core::{Fit, FitWeighted, Float, Predict, PredictProba, Result, Rus
 use anofox_ml_trees::{
     ClassWeight, DecisionTreeClassifier, FittedDecisionTreeClassifier, MaxFeatures, SplitCriterion,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -138,7 +138,7 @@ pub struct FittedRandomForestClassifier<F: Float> {
 impl<F: Float> Fit<F> for RandomForestClassifier {
     type Fitted = FittedRandomForestClassifier<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -147,11 +147,11 @@ impl<F: Float> FitWeighted<F> for RandomForestClassifier {
     type Fitted = FittedRandomForestClassifier<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -160,9 +160,9 @@ impl<F: Float> FitWeighted<F> for RandomForestClassifier {
 impl RandomForestClassifier {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedRandomForestClassifier<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -246,7 +246,7 @@ impl RandomForestClassifier {
                     x,
                     y,
                     &row_indices,
-                    effective_weight.as_ref(),
+                    effective_weight.as_ref().map(|a| a.view()),
                 )?;
                 Ok(ForestTree {
                     tree: fitted_tree,
@@ -275,7 +275,7 @@ impl RandomForestClassifier {
 impl<F: Float> Predict<F> for FittedRandomForestClassifier<F> {
     /// Predict the class with the highest mean leaf probability across trees
     /// (sklearn semantics). Ties go to the smallest class label.
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let proba = self.predict_proba(x)?;
         let classes = self.classes();
         Ok(Array1::from_iter(
@@ -318,7 +318,7 @@ impl<F: Float> FittedRandomForestClassifier<F> {
     fn accumulate_tree_proba(
         &self,
         t: usize,
-        x: &Array2<F>,
+        x: ArrayView2<F>,
         classes: &[F],
         weight: F,
         acc: &mut Array2<F>,
@@ -340,7 +340,8 @@ impl<F: Float> FittedRandomForestClassifier<F> {
     /// Returns an `Array2<F>` of shape `(n_samples, n_classes)` where each row
     /// sums to 1.0. Probabilities are averaged across all trees in the forest.
     /// Columns follow [`classes`](Self::classes) (sorted ascending).
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -378,7 +379,13 @@ impl<F: Float> FittedRandomForestClassifier<F> {
     }
 
     /// Compute classification accuracy on the given data.
-    pub fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<f64> {
+    pub fn score<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+    ) -> Result<f64> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         let preds = self.predict(x)?;
         let n = y.len();
         let correct = preds
@@ -395,7 +402,7 @@ impl<F: Float> FittedRandomForestClassifier<F> {
         for forest_tree in &self.trees {
             all.extend(forest_tree.tree.classes());
         }
-        sorted_classes(&Array1::from_vec(all))
+        sorted_classes(Array1::from_vec(all).view())
     }
 }
 
@@ -404,8 +411,8 @@ impl<F: Float> FittedRandomForestClassifier<F> {
 /// did *not* see it in their bootstrap sample.
 fn compute_oob_score_classification<F: Float>(
     forest: &FittedRandomForestClassifier<F>,
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     bootstrap_indices: &[Vec<usize>],
 ) -> Result<Option<f64>> {
     let n_samples = x.nrows();
@@ -424,7 +431,7 @@ fn compute_oob_score_classification<F: Float>(
         }
         let x_oob = select_rows(x, &oob_rows);
         let mut acc = Array2::<F>::zeros((oob_rows.len(), classes.len()));
-        forest.accumulate_tree_proba(t, &x_oob, &classes, F::one(), &mut acc)?;
+        forest.accumulate_tree_proba(t, x_oob.view(), &classes, F::one(), &mut acc)?;
         for (k, &i) in oob_rows.iter().enumerate() {
             let mut row = oob_proba.row_mut(i);
             row += &acc.row(k);
@@ -725,6 +732,7 @@ mod tests {
     }
 
     mod prop_tests {
+
         use super::*;
         use proptest::prelude::*;
         use std::collections::HashSet;
@@ -839,7 +847,7 @@ mod tests {
 }
 
 impl<F: Float> PredictProba<F> for FittedRandomForestClassifier<F> {
-    fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn predict_proba_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         Self::predict_proba(self, x)
     }
 }
@@ -1033,12 +1041,12 @@ mod regression_tests {
     struct FittedConst(f64);
     impl Fit<f64> for ConstClassifier {
         type Fitted = FittedConst;
-        fn fit(&self, _x: &Array2<f64>, _y: &Array1<f64>) -> Result<FittedConst> {
+        fn fit_view(&self, _x: ArrayView2<f64>, _y: ArrayView1<f64>) -> Result<FittedConst> {
             Ok(FittedConst(self.0))
         }
     }
     impl Predict<f64> for FittedConst {
-        fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+        fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
             Ok(Array1::from_elem(x.nrows(), self.0))
         }
     }

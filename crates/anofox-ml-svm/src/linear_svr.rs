@@ -2,7 +2,7 @@
 //! coordinate descent (Ho & Lin, 2012).
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -195,7 +195,7 @@ impl<F: Float> FittedLinearSvr<F> {
 }
 
 impl<F: Float> Predict<F> for FittedLinearSvr<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput(
                 "prediction input must not be empty".into(),
@@ -234,8 +234,8 @@ impl<F: Float> Predict<F> for FittedLinearSvr<F> {
 /// the minimum-norm subgradient drops below `tol` × its first-epoch value.
 #[allow(clippy::too_many_arguments)]
 fn fit_linear_svr<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     c: F,
     epsilon: F,
     loss: LinearSvrLoss,
@@ -341,7 +341,7 @@ fn fit_linear_svr<F: Float>(
 impl<F: Float> Fit<F> for LinearSvr {
     type Fitted = FittedLinearSvr<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.validate()?;
 
         if x.is_empty() || y.is_empty() {
@@ -391,7 +391,7 @@ impl<F: Float> Fit<F> for LinearSvr {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array2};
 
     #[test]
     fn test_basic_linear_regression() {

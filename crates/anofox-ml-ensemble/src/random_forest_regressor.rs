@@ -1,6 +1,6 @@
 use anofox_ml_core::{Fit, FitWeighted, Float, Predict, Result, RustMlError};
 use anofox_ml_trees::{DecisionTreeRegressor, FittedDecisionTreeRegressor, MaxFeatures};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -128,7 +128,7 @@ pub struct FittedRandomForestRegressor<F: Float> {
 impl<F: Float> Fit<F> for RandomForestRegressor {
     type Fitted = FittedRandomForestRegressor<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.fit_impl(x, y, None)
     }
 }
@@ -137,11 +137,11 @@ impl<F: Float> FitWeighted<F> for RandomForestRegressor {
     type Fitted = FittedRandomForestRegressor<F>;
 
     /// Per-sample weights (sklearn's `sample_weight`).
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         self.fit_impl(x, y, sample_weight)
     }
@@ -150,9 +150,9 @@ impl<F: Float> FitWeighted<F> for RandomForestRegressor {
 impl RandomForestRegressor {
     fn fit_impl<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<FittedRandomForestRegressor<F>> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -256,7 +256,7 @@ impl RandomForestRegressor {
 }
 
 impl<F: Float> Predict<F> for FittedRandomForestRegressor<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -326,7 +326,13 @@ impl<F: Float> FittedRandomForestRegressor<F> {
     }
 
     /// Compute R² score on the given data.
-    pub fn score(&self, x: &Array2<F>, y: &Array1<F>) -> Result<f64> {
+    pub fn score<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+    ) -> Result<f64> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         let preds = self.predict(x)?;
         let n = y.len();
         let y_mean = y.iter().copied().fold(F::zero(), |a, b| a + b) / F::from_usize(n).unwrap();
@@ -350,8 +356,8 @@ impl<F: Float> FittedRandomForestRegressor<F> {
 /// Compute OOB R² score for regression.
 fn compute_oob_score_regression<F: Float>(
     trees: &[ForestTree<F>],
-    x: &Array2<F>,
-    y: &Array1<F>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
     n_samples: usize,
     bootstrap_indices: &[Vec<usize>],
 ) -> Result<Option<f64>> {
@@ -368,7 +374,7 @@ fn compute_oob_score_regression<F: Float>(
             continue;
         }
         let x_oob = select_rows(x, &oob_rows);
-        let sub_x = tree_input(&x_oob, &forest_tree.feature_indices);
+        let sub_x = tree_input(x_oob.view(), &forest_tree.feature_indices);
         let pred = forest_tree.tree.predict(&sub_x)?;
         for (k, &i) in oob_rows.iter().enumerate() {
             oob_preds[i] += pred[k].to_f64().unwrap();

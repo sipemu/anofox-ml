@@ -1,7 +1,7 @@
 //! Common types and utilities for SGD-based linear models.
 
 use anofox_ml_core::{Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, ArrayView2};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 #[cfg(test)]
@@ -217,7 +217,7 @@ pub(crate) struct SgdRun {
 /// `n_iter_no_change`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sgd<L>(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     y: &[f64],
     sample_weight: Option<&[f64]>,
     indices: &mut [usize],
@@ -393,6 +393,7 @@ pub(crate) fn validation_split(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array2;
 
     #[test]
     fn softplus_is_finite_and_accurate() {
@@ -430,7 +431,7 @@ mod tests {
         let mut idx: Vec<usize> = (0..n).collect();
         let mut rng = StdRng::seed_from_u64(0);
         run_sgd(
-            &x,
+            x.view(),
             &y,
             None,
             &mut idx,

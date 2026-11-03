@@ -33,7 +33,7 @@ use crate::convert::check_xy;
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::path::{fit_path, kfold_ids, lambda_grid, PathOptions, RegPath};
 use faer::{Col, Mat};
-use ndarray::{Array1, Array2, Array3};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
 
 // ---------------------------------------------------------------------------
 // Shared CV machinery
@@ -120,11 +120,11 @@ impl FoldSpec {
     }
 }
 
-fn rows_mat(x: &Array2<f64>, rows: &[usize]) -> Mat<f64> {
+fn rows_mat(x: ArrayView2<f64>, rows: &[usize]) -> Mat<f64> {
     Mat::from_fn(rows.len(), x.ncols(), |i, j| x[[rows[i], j]])
 }
 
-fn rows_col(y: &Array1<f64>, rows: &[usize]) -> Col<f64> {
+fn rows_col(y: ArrayView1<f64>, rows: &[usize]) -> Col<f64> {
     Col::from_fn(rows.len(), |i| y[rows[i]])
 }
 
@@ -166,8 +166,8 @@ fn sk_path(x: &Mat<f64>, y: &Col<f64>, alphas: &[f64], rho: f64, cd: CdOptions) 
 
 /// sklearn's default alpha grid for mixing `rho`.
 pub(crate) fn default_alphas(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
     rho: f64,
     n_alphas: usize,
     eps: f64,
@@ -225,8 +225,8 @@ pub(crate) struct PathCv {
 }
 
 pub(crate) fn path_cv(
-    x: &Array2<f64>,
-    y: &Array1<f64>,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
     rho: f64,
     alphas: &[f64],
     test_sets: &[Vec<usize>],
@@ -287,8 +287,8 @@ pub(crate) fn path_cv(
     })
 }
 
-pub(crate) fn r_squared(x: &Array2<f64>, y: &Array1<f64>, coef: &Array1<f64>, b: f64) -> f64 {
-    let resid = y - &(x.dot(coef) + b);
+pub(crate) fn r_squared(x: ArrayView2<f64>, y: ArrayView1<f64>, coef: &Array1<f64>, b: f64) -> f64 {
+    let resid = &y - &(x.dot(coef) + b);
     let mean = y.mean().unwrap_or(0.0);
     let tss: f64 = y.iter().map(|v| (v - mean).powi(2)).sum();
     let rss = resid.dot(&resid);
@@ -471,7 +471,7 @@ impl FittedElasticNetCrossValidated {
 impl Fit<f64> for ElasticNetCrossValidated {
     type Fitted = FittedElasticNetCrossValidated;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         if self.l1_ratios.is_empty() {
             return Err(RustMlError::InvalidParameter(
@@ -533,7 +533,7 @@ impl Fit<f64> for ElasticNetCrossValidated {
 }
 
 impl Predict<f64> for FittedElasticNetCrossValidated {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         crate::convert::linear_predict(x, &self.coef, self.intercept.unwrap_or(0.0))
     }
 }

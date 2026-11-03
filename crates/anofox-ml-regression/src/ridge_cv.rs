@@ -19,7 +19,7 @@ use crate::convert::{check_xy, linear_predict};
 use crate::elastic_net_cv::{r_squared, train_rows, FoldSpec};
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use faer::Mat;
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 /// Ridge regression with cross-validated alpha selection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -137,15 +137,15 @@ struct RidgeSvd {
 }
 
 impl RidgeSvd {
-    fn new(x: &Array2<f64>, y: &Array1<f64>, fit_intercept: bool) -> Result<Self> {
+    fn new(x: ArrayView2<f64>, y: ArrayView1<f64>, fit_intercept: bool) -> Result<Self> {
         let (n, p) = x.dim();
         let (x_mean, y_mean) = if fit_intercept {
             (x.mean_axis(Axis(0)).unwrap(), y.mean().unwrap())
         } else {
             (Array1::zeros(p), 0.0)
         };
-        let xc = x - &x_mean;
-        let yc = y - y_mean;
+        let xc = &x - &x_mean;
+        let yc = &y - y_mean;
         let m = Mat::from_fn(n, p, |i, j| xc[[i, j]]);
         let svd = m
             .thin_svd()
@@ -220,7 +220,7 @@ impl RidgeSvd {
 impl Fit<f64> for RidgeCrossValidated {
     type Fitted = FittedRidgeCrossValidated;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         if self.alphas.is_empty() {
             return Err(RustMlError::InvalidParameter(
@@ -246,7 +246,11 @@ impl Fit<f64> for RidgeCrossValidated {
             for test in spec.test_sets(n)? {
                 let train = train_rows(n, &test);
                 let xt = x.select(Axis(0), &train);
-                let svd = RidgeSvd::new(&xt, &y.select(Axis(0), &train), self.with_intercept)?;
+                let svd = RidgeSvd::new(
+                    xt.view(),
+                    y.select(Axis(0), &train).view(),
+                    self.with_intercept,
+                )?;
                 let xv = x.select(Axis(0), &test);
                 for (l, &a) in self.alphas.iter().enumerate() {
                     let (c, b) = svd.coef(a);
@@ -288,7 +292,7 @@ impl Fit<f64> for RidgeCrossValidated {
 }
 
 impl Predict<f64> for FittedRidgeCrossValidated {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         linear_predict(x, &self.coef, self.intercept.unwrap_or(0.0))
     }
 }

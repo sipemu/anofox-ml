@@ -1,6 +1,6 @@
 //! `_native.Model`: the single Python class behind every estimator wrapper.
 
-use ndarray::{Array1, Array2};
+use ndarray::ArrayView2;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyAttributeError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -125,12 +125,13 @@ impl PyModel {
         y: Option<PyReadonlyArray1<'_, f64>>,
         sample_weight: Option<PyReadonlyArray1<'_, f64>>,
     ) -> PyResult<()> {
-        let x: Array2<f64> = x.as_array().to_owned();
-        let y: Option<Array1<f64>> = y.map(|y| y.as_array().to_owned());
-        let w: Option<Array1<f64>> = sample_weight.map(|w| w.as_array().to_owned());
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_ref().map(|y| y.as_array()),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
         let inner = &mut self.inner;
-        py.detach(|| inner.fit(&x, y.as_ref(), w.as_ref()))
-            .map_err(to_py_err)
+        py.detach(|| inner.fit(x, y, w)).map_err(to_py_err)
     }
 
     fn predict(&self, py: Python<'_>, x: PyReadonlyArray2<'_, f64>) -> PyResult<Py<PyAny>> {
@@ -183,11 +184,11 @@ impl PyModel {
         &self,
         py: Python<'_>,
         x: PyReadonlyArray2<'_, f64>,
-        f: impl FnOnce(&dyn DynModel, &Array2<f64>) -> anofox_ml_core::Result<Out> + Send,
+        f: impl FnOnce(&dyn DynModel, ArrayView2<f64>) -> anofox_ml_core::Result<Out> + Send,
     ) -> PyResult<Py<PyAny>> {
-        let x: Array2<f64> = x.as_array().to_owned();
+        let x = x.as_array();
         let inner: &dyn DynModel = self.inner.as_ref();
-        let out = py.detach(|| f(inner, &x)).map_err(to_py_err)?;
+        let out = py.detach(|| f(inner, x)).map_err(to_py_err)?;
         Ok(out_to_py(py, out))
     }
 }

@@ -22,7 +22,7 @@
 use anofox_ml_core::{
     shuffled_k_fold, stratified_k_fold, Fit, Float, Result, RustMlError, Transform,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2};
 
 /// Kind of target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -128,7 +128,7 @@ fn category_index<F: Float>(cats: &[F], v: F) -> Option<usize> {
         .ok()
 }
 
-fn infer_target_type<F: Float>(y: &Array1<F>) -> TargetType {
+fn infer_target_type<F: Float>(y: ArrayView1<F>) -> TargetType {
     if y.iter().any(|v| v.fract() != F::zero() || !v.is_finite()) {
         return TargetType::Continuous;
     }
@@ -209,8 +209,8 @@ impl TargetEncoder {
     #[allow(clippy::type_complexity)]
     fn fit_all<F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
     ) -> Result<(
         FittedTargetEncoder<F>,
         Vec<Vec<Option<usize>>>,
@@ -322,11 +322,13 @@ impl TargetEncoder {
     /// Fit on `(X, y)` and return the cross-fitted encoding of the training
     /// data (sklearn's `fit_transform`). The fitted encoder itself uses all
     /// the data, as `fit`.
-    pub fn fit_transform<F: Float>(
+    pub fn fit_transform<'a, 'b, F: Float>(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
     ) -> Result<(FittedTargetEncoder<F>, Array2<F>)> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         if self.cv < 2 {
             return Err(RustMlError::InvalidParameter(
                 "cv must be at least 2".into(),
@@ -383,7 +385,7 @@ fn interleave(per_target: Vec<Vec<Vec<f64>>>, d: usize) -> Vec<Vec<f64>> {
 impl<F: Float> Fit<F> for TargetEncoder {
     type Fitted = FittedTargetEncoder<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         Ok(self.fit_all(x, y)?.0)
     }
 
@@ -391,8 +393,8 @@ impl<F: Float> Fit<F> for TargetEncoder {
     /// `fit_transform`.
     fn fit_transform_supervised(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
     ) -> Result<(Self::Fitted, Option<Array2<F>>)> {
         let (fitted, out) = self.fit_transform(x, y)?;
         Ok((fitted, Some(out)))
@@ -400,7 +402,7 @@ impl<F: Float> Fit<F> for TargetEncoder {
 }
 
 impl<F: Float> Transform<F> for FittedTargetEncoder<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let d = self.categories.len();
         if x.ncols() != d {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -457,7 +459,7 @@ impl<F: Float> FittedTargetEncoder<F> {
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
-    use ndarray::array;
+    use ndarray::{array, Array1};
 
     fn data() -> (Array2<f64>, Array1<f64>) {
         let x = array![
@@ -645,7 +647,7 @@ mod tests {
         // Each row is encoded by an encoder fitted without its fold.
         let (x, y) = data();
         let te = TargetEncoder::new().with_cv(3).with_random_state(7);
-        let (full, out) = te.fit_transform(&x, &y).unwrap();
+        let (full, out) = te.fit_transform(x.view(), y.view()).unwrap();
         let plain = Fit::<f64>::fit(&te, &x, &y).unwrap();
         assert_eq!(full.encodings(), plain.encodings());
         let folds = shuffled_k_fold(x.nrows(), 3, 7).unwrap();
@@ -668,8 +670,9 @@ mod tests {
         use anofox_ml_core::{FitTransform, Supervised};
         let (x, y) = data();
         let te = TargetEncoder::new().with_cv(3).with_random_state(1);
-        let (_, expected) = te.fit_transform(&x, &y).unwrap();
-        let (_, out) = FitTransform::<f64>::fit_transform(&Supervised(te), &x, Some(&y)).unwrap();
+        let (_, expected) = te.fit_transform(x.view(), y.view()).unwrap();
+        let (_, out) =
+            FitTransform::<f64>::fit_transform(&Supervised(te), x.view(), Some(y.view())).unwrap();
         assert_eq!(out, expected);
     }
 }

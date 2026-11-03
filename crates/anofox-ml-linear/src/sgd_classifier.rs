@@ -14,7 +14,7 @@ use crate::sgd_common::{
 use anofox_ml_core::{
     ClassWeight, Fit, FitWeighted, Float, PartialFit, Predict, PredictProba, Result, RustMlError,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -219,7 +219,7 @@ impl SgdClassifier {
         }
     }
 
-    fn validate(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+    fn validate(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<()> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -311,7 +311,8 @@ impl<F: Float> FittedSgdClassifier<F> {
     ///
     /// Shape `(n_samples, 1)` for binary problems (positive = `classes[1]`,
     /// like sklearn's 1-D output) and `(n_samples, n_classes)` otherwise.
-    pub fn decision_function(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn decision_function<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -344,7 +345,7 @@ fn sorted_unique(y: &[f64]) -> Vec<f64> {
 
 /// The ±1 target of each sub-problem: binary → one problem with
 /// `classes[1]` positive, otherwise one OvR problem per class.
-fn binary_targets(y: &Array1<f64>, classes: &[f64]) -> Vec<Vec<f64>> {
+fn binary_targets(y: ArrayView1<f64>, classes: &[f64]) -> Vec<Vec<f64>> {
     let positives: Vec<f64> = if classes.len() == 2 {
         vec![classes[1]]
     } else {
@@ -363,9 +364,9 @@ fn binary_targets(y: &Array1<f64>, classes: &[f64]) -> Vec<Vec<f64>> {
 impl SgdClassifier {
     fn train(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
         classes: Vec<f64>,
         state: Option<FittedSgdClassifier<f64>>,
         partial: bool,
@@ -579,7 +580,7 @@ impl SgdClassifier {
 impl Fit<f64> for SgdClassifier {
     type Fitted = FittedSgdClassifier<f64>;
 
-    fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.validate(x, y)?;
         let classes = sorted_unique(&y.to_vec());
         if classes.len() < 2 {
@@ -596,11 +597,11 @@ impl FitWeighted<f64> for SgdClassifier {
 
     /// Each SGD update is scaled by the sample's weight times its class
     /// weight (sklearn); the early-stopping accuracy is weighted too.
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
-        sample_weight: Option<&Array1<f64>>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
         self.validate(x, y)?;
         let classes = sorted_unique(&y.to_vec());
@@ -619,11 +620,11 @@ impl PartialFit<f64> for SgdClassifier {
     /// Run exactly one SGD epoch over the batch, resuming from `state`
     /// (weights, averaged weights and the learning-rate counter `t_`), as
     /// sklearn's `partial_fit`. `tol` / `early_stopping` do not apply.
-    fn partial_fit(
+    fn partial_fit_view(
         &self,
         state: Option<Self::Fitted>,
-        x: &Array2<f64>,
-        y: &Array1<f64>,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
         classes: Option<&[f64]>,
     ) -> Result<Self::Fitted> {
         self.validate(x, y)?;
@@ -666,7 +667,7 @@ impl PartialFit<f64> for SgdClassifier {
 }
 
 impl Predict<f64> for FittedSgdClassifier<f64> {
-    fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let scores = self.decision_function(x)?;
         let n = x.nrows();
         let mut preds = Array1::zeros(n);
@@ -704,7 +705,7 @@ impl PredictProba<f64> for FittedSgdClassifier<f64> {
     /// `ClassifierLoss::ModifiedHuber` (`(clip(s, -1, 1) + 1) / 2`), as in
     /// sklearn. Multi-class OvR scores are normalised to sum to one
     /// (uniform when all OvR probabilities are zero).
-    fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
+    fn predict_proba_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         let link: fn(f64) -> f64 = match self.loss {
             ClassifierLoss::Log => sigmoid,
             ClassifierLoss::ModifiedHuber => |s: f64| (s.clamp(-1.0, 1.0) + 1.0) / 2.0,
@@ -910,7 +911,7 @@ mod tests {
         let clf = SgdClassifier::new().with_max_iter(100);
         let fitted = clf.fit(&x, &y).unwrap();
 
-        let scores = fitted.decision_function(&x).unwrap();
+        let scores = fitted.decision_function(x.view()).unwrap();
         assert_eq!(scores.nrows(), 12);
         assert_eq!(scores.ncols(), 1, "binary problems train a single model");
     }

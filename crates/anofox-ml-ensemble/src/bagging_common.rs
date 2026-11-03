@@ -2,11 +2,9 @@
 //! [`BaggingRegressor`](crate::BaggingRegressor) (sklearn's
 //! `_generate_bagging_indices`).
 
-use std::borrow::Cow;
-
 use anofox_ml_core::{Float, Result, RustMlError};
 use anofox_ml_trees::MaxFeatures;
-use ndarray::{Array2, Axis};
+use ndarray::{ArrayView2, Axis, CowArray, Ix2};
 use rand::rngs::StdRng;
 use rand::seq::index::sample;
 use rand::{Rng, SeedableRng};
@@ -107,13 +105,13 @@ impl BagSampling {
 
 /// The columns `features` of `x` (all of `x` when `features` is empty).
 pub(crate) fn select_columns<'a, F: Float>(
-    x: &'a Array2<F>,
+    x: ArrayView2<'a, F>,
     features: &[usize],
-) -> Cow<'a, Array2<F>> {
+) -> CowArray<'a, F, Ix2> {
     if features.is_empty() {
-        Cow::Borrowed(x)
+        x.into()
     } else {
-        Cow::Owned(x.select(Axis(1), features))
+        x.select(Axis(1), features).into()
     }
 }
 

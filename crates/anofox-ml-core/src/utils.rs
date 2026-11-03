@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayBase, ArrayView1, ArrayView2, AsArray, Data, Ix1, Ix2};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
@@ -166,7 +166,7 @@ fn label_key<F: Float>(v: F) -> u64 {
 /// Classes are ordered by first appearance in `y` (like sklearn's
 /// `StratifiedKFold` encoding) and indices within a class are ascending, so
 /// the result is fully deterministic (no hash-map iteration order leaks out).
-pub(crate) fn group_by_class<F: Float>(y: &Array1<F>) -> Vec<Vec<usize>> {
+pub(crate) fn group_by_class<F: Float>(y: ArrayView1<F>) -> Vec<Vec<usize>> {
     let mut position: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for (i, &v) in y.iter().enumerate() {
@@ -192,7 +192,7 @@ pub(crate) fn group_by_class<F: Float>(y: &Array1<F>) -> Vec<Vec<usize>> {
 /// [`grid_search_cv`], [`randomized_search_cv`], [`cross_val_predict`],
 /// [`cross_validate`], [`learning_curve`] and [`validation_curve`]) to choose
 /// between stratified and plain shuffled K-fold.
-pub fn looks_like_class_labels<F: Float>(y: &Array1<F>) -> bool {
+pub fn looks_like_class_labels<F: Float, S: Data<Elem = F>>(y: &ArrayBase<S, Ix1>) -> bool {
     let n = y.len();
     if n == 0 {
         return false;
@@ -206,11 +206,11 @@ pub fn looks_like_class_labels<F: Float>(y: &Array1<F>) -> bool {
             return false;
         }
     }
-    let n_unique = group_by_class(y).len();
+    let n_unique = group_by_class(y.view()).len();
     n_unique <= 2 || 2 * n_unique <= n
 }
 
-fn check_xy<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<()> {
+fn check_xy<F: Float>(x: ArrayView2<F>, y: ArrayView1<F>) -> Result<()> {
     if x.nrows() != y.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {} elements",
@@ -303,12 +303,14 @@ fn validate_splits(splits: &[CvSplit], n: usize, require_partition: bool) -> Res
 /// Consequently every fold receives `n / k` or `n / k + 1` samples even when
 /// some (or all) classes have fewer than `k` members — e.g. a continuous
 /// target with all-unique values yields `k` non-empty folds.
-pub fn stratified_k_fold<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn stratified_k_fold<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     k: usize,
     seed: u64,
 ) -> Result<Vec<CvSplit>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
     check_xy(x, y)?;
     if x.nrows() == 0 {
         return Err(RustMlError::EmptyInput("input is empty".into()));
@@ -377,16 +379,18 @@ pub fn shuffled_k_fold(n_samples: usize, k: usize, seed: u64) -> Result<Vec<CvSp
 /// Uses [`stratified_k_fold`] when `y` [`looks_like_class_labels`] and
 /// [`shuffled_k_fold`] (seeded) otherwise, mirroring sklearn's choice of
 /// `StratifiedKFold` for classifiers and `KFold` for regressors.
-pub fn default_cv_splits<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn default_cv_splits<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     k: usize,
     seed: u64,
 ) -> Result<Vec<CvSplit>> {
-    if looks_like_class_labels(y) {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
+    if looks_like_class_labels(&y) {
         stratified_k_fold(x, y, k, seed)
     } else {
-        check_xy(x, y)?;
+        check_xy(x.view(), y.view())?;
         if x.nrows() == 0 {
             return Err(RustMlError::EmptyInput("input is empty".into()));
         }
@@ -431,7 +435,7 @@ pub fn cross_val_score_with_splits<F: Float>(
     fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
     scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
 ) -> Result<Vec<F>> {
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
     splits
         .iter()
@@ -450,7 +454,7 @@ pub fn cross_val_score_with_splits_par<F: Float>(
     scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F> + Sync,
 ) -> Result<Vec<F>> {
     use rayon::prelude::*;
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
     splits
         .par_iter()
@@ -477,7 +481,7 @@ where
             "param_configs must not be empty".into(),
         ));
     }
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
     let k = splits.len();
     let flat: Vec<F> = (0..param_configs.len() * k)
@@ -589,7 +593,7 @@ pub fn grid_search_cv_with_splits<F: Float>(
             "param_configs must not be empty".into(),
         ));
     }
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
 
     let mut cv_scores: Vec<Vec<F>> = Vec::with_capacity(param_configs.len());
@@ -899,7 +903,7 @@ where
     if n_iter == 0 {
         return Err(RustMlError::InvalidParameter("n_iter must be > 0".into()));
     }
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
 
     let mut cv_scores: Vec<Vec<F>> = Vec::with_capacity(n_iter);
@@ -961,7 +965,7 @@ pub fn cross_val_predict_with_splits<F: Float>(
     splits: &[CvSplit],
     fit_predict: impl Fn(&Array2<F>, &Array1<F>, &Array2<F>) -> Result<Array1<F>>,
 ) -> Result<Array1<F>> {
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), true)?;
     let n = x.nrows();
     let mut predictions = Array1::zeros(n);
@@ -1032,13 +1036,15 @@ pub fn repeated_stratified_k_fold<F: Float>(
 ///   drives all draws, so the result is fully deterministic for a given `seed`.
 ///
 /// Returned index lists are ascending.
-pub fn stratified_shuffle_split<F: Float>(
-    x: &Array2<F>,
-    y: &Array1<F>,
+pub fn stratified_shuffle_split<'a, 'b, F: Float>(
+    x: impl AsArray<'a, F, Ix2>,
+    y: impl AsArray<'b, F, Ix1>,
     n_splits: usize,
     test_size: f64,
     seed: u64,
 ) -> Result<Vec<CvSplit>> {
+    let x: ArrayView2<F> = x.into();
+    let y: ArrayView1<F> = y.into();
     if test_size <= 0.0 || test_size >= 1.0 {
         return Err(RustMlError::InvalidParameter(
             "test_size must be in (0, 1)".into(),
@@ -1201,7 +1207,7 @@ pub fn cross_validate_with_splits<F: Float>(
             "need at least one scorer".into(),
         ));
     }
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
     let n_metrics = scorers.len();
     let n_splits = splits.len();
@@ -1264,7 +1270,7 @@ pub fn cross_validate_weighted_with_splits<F: Float>(
             "need at least one scorer".into(),
         ));
     }
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     if let Some(w) = sample_weight {
         crate::class_weight::check_sample_weight(w, y.len())?;
     }
@@ -1382,7 +1388,7 @@ pub fn learning_curve_with_splits<F: Float>(
     scorer: impl Fn(&Array1<F>, &Array1<F>) -> Result<F>,
 ) -> Result<LearningCurveResult<F>> {
     check_train_sizes(train_sizes)?;
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
 
     let n_splits = splits.len();
@@ -1461,7 +1467,7 @@ pub fn validation_curve_with_splits<F: Float>(
             "param_configs must not be empty".into(),
         ));
     }
-    check_xy(x, y)?;
+    check_xy(x.view(), y.view())?;
     validate_splits(splits, x.nrows(), false)?;
     let n_configs = param_configs.len();
     let n_splits = splits.len();

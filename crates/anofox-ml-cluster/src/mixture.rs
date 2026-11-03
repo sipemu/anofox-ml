@@ -19,7 +19,7 @@
 //! diag/spherical.
 
 use anofox_ml_core::{Result, RustMlError};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -236,7 +236,7 @@ pub(crate) fn log_det_cholesky(
 /// `log N(x_i | μ_k, Λ_k⁻¹)` for all samples and components, batched with
 /// one GEMM per component (sklearn `_estimate_log_gaussian_prob`).
 pub(crate) fn estimate_log_gaussian_prob(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     means: &Array2<f64>,
     prec_chol: &[Array2<f64>],
     ct: CovarianceType,
@@ -311,7 +311,7 @@ pub(crate) fn log_prob_resp(weighted: Array2<f64>) -> (Array1<f64>, Array2<f64>)
 /// `_estimate_gaussian_parameters`): `(n_k, μ_k, Σ_k)` with
 /// `n_k = Σ_i r_ik + 10·ε` and `reg_covar` added to the covariance diagonal.
 pub(crate) fn estimate_gaussian_parameters(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     resp: &Array2<f64>,
     reg_covar: f64,
     ct: CovarianceType,
@@ -319,7 +319,7 @@ pub(crate) fn estimate_gaussian_parameters(
     let d = x.ncols();
     let k = resp.ncols();
     let nk: Array1<f64> = resp.sum_axis(Axis(0)) + 10.0 * f64::EPSILON;
-    let mut means = resp.t().dot(x);
+    let mut means = resp.t().dot(&x);
     for c in 0..k {
         let inv = 1.0 / nk[c];
         means.row_mut(c).mapv_inplace(|v| v * inv);
@@ -328,7 +328,7 @@ pub(crate) fn estimate_gaussian_parameters(
         CovarianceType::Full => (0..k)
             .into_par_iter()
             .map(|c| {
-                let diff = x - &means.row(c);
+                let diff = &x - &means.row(c);
                 let mut weighted = diff.clone();
                 for (mut row, &r) in weighted.rows_mut().into_iter().zip(resp.column(c).iter()) {
                     row.mapv_inplace(|v| v * r);
@@ -341,7 +341,7 @@ pub(crate) fn estimate_gaussian_parameters(
             })
             .collect(),
         CovarianceType::Tied => {
-            let avg_x2 = x.t().dot(x);
+            let avg_x2 = x.t().dot(&x);
             let mut nm = means.t().to_owned();
             for c in 0..k {
                 nm.column_mut(c).mapv_inplace(|v| v * nk[c]);
@@ -378,7 +378,7 @@ pub(crate) fn estimate_gaussian_parameters(
 
 /// Initial responsibilities (sklearn `_initialize_parameters`).
 pub(crate) fn initial_resp(
-    x: &Array2<f64>,
+    x: ArrayView2<f64>,
     k: usize,
     init: MixtureInit,
     rng: &mut StdRng,

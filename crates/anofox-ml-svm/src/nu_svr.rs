@@ -24,7 +24,7 @@
 //! clipped to the box.
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::kernel::SvmKernel;
 use crate::svr;
@@ -147,7 +147,7 @@ impl<F: Float> FittedNuSvr<F> {
 }
 
 impl<F: Float> Predict<F> for FittedNuSvr<F> {
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         self.inner.predict(x)
     }
 }
@@ -159,7 +159,7 @@ impl<F: Float> Predict<F> for FittedNuSvr<F> {
 impl<F: Float> Fit<F> for NuSvr {
     type Fitted = FittedNuSvr<F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         self.validate()?;
 
         if x.is_empty() || y.is_empty() {

@@ -1,5 +1,5 @@
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 /// The type of norm used to normalize each sample (row).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -53,7 +53,7 @@ pub struct FittedNormalizer<F: Float> {
 impl<F: Float> FitUnsupervised<F> for Normalizer {
     type Fitted = FittedNormalizer<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         if x.is_empty() {
             return Err(RustMlError::EmptyInput("input array is empty".into()));
         }
@@ -66,7 +66,7 @@ impl<F: Float> FitUnsupervised<F> for Normalizer {
 }
 
 impl<F: Float> Transform<F> for FittedNormalizer<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         let eps = F::from_f64(1e-15).unwrap();
         let mut result = x.to_owned();
 

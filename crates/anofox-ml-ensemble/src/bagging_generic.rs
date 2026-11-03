@@ -20,7 +20,7 @@
 use anofox_ml_core::{
     encode_labels, label_index, Fit, FitWeighted, Float, Predict, Result, RustMlError,
 };
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 use rayon::prelude::*;
 
 use crate::bagging_common::{out_of_bag, select_columns, BagPlan};
@@ -78,7 +78,7 @@ pub struct FittedGenericBagging<M, F> {
     oob_score: Option<f64>,
 }
 
-fn check_xy<F: Float>(x: &Array2<F>, y: &Array1<F>, w: Option<&Array1<F>>) -> Result<()> {
+fn check_xy<F: Float>(x: ArrayView2<F>, y: ArrayView1<F>, w: Option<ArrayView1<F>>) -> Result<()> {
     if x.nrows() != y.len() {
         return Err(RustMlError::ShapeMismatch(format!(
             "X has {} rows but y has {} elements",
@@ -99,9 +99,9 @@ fn check_xy<F: Float>(x: &Array2<F>, y: &Array1<F>, w: Option<&Array1<F>>) -> Re
 /// rows and columns of `x`, `y` and (if given) the weights.
 fn fit_all<F, M, G>(
     plans: &[BagPlan],
-    x: &Array2<F>,
-    y: &Array1<F>,
-    w: Option<&Array1<F>>,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
+    w: Option<ArrayView1<F>>,
     fit_one: G,
 ) -> Result<Vec<M>>
 where
@@ -121,7 +121,7 @@ where
 }
 
 impl<M, F: Float> FittedGenericBagging<M, F> {
-    fn check_features(&self, x: &Array2<F>) -> Result<()> {
+    fn check_features(&self, x: ArrayView2<F>) -> Result<()> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -152,7 +152,7 @@ impl<M, F: Float> FittedGenericBagging<M, F> {
 
 impl<M: Predict<F> + Sync, F: Float> FittedGenericBagging<M, F> {
     /// Predictions of every estimator on its own feature subset.
-    fn all_predictions(&self, x: &Array2<F>) -> Result<Vec<Array1<F>>> {
+    fn all_predictions(&self, x: ArrayView2<F>) -> Result<Vec<Array1<F>>> {
         self.check_features(x)?;
         self.estimators
             .par_iter()
@@ -165,7 +165,7 @@ impl<M: Predict<F> + Sync, F: Float> FittedGenericBagging<M, F> {
     fn oob_predictions(
         estimators: &[M],
         plans: &[BagPlan],
-        x: &Array2<F>,
+        x: ArrayView2<F>,
     ) -> Result<Vec<(usize, F)>> {
         let mut out = Vec::new();
         for (plan, m) in plans.iter().zip(estimators) {
@@ -187,8 +187,8 @@ impl<E> GenericBaggingRegressor<E> {
         &self,
         plans: &[BagPlan],
         estimators: Vec<M>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
     ) -> Result<FittedGenericBagging<M, F>> {
         let n = x.nrows();
         let (oob, oob_score) = if self.params.oob_score {
@@ -205,7 +205,7 @@ impl<E> GenericBaggingRegressor<E> {
                     F::nan()
                 }
             });
-            let score = r2_where_defined(y, &pred.column(0).to_owned());
+            let score = r2_where_defined(y, pred.column(0));
             (Some(pred), Some(score))
         } else {
             (None, None)
@@ -229,7 +229,7 @@ where
 {
     type Fitted = FittedGenericBagging<E::Fitted, F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         check_xy(x, y, None)?;
         let plans = self.params.sampling().plans(x.nrows(), x.ncols())?;
         let est = fit_all(&plans, x, y, None, |xs, ys, _| self.estimator.fit(xs, ys))?;
@@ -245,11 +245,11 @@ where
 {
     type Fitted = FittedGenericBagging<E::Fitted, F>;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         check_xy(x, y, sample_weight)?;
         let plans = self.params.sampling().plans(x.nrows(), x.ncols())?;
@@ -271,7 +271,7 @@ impl<M: Predict<F> + Sync, F: Float> FittedGenericBagging<M, F> {
 }
 
 /// R² over the samples whose prediction is not NaN.
-fn r2_where_defined<F: Float>(y: &Array1<F>, pred: &Array1<F>) -> f64 {
+fn r2_where_defined<F: Float>(y: ArrayView1<F>, pred: ArrayView1<F>) -> f64 {
     let pairs: Vec<(f64, f64)> = y
         .iter()
         .zip(pred)
@@ -298,8 +298,8 @@ impl<E> GenericBaggingClassifier<E> {
         &self,
         plans: &[BagPlan],
         estimators: Vec<M>,
-        x: &Array2<F>,
-        y: &Array1<F>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
         classes: Vec<F>,
     ) -> Result<FittedGenericBagging<M, F>> {
         let n = x.nrows();
@@ -364,9 +364,9 @@ where
 {
     type Fitted = FittedGenericBagging<E::Fitted, F>;
 
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         check_xy(x, y, None)?;
-        let (classes, _) = encode_labels(y)?;
+        let (classes, _) = encode_labels(&y)?;
         let plans = self.params.sampling().plans(x.nrows(), x.ncols())?;
         let est = fit_all(&plans, x, y, None, |xs, ys, _| self.estimator.fit(xs, ys))?;
         self.finish(&plans, est, x, y, classes)
@@ -381,14 +381,14 @@ where
 {
     type Fitted = FittedGenericBagging<E::Fitted, F>;
 
-    fn fit_weighted(
+    fn fit_weighted_view(
         &self,
-        x: &Array2<F>,
-        y: &Array1<F>,
-        sample_weight: Option<&Array1<F>>,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        sample_weight: Option<ArrayView1<F>>,
     ) -> Result<Self::Fitted> {
         check_xy(x, y, sample_weight)?;
-        let (classes, _) = encode_labels(y)?;
+        let (classes, _) = encode_labels(&y)?;
         let plans = self.params.sampling().plans(x.nrows(), x.ncols())?;
         let est = fit_all(&plans, x, y, sample_weight, |xs, ys, ws| {
             self.estimator.fit_weighted(xs, ys, ws)
@@ -400,7 +400,8 @@ where
 impl<M: Predict<F> + Sync, F: Float> FittedGenericBagging<M, F> {
     /// Classifier: fraction of the estimators voting for each class, shape
     /// `(n, n_classes)` in the order of [`classes`](Self::classes).
-    pub fn predict_proba(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, F, Ix2>) -> Result<Array2<F>> {
+        let x: ArrayView2<F> = x.into();
         if self.classes.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "predict_proba is only available for a bagging classifier".into(),
@@ -428,7 +429,7 @@ impl<M: Predict<F> + Sync, F: Float> FittedGenericBagging<M, F> {
 impl<M: Predict<F> + Sync, F: Float> Predict<F> for FittedGenericBagging<M, F> {
     /// Regressor: mean prediction. Classifier: the class with the most votes
     /// (ties to the smaller label).
-    fn predict(&self, x: &Array2<F>) -> Result<Array1<F>> {
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         if self.classes.is_empty() {
             let preds = self.all_predictions(x)?;
             let mut sum = Array1::<F>::zeros(x.nrows());

@@ -1,5 +1,5 @@
 use anofox_ml_core::{FitUnsupervised, Float, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 /// Parameters for `VarianceThreshold` feature selector (unfitted state).
 ///
@@ -92,7 +92,7 @@ impl<F: Float> FittedVarianceThreshold<F> {
 impl<F: Float> FitUnsupervised<F> for VarianceThreshold {
     type Fitted = FittedVarianceThreshold<F>;
 
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let (n_samples, n_features) = x.dim();
 
         if n_samples == 0 || n_features == 0 {
@@ -169,7 +169,7 @@ impl<F: Float> FitUnsupervised<F> for VarianceThreshold {
 }
 
 impl<F: Float> Transform<F> for FittedVarianceThreshold<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features_in {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",

@@ -9,7 +9,7 @@
 //! `∂K/∂θ_k` for every free `θ_k`.
 
 use anofox_ml_core::{Result, RustMlError};
-use ndarray::{Array1, Array2, ArrayView2, Axis, Zip};
+use ndarray::{Array1, Array2, ArrayView2, AsArray, Axis, Ix2, Zip};
 
 /// Default hyperparameter bounds, `(1e-5, 1e5)` — sklearn's default for
 /// every kernel hyperparameter.
@@ -487,17 +487,28 @@ impl GpKernel {
     }
 
     /// `K(X, X)` (White noise on the diagonal).
-    pub fn gram(&self, x: &Array2<f64>) -> Array2<f64> {
+    pub fn gram<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Array2<f64> {
+        let x: ArrayView2<f64> = x.into();
         self.eval(&x.view(), None, None)
     }
 
     /// Cross-covariance `K(A, B)` between two point sets (White ≡ 0).
-    pub fn cross(&self, a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    pub fn cross<'a, 'b>(
+        &self,
+        a: impl AsArray<'a, f64, Ix2>,
+        b: impl AsArray<'b, f64, Ix2>,
+    ) -> Array2<f64> {
+        let a: ArrayView2<f64> = a.into();
+        let b: ArrayView2<f64> = b.into();
         self.eval(&a.view(), Some(&b.view()), None)
     }
 
     /// `K(X, X)` and `∂K/∂θ_k` for every free log-hyperparameter `θ_k`.
-    pub fn gram_with_gradient(&self, x: &Array2<f64>) -> (Array2<f64>, Vec<Array2<f64>>) {
+    pub fn gram_with_gradient<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> (Array2<f64>, Vec<Array2<f64>>) {
+        let x: ArrayView2<f64> = x.into();
         let mut grads = Vec::with_capacity(self.n_params());
         let k = self.eval(&x.view(), None, Some(&mut grads));
         let grads = grads
@@ -510,7 +521,8 @@ impl GpKernel {
     }
 
     /// Diagonal of `K(X, X)` without forming the matrix.
-    pub fn diag(&self, x: &Array2<f64>) -> Array1<f64> {
+    pub fn diag<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Array1<f64> {
+        let x: ArrayView2<f64> = x.into();
         let n = x.nrows();
         match self {
             GpKernel::Rbf { signal_var, .. }
@@ -777,17 +789,17 @@ mod tests {
         for kern in kernels() {
             kern.validate(2).unwrap();
             let theta = kern.theta();
-            let (k0, grads) = kern.gram_with_gradient(&x);
+            let (k0, grads) = kern.gram_with_gradient(x.view());
             assert_eq!(grads.len(), theta.len());
-            assert!((&k0 - &kern.gram(&x)).iter().all(|v| v.abs() < 1e-14));
+            assert!((&k0 - &kern.gram(x.view())).iter().all(|v| v.abs() < 1e-14));
             let h = 1e-6;
             for p in 0..theta.len() {
                 let mut tp = theta.clone();
                 tp[p] += h;
                 let mut tm = theta.clone();
                 tm[p] -= h;
-                let kp = kern.with_theta(&tp).unwrap().gram(&x);
-                let km = kern.with_theta(&tm).unwrap().gram(&x);
+                let kp = kern.with_theta(&tp).unwrap().gram(x.view());
+                let km = kern.with_theta(&tm).unwrap().gram(x.view());
                 let fd = (kp - km) / (2.0 * h);
                 for (a, b) in fd.iter().zip(grads[p].iter()) {
                     assert!(
@@ -803,9 +815,9 @@ mod tests {
     fn cross_matches_gram_and_diag() {
         let x = data();
         for kern in kernels() {
-            let without_white = kern.cross(&x, &x);
-            let k = kern.gram(&x);
-            let d = kern.diag(&x);
+            let without_white = kern.cross(x.view(), x.view());
+            let k = kern.gram(x.view());
+            let d = kern.diag(x.view());
             for i in 0..x.nrows() {
                 assert!((k[[i, i]] - d[i]).abs() < 1e-12);
                 for j in 0..x.nrows() {
@@ -821,9 +833,9 @@ mod tests {
     fn white_kernel_is_zero_for_cross_covariance() {
         let x = data();
         let w = GpKernel::White { noise_level: 0.5 };
-        assert!(w.cross(&x, &x).iter().all(|&v| v == 0.0));
-        assert_eq!(w.gram(&x)[[3, 3]], 0.5);
-        assert_eq!(w.diag(&x)[0], 0.5);
+        assert!(w.cross(x.view(), x.view()).iter().all(|&v| v == 0.0));
+        assert_eq!(w.gram(x.view())[[3, 3]], 0.5);
+        assert_eq!(w.diag(x.view())[0], 0.5);
     }
 
     #[test]
@@ -882,7 +894,7 @@ mod tests {
             signal_var: 1.4,
             nu: 2.5,
         };
-        let d = iso.gram(&x) - ard.gram(&x);
+        let d = iso.gram(x.view()) - ard.gram(x.view());
         assert!(d.iter().all(|v| v.abs() < 1e-12));
     }
 }

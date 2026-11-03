@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use ndarray::Array1;
+use ndarray::{ArrayBase, Data, Ix1};
 
 use crate::error::{Result, RustMlError};
 use crate::float::Float;
@@ -45,7 +45,9 @@ pub fn label_index<F: Float>(classes: &[F], v: F) -> Option<usize> {
 }
 
 /// Encode `y` as `(sorted classes, class index per sample)`.
-pub fn encode_labels<F: Float>(y: &Array1<F>) -> Result<(Vec<F>, Vec<usize>)> {
+pub fn encode_labels<F: Float, S: Data<Elem = F>>(
+    y: &ArrayBase<S, Ix1>,
+) -> Result<(Vec<F>, Vec<usize>)> {
     let classes = sorted_unique_labels(y.iter().copied())?;
     let idx = y
         .iter()

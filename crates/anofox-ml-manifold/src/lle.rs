@@ -18,7 +18,7 @@ use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
 use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
 use faer::linalg::solvers::Solve;
 use faer::{Mat, Side};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView2};
 use rayon::prelude::*;
 
 use crate::sparse_eigen::smallest_eigenpairs;
@@ -57,9 +57,9 @@ impl<F: Float> FitUnsupervised<F> for LocallyLinearEmbedding {
     type Fitted = FittedLocallyLinearEmbedding;
 
     /// Computed in `f64` whatever the input float type.
-    fn fit(&self, x: &Array2<F>) -> Result<Self::Fitted> {
+    fn fit_view(&self, x: ArrayView2<F>) -> Result<Self::Fitted> {
         let x_f64 = anofox_ml_core::as_f64(x);
-        let x: &Array2<f64> = &x_f64;
+        let x = x_f64.view();
         let n = x.nrows();
         let d = x.ncols();
         if n == 0 {

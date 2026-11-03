@@ -1,7 +1,7 @@
 use crate::mutual_information::{mutual_info_classif, mutual_info_regression, DiscreteFeatures};
 use crate::special::{chi2_sf, f_sf};
 use anofox_ml_core::{Fit, Float, Result, RustMlError, Transform};
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix1, Ix2};
 use std::collections::HashMap;
 
 /// Pluggable scoring function used by [`SelectKBest`].
@@ -93,7 +93,13 @@ impl SelectKBest {
     /// For [`ScoringFunction::FClassif`] and [`ScoringFunction::FRegression`],
     /// `y` is used as the target variable. For [`ScoringFunction::Variance`],
     /// `y` is ignored.
-    pub fn fit<F: Float>(&self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedSelectKBest<F>> {
+    pub fn fit<'a, 'b, F: Float>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+        y: impl AsArray<'b, F, Ix1>,
+    ) -> Result<FittedSelectKBest<F>> {
+        let x: ArrayView2<F> = x.into();
+        let y: ArrayView1<F> = y.into();
         let (n_samples, n_features) = x.dim();
 
         if n_samples == 0 || n_features == 0 {
@@ -204,13 +210,13 @@ impl<F: Float> FittedSelectKBest<F> {
 
 impl<F: Float> Fit<F> for SelectKBest {
     type Fitted = FittedSelectKBest<F>;
-    fn fit(&self, x: &Array2<F>, y: &Array1<F>) -> Result<FittedSelectKBest<F>> {
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<FittedSelectKBest<F>> {
         SelectKBest::fit(self, x, y)
     }
 }
 
 impl<F: Float> Transform<F> for FittedSelectKBest<F> {
-    fn transform(&self, x: &Array2<F>) -> Result<Array2<F>> {
+    fn transform_view(&self, x: ArrayView2<F>) -> Result<Array2<F>> {
         if x.ncols() != self.n_features_in {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -248,7 +254,10 @@ impl<F: Float> Transform<F> for FittedSelectKBest<F> {
 /// Like sklearn, a feature with zero within-class variance but non-zero
 /// between-class variance gets `F = inf, p = 0`; a constant feature gets
 /// `F = 0, p = 1` (sklearn returns NaN there).
-fn compute_f_classif<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F>, Array1<F>)> {
+fn compute_f_classif<F: Float>(
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
+) -> Result<(Array1<F>, Array1<F>)> {
     let (n_samples, n_features) = x.dim();
     let n_f = F::from_usize(n_samples).unwrap();
 
@@ -342,7 +351,10 @@ fn compute_f_classif<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F
 /// For each feature j:
 ///   r = correlation(x[:,j], y)
 ///   F = r^2 * (n - 2) / (1 - r^2),  p = F.sf(F, 1, n - 2)
-fn compute_f_regression<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F>, Array1<F>)> {
+fn compute_f_regression<F: Float>(
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
+) -> Result<(Array1<F>, Array1<F>)> {
     let (n_samples, n_features) = x.dim();
 
     if n_samples < 3 {
@@ -404,7 +416,7 @@ fn compute_f_regression<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array
 /// sklearn `chi2`: for non-negative `X` and class labels `y`,
 /// `observed = Yᵀ X` (per class feature sums), `expected = class_prob ⊗
 /// feature_sum`, `χ² = Σ (obs - exp)² / exp` with `n_classes - 1` dof.
-fn compute_chi2<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F>, Array1<F>)> {
+fn compute_chi2<F: Float>(x: ArrayView2<F>, y: ArrayView1<F>) -> Result<(Array1<F>, Array1<F>)> {
     let (n_samples, n_features) = x.dim();
     if x.iter().any(|&v| v < F::zero()) {
         return Err(RustMlError::InvalidParameter(
@@ -451,7 +463,7 @@ fn compute_chi2<F: Float>(x: &Array2<F>, y: &Array1<F>) -> Result<(Array1<F>, Ar
 }
 
 /// Compute per-feature variance (unsupervised scoring).
-fn compute_variance<F: Float>(x: &Array2<F>) -> Array1<F> {
+fn compute_variance<F: Float>(x: ArrayView2<F>) -> Array1<F> {
     let n = F::from_usize(x.nrows()).unwrap();
     let mean = x.sum_axis(Axis(0)) / n;
     let n_features = x.ncols();
@@ -502,7 +514,7 @@ mod tests {
         // sklearn 1.8 f_classif / chi2 / f_regression on the same data.
         let (x, y, yr) = sk_data();
         let f = SelectKBest::new(1, ScoringFunction::FClassif)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         assert_vec(
             f.scores(),
@@ -525,7 +537,7 @@ mod tests {
             1e-9,
         );
         let f = SelectKBest::new(2, ScoringFunction::Chi2)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         assert_vec(
             f.scores(),
@@ -549,7 +561,7 @@ mod tests {
         );
         assert_eq!(f.selected_indices(), &[0, 1]);
         let f = SelectKBest::new(1, ScoringFunction::FRegression)
-            .fit(&x, &yr)
+            .fit(x.view(), yr.view())
             .unwrap();
         assert_vec(
             f.scores(),
@@ -575,7 +587,7 @@ mod tests {
         let xs: Array2<f64> = array![[0.0, 1.0], [0.0, 2.0], [1.0, 3.0], [1.0, 4.0]];
         let ys = array![0.0, 0.0, 1.0, 1.0];
         let f = SelectKBest::new(1, ScoringFunction::FClassif)
-            .fit(&xs, &ys)
+            .fit(xs.view(), ys.view())
             .unwrap();
         assert!(f.scores()[0].is_infinite());
         assert_eq!(f.pvalues().unwrap()[0], 0.0);
@@ -587,7 +599,7 @@ mod tests {
         let x = array![[1.0, -1.0], [0.0, 2.0]];
         let y = array![0.0, 1.0];
         assert!(SelectKBest::new(1, ScoringFunction::Chi2)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .is_err());
     }
 
@@ -595,13 +607,13 @@ mod tests {
     fn test_mutual_info_scorers() {
         let (x, y, yr) = sk_data();
         let f = SelectKBest::new(2, ScoringFunction::MutualInfoClassif)
-            .fit(&x, &y)
+            .fit(x.view(), y.view())
             .unwrap();
         assert!(f.pvalues().is_none());
         assert_eq!(f.scores().len(), 4);
         assert!(f.scores().iter().all(|&v| v >= 0.0));
         let f = SelectKBest::new(1, ScoringFunction::MutualInfoRegression)
-            .fit(&x, &yr)
+            .fit(x.view(), yr.view())
             .unwrap();
         assert!(f.scores().iter().all(|&v| v >= 0.0));
     }
@@ -622,7 +634,7 @@ mod tests {
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let selector = SelectKBest::new(1, ScoringFunction::FClassif);
-        let fitted = selector.fit(&x, &y).unwrap();
+        let fitted = selector.fit(x.view(), y.view()).unwrap();
 
         assert_eq!(fitted.selected_indices(), &[0]);
         assert!(
@@ -641,7 +653,7 @@ mod tests {
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0];
 
         let selector = SelectKBest::new(1, ScoringFunction::FRegression);
-        let fitted = selector.fit(&x, &y).unwrap();
+        let fitted = selector.fit(x.view(), y.view()).unwrap();
 
         assert_eq!(fitted.selected_indices(), &[0]);
         // Feature 0 has perfect correlation -> very large F.
@@ -662,7 +674,7 @@ mod tests {
         let y = array![0.0, 0.0, 0.0, 0.0]; // ignored for Variance
 
         let selector = SelectKBest::new(1, ScoringFunction::Variance);
-        let fitted = selector.fit(&x, &y).unwrap();
+        let fitted = selector.fit(x.view(), y.view()).unwrap();
 
         assert_eq!(fitted.selected_indices(), &[1]);
     }
@@ -673,7 +685,7 @@ mod tests {
         let y = array![1.0, 2.0, 3.0];
 
         let selector = SelectKBest::new(2, ScoringFunction::FRegression);
-        let fitted = selector.fit(&x, &y).unwrap();
+        let fitted = selector.fit(x.view(), y.view()).unwrap();
         let result = fitted.transform(&x).unwrap();
 
         assert_eq!(result.nrows(), 3);
@@ -698,7 +710,7 @@ mod tests {
         let y = array![0.0, 1.0];
 
         let selector = SelectKBest::new(0, ScoringFunction::FClassif);
-        let result = selector.fit(&x, &y);
+        let result = selector.fit(x.view(), y.view());
         assert!(result.is_err());
     }
 
@@ -708,7 +720,7 @@ mod tests {
         let y = array![0.0, 1.0];
 
         let selector = SelectKBest::new(5, ScoringFunction::FClassif);
-        let result = selector.fit(&x, &y);
+        let result = selector.fit(x.view(), y.view());
         assert!(result.is_err());
         match result.unwrap_err() {
             RustMlError::InvalidParameter(msg) => {
@@ -724,7 +736,7 @@ mod tests {
         let y = array![0.0, 1.0, 2.0]; // 3 labels for 2 samples
 
         let selector = SelectKBest::new(1, ScoringFunction::FClassif);
-        let result = selector.fit(&x, &y);
+        let result = selector.fit(x.view(), y.view());
         assert!(result.is_err());
         match result.unwrap_err() {
             RustMlError::ShapeMismatch(msg) => {
@@ -740,7 +752,7 @@ mod tests {
         let y = Array1::<f64>::zeros(0);
 
         let selector = SelectKBest::new(1, ScoringFunction::FRegression);
-        let result = selector.fit(&x, &y);
+        let result = selector.fit(x.view(), y.view());
         assert!(result.is_err());
     }
 
@@ -755,7 +767,7 @@ mod tests {
         let y = array![0.0, 0.0, 1.0, 1.0];
 
         let selector = SelectKBest::new(1, ScoringFunction::FClassif);
-        let fitted = selector.fit(&x, &y).unwrap();
+        let fitted = selector.fit(x.view(), y.view()).unwrap();
 
         let wrong = array![[1.0, 2.0]]; // 2 cols instead of 3
         assert!(fitted.transform(&wrong).is_err());
@@ -767,7 +779,7 @@ mod tests {
         let y = array![1.0, 2.0, 3.0];
 
         let selector = SelectKBest::new(2, ScoringFunction::FRegression);
-        let fitted = selector.fit(&x, &y).unwrap();
+        let fitted = selector.fit(x.view(), y.view()).unwrap();
 
         assert_eq!(fitted.selected_indices().len(), 2);
         assert_eq!(fitted.selected_indices(), &[0, 1]);
@@ -779,7 +791,7 @@ mod tests {
         let y: Array1<f32> = array![0.0_f32, 0.0, 1.0, 1.0];
 
         let selector = SelectKBest::new(1, ScoringFunction::FClassif);
-        let fitted = selector.fit(&x, &y).unwrap();
+        let fitted = selector.fit(x.view(), y.view()).unwrap();
 
         assert_eq!(fitted.selected_indices().len(), 1);
         let result = fitted.transform(&x).unwrap();
