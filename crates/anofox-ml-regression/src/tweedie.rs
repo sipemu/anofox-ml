@@ -4,25 +4,25 @@
 //! `sklearn.linear_model.{TweedieRegressor, GammaRegressor}`:
 //!
 //! ```text
-//! min  1/(2n) Σ d_p(yᵢ, μᵢ) + α/2 ‖β‖²      (intercept unpenalised)
+//! min  1/(2 Σw) Σ wᵢ d_p(yᵢ, μᵢ) + α/2 ‖β‖²      (intercept unpenalised)
 //! ```
 //!
 //! with `d_p` the Tweedie unit deviance of variance power `p` and the link
 //! chosen like sklearn's `link='auto'` (identity for `p <= 0`, log
 //! otherwise). The fit is delegated to `anofox_regression`'s
-//! `TweedieRegressor` (penalised IRLS, upstream `lambda = n·alpha`), with
-//! offsets and opt-in Wald inference.
+//! `TweedieRegressor` (penalised IRLS, upstream `lambda = alpha · Σw`, prior
+//! weights `w`), with sample weights (`FitWeighted`), offsets and opt-in Wald
+//! inference.
 //!
-//! `alpha` defaults to sklearn's 1.0 (anofox-regression 0.8 converges
-//! there). Upstream has no sample weights for these families yet, so they do
-//! not implement `FitWeighted` (#72).
+//! `alpha` defaults to sklearn's 1.0.
 
 use crate::convert::{
-    check_row_vector, check_xy, coef_from_col, ndarray_to_col, ndarray_to_mat, upstream_err,
+    check_row_vector, check_xy, coef_from_col, ndarray_to_col, ndarray_to_mat,
+    resolve_sample_weight, upstream_err,
 };
 use crate::glm::{check_response, upstream_lambda, GlmFit};
 use crate::summary::{glm_summary_from_result, RegressionSummary, StatisticKind};
-use anofox_ml_core::{Fit, Predict, Result, RustMlError};
+use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use anofox_regression::solvers::{
     FittedRegressor as _, Regressor as _, TweedieRegressor as InnerTweedie,
 };
@@ -112,8 +112,28 @@ impl TweedieRegressor {
         y: impl AsArray<'b, f64, Ix1>,
         offset: Option<&Array1<f64>>,
     ) -> Result<FittedTweedieRegressor> {
-        let x: ArrayView2<f64> = x.into();
-        let y: ArrayView1<f64> = y.into();
+        self.fit_impl(x.into(), y.into(), None, offset)
+    }
+
+    /// Fit with sample weights (sklearn's `sample_weight`, R's prior
+    /// weights) and an optional offset on the link scale.
+    pub fn fit_weighted_with_offset<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+        sample_weight: Option<&Array1<f64>>,
+        offset: Option<&Array1<f64>>,
+    ) -> Result<FittedTweedieRegressor> {
+        self.fit_impl(x.into(), y.into(), sample_weight.map(|w| w.view()), offset)
+    }
+
+    fn fit_impl(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        offset: Option<&Array1<f64>>,
+    ) -> Result<FittedTweedieRegressor> {
         check_xy(x, y)?;
         let p = self.power;
         if !p.is_finite() || p < 0.0 || (p > 0.0 && p < 1.0) {
@@ -137,15 +157,19 @@ impl TweedieRegressor {
         if self.inference {
             crate::summary::validate_level(self.confidence_level)?;
         }
+        let w = resolve_sample_weight(sample_weight, y.len())?;
         let mut b = InnerTweedie::builder()
             .var_power(p)
             .link_power(self.link_power)
             .with_intercept(self.with_intercept)
-            .lambda(upstream_lambda(self.alpha, y.len() as f64)?)
+            .lambda(upstream_lambda(self.alpha, w.sum())?)
             .max_iterations(self.max_iter)
             .tolerance(self.tol)
             .compute_inference(self.inference)
             .confidence_level(self.confidence_level);
+        if sample_weight.is_some() {
+            b = b.weights(ndarray_to_col(w.view()));
+        }
         if let Some(o) = offset {
             b = b.offset(ndarray_to_col(o.view()));
         }
@@ -257,6 +281,19 @@ impl Fit<f64> for TweedieRegressor {
     }
 }
 
+impl FitWeighted<f64> for TweedieRegressor {
+    type Fitted = FittedTweedieRegressor;
+
+    fn fit_weighted_view(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight, None)
+    }
+}
+
 impl Predict<f64> for FittedTweedieRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         let fam = TweedieFamily::new(self.power, self.link_power);
@@ -333,6 +370,18 @@ impl Fit<f64> for GammaRegressor {
     type Fitted = FittedTweedieRegressor;
     fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.inner.fit(x, y)
+    }
+}
+
+impl FitWeighted<f64> for GammaRegressor {
+    type Fitted = FittedTweedieRegressor;
+    fn fit_weighted_view(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<Self::Fitted> {
+        self.inner.fit_weighted_view(x, y, sample_weight)
     }
 }
 

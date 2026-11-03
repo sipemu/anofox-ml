@@ -43,7 +43,7 @@ pub use glm::{
     BinomialLink, BinomialRegressor, FittedBinomialRegressor, FittedPoissonRegressor,
     PoissonRegressor,
 };
-pub use huber::{FittedHuberRegressor, HuberRegressor};
+pub use huber::{FittedHuberRegressor, HuberRegressor, HuberScale};
 pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor, OutOfBounds};
 pub use kernel_ridge::{FittedKernelRidge, KernelRidge};
 pub use lars::{FittedLars, FittedLassoLarsIC, IcCriterion, Lars, LassoLarsIC};

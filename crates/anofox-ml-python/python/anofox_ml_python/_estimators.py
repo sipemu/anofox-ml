@@ -807,6 +807,8 @@ class ElasticNet(_LinearAttrs, RegressorMixin, BaseEstimator):
 
 
 class HuberRegressor(_LinearAttrs, RegressorMixin, BaseEstimator):
+    """Huber regression with sklearn's joint coefficient / scale estimate."""
+
     _kind = "HuberRegressor"
 
     def __init__(self, epsilon=1.35, max_iter=100, alpha=1e-4, fit_intercept=True, tol=1e-5):
@@ -822,16 +824,19 @@ class HuberRegressor(_LinearAttrs, RegressorMixin, BaseEstimator):
 
 
 class QuantileRegressor(_LinearAttrs, RegressorMixin, BaseEstimator):
-    """Unpenalised linear quantile regression."""
+    """Linear quantile regression with an L1 penalty ``alpha`` (sklearn's
+    objective, solved exactly as a linear program)."""
 
     _kind = "QuantileRegressor"
 
-    def __init__(self, quantile=0.5, fit_intercept=True):
+    def __init__(self, quantile=0.5, alpha=1.0, fit_intercept=True):
         self.quantile = quantile
+        self.alpha = alpha
         self.fit_intercept = fit_intercept
 
     def _rust_params(self, X, y):
-        return {"quantile": self.quantile, "with_intercept": self.fit_intercept}
+        return {"quantile": self.quantile, "alpha": float(self.alpha),
+                "with_intercept": self.fit_intercept}
 
 
 class RidgeCV(_LinearAttrs, RegressorMixin, BaseEstimator):
@@ -890,19 +895,23 @@ class ElasticNetCV(LassoCV):
 
 
 class LogisticRegression(ClassifierMixin, BaseEstimator):
-    """L2-penalised logistic regression (one-vs-rest for more than two classes)."""
+    """Logistic regression: multinomial loss for more than two classes, L2 /
+    L1 / elastic-net penalty via ``C`` and ``l1_ratio`` (sklearn >= 1.8)."""
 
     _kind = "LogisticRegressor"
 
-    def __init__(self, C=1.0, fit_intercept=True, tol=1e-8, max_iter=1000, class_weight=None):
+    def __init__(self, C=1.0, l1_ratio=0.0, fit_intercept=True, tol=1e-8, max_iter=1000,
+                 class_weight=None):
         self.C = C
+        self.l1_ratio = l1_ratio
         self.fit_intercept = fit_intercept
         self.tol = tol
         self.max_iter = max_iter
         self.class_weight = class_weight
 
     def _rust_params(self, X, y):
-        return {"c": float(self.C), "with_intercept": self.fit_intercept, "tol": self.tol,
+        return {"c": float(self.C), "l1_ratio": float(self.l1_ratio),
+                "with_intercept": self.fit_intercept, "tol": self.tol,
                 "max_iter": self.max_iter,
                 "class_weight": self._encode_class_weight(self.class_weight)}
 
@@ -920,13 +929,13 @@ class _Glm(_LinearAttrs, RegressorMixin, BaseEstimator):
 
 
 class PoissonRegressor(_Glm):
-    """Poisson GLM with log link. ``alpha`` defaults to 0 (see CHANGELOG, #72)."""
+    """Poisson GLM with log link (sklearn's ``alpha = 1.0`` default)."""
 
     _kind = "PoissonRegressor"
 
 
 class GammaRegressor(_Glm):
-    """Gamma GLM with log link. ``alpha`` defaults to 0 (see CHANGELOG, #72)."""
+    """Gamma GLM with log link (sklearn's ``alpha = 1.0`` default)."""
 
     _kind = "GammaRegressor"
 
@@ -1564,6 +1573,35 @@ class PolynomialFeatures(TransformerMixin, BaseEstimator):
         lo, hi = (0, self.degree) if np.isscalar(self.degree) else self.degree
         return {"degree": int(hi), "min_degree": int(lo),
                 "interaction_only": self.interaction_only, "include_bias": self.include_bias}
+
+
+class SplineTransformer(TransformerMixin, BaseEstimator):
+    """B-spline expansion of each feature (sklearn's ``SplineTransformer``;
+    ``sample_weight`` and sparse output are not supported)."""
+
+    _kind = "SplineTransformer"
+
+    def __init__(self, n_knots=5, degree=3, *, knots="uniform", extrapolation="constant",
+                 include_bias=True):
+        self.n_knots = n_knots
+        self.degree = degree
+        self.knots = knots
+        self.extrapolation = extrapolation
+        self.include_bias = include_bias
+
+    def _rust_params(self, X, y):
+        params = {"n_knots": int(self.n_knots), "degree": int(self.degree),
+                  "extrapolation": _choice(self.extrapolation, {
+                      "constant": "Constant", "linear": "Linear", "continue": "Continue",
+                      "periodic": "Periodic", "error": "Error"}, "extrapolation"),
+                  "include_bias": bool(self.include_bias)}
+        if isinstance(self.knots, str):
+            params["knot_placement"] = _choice(
+                self.knots, {"uniform": "Uniform", "quantile": "Quantile"}, "knots")
+        else:
+            # sklearn: shape (n_knots, n_features); Rust: one list per feature.
+            params["knots"] = np.asarray(self.knots, dtype=float).T.tolist()
+        return params
 
 
 class PowerTransformer(TransformerMixin, BaseEstimator):

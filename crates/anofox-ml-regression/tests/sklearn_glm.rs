@@ -2,10 +2,6 @@
 //! `GammaRegressor`, `TweedieRegressor`, fitted with `tol=1e-12`) and with
 //! statsmodels 0.14 `GLM` (prior weights = `var_weights`, offsets, Wald SEs).
 //!
-//! Cases that anofox-regression 0.7 cannot fit yet (penalised IRLS that
-//! does not converge, sample weights for Poisson / Gamma / Tweedie) are kept
-//! as reference data and ignored tests until upstream is fixed (#72).
-//!
 //! Reference script: rng = RandomState(0); X = round(normal(30, 3), 3);
 //! y ~ Poisson / Gamma(shape 2) / zero-inflated Gamma around
 //! exp(0.3 + 0.5 x0 - 0.4 x1 + 0.2 x2); w = round(uniform(0.2, 3), 3).
@@ -284,54 +280,43 @@ const SK: &[(&str, f64, bool, [f64; 4])] = &[
     ),
 ];
 
-/// Unweighted fit of one `SK` case through the wrappers.
-fn fit_case(name: &str, alpha: f64) -> FittedTweedieRegressor {
+/// Fit of one `SK` case through the wrappers (`weighted`: sample weights `W`).
+fn fit_case(name: &str, alpha: f64, weighted: bool) -> FittedTweedieRegressor {
     let x = x();
+    let w = weighted.then(|| a(&W));
     match name {
         "pois" => TweedieRegressor::new(1.0)
             .with_alpha(alpha)
             .with_tol(1e-12)
             .with_max_iter(1000)
-            .fit(&x, &a(&YP))
+            .fit_weighted(&x, &a(&YP), w.as_ref())
             .unwrap(),
         "gamma" => GammaRegressor::new()
             .with_alpha(alpha)
             .with_tol(1e-12)
             .with_max_iter(1000)
-            .fit(&x, &a(&YG))
+            .fit_weighted(&x, &a(&YG), w.as_ref())
             .unwrap(),
         _ => TweedieRegressor::new(1.5)
             .with_alpha(alpha)
             .with_tol(1e-12)
             .with_max_iter(1000)
-            .fit(&x, &a(&YT))
+            .fit_weighted(&x, &a(&YT), w.as_ref())
             .unwrap(),
     }
 }
 
-/// Unweighted cases upstream fits today.
-const CONVERGING: &[(&str, f64)] = &[
-    ("pois", 0.0),
-    ("pois", 0.1),
-    ("gamma", 0.0),
-    ("gamma", 0.1),
-    ("tw15", 0.0),
-];
-
 #[test]
 fn test_glm_alpha_matches_sklearn() {
     for &(name, alpha, weighted, expected) in SK {
-        if weighted || !CONVERGING.contains(&(name, alpha)) {
-            continue;
-        }
-        let f = fit_case(name, alpha);
-        assert!(f.converged());
+        let f = fit_case(name, alpha, weighted);
+        assert!(f.converged(), "{name} alpha={alpha} weighted={weighted}");
         check(
             f.intercept(),
             &f.coefficients(),
             &expected,
             1e-6,
-            &format!("{name} alpha={alpha}"),
+            &format!("{name} alpha={alpha} weighted={weighted}"),
         );
     }
     // PoissonRegressor is the same model as Tweedie(power = 1).
@@ -350,22 +335,20 @@ fn test_glm_alpha_matches_sklearn() {
 }
 
 #[test]
-fn test_glm_large_alpha_matches_sklearn() {
-    for &(name, alpha, weighted, expected) in SK {
-        if weighted || CONVERGING.contains(&(name, alpha)) {
-            continue;
-        }
-        let f = fit_case(name, alpha);
-        check(
-            f.intercept(),
-            &f.coefficients(),
-            &expected,
-            1e-6,
-            &format!("{name} alpha={alpha}"),
-        );
-    }
-    // The weighted rows of `SK` additionally need upstream sample weights
-    // for Poisson / Gamma / Tweedie (`FitWeighted`, #72).
+fn test_poisson_regressor_sample_weight_matches_sklearn() {
+    // PoissonRegressor with sample weights is weighted Tweedie(power = 1).
+    let f = PoissonRegressor::new()
+        .with_alpha(0.1)
+        .with_tol(1e-12)
+        .fit_weighted(&x(), &a(&YP), Some(&a(&W)))
+        .unwrap();
+    check(
+        f.intercept(),
+        &f.coefficients(),
+        &SK[3].3,
+        1e-6,
+        "weighted poisson 0.1",
+    );
 }
 
 #[test]

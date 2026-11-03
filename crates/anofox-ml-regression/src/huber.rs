@@ -1,14 +1,40 @@
 //! Huber robust regression wrapper.
 //!
 //! Wraps `anofox_regression::HuberRegressor` to provide robust linear regression
-//! with the anofox-ml [`Fit`] / [`Predict`] type-state pattern.
+//! with the anofox-ml [`Fit`] / [`Predict`] type-state pattern. By default the
+//! coefficients and the scale are estimated jointly, as sklearn's
+//! `HuberRegressor` ([`HuberScale::Joint`]); [`HuberScale::Mad`] is IRLS at the
+//! MAD scale (`MASS::rlm`).
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::FittedHuber;
 use anofox_regression::solvers::HuberRegressor as InnerHuber;
+use anofox_regression::solvers::HuberScale as InnerScale;
 use anofox_regression::{FittedRegressor as _, Regressor as _};
 use ndarray::{Array1, ArrayView1, ArrayView2};
+
+/// How the Huber scale `σ` is estimated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum HuberScale {
+    /// `σ` and the coefficients jointly minimise Owen's concomitant-scale
+    /// objective `nσ + Σ_in r²/σ + Σ_out (2ε|r| − ε²σ) + α‖β‖²`, as sklearn's
+    /// `HuberRegressor` (`scale_`, `outliers_`).
+    #[default]
+    Joint,
+    /// IRLS with `σ` re-estimated by the MAD of the residuals at every step
+    /// (`MASS::rlm`).
+    Mad,
+}
+
+impl HuberScale {
+    fn inner(self) -> InnerScale {
+        match self {
+            HuberScale::Joint => InnerScale::Joint,
+            HuberScale::Mad => InnerScale::Mad,
+        }
+    }
+}
 
 /// Huber robust regression estimator.
 ///
@@ -25,6 +51,13 @@ pub struct HuberRegressor {
     with_intercept: bool,
     max_iter: usize,
     tol: f64,
+    /// Pre-0.10 models were fitted at the MAD scale.
+    #[serde(default = "mad_scale")]
+    scale_method: HuberScale,
+}
+
+fn mad_scale() -> HuberScale {
+    HuberScale::Mad
 }
 
 impl HuberRegressor {
@@ -35,7 +68,14 @@ impl HuberRegressor {
             with_intercept: true,
             max_iter: 100,
             tol: 1e-5,
+            scale_method: HuberScale::Joint,
         }
+    }
+
+    /// Scale estimator. Default: [`HuberScale::Joint`] (sklearn).
+    pub fn with_scale_method(mut self, scale_method: HuberScale) -> Self {
+        self.scale_method = scale_method;
+        self
     }
 
     /// Set the Huber threshold parameter. Must be > 1.0. Default: 1.35.
@@ -98,7 +138,8 @@ impl FittedHuberRegressor {
         self.inner.result().r_squared
     }
 
-    /// Return the estimated scale (sigma) from the MAD estimator.
+    /// The estimated scale `σ` (sklearn's `scale_` with
+    /// [`HuberScale::Joint`], the final MAD scale with [`HuberScale::Mad`]).
     pub fn scale(&self) -> f64 {
         self.inner.scale()
     }
@@ -148,6 +189,7 @@ impl Fit<f64> for HuberRegressor {
             .with_intercept(self.with_intercept)
             .max_iterations(self.max_iter)
             .tolerance(self.tol)
+            .scale_method(self.scale_method.inner())
             .build();
 
         let fitted = inner_model
@@ -218,8 +260,14 @@ mod tests {
 
     #[test]
     fn test_huber_regularization_shrinks() {
+        // Noisy data: on an exact fit the joint scale goes to 0 and the
+        // penalty has (almost) no effect, as in sklearn.
         let x = Array2::from_shape_vec((50, 1), (1..=50).map(|i| i as f64).collect()).unwrap();
-        let y = Array1::from_vec((1..=50).map(|i| 1.0 + 3.0 * i as f64).collect());
+        let y = Array1::from_vec(
+            (1..=50)
+                .map(|i| 1.0 + 3.0 * i as f64 + 20.0 * (i as f64).sin())
+                .collect(),
+        );
 
         let low = HuberRegressor::new()
             .with_alpha(0.0001)

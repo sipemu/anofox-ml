@@ -4,10 +4,9 @@
 //!
 //! - LARS and the Lasso path are delegated to
 //!   `anofox_regression::solvers::LarsRegressor` (`LarsMethod::Lar` /
-//!   `LarsMethod::Lasso`), converting at the ndarray boundary. Upstream 0.7's
-//!   Lasso path re-admits a dropped feature with the wrong sign, so LassoLars
-//!   deviates from sklearn once a feature leaves the active set (tracked in
-//!   #72; the affected parity tests are ignored until upstream is fixed).
+//!   `LarsMethod::Lasso`), converting at the ndarray boundary. The Lasso
+//!   path drops a feature whose coefficient crosses zero, as sklearn's
+//!   `lars_path(method="lasso")` does (anofox-regression 0.10).
 //! - sklearn's `alpha` / `alphas_` are the maximum absolute correlation
 //!   divided by `n_samples`; upstream reports the raw correlation, so its path
 //!   alphas are divided by `n`.
@@ -138,27 +137,15 @@ impl Lars {
         );
         let res = inner.result();
         let coef = coef_from_col(&res.coefficients);
-        // Active set at the end, ordered by first entry on the path.
-        let steps = coef_path.ncols();
-        let mut entered: Vec<(usize, usize)> = (0..coef.len())
-            .filter(|&j| coef[j] != 0.0)
-            .map(|j| {
-                (
-                    (0..steps)
-                        .find(|&l| coef_path[[j, l]] != 0.0)
-                        .unwrap_or(steps),
-                    j,
-                )
-            })
-            .collect();
-        entered.sort_unstable();
+        // sklearn's `active_`: the active set at the end, in entry order.
+        let active = inner.active().to_vec();
         Ok(LarsPath {
             alphas: Array1::from_iter(path.lambdas.iter().map(|a| a / n)),
             coef_path,
             intercepts: path.intercepts,
             intercept: res.intercept.unwrap_or(0.0),
             coef,
-            active: entered.into_iter().map(|(_, j)| j).collect(),
+            active,
         })
     }
 }
@@ -458,7 +445,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "upstream anofox-regression 0.7 LassoLars re-admits dropped features (#72)"]
     fn test_lasso_lars_drops_variable_like_sklearn() {
         // The Lasso path must drop feature 2 when its coefficient crosses
         // zero (sklearn lars_path(method="lasso")).
@@ -493,7 +479,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "upstream anofox-regression 0.7 LassoLars re-admits dropped features (#72)"]
     fn test_lasso_lars_alpha_matches_sklearn() {
         let (x, y) = drop_data();
         for (alpha, coef, intercept) in [
@@ -527,7 +512,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "upstream anofox-regression 0.7 LassoLars re-admits dropped features (#72)"]
     fn test_lasso_lars_ic_matches_sklearn() {
         let (x, y) = drop_data();
         let aic = LassoLarsIC::new(IcCriterion::Aic).fit(&x, &y).unwrap();
@@ -545,7 +529,7 @@ mod tests {
             1e-8,
         );
         assert!((aic.noise_variance - 0.19103976946584808).abs() < 1e-12);
-        assert_eq!(aic.alpha, 0.0);
+        assert!(aic.alpha.abs() < 1e-12);
 
         let bic = LassoLarsIC::new(IcCriterion::Bic).fit(&x, &y).unwrap();
         assert!((bic.alpha - 0.011642748360321697).abs() < 1e-10);

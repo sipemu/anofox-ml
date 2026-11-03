@@ -119,7 +119,6 @@ fn test_binary_balanced_class_weight_matches_sklearn() {
 }
 
 #[test]
-#[ignore = "L1 / elastic-net logistic needs anofox-regression support (#72)"]
 fn test_binary_l1_and_elastic_net_match_sklearn_saga() {
     binary_check(
         LogisticRegressor::new().with_c(0.5).with_l1_ratio(1.0),
@@ -142,7 +141,6 @@ fn test_binary_l1_and_elastic_net_match_sklearn_saga() {
 }
 
 #[test]
-#[ignore = "L1 / elastic-net logistic needs anofox-regression support (#72)"]
 fn test_l1_produces_exact_zeros() {
     let f = LogisticRegressor::new()
         .with_c(0.05)
@@ -157,7 +155,6 @@ fn test_l1_produces_exact_zeros() {
 }
 
 #[test]
-#[ignore = "multinomial logistic needs anofox-regression support (#72)"]
 fn test_multinomial_matches_sklearn() {
     let f = LogisticRegressor::new()
         .with_multi_class(MultiClass::Multinomial)
@@ -214,7 +211,6 @@ fn test_multinomial_matches_sklearn() {
 }
 
 #[test]
-#[ignore = "multinomial logistic needs anofox-regression support (#72)"]
 fn test_multinomial_class_and_sample_weight_match_sklearn() {
     let f = LogisticRegressor::new()
         .with_multi_class(MultiClass::Multinomial)
@@ -355,14 +351,24 @@ fn test_binary_inference_matches_statsmodels_logit() {
 }
 
 #[test]
-fn test_blocked_features_return_errors() {
-    // Multinomial loss and L1 penalties need anofox-regression support (#72).
+fn test_inference_only_for_binary_l2() {
     assert!(LogisticRegressor::new()
-        .with_multi_class(MultiClass::Multinomial)
+        .with_inference(true)
         .fit(&x(), &a(&Y3))
         .is_err());
     assert!(LogisticRegressor::new()
         .with_l1_ratio(1.0)
-        .fit(&x(), &a(&Y3))
+        .with_inference(true)
+        .fit(&x(), &a(&YB))
         .is_err());
+}
+
+#[test]
+fn test_multinomial_is_the_default() {
+    let f = LogisticRegressor::new().fit(&x(), &a(&Y3)).unwrap();
+    let m = LogisticRegressor::new()
+        .with_multi_class(MultiClass::Multinomial)
+        .fit(&x(), &a(&Y3))
+        .unwrap();
+    assert_eq!(f.coef(), m.coef());
 }
