@@ -43,7 +43,7 @@ Add anofox-ml to your project:
 
 ```toml
 [dependencies]
-anofox-ml = "0.1"
+anofox-ml = "0.2"
 ndarray = "0.16"
 ```
 

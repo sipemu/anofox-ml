@@ -6,6 +6,67 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-03
+
+This release completes the October 2026 algorithm review (#26–#72). It fixes
+wrong results and panics, brings every estimator to checked parity with
+scikit-learn 1.8 / 1.9, redesigns the core traits around `ndarray` views,
+and adopts anofox-regression 0.10. Most of the API surface changed in some
+way; the summary below lists what to look at when upgrading, and the
+detailed sections follow.
+
+### Highlights
+
+- **Correctness and sklearn parity.** The estimators are checked against
+  hardcoded scikit-learn reference values (no parity test is skipped).
+  Among the fixes: ROC-AUC / average-precision ties, LDA scalings, PCA,
+  SVR / OneClassSVM, DBSCAN / HDBSCAN / LOF / Isomap, random-forest
+  feature sampling, LightGBM early stopping, calibration, SGD stopping,
+  panics on Fortran-order or NaN input, and HashMap-order nondeterminism.
+- **New estimators.** HDBSCAN, BayesianGaussianMixture, MeanShift, OPTICS,
+  Birch, SpectralClustering, AffinityPropagation, Isomap, LLE, t-SNE
+  (Barnes-Hut), GaussianProcessClassifier, FastICA, CCA, NMF, PLS,
+  KernelPCA, TruncatedSVD, RFECV, LocalOutlierFactor, SplineTransformer,
+  RcsTransformer, KNNImputer, IterativeImputer, IncrementalPCA and more.
+- **Core API.** View-based trait inputs (`fit` / `predict` / `transform`
+  accept `&Array2`, `ArrayView2` and slices without a copy); `FitWeighted`,
+  `PartialFit`, `PredictProba` and `DecisionFunction` across most
+  estimators; `Pipeline` implements `Fit`, is refittable, forwards
+  `predict_proba` and accepts supervised steps (`Supervised`); shared
+  `ClassWeight`; `sample_weight` and `groups` through the CV helpers.
+- **Cross-validation.** Group, stratified-group, purged / combinatorial,
+  time-series, spatial-block and buffered splitters, nested CV and
+  permutation tests (#74–#79).
+- **Regression** delegates to anofox-regression 0.10: multinomial and L1 /
+  elastic-net logistic regression, weighted Poisson / Gamma / Tweedie GLMs
+  with offsets and opt-in inference, sklearn's Huber and L1 quantile
+  regression, LassoLars.
+- **Performance.** libsvm's SMO solver with a kernel cache for the kernel
+  SVMs, nn-chain Ward clustering, KD-tree neighbours, and faer without its
+  thread pool (small fits 5–25× faster).
+
+### Upgrading from 0.1
+
+- **Implementing the traits:** write the `*_view` methods
+  (`fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>)`, `predict_view`,
+  `transform_view`, ...). Calls to `fit` / `predict` / ... are unchanged.
+  Custom pipeline steps (`FitTransform`, `TransformStep`, `FitPredict`,
+  `PredictStep`) take views and the pipeline target.
+- **Defaults now follow sklearn** (results change without code changes):
+  multinomial logistic regression for more than two classes, Huber's joint
+  scale, Quantile `alpha = 1.0`, Poisson / Gamma / Tweedie `alpha = 1.0`,
+  SVM `gamma = Gamma::Scale` and libsvm tolerances, LDA `Svd` solver,
+  NMF `Auto` init, IsolationForest contamination, MiniBatchKMeans batch
+  size, tree `max_depth = None`, LightGBM `huber_delta`, GaussianNB
+  `var_smoothing`, and more. The sections below mark each one
+  **Breaking**.
+- **Renamed or reshaped API:** sklearn class names in Python, `Option`
+  parameters (`n_components`, `learning_rate`, `bandwidth`, ...), array
+  shapes of fitted coefficients (`(K, p)` / `(n, K)`), `ClassicalMDS`,
+  removed `seed` fields and the public `kdtree` module.
+- **Random results:** fold assignment, bootstrap draws and tree seeds
+  changed, so seeded runs do not reproduce 0.1 numbers.
+
 ### faer runs sequentially
 
 - faer is built without its default features (which include `rayon`), as
