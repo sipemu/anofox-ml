@@ -403,10 +403,8 @@ impl GradientBoostingClassifier {
                 if use_subsample {
                     train_rows.clone().shuffle(&mut rng);
                 }
-                if self.max_features.is_some() {
-                    for _ in 0..n_trees_per_round {
-                        let _: u64 = tree_seeds.gen();
-                    }
+                for _ in 0..n_trees_per_round {
+                    let _: u64 = tree_seeds.gen();
                 }
             }
             tree_sets = p.tree_sets;
@@ -437,13 +435,9 @@ impl GradientBoostingClassifier {
                     neg_grad[i] = y_k - probs[[i, k]];
                 }
 
-                let round_params;
-                let params = if self.max_features.is_some() {
-                    round_params = tree_params.clone().with_seed(tree_seeds.gen());
-                    &round_params
-                } else {
-                    &tree_params
-                };
+                // Every round gets its own tree seed (feature order, feature subset).
+                let round_params = tree_params.clone().with_seed(tree_seeds.gen());
+                let params = &round_params;
                 let mut tree: FittedDecisionTreeRegressor<F> = if in_bag.len() < n_samples {
                     crate::forest_common::fit_tree_on_rows(
                         params,

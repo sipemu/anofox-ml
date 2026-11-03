@@ -12,7 +12,9 @@
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result};
 use ndarray::{Array1, Array2};
 
-use crate::lgbm::{FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassifier, LgbmRegressor};
+use crate::lgbm::{
+    BinningMethod, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassifier, LgbmRegressor,
+};
 
 /// Shared hyperparameters and builder methods of the two facades.
 macro_rules! hist_gb_config {
@@ -140,7 +142,8 @@ impl HistGradientBoostingRegressor {
             .with_max_depth(self.max_depth)
             .with_min_child_samples(self.min_samples_leaf)
             .with_reg_lambda(self.l2_regularization)
-            .with_max_bins(self.max_bins))
+            .with_max_bins(self.max_bins)
+            .with_binning(BinningMethod::Sklearn))
     }
 }
 
@@ -154,7 +157,8 @@ impl HistGradientBoostingClassifier {
             .with_max_depth(self.max_depth)
             .with_min_child_samples(self.min_samples_leaf)
             .with_reg_lambda(self.l2_regularization)
-            .with_max_bins(self.max_bins);
+            .with_max_bins(self.max_bins)
+            .with_binning(BinningMethod::Sklearn);
         // sklearn's multinomial hessian is p(1 - p), without LightGBM's
         // K / (K - 1) factor.
         engine.softmax_hessian_factor = false;
@@ -351,5 +355,75 @@ mod tests {
             .predict(&x)
             .unwrap();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn regressor_matches_sklearn_binning() {
+        // sklearn 1.8 HistGradientBoostingRegressor(max_iter=20,
+        // min_samples_leaf=5[, max_bins=16]).fit(X, y).predict(X[rows]).
+        // max_bins=16 takes the percentile path of sklearn's binning. sklearn
+        // keeps gradients in float32, hence the 1e-6 tolerance.
+        let x = Array2::from_shape_fn((120, 3), |(i, j)| {
+            let t = i as f64;
+            match j {
+                0 => (t * 0.37).sin() * 3.0 + t * 0.01,
+                1 => ((t * 0.11).cos() * 4.0).round(),
+                _ => (t * 0.7) % 5.3,
+            }
+        });
+        let y = Array1::from_shape_fn(120, |i| {
+            x[[i, 0]].powi(2) - 2.0 * x[[i, 1]] + x[[i, 2]].sin()
+        });
+        let rows = [0, 7, 33, 90, 119];
+        let cases: [(usize, [f64; 5]); 2] = [
+            (
+                255,
+                [
+                    -5.777_367_549_331_124_5,
+                    -3.408_584_907_578_834_6,
+                    8.455_614_568_356_298,
+                    17.890_444_108_490_723,
+                    -3.509_011_691_821_183,
+                ],
+            ),
+            (
+                16,
+                [
+                    -5.885_602_490_798_531,
+                    -3.395_267_404_999_707,
+                    8.690_401_533_423_369,
+                    17.968_895_264_862_134,
+                    -3.352_575_566_258_404_5,
+                ],
+            ),
+        ];
+        for (max_bins, expected) in cases {
+            let m = HistGradientBoostingRegressor::new()
+                .with_n_estimators(20)
+                .with_min_samples_leaf(5)
+                .with_max_bins(max_bins)
+                .fit(&x, &y)
+                .unwrap();
+            let p = m.predict(&x.select(ndarray::Axis(0), &rows)).unwrap();
+            for (a, b) in p.iter().zip(expected) {
+                assert!((a - b).abs() < 1e-6, "max_bins={max_bins}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn sklearn_thresholds_match_numpy() {
+        // <= max_bins distinct values: midpoints.
+        assert_eq!(
+            crate::lgbm::sklearn_thresholds_for_test(&[1.0, 1.0, 2.0, 4.0], 4),
+            vec![1.5, 3.0]
+        );
+        // np.percentile(arange(10), [25, 50, 75], method="midpoint")
+        //   -> [2.5, 4.5, 6.5]
+        let v: Vec<f64> = (0..10).map(f64::from).collect();
+        assert_eq!(
+            crate::lgbm::sklearn_thresholds_for_test(&v, 4),
+            vec![2.5, 4.5, 6.5]
+        );
     }
 }

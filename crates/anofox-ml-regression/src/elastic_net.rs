@@ -18,6 +18,10 @@ pub struct ElasticNetRegressor {
     lambda: f64,
     alpha: f64,
     with_intercept: bool,
+    /// `lambda` is sklearn's `alpha` (penalty scale of `(1/2n)·RSS`),
+    /// converted at fit time; otherwise upstream's raw `lambda`.
+    #[serde(default)]
+    sklearn_scale: bool,
 }
 
 impl ElasticNetRegressor {
@@ -26,11 +30,22 @@ impl ElasticNetRegressor {
             lambda: 1.0,
             alpha: 0.5,
             with_intercept: true,
+            sklearn_scale: false,
         }
     }
 
     pub fn with_lambda(mut self, lambda: f64) -> Self {
         self.lambda = lambda;
+        self
+    }
+
+    /// Use sklearn's penalty scale: `alpha` as in sklearn's
+    /// `(1/2n)·||y − Xw||² + alpha·(l1_ratio·||w||₁ + (1 − l1_ratio)/2·||w||²)`
+    /// (the mixing set with `with_alpha` is sklearn's `l1_ratio`). It is
+    /// translated to upstream's raw objective at fit time.
+    pub fn with_sklearn_alpha(mut self, alpha: f64) -> Self {
+        self.lambda = alpha;
+        self.sklearn_scale = true;
         self
     }
 
@@ -103,11 +118,25 @@ impl Fit<f64> for ElasticNetRegressor {
         let x_mat = ndarray_to_mat(x);
         let y_col = ndarray_to_col(y);
 
-        let inner_model = InnerElasticNet::builder()
+        // sklearn → raw objective RSS + λ(a·|w|₁ + (1 − a)·||w||²):
+        // λ = n·alpha·(1 + r), a = 2r / (1 + r) for sklearn's l1_ratio r.
+        let (lambda, mix) = if self.sklearn_scale {
+            let r = self.alpha;
+            let n = x.nrows() as f64;
+            (n * self.lambda * (1.0 + r), 2.0 * r / (1.0 + r))
+        } else {
+            (self.lambda, self.alpha)
+        };
+        let mut builder = InnerElasticNet::builder()
             .with_intercept(self.with_intercept)
-            .lambda(self.lambda)
-            .alpha(self.alpha)
-            .build();
+            .lambda(lambda)
+            .alpha(mix);
+        if self.sklearn_scale {
+            // sklearn is compared with a tight tolerance; upstream's
+            // default stops earlier.
+            builder = builder.tolerance(1e-14);
+        }
+        let inner_model = builder.build();
 
         let fitted = inner_model
             .fit(&x_mat, &y_col)

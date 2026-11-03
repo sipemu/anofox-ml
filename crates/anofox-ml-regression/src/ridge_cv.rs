@@ -8,7 +8,7 @@
 //!   unpenalised intercept) and the exact LOO residuals
 //!   `(y_i − ŷ_i) / (1 − h_i)`; the criterion is their mean square (sklearn's
 //!   `scoring=None`).
-//! - `with_cv_folds(k)` / `with_fold_ids(..)`: k-fold CV (seeded shuffled
+//! - `with_cv_folds(k)` / `with_fold_ids(..)`: k-fold CV (contiguous, or seeded shuffled
 //!   folds or given fold ids), one SVD per training fold for all alphas,
 //!   scored by the pooled held-out MSE.
 //!
@@ -28,6 +28,8 @@ pub struct RidgeCrossValidated {
     cv_folds: Option<usize>,
     fold_ids: Option<Vec<usize>>,
     seed: u64,
+    #[serde(default)]
+    shuffle: bool,
     with_intercept: bool,
 }
 
@@ -38,6 +40,7 @@ impl RidgeCrossValidated {
             cv_folds: None,
             fold_ids: None,
             seed: 0,
+            shuffle: false,
             with_intercept: true,
         }
     }
@@ -47,8 +50,8 @@ impl RidgeCrossValidated {
         self
     }
 
-    /// Use k-fold CV (seeded shuffled folds) instead of the default
-    /// efficient leave-one-out.
+    /// Use k-fold CV (contiguous folds, as sklearn's `cv=int`) instead of
+    /// the default efficient leave-one-out.
     pub fn with_cv_folds(mut self, folds: usize) -> Self {
         self.cv_folds = Some(folds);
         self
@@ -60,9 +63,10 @@ impl RidgeCrossValidated {
         self
     }
 
-    /// Seed of the shuffled k-fold assignment (default 0).
+    /// Shuffle the rows with this seed before cutting the k folds.
     pub fn with_random_state(mut self, seed: u64) -> Self {
         self.seed = seed;
+        self.shuffle = true;
         self
     }
 
@@ -236,6 +240,7 @@ impl Fit<f64> for RidgeCrossValidated {
                 n_folds: self.cv_folds.unwrap_or(5),
                 fold_ids: self.fold_ids.clone(),
                 seed: self.seed,
+                shuffle: self.shuffle,
             };
             let mut sse = Array1::<f64>::zeros(self.alphas.len());
             for test in spec.test_sets(n)? {

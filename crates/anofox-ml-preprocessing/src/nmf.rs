@@ -13,12 +13,29 @@ use ndarray::Array2;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Initialisation of `W` and `H` (sklearn `init`).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum NmfInit {
-    /// Sample W, H from uniform random.
+    /// sklearn's `init=None`: `NndsvdA` when `n_components <= min(n_samples,
+    /// n_features)`, else `Random`.
+    #[default]
+    Auto,
+    /// `|N(0, 1)| · sqrt(mean(X) / n_components)` entries.
     Random,
-    /// NNDSVD: deterministic init from truncated SVD (sklearn default).
+    /// NNDSVD from the truncated SVD (exact zeros kept).
     Nndsvd,
+    /// NNDSVD with its zeros filled by `mean(X)`.
+    NndsvdA,
+    /// NNDSVD with its zeros filled by small random values
+    /// `|N(0, 1)| · mean(X) / 100`.
+    NndsvdAr,
+}
+
+/// |N(0, 1)| draws (Box–Muller).
+fn abs_normal(rng: &mut StdRng) -> f64 {
+    let u1: f64 = rng.gen::<f64>().max(f64::MIN_POSITIVE);
+    let u2: f64 = rng.gen();
+    ((-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()).abs()
 }
 
 /// NMF solver (sklearn `solver`).
@@ -78,7 +95,7 @@ impl Nmf {
             max_iter: 200,
             tol: 1e-4,
             seed: 0,
-            init: NmfInit::Nndsvd,
+            init: NmfInit::Auto,
             solver: NmfSolver::Cd,
             beta_loss: BetaLoss::Frobenius,
             alpha_w: 0.0,
@@ -147,31 +164,14 @@ fn nndsvd_init(x: &Array2<f64>, k: usize) -> Result<(Array2<f64>, Array2<f64>)> 
     let mut w = Array2::<f64>::zeros((n, k));
     let mut h = Array2::<f64>::zeros((k, d));
 
-    // First component: leading singular triplet (sign-fixed positive).
-    let s0 = s.column_vector()[0].max(1e-12);
-    let mut u0_pos_norm = 0.0_f64;
+    // First component: the leading singular vectors are of one sign, so
+    // their absolute values (sklearn: sqrt(S[0]) * |U[:, 0]|, |V[0, :]|).
+    let lead_scale = s.column_vector()[0].max(0.0).sqrt();
     for i in 0..n {
-        u0_pos_norm += u[(i, 0)].max(0.0).powi(2);
-    }
-    u0_pos_norm = u0_pos_norm.sqrt();
-    let mut v0_pos_norm = 0.0_f64;
-    for j in 0..d {
-        v0_pos_norm += v[(j, 0)].max(0.0).powi(2);
-    }
-    v0_pos_norm = v0_pos_norm.sqrt();
-    // If positive part norm is larger, use it; else flip sign and use negative.
-    let (u_sign, v_sign) =
-        if u0_pos_norm * v0_pos_norm >= (u0_pos_norm * v0_pos_norm).max(1e-12) / 2.0 {
-            (1.0, 1.0)
-        } else {
-            (-1.0, -1.0)
-        };
-    let lead_scale = s0.sqrt();
-    for i in 0..n {
-        w[[i, 0]] = (u_sign * u[(i, 0)]).max(0.0) * lead_scale;
+        w[[i, 0]] = u[(i, 0)].abs() * lead_scale;
     }
     for j in 0..d {
-        h[[0, j]] = (v_sign * v[(j, 0)]).max(0.0) * lead_scale;
+        h[[0, j]] = v[(j, 0)].abs() * lead_scale;
     }
 
     // Remaining components: split positive and negative parts.
@@ -450,9 +450,14 @@ impl FitUnsupervised<f64> for Nmf {
         if n == 0 || d == 0 {
             return Err(RustMlError::EmptyInput("empty input".into()));
         }
-        if k == 0 || k > d.min(n) {
+        let init = match self.init {
+            NmfInit::Auto if k <= d.min(n) => NmfInit::NndsvdA,
+            NmfInit::Auto => NmfInit::Random,
+            other => other,
+        };
+        if k == 0 || (k > d.min(n) && init != NmfInit::Random) {
             return Err(RustMlError::InvalidParameter(format!(
-                "n_components must be in 1..={}",
+                "n_components must be in 1..={} for an NNDSVD init",
                 d.min(n)
             )));
         }
@@ -469,15 +474,32 @@ impl FitUnsupervised<f64> for Nmf {
                 "alpha must be >= 0 and l1_ratio in [0, 1]".into(),
             ));
         }
-        let (mut w, mut h) = match self.init {
-            NmfInit::Nndsvd => nndsvd_init(x, k)?,
+        let mut rng = StdRng::seed_from_u64(self.seed);
+        let mean = x.mean().unwrap_or(0.0);
+        let (mut w, mut h) = match init {
             NmfInit::Random => {
-                let mut rng = StdRng::seed_from_u64(self.seed);
-                let scale = (x.mean().unwrap_or(0.0).max(0.0) / k as f64)
-                    .sqrt()
-                    .max(1e-6);
-                let w = Array2::<f64>::from_shape_fn((n, k), |_| rng.gen::<f64>() * scale + 1e-6);
-                let h = Array2::<f64>::from_shape_fn((k, d), |_| rng.gen::<f64>() * scale + 1e-6);
+                let avg = (mean / k as f64).sqrt();
+                // sklearn draws H first, then W.
+                let h = Array2::<f64>::from_shape_fn((k, d), |_| avg * abs_normal(&mut rng));
+                let w = Array2::<f64>::from_shape_fn((n, k), |_| avg * abs_normal(&mut rng));
+                (w, h)
+            }
+            _ => {
+                let (mut w, mut h) = nndsvd_init(x, k)?;
+                match init {
+                    NmfInit::NndsvdA => {
+                        w.mapv_inplace(|v| if v == 0.0 { mean } else { v });
+                        h.mapv_inplace(|v| if v == 0.0 { mean } else { v });
+                    }
+                    NmfInit::NndsvdAr => {
+                        for v in w.iter_mut().chain(h.iter_mut()) {
+                            if *v == 0.0 {
+                                *v = mean * abs_normal(&mut rng) / 100.0;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 (w, h)
             }
         };
@@ -643,7 +665,12 @@ mod tests {
             ),
         ];
         for (i, (m, err, comps)) in cases.into_iter().enumerate() {
-            let f = m.with_tol(1e-12).with_max_iter(2000).fit(&x).unwrap();
+            let f = m
+                .with_init(NmfInit::Nndsvd)
+                .with_tol(1e-12)
+                .with_max_iter(2000)
+                .fit(&x)
+                .unwrap();
             assert!(
                 (f.reconstruction_err - err).abs() < 1e-5,
                 "case {i}: err {}",
@@ -661,5 +688,29 @@ mod tests {
             .with_beta_loss(BetaLoss::KullbackLeibler)
             .fit(&x)
             .is_err());
+
+        // Default init (sklearn's init=None -> 'nndsvda'):
+        // sklearn 1.8 NMF(2, tol=1e-12, max_iter=2000).fit(X)
+        let f = Nmf::new(2)
+            .with_tol(1e-12)
+            .with_max_iter(2000)
+            .fit(&x)
+            .unwrap();
+        assert!((f.reconstruction_err - 2.354_798_448_607_818_6).abs() < 1e-8);
+        let want = [
+            2.445_001_341_372_870_4,
+            0.0,
+            0.726_870_794_058_906_8,
+            2.255_453_485_478_836_4,
+            2.295_414_762_418_369,
+            0.234_083_107_423_126_27,
+            1.665_551_707_037_105_5,
+            0.824_181_298_317_364_3,
+            0.115_916_162_992_167_49,
+            0.459_264_354_306_825_5,
+        ];
+        for (got, w) in f.components.iter().zip(want) {
+            assert!((got - w).abs() < 1e-8, "{got} vs {w}");
+        }
     }
 }

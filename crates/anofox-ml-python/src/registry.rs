@@ -212,6 +212,7 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         predict: |m, x| m.predict(x),
         score_samples: |m, x| Ok::<_, anofox_ml_core::RustMlError>(m.score_samples(x)),
+        decision_function: |m, x| Ok::<_, anofox_ml_core::RustMlError>(m.decision_function(x)),
     }
 
     // ------------------------------------------------------------- svm
@@ -285,6 +286,7 @@ registry! {
         fitted: linear::FittedPassiveAggressiveClassifier,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        decision_function: |m, x| m.decision_function(x),
     }
     PassiveAggressiveRegressor {
         config: linear::PassiveAggressiveRegressor = Default::default(),
@@ -680,6 +682,7 @@ registry! {
         fitted: pre::FittedFastIca,
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
+        inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
     }
     Nmf {
         config: pre::Nmf = pre::Nmf::new(2),
@@ -711,8 +714,9 @@ registry! {
     MiniBatchKMeans {
         config: cluster::MiniBatchKMeans = Default::default(),
         fitted: cluster::FittedMiniBatchKMeans<f64>,
-        fit: |c, x, y, w| unsup(K, c, x, w),
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted(c, x, w),
         predict: |m, x| m.predict(x),
+        labels: |m| m.labels().clone(),
     }
     Dbscan {
         config: cluster::Dbscan = Default::default(),

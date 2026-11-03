@@ -16,7 +16,7 @@
 //! training fold and once on the full data. The default grid is sklearn's:
 //! `n_alphas = 100` values log-spaced from `alpha_max = max|Xcᵀyc| /
 //! (n·l1_ratio)` down to `eps·alpha_max` (`eps = 1e-3`), from upstream
-//! `lambda_grid`. Folds are seeded shuffled k-fold ids (`kfold_ids`) or
+//! `lambda_grid`. Folds are contiguous (sklearn `KFold`), seeded shuffled (`kfold_ids`) or
 //! user-given fold ids. The CV curve is the pooled MSE (all held-out squared
 //! errors / n); `alpha_1se` is the largest alpha within one standard error
 //! (glmnet's `cvsd`) of the minimum. The returned coefficients are the
@@ -45,6 +45,23 @@ pub(crate) struct FoldSpec {
     pub n_folds: usize,
     pub fold_ids: Option<Vec<usize>>,
     pub seed: u64,
+    /// Shuffle the rows (seeded) before cutting them into folds. Default
+    /// false: contiguous folds, as sklearn's `cv=int` (`KFold` without
+    /// shuffling).
+    #[serde(default)]
+    pub shuffle: bool,
+}
+
+/// sklearn `KFold(k)` without shuffling: contiguous blocks, the first
+/// `n % k` of size `n / k + 1`.
+pub(crate) fn contiguous_fold_ids(n: usize, k: usize) -> Vec<usize> {
+    let (base, extra) = (n / k, n % k);
+    let mut ids = Vec::with_capacity(n);
+    for f in 0..k {
+        let size = base + usize::from(f < extra);
+        ids.extend(std::iter::repeat_n(f, size));
+    }
+    ids
 }
 
 impl FoldSpec {
@@ -53,6 +70,7 @@ impl FoldSpec {
             n_folds,
             fold_ids: None,
             seed: 0,
+            shuffle: false,
         }
     }
 
@@ -80,7 +98,11 @@ impl FoldSpec {
                         self.n_folds
                     )));
                 }
-                kfold_ids(n, self.n_folds, self.seed)
+                if self.shuffle {
+                    kfold_ids(n, self.n_folds, self.seed)
+                } else {
+                    contiguous_fold_ids(n, self.n_folds)
+                }
             }
         };
         let mut labels: Vec<usize> = ids.clone();
@@ -337,7 +359,7 @@ impl ElasticNetCrossValidated {
         self
     }
 
-    /// Number of shuffled k-fold splits (default 5).
+    /// Number of k-fold splits (default 5).
     pub fn with_cv_folds(mut self, folds: usize) -> Self {
         self.folds.n_folds = folds;
         self
@@ -349,9 +371,11 @@ impl ElasticNetCrossValidated {
         self
     }
 
-    /// Seed of the shuffled fold assignment (default 0).
+    /// Shuffle the rows with this seed before cutting the folds (default:
+    /// contiguous folds, as sklearn's `cv=int`).
     pub fn with_random_state(mut self, seed: u64) -> Self {
         self.folds.seed = seed;
+        self.folds.shuffle = true;
         self
     }
 

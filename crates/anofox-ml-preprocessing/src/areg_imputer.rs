@@ -138,17 +138,16 @@ impl AregImputer {
                 .collect(),
             None => vec![ImputeVariable::Numeric; p],
         };
-        let options = AregImputeOptions {
-            n_impute: self.n_impute,
-            nk: self.nk,
-            tlinear: self.tlinear,
-            burnin: self.burnin,
-            matching: match self.matching {
+        let options = AregImputeOptions::default()
+            .n_impute(self.n_impute)
+            .nk(self.nk)
+            .tlinear(self.tlinear)
+            .burnin(self.burnin)
+            .matching(match self.matching {
                 AregMatch::Weighted(f) => DonorMatch::Weighted(f),
                 AregMatch::Closest => DonorMatch::Closest,
-            },
-            seed: self.seed,
-        };
+            })
+            .seed(self.seed);
         let m = Mat::<f64>::from_fn(x.nrows(), p, |i, j| x[[i, j]]);
         let res = areg_impute(&m, &kinds, &options)
             .map_err(|e| RustMlError::InvalidParameter(format!("aregImpute: {e}")))?;
@@ -210,10 +209,7 @@ mod tests {
         let r = imp.impute(&x).unwrap();
         assert_eq!(r.datasets.len(), 3);
         let m = Mat::<f64>::from_fn(30, 3, |i, j| x[[i, j]]);
-        let opts = AregImputeOptions {
-            n_impute: 3,
-            ..AregImputeOptions::default()
-        };
+        let opts = AregImputeOptions::default().n_impute(3);
         let kinds = [
             ImputeVariable::Numeric,
             ImputeVariable::Numeric,

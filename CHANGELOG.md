@@ -6,6 +6,161 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Correctness parity with sklearn (round 2)
+
+- **anofox-regression 0.9.0** (its API cleanup). The changes here are
+  mechanical: `with_intercept` builders, the `BayesianRidgeRegressor` /
+  `ArdRegressor` renames, `IterativeFit::iterations`, option setters for
+  the now `#[non_exhaustive]` structs, and faer column accessors. No
+  results change. The remaining #72 parity tests (LassoLars,
+  BayesianRidge / ARD `predict_std`, multinomial / L1 logistic regression)
+  still fail with 0.9.0 and stay ignored.
+
+- **anofox-regression 0.8.0.** It fixes several #72 findings:
+  - the elastic-net single fit (#187);
+  - penalised Poisson / Gamma / Tweedie IRLS convergence;
+  - the RANSAC tie-break;
+  - Theil-Sen.
+
+  What changes here:
+  - Lasso and ElasticNet get an opt-in sklearn penalty scale
+    (`with_sklearn_alpha`). It is an exact translation to upstream's raw
+    objective, `λ = n·α·(1 + r)` with mixing `2r/(1 + r)` for
+    `l1_ratio = r`, and uses a tight tolerance. Python `Lasso` /
+    `ElasticNet` use it and now match sklearn (about 1e-7 relative).
+  - **Breaking:** `PoissonRegressor`, `GammaRegressor` and
+    `TweedieRegressor` default to sklearn's `alpha = 1.0` (Rust and
+    Python); `alpha = 0` gives the unpenalised fit. `BinomialRegressor`
+    keeps 0.
+  - The GLM parity tests at sklearn's alpha are enabled again.
+  - Still blocked (#72): sample weights for Poisson / Gamma / Tweedie,
+    multinomial / L1 logistic regression, the LassoLars drop rule,
+    BayesianRidge / ARD `predict_std`, Huber, the Quantile L1 penalty and
+    the B-spline basis.
+
+- **HistGradientBoosting bins like sklearn.** The engine gets
+  `BinningMethod::{LightGbm, Sklearn}`, and the HGB facades use sklearn's
+  `_BinMapper` thresholds: midpoints between distinct values, or
+  percentile midpoints, with a 200 000-row subsample. Before, they used
+  LightGBM's greedy bins, so even a single split differed from sklearn.
+  - The regressor now matches sklearn to about 1e-7 (sklearn keeps
+    gradients in float32).
+  - The classifier matches up to exact-gain ties, which sklearn breaks by
+    float32 summation order.
+  - `LgbmRegressor` / `LgbmClassifier` keep LightGBM's binning.
+- **NMF initialisation follows sklearn.**
+  - The default is sklearn's `init=None`: `nndsvda`, or `random` when
+    `n_components > min(n_samples, n_features)` (which is now allowed with
+    a random init). New `NndsvdA` and `NndsvdAr`.
+  - The first NNDSVD component uses `|U₀|`, `|V₀|`. Before, a negatively
+    signed leading singular vector would have zeroed it.
+  - Random init draws `|N(0,1)|·sqrt(mean(X)/k)`, sklearn's distribution.
+  - The default fit matches sklearn to 1e-13.
+  - Python `NMF` gains `init`, `components_` and `reconstruction_err_`.
+  - **Breaking:** the default init changes from `Nndsvd` to `Auto`.
+- **FastICA is a port of sklearn's `_fastica`.**
+  - Default `Parallel` algorithm with symmetric decorrelation, plus
+    `Deflation`.
+  - `logcosh(alpha)` / `exp` / `cube` contrasts.
+  - `whiten` = unit-variance (default) / arbitrary-variance / none, and
+    `svd` / `eigh` whitening solvers.
+  - sklearn's `u *= sign(u[0])` eigenvector signs, `w_init` (default
+    `N(0,1)`), `mixing_` and `inverse_transform`.
+  - Given the same `w_init`, every variant matches sklearn to 1e-8.
+  - Before, it ran deflation from a uniform start and scaled sources with
+    ddof = 1.
+  - **Breaking:** `n_components` is an `Option`, and the fitted fields are
+    now `components`, `mixing`, `mean`, `whitening`, `n_iter`.
+- **OneClassSVM uses libsvm's dual scaling, as sklearn.** Σα = ν·n.
+  `score_samples` is `decision_function + offset()` (sklearn's `offset_`).
+  Before, decision values were divided by ν·n and `score_samples` equalled
+  `decision_function`. Predictions are unchanged. **Breaking.**
+- **KernelPCA eigenvalue cleanup is sklearn's `_check_psd_eigenvalues`.**
+  Significantly negative eigenvalues are an error, other negatives become
+  0, and positives below 1e-12·max become 0. Rounding noise was kept
+  before, so `remove_zero_eig` / Python `n_components=None` returned
+  spurious components (79 instead of 4 on rank-4 data). Python
+  `n_components=None` now always removes zero eigenvalues, as sklearn.
+- **Python `KBinsDiscretizer` defaults to `encode='onehot'`,** as sklearn.
+  The output is dense, where sklearn returns a sparse matrix.
+- **Isomap follows sklearn.**
+  - A disconnected k-NN graph is completed as sklearn's
+    `_fix_connected_components` does: an edge between the closest pair of
+    every two components. Before, `fit` returned an error.
+  - The embedding gets sklearn's KernelPCA eigenvalue cleanup and
+    `svd_flip` signs.
+  - Embeddings match sklearn to 1e-14 (data with tied k-NN distances can
+    differ).
+- **LocalOutlierFactor thresholds follow sklearn.**
+  - `contamination: Option<f64>`, defaulting to `None` = sklearn's
+    `'auto'` (offset -1.5).
+  - A numeric contamination uses the linearly interpolated percentile.
+  - Outliers are the samples with `nof < offset`.
+  - Before: default 0.1, nearest-rank threshold, strict `>`, so about 10%
+    of labels differed from sklearn.
+  - **Breaking:** the type and default of `contamination` changed.
+- **IsolationForest follows sklearn.**
+  - Leaf corrections use sklearn's `_average_path_length`, with `c(2) = 1`.
+    The general formula gave 0.154 there, which biased all scores.
+  - `contamination: Option<f64>`, defaulting to sklearn's `'auto'`
+    (offset -0.5). A numeric contamination uses the interpolated
+    percentile.
+  - Inliers are `score >= offset`. New `decision_function`.
+  - Scores agree with sklearn within seed noise.
+  - Python gets `max_samples='auto'` / float and `contamination='auto'`.
+  - **Breaking:** the default contamination changed.
+- **Trees visit features in a random order at every node,** as sklearn's
+  splitter does. Splits of equal improvement now go to a random feature
+  instead of always the lowest index.
+  - The fixed order made forest trees needlessly alike. RandomForest's
+    held-out R² on diabetes trailed sklearn by 0.017 (3.6 SE); it now
+    agrees within noise.
+  - Gradient-boosting rounds each get their own tree seed.
+  - Results without ties are unchanged; tie-breaks differ from before.
+- **CV folds of LassoCV, ElasticNetCV and RidgeCV(cv=k) are contiguous by
+  default,** as sklearn's `cv=int` (`KFold` without shuffling). Before,
+  they were shuffled with a seed, so `alpha_` could differ from sklearn's:
+  LassoCV predictions on diabetes were 13.8 apart, now 2e-3, which is
+  solver tolerance. `with_random_state(seed)` still shuffles. Python
+  `ElasticNetCV` defaults to `l1_ratio=0.5`, as sklearn.
+- **MiniBatchKMeans is a port of sklearn's algorithm.**
+  - k-means++ / random init on `init_size` subsamples, best of `n_init`
+    on a validation set.
+  - `max_iter` epochs of `batch_size` rows drawn with replacement.
+  - Batch-wise weighted-mean centre updates, reassignment of rarely used
+    centres (`reassignment_ratio`).
+  - Stopping on the exponentially weighted batch inertia
+    (`max_no_improvement`), or on `tol · mean(var(X))` when `tol > 0`.
+  - `sample_weight`, `labels`, `inertia`, `n_steps`.
+  - Before, it applied per-sample online updates with a fixed shift
+    tolerance.
+  - Mean inertia over seeds agrees with sklearn.
+  - **Breaking:** defaults are now sklearn's (`batch_size` 1024, `tol` 0).
+- **PassiveAggressiveClassifier follows sklearn's `_plain_sgd`.**
+  - Multiclass via one-vs-rest (before: an error for more than 2 classes).
+  - Steps use `‖x‖²` without an intercept term.
+  - Stopping uses sklearn's rule: 5 epochs whose mean loss exceeds
+    `best − tol`.
+  - New `decision_function`.
+  - With `shuffle=False` it matches sklearn to 1e-12 for PA-I and PA-II.
+  - **Breaking:** `coef` is an `Array2`, `intercept` an `Array1`, `classes`
+    a `Vec`.
+- **Python: classical MDS is exported only as `ClassicalMDS`.** The `MDS`
+  alias pointed to classical (Torgerson) MDS, but sklearn's `MDS` is the
+  iterative SMACOF algorithm, so the name promised a different method.
+  **Breaking:** use `ClassicalMDS`.
+- **IsotonicRegressor predicts like sklearn.** Predictions interpolate
+  linearly between the fitted points (sklearn's `X_thresholds_` /
+  `y_thresholds_`); before, they were a step function. New
+  `out_of_bounds` (`Nan` default / `Clip` / `Raise`); before, inputs
+  outside the range were always clipped.
+- **CCA is a port of sklearn's `CCA`.** It uses NIPALS mode B with
+  canonical deflation and `scale`, plus `_svd_flip_1d` signs, and exposes
+  weights, loadings, rotations and `n_iter`. Before, it was the
+  closed-form SVD solution: the canonical correlations were the same, but
+  scores and weights were scaled and signed differently from sklearn's.
+  It matches sklearn now. **Breaking:** `FittedCca` fields changed.
+
 ### Algorithms — new
 
 - **HDBSCAN** (`anofox-ml-cluster`) with stability-based flat extraction that

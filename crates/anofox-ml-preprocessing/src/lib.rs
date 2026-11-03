@@ -68,7 +68,7 @@ pub mod variance_threshold;
 pub use areg_imputer::{AregImputer, AregMatch, AregVariable, MultipleImputation};
 pub use binarizer::{Binarizer, FittedBinarizer};
 pub use cca::{Cca, FittedCca};
-pub use fast_ica::{FastIca, FittedFastIca};
+pub use fast_ica::{FastIca, FittedFastIca, IcaAlgorithm, IcaFun, IcaWhiten, IcaWhitenSolver};
 pub use incremental_pca::{FittedIncrementalPca, IncrementalPca};
 pub use iterative_imputer::{
     AnyModel, AnyRegressor, FittedIterativeImputer, ImputationEstimator, ImputationModel,

@@ -4,7 +4,7 @@
 //! The whole alpha grid is solved by coordinate descent with warm starts
 //! (upstream `fit_path`) per fold and on the full data; the default grid is
 //! sklearn's (`n_alphas = 100`, `eps = 1e-3`, `alpha_max = max|Xcᵀyc|/n`).
-//! Selection uses the pooled held-out MSE over seeded shuffled (or given)
+//! Selection uses the pooled held-out MSE over contiguous (sklearn `KFold`), seeded shuffled or given
 //! folds; the coefficients are the full-data path solution at `alpha_`.
 //! See [`crate::elastic_net_cv`] for the shared machinery.
 
@@ -59,7 +59,7 @@ impl LassoCrossValidated {
         self
     }
 
-    /// Number of shuffled k-fold splits (default 5).
+    /// Number of k-fold splits (default 5).
     pub fn with_cv_folds(mut self, folds: usize) -> Self {
         self.folds.n_folds = folds;
         self
@@ -71,9 +71,11 @@ impl LassoCrossValidated {
         self
     }
 
-    /// Seed of the shuffled fold assignment (default 0).
+    /// Shuffle the rows with this seed before cutting the folds (default:
+    /// contiguous folds, as sklearn's `cv=int`).
     pub fn with_random_state(mut self, seed: u64) -> Self {
         self.folds.seed = seed;
+        self.folds.shuffle = true;
         self
     }
 

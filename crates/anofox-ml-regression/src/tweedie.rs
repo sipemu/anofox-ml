@@ -13,10 +13,9 @@
 //! `TweedieRegressor` (penalised IRLS, upstream `lambda = n·alpha`), with
 //! offsets and opt-in Wald inference.
 //!
-//! Blocked on anofox-regression (#72): upstream's penalised IRLS does not
-//! converge at sklearn's default `alpha = 1.0` and has no sample weights, so
-//! `alpha` defaults to 0 and these regressors do not implement `FitWeighted`
-//! yet.
+//! `alpha` defaults to sklearn's 1.0 (anofox-regression 0.8 converges
+//! there). Upstream has no sample weights for these families yet, so they do
+//! not implement `FitWeighted` (#72).
 
 use crate::convert::{
     check_row_vector, check_xy, coef_from_col, ndarray_to_col, ndarray_to_mat, upstream_err,
@@ -53,7 +52,7 @@ impl TweedieRegressor {
     pub fn new(power: f64) -> Self {
         Self {
             power,
-            alpha: 0.0,
+            alpha: 1.0,
             // sklearn link='auto': identity for power <= 0, log otherwise.
             link_power: if power <= 0.0 { 1.0 } else { 0.0 },
             with_intercept: true,
@@ -270,8 +269,7 @@ impl Predict<f64> for FittedTweedieRegressor {
 // ---------------------------------------------------------------------------
 
 /// Gamma GLM regressor (Tweedie with power=2 and log link), mirroring
-/// `sklearn.linear_model.GammaRegressor` (`alpha` defaults to 0 here, see
-/// the module docs).
+/// `sklearn.linear_model.GammaRegressor`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GammaRegressor {
     inner: TweedieRegressor,

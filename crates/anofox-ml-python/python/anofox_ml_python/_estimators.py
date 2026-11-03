@@ -385,15 +385,28 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
 class IsolationForest(OutlierMixin, BaseEstimator):
     _kind = "IsolationForest"
 
-    def __init__(self, n_estimators=100, max_samples=256, contamination=0.1, random_state=None):
+    def __init__(self, n_estimators=100, max_samples="auto", contamination="auto",
+                 random_state=None):
         self.n_estimators = n_estimators
         self.max_samples = max_samples
         self.contamination = contamination
         self.random_state = random_state
 
     def _rust_params(self, X, y):
-        return {"n_estimators": self.n_estimators, "max_samples": self.max_samples,
-                "contamination": self.contamination, "seed": _seed(self.random_state)}
+        n = X.shape[0]
+        if self.max_samples == "auto":
+            ms = min(256, n)
+        elif isinstance(self.max_samples, float):
+            ms = int(self.max_samples * n)
+        else:
+            ms = int(self.max_samples)
+        return {"n_estimators": self.n_estimators, "max_samples": ms,
+                "contamination": None if self.contamination == "auto"
+                else float(self.contamination),
+                "seed": _seed(self.random_state)}
+
+    def decision_function(self, X):
+        return self._call("decision_function", X)
 
     def predict(self, X):
         return np.asarray(self._call("predict", X), dtype=np.int64)
@@ -765,13 +778,7 @@ class Ridge(_LinearAttrs, RegressorMixin, BaseEstimator):
 
 
 class Lasso(_LinearAttrs, RegressorMixin, BaseEstimator):
-    """L1-penalised least squares.
-
-    ``alpha`` is passed to anofox-regression's ``lambda``. Its penalty
-    convention does not yet match sklearn's ``(1 / 2n) ||y - Xw||² +
-    alpha ||w||₁``, so coefficients differ from sklearn's for the same
-    ``alpha`` (tracked upstream, sipemu/anofox-ml#72).
-    """
+    """L1-penalised least squares with sklearn's ``alpha`` scale."""
 
     _kind = "LassoRegressor"
 
@@ -780,15 +787,12 @@ class Lasso(_LinearAttrs, RegressorMixin, BaseEstimator):
         self.fit_intercept = fit_intercept
 
     def _rust_params(self, X, y):
-        return {"lambda": float(self.alpha), "with_intercept": self.fit_intercept}
+        return {"lambda": float(self.alpha), "with_intercept": self.fit_intercept,
+                "sklearn_scale": True}
 
 
 class ElasticNet(_LinearAttrs, RegressorMixin, BaseEstimator):
-    """Elastic-net penalised least squares (``alpha``, ``l1_ratio``).
-
-    As for :class:`Lasso`, ``alpha`` is anofox-regression's ``lambda`` and
-    does not yet follow sklearn's scaling (sipemu/anofox-ml#72).
-    """
+    """Elastic-net penalised least squares (sklearn's ``alpha``, ``l1_ratio``)."""
 
     _kind = "ElasticNetRegressor"
 
@@ -799,7 +803,7 @@ class ElasticNet(_LinearAttrs, RegressorMixin, BaseEstimator):
 
     def _rust_params(self, X, y):
         return {"lambda": float(self.alpha), "alpha": float(self.l1_ratio),
-                "with_intercept": self.fit_intercept}
+                "with_intercept": self.fit_intercept, "sklearn_scale": True}
 
 
 class HuberRegressor(_LinearAttrs, RegressorMixin, BaseEstimator):
@@ -865,14 +869,14 @@ class LassoCV(_LinearAttrs, RegressorMixin, BaseEstimator):
                 "alphas": None if self.alphas is None else [float(a) for a in self.alphas],
                 "with_intercept": self.fit_intercept, "max_iter": self.max_iter,
                 "tol": self.tol,
-                "folds": {"n_folds": int(self.cv), "fold_ids": None,
+                "folds": {"n_folds": int(self.cv), "fold_ids": None, "shuffle": False,
                           "seed": _seed(self.random_state)}}
 
 
 class ElasticNetCV(LassoCV):
     _kind = "ElasticNetCrossValidated"
 
-    def __init__(self, l1_ratio=(0.1, 0.3, 0.5, 0.7, 0.9), eps=1e-3, n_alphas=100,
+    def __init__(self, l1_ratio=0.5, eps=1e-3, n_alphas=100,
                  alphas=None, fit_intercept=True, max_iter=100_000, tol=1e-12, cv=5,
                  random_state=None):
         super().__init__(eps, n_alphas, alphas, fit_intercept, max_iter, tol, cv, random_state)
@@ -904,7 +908,7 @@ class LogisticRegression(ClassifierMixin, BaseEstimator):
 
 
 class _Glm(_LinearAttrs, RegressorMixin, BaseEstimator):
-    def __init__(self, alpha=0.0, fit_intercept=True, max_iter=100, tol=1e-8):
+    def __init__(self, alpha=1.0, fit_intercept=True, max_iter=100, tol=1e-8):
         self.alpha = alpha
         self.fit_intercept = fit_intercept
         self.max_iter = max_iter
@@ -935,7 +939,7 @@ class GammaRegressor(_Glm):
 class TweedieRegressor(_Glm):
     _kind = "TweedieRegressor"
 
-    def __init__(self, power=0.0, alpha=0.0, link="auto", fit_intercept=True, max_iter=100,
+    def __init__(self, power=0.0, alpha=1.0, link="auto", fit_intercept=True, max_iter=100,
                  tol=1e-8):
         super().__init__(alpha, fit_intercept, max_iter, tol)
         self.power = power
@@ -1232,12 +1236,14 @@ class LocalOutlierFactor(OutlierMixin, BaseEstimator):
 
     _kind = "LocalOutlierFactor"
 
-    def __init__(self, n_neighbors=20, contamination=0.1):
+    def __init__(self, n_neighbors=20, contamination="auto"):
         self.n_neighbors = n_neighbors
         self.contamination = contamination
 
     def _rust_params(self, X, y):
-        return {"n_neighbors": self.n_neighbors, "contamination": self.contamination}
+        return {"n_neighbors": self.n_neighbors,
+                "contamination": None if self.contamination == "auto"
+                else float(self.contamination)}
 
     def fit(self, X, y=None):
         self._fit_model(X)
@@ -1594,14 +1600,17 @@ class QuantileTransformer(TransformerMixin, BaseEstimator):
 class KBinsDiscretizer(TransformerMixin, BaseEstimator):
     _kind = "KBinsDiscretizer"
 
-    def __init__(self, n_bins=5, encode="ordinal", strategy="quantile"):
+    # sklearn's default encode='onehot' returns a sparse matrix; here the
+    # one-hot output is dense.
+    def __init__(self, n_bins=5, encode="onehot", strategy="quantile"):
         self.n_bins = n_bins
         self.encode = encode
         self.strategy = strategy
 
     def _rust_params(self, X, y):
         return {"n_bins": self.n_bins,
-                "encode": _choice(self.encode, {"ordinal": "Ordinal", "onehot-dense": "Onehot"},
+                "encode": _choice(self.encode, {"ordinal": "Ordinal", "onehot": "Onehot",
+                                                "onehot-dense": "Onehot"},
                                   "encode"),
                 "strategy": _choice(self.strategy, {"uniform": "Uniform",
                                                     "quantile": "Quantile",
@@ -1667,7 +1676,10 @@ class KernelPCA(TransformerMixin, BaseEstimator):
         else:
             raise ValueError(f"unknown kernel {self.kernel!r}")
         n = X.shape[0] if self.n_components is None else int(self.n_components)
-        return {"n_components": n, "kernel": kernel, "remove_zero_eig": self.remove_zero_eig}
+        # As sklearn: with n_components=None zero-eigenvalue components are
+        # always removed.
+        return {"n_components": n, "kernel": kernel,
+                "remove_zero_eig": self.remove_zero_eig or self.n_components is None}
 
 
 class TruncatedSVD(TransformerMixin, BaseEstimator):
@@ -1683,24 +1695,67 @@ class TruncatedSVD(TransformerMixin, BaseEstimator):
 class FastICA(TransformerMixin, BaseEstimator):
     _kind = "FastIca"
 
-    def __init__(self, n_components=None, max_iter=200, tol=1e-4, random_state=None):
+    def __init__(self, n_components=None, *, algorithm="parallel", whiten="unit-variance",
+                 fun="logcosh", fun_args=None, max_iter=200, tol=1e-4, w_init=None,
+                 whiten_solver="svd", random_state=None):
         self.n_components = n_components
+        self.algorithm = algorithm
+        self.whiten = whiten
+        self.fun = fun
+        self.fun_args = fun_args
         self.max_iter = max_iter
         self.tol = tol
+        self.w_init = w_init
+        self.whiten_solver = whiten_solver
         self.random_state = random_state
 
     def _rust_params(self, X, y):
-        n = X.shape[1] if self.n_components is None else int(self.n_components)
-        return {"n_components": n, "max_iter": self.max_iter, "tol": self.tol,
+        fun = _choice(self.fun, {"logcosh": "Logcosh", "exp": "Exp", "cube": "Cube"}, "fun")
+        if fun == "Logcosh":
+            fun = {"Logcosh": {"alpha": float((self.fun_args or {}).get("alpha", 1.0))}}
+        whiten = {"unit-variance": "UnitVariance", "arbitrary-variance": "ArbitraryVariance",
+                  False: "None"}
+        w_init = None if self.w_init is None else np.asarray(self.w_init, dtype=float)
+        return {"n_components": None if self.n_components is None else int(self.n_components),
+                "algorithm": _choice(self.algorithm, {"parallel": "Parallel",
+                                                      "deflation": "Deflation"}, "algorithm"),
+                "whiten": _choice(self.whiten, whiten, "whiten"), "fun": fun,
+                "max_iter": self.max_iter, "tol": self.tol,
+                "w_init": None if w_init is None else {"v": 1, "dim": list(w_init.shape),
+                                                       "data": w_init.ravel().tolist()},
+                "whiten_solver": _choice(self.whiten_solver, {"svd": "Svd", "eigh": "Eigh"},
+                                         "whiten_solver"),
                 "seed": _seed(self.random_state)}
+
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+    @property
+    def mixing_(self):
+        return _nd(self._fitted_state()["mixing"])
+
+    @property
+    def mean_(self):
+        return _nd(self._fitted_state()["mean"])
 
 
 class NMF(TransformerMixin, BaseEstimator):
     _kind = "Nmf"
 
-    def __init__(self, n_components=None, solver="cd", beta_loss="frobenius", tol=1e-4,
-                 max_iter=200, random_state=None, alpha_W=0.0, alpha_H="same", l1_ratio=0.0):
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+    @property
+    def reconstruction_err_(self):
+        return self._fitted_state()["reconstruction_err"]
+
+    def __init__(self, n_components=None, init=None, solver="cd", beta_loss="frobenius",
+                 tol=1e-4, max_iter=200, random_state=None, alpha_W=0.0, alpha_H="same",
+                 l1_ratio=0.0):
         self.n_components = n_components
+        self.init = init
         self.solver = solver
         self.beta_loss = beta_loss
         self.tol = tol
@@ -1718,6 +1773,9 @@ class NMF(TransformerMixin, BaseEstimator):
                                                       "kullback-leibler": "KullbackLeibler",
                                                       "itakura-saito": "ItakuraSaito"},
                                      "beta_loss"),
+                "init": _choice(self.init, {None: "Auto", "random": "Random",
+                                            "nndsvd": "Nndsvd", "nndsvda": "NndsvdA",
+                                            "nndsvdar": "NndsvdAr"}, "init"),
                 "tol": self.tol, "max_iter": self.max_iter, "seed": _seed(self.random_state),
                 "alpha_w": float(self.alpha_W),
                 "alpha_h": None if self.alpha_H == "same" else float(self.alpha_H),
@@ -1793,17 +1851,28 @@ class KMeans(ClusterMixin, BaseEstimator):
 class MiniBatchKMeans(ClusterMixin, BaseEstimator):
     _kind = "MiniBatchKMeans"
 
-    def __init__(self, n_clusters=8, max_iter=100, batch_size=1024, tol=1e-4,
-                 random_state=None):
+    def __init__(self, n_clusters=8, *, init="k-means++", max_iter=100, batch_size=1024,
+                 random_state=None, tol=0.0, max_no_improvement=10, init_size=None,
+                 n_init="auto", reassignment_ratio=0.01):
         self.n_clusters = n_clusters
+        self.init = init
         self.max_iter = max_iter
         self.batch_size = batch_size
-        self.tol = tol
         self.random_state = random_state
+        self.tol = tol
+        self.max_no_improvement = max_no_improvement
+        self.init_size = init_size
+        self.n_init = n_init
+        self.reassignment_ratio = reassignment_ratio
 
     def _rust_params(self, X, y):
-        return {"n_clusters": self.n_clusters, "max_iter": self.max_iter,
-                "batch_size": self.batch_size, "tol": self.tol,
+        return {"n_clusters": self.n_clusters,
+                "init": _choice(self.init, {"k-means++": "KMeansPlusPlus", "random": "Random"},
+                                "init"),
+                "max_iter": self.max_iter, "batch_size": self.batch_size, "tol": float(self.tol),
+                "max_no_improvement": self.max_no_improvement, "init_size": self.init_size,
+                "n_init": None if self.n_init == "auto" else int(self.n_init),
+                "reassignment_ratio": float(self.reassignment_ratio),
                 "seed": _seed(self.random_state)}
 
 
@@ -2114,8 +2183,10 @@ class LocallyLinearEmbedding(_Embedding):
                 "reg": self.reg}
 
 
-class MDS(_Embedding):
-    """Classical (metric, Torgerson) multidimensional scaling."""
+class ClassicalMDS(_Embedding):
+    """Classical (Torgerson) multidimensional scaling, sklearn's
+    ``ClassicalMDS``. (sklearn's ``MDS`` is the iterative SMACOF algorithm,
+    which this package does not provide.)"""
 
     _kind = "ClassicalMds"
 

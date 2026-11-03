@@ -416,9 +416,7 @@ impl GradientBoostingRegressor {
                 if subsample_size < n_train {
                     train_rows.clone().shuffle(&mut rng);
                 }
-                if self.max_features.is_some() {
-                    let _: u64 = tree_seeds.gen();
-                }
+                let _: u64 = tree_seeds.gen();
                 predictions.scaled_add(lr, &tree.predict(x)?);
                 trees.push(tree);
             }
@@ -474,13 +472,9 @@ impl GradientBoostingRegressor {
             } else {
                 train_rows.clone()
             };
-            let round_params;
-            let params = if self.max_features.is_some() {
-                round_params = tree_params.clone().with_seed(tree_seeds.gen());
-                &round_params
-            } else {
-                &tree_params
-            };
+            // Every round gets its own tree seed (feature order, feature subset).
+            let round_params = tree_params.clone().with_seed(tree_seeds.gen());
+            let params = &round_params;
             let mut fitted_tree: FittedDecisionTreeRegressor<F> =
                 crate::forest_common::fit_tree_on_rows(params, x, &grad, &in_bag, sample_weight)?;
 

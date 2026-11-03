@@ -29,7 +29,10 @@ pub enum LofAlgorithm {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocalOutlierFactor {
     pub n_neighbors: usize,
-    pub contamination: f64,
+    /// Expected fraction of outliers in `(0, 0.5]`; `None` is sklearn's
+    /// `'auto'` (threshold -1.5 on the negative outlier factor).
+    #[serde(default)]
+    pub contamination: Option<f64>,
     pub algorithm: LofAlgorithm,
 }
 
@@ -37,12 +40,13 @@ impl LocalOutlierFactor {
     pub fn new(n_neighbors: usize) -> Self {
         Self {
             n_neighbors,
-            contamination: 0.1,
+            contamination: None,
             algorithm: LofAlgorithm::Auto,
         }
     }
+    /// Expected outlier fraction (sklearn `contamination`).
     pub fn with_contamination(mut self, c: f64) -> Self {
-        self.contamination = c;
+        self.contamination = Some(c);
         self
     }
     pub fn with_algorithm(mut self, a: LofAlgorithm) -> Self {
@@ -125,14 +129,27 @@ impl<F: Float> FitUnsupervised<F> for LocalOutlierFactor {
         let neg_of: Vec<f64> = lof.iter().map(|v| -v).collect();
         let neg_of = Array1::from(neg_of);
 
-        // Threshold: contamination-th percentile of negative LOF (sklearn).
-        let mut sorted: Vec<f64> = neg_of.iter().copied().collect();
-        sorted.sort_by(|a, b| a.total_cmp(b));
-        let q = (self.contamination * (n as f64 - 1.0)).round() as usize;
-        let q = q.min(n - 1);
-        let threshold = sorted[q];
+        // sklearn's `offset_`: -1.5 for contamination='auto', else the
+        // `100 · contamination` percentile (linear interpolation) of the
+        // negative outlier factors; samples below it are outliers.
+        let threshold = match self.contamination {
+            None => -1.5,
+            Some(c) => {
+                if !(c > 0.0 && c <= 0.5) {
+                    return Err(RustMlError::InvalidParameter(format!(
+                        "contamination must be in (0, 0.5], got {c}"
+                    )));
+                }
+                let mut sorted: Vec<f64> = neg_of.to_vec();
+                sorted.sort_by(f64::total_cmp);
+                let pos = c * (n as f64 - 1.0);
+                let lo = pos.floor() as usize;
+                let hi = (lo + 1).min(n - 1);
+                sorted[lo] + (pos - lo as f64) * (sorted[hi] - sorted[lo])
+            }
+        };
 
-        let predictions: Array1<f64> = neg_of.mapv(|v| if v > threshold { 1.0 } else { -1.0 });
+        let predictions: Array1<f64> = neg_of.mapv(|v| if v < threshold { -1.0 } else { 1.0 });
 
         Ok(FittedLocalOutlierFactor {
             negative_outlier_factor: neg_of,
@@ -293,5 +310,20 @@ mod tests {
         let b = FitUnsupervised::<f32>::fit(&lof, &x32).unwrap();
         assert_eq!(a.negative_outlier_factor, b.negative_outlier_factor);
         assert_eq!(a.predictions, b.predictions);
+    }
+
+    #[test]
+    fn test_auto_contamination_threshold_is_sklearn_offset() {
+        // sklearn contamination='auto': offset_ = -1.5, outliers are the
+        // samples with negative_outlier_factor_ < offset_.
+        let x = Array2::from_shape_fn((30, 2), |(i, j)| ((i * (j + 2)) % 7) as f64 / 3.0);
+        let mut x = x;
+        x[[29, 0]] = 40.0;
+        let f = FitUnsupervised::<f64>::fit(&LocalOutlierFactor::new(5), &x).unwrap();
+        assert_eq!(f.threshold, -1.5);
+        for (p, nof) in f.predictions.iter().zip(&f.negative_outlier_factor) {
+            assert_eq!(*p, if *nof < -1.5 { -1.0 } else { 1.0 });
+        }
+        assert_eq!(f.predictions[29], -1.0);
     }
 }

@@ -7,10 +7,9 @@
 //! inference ([`RegressionSummary`]). Binomial additionally takes sample
 //! (trial) weights.
 //!
-//! Blocked on anofox-regression (#72): upstream's penalised IRLS does not
-//! converge at sklearn's default `alpha = 1.0` and Poisson has no sample
-//! weights, so `alpha` defaults to 0 (unpenalised, as R's `glm`) and
-//! `PoissonRegressor` does not implement `FitWeighted` yet.
+//! `PoissonRegressor` defaults to sklearn's `alpha = 1.0` (anofox-regression
+//! 0.8 converges there). Upstream has no Poisson sample weights yet, so it
+//! does not implement `FitWeighted` (#72).
 
 use crate::convert::{
     check_n_features, check_row_vector, check_xy, coef_from_col, exposure_to_offset,
@@ -108,9 +107,9 @@ pub(crate) fn upstream_lambda(alpha: f64, weight_sum: f64) -> Result<f64> {
 /// 1/(2n) Σ d(yᵢ, μᵢ) + α/2 ‖β‖²      (intercept unpenalised)
 /// ```
 ///
-/// with `d` the Poisson unit deviance. `alpha` defaults to 0 (unpenalised
-/// maximum likelihood, R's `glm(family = poisson)`); sklearn's default of
-/// 1.0 is blocked on anofox-regression (#72).
+/// with `d` the Poisson unit deviance. `alpha` defaults to 1.0, as sklearn;
+/// `alpha = 0` is unpenalised maximum likelihood (R's
+/// `glm(family = poisson)`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PoissonRegressor {
     alpha: f64,
@@ -124,7 +123,7 @@ pub struct PoissonRegressor {
 impl PoissonRegressor {
     pub fn new() -> Self {
         Self {
-            alpha: 0.0,
+            alpha: 1.0,
             with_intercept: true,
             max_iter: 100,
             tol: 1e-8,
@@ -651,6 +650,7 @@ mod tests {
         );
         let x = Array2::from_shape_vec((6, 1), xs.to_vec()).unwrap();
         let fitted = PoissonRegressor::new()
+            .with_alpha(0.0)
             .fit_with_exposure(&x, &y, &exposure)
             .unwrap();
         assert_abs_diff_eq!(fitted.coefficients()[0], 0.3, epsilon = 1e-6);

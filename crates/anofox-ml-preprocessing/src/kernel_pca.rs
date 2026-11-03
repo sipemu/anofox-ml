@@ -112,22 +112,31 @@ impl FitUnsupervised<f64> for KernelPca {
         let s = eig.S(); // ascending
         let v = eig.U();
 
-        // sklearn: eigenvalues in descending order, tiny negatives clipped
-        // to 0 (`_check_psd_eigenvalues`), eigenvector signs fixed so that
-        // the largest-|·| entry of every column is positive (`svd_flip`).
-        let scale = s.column_vector()[n - 1].abs().max(1.0);
+        // sklearn's `_check_psd_eigenvalues`: significantly negative
+        // eigenvalues are an error, the rest of the negatives become 0 and so
+        // do positives below 1e-12 · max. Eigenvalues come in descending
+        // order, eigenvector signs are fixed so that the largest-|·| entry of
+        // every column is positive (`svd_flip`).
+        let sv = s.column_vector();
+        let max_eig = sv[n - 1];
+        let min_eig = sv[0];
+        if max_eig > 0.0 && min_eig < -1e-5 * max_eig && min_eig < -1e-10 {
+            return Err(RustMlError::InvalidParameter(format!(
+                "the kernel matrix has significant negative eigenvalues ({min_eig:e}, \
+                 largest {max_eig:e}); it is not positive semi-definite"
+            )));
+        }
+        let clean = |val: f64| {
+            if val <= 0.0 || val < 1e-12 * max_eig {
+                0.0
+            } else {
+                val
+            }
+        };
         let mut cols: Vec<(f64, usize)> = (0..k_target)
             .map(|c| {
                 let src = n - 1 - c;
-                let val = s.column_vector()[src];
-                (
-                    if val < 1e-10 * scale {
-                        0.0f64.max(val.max(0.0))
-                    } else {
-                        val
-                    },
-                    src,
-                )
+                (clean(sv[src]), src)
             })
             .collect();
         if self.remove_zero_eig {
@@ -137,7 +146,7 @@ impl FitUnsupervised<f64> for KernelPca {
         let mut alphas = Array2::<f64>::zeros((n, kk));
         let mut eigenvalues = Array1::<f64>::zeros(kk);
         for (c, &(val, src)) in cols.iter().enumerate() {
-            eigenvalues[c] = if val < 1e-10 * scale { 0.0 } else { val };
+            eigenvalues[c] = val;
             let mut best = 0;
             for i in 1..n {
                 if v[(i, src)].abs() > v[(best, src)].abs() {
@@ -323,5 +332,25 @@ mod tests {
         );
         let z = KernelPca::new(2, KpcaKernel::Linear).fit(&c).unwrap();
         assert!(z.transform(&c).unwrap().iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_rounding_level_eigenvalues_removed_like_sklearn() {
+        // Rank-2 data in 3-D with a linear kernel: the centred kernel matrix
+        // has 2 positive eigenvalues; the rest are rounding noise, which
+        // sklearn's `_check_psd_eigenvalues` sets to 0 (< 1e-12 · max).
+        let x = Array2::from_shape_fn((40, 3), |(i, j)| {
+            let (a, b) = ((i as f64 * 0.7).sin(), (i as f64 * 0.3).cos());
+            match j {
+                0 => a,
+                1 => b,
+                _ => 2.0 * a - b,
+            }
+        });
+        let f = KernelPca::new(40, KpcaKernel::Linear)
+            .with_remove_zero_eig(true)
+            .fit(&x)
+            .unwrap();
+        assert_eq!(f.eigenvalues.len(), 2);
     }
 }

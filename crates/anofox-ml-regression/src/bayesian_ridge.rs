@@ -18,8 +18,9 @@ use crate::convert::{
 };
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::{
-    ArdRegression as InnerArd, BayesianRidge as InnerBayesianRidge, FittedArd as InnerFittedArd,
-    FittedBayesianRidge as InnerFittedBayesianRidge, FittedRegressor as _, Regressor as _,
+    ArdRegressor as InnerArd, BayesianRidgeRegressor as InnerBayesianRidge,
+    FittedArd as InnerFittedArd, FittedBayesianRidge as InnerFittedBayesianRidge,
+    FittedRegressor as _, Regressor as _,
 };
 
 fn no_posterior() -> RustMlError {
@@ -119,7 +120,7 @@ impl Fit<f64> for BayesianRidge {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         let fitted = InnerBayesianRidge::builder()
-            .fit_intercept(self.fit_intercept)
+            .with_intercept(self.fit_intercept)
             .max_iter(self.max_iter)
             .tolerance(self.tol)
             .alpha_1(self.alpha_1)
@@ -135,7 +136,7 @@ impl Fit<f64> for BayesianRidge {
             intercept: res.intercept.unwrap_or(0.0),
             alpha: fitted.alpha(),
             lambda: fitted.lambda(),
-            n_iter: fitted.n_iter(),
+            n_iter: anofox_regression::prelude::IterativeFit::iterations(&fitted),
             sigma: mat_to_ndarray(fitted.sigma()),
             log_marginal_likelihood: fitted.log_marginal_likelihood(),
             n_features: x.ncols(),
@@ -245,7 +246,7 @@ impl Fit<f64> for ARDRegression {
     fn fit(&self, x: &Array2<f64>, y: &Array1<f64>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
         let fitted = InnerArd::builder()
-            .fit_intercept(self.fit_intercept)
+            .with_intercept(self.fit_intercept)
             .max_iter(self.max_iter)
             .tolerance(self.tol)
             .alpha_1(self.alpha_1)
@@ -260,9 +261,9 @@ impl Fit<f64> for ARDRegression {
         Ok(FittedARDRegression {
             coef: col_to_ndarray(&res.coefficients),
             intercept: res.intercept.unwrap_or(0.0),
-            lambdas: Array1::from(fitted.lambdas().to_vec()),
+            lambdas: Array1::from_iter(fitted.lambdas().iter().copied()),
             alpha: fitted.alpha(),
-            n_iter: fitted.n_iter(),
+            n_iter: anofox_regression::prelude::IterativeFit::iterations(&fitted),
             sigma: mat_to_ndarray(fitted.sigma()),
             kept_features: fitted.kept_features().to_vec(),
             n_features: x.ncols(),

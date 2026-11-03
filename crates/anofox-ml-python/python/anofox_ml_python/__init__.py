@@ -110,14 +110,13 @@ from ._estimators import (
     TSNE,
     Isomap,
     LocallyLinearEmbedding,
-    MDS,
+    ClassicalMDS,
 )
 from .model_selection import train_test_split
 
 #: Previous (0.1) class names.
 KnnClassifier = KNeighborsClassifier
 KnnRegressor = KNeighborsRegressor
-ClassicalMDS = MDS
 Svc = SVC
 LinearSvc = LinearSVC
 MlpClassifier = MLPClassifier
@@ -230,6 +229,5 @@ __all__ = [
     "TSNE",
     "Isomap",
     "LocallyLinearEmbedding",
-    "MDS",
     "ClassicalMDS",
 ]

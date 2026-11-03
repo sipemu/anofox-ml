@@ -1,218 +1,318 @@
 //! Canonical Correlation Analysis.
 //!
-//! Mirrors `sklearn.cross_decomposition.CCA` (and `PLSCanonical` for the
-//! univariate case). Given paired (X, Y), CCA finds linear combinations
-//! `Xa` and `Yb` that are maximally correlated.
+//! A port of `sklearn.cross_decomposition.CCA` (sklearn 1.8: `_PLS` with
+//! `deflation_mode="canonical"`, `mode="B"`, NIPALS):
 //!
-//! Closed form via SVD:
-//! 1. Centre and whiten both X and Y (X_white = X · K_x, Y_white = Y · K_y).
-//! 2. Compute the cross-covariance `C = X_whiteᵀ · Y_white / (n - 1)`.
-//! 3. SVD `C = U Σ Vᵀ`. The first `k` columns of `K_x · U` and `K_y · V`
-//!    are the loadings `x_weights_` and `y_weights_` (sklearn's naming).
-//! 4. `Σ_ii` are the canonical correlations.
+//! 1. Centre X and Y and (with `scale`) divide by their standard deviations
+//!    (ddof = 1; constant columns keep scale 1).
+//! 2. For each component, the power method finds the first pair of
+//!    canonical directions on the current (deflated) matrices:
+//!    `w = pinv(X) y_score` normalised, `c = pinv(Y) (X w)` normalised,
+//!    until `‖Δw‖² < tol`. Signs follow `_svd_flip_1d` (largest |w| entry
+//!    positive).
+//! 3. Scores `t = X w`, `u = Y c`; both blocks are deflated by their own
+//!    scores (`X -= t pᵀ`, `p = Xᵀ t / tᵀt`).
+//! 4. Rotations `W (Pᵀ W)⁻¹` map new data to scores (`transform`).
+//!
+//! Weights, loadings, rotations and scores match sklearn.
 
 use anofox_ml_core::{Result, RustMlError};
 use faer::linalg::solvers::Svd;
 use faer::Mat;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis};
 
 pub struct Cca {
     pub n_components: usize,
+    /// Standardise X and Y (sklearn `scale`, default true).
+    pub scale: bool,
+    pub max_iter: usize,
+    pub tol: f64,
 }
 
 impl Cca {
     pub fn new(n_components: usize) -> Self {
-        Self { n_components }
+        Self {
+            n_components,
+            scale: true,
+            max_iter: 500,
+            tol: 1e-6,
+        }
+    }
+    pub fn with_scale(mut self, scale: bool) -> Self {
+        self.scale = scale;
+        self
+    }
+    pub fn with_max_iter(mut self, m: usize) -> Self {
+        self.max_iter = m;
+        self
+    }
+    pub fn with_tol(mut self, t: f64) -> Self {
+        self.tol = t;
+        self
     }
 
     pub fn fit(&self, x: &Array2<f64>, y: &Array2<f64>) -> Result<FittedCca> {
-        let n = x.nrows();
-        let dx = x.ncols();
+        let (n, dx) = x.dim();
         let dy = y.ncols();
         if y.nrows() != n {
             return Err(RustMlError::ShapeMismatch(format!(
-                "X has {} rows but Y has {}",
-                n,
+                "X has {n} rows but Y has {}",
                 y.nrows()
             )));
         }
-        let k = self.n_components.min(dx).min(dy);
-        if k == 0 {
-            return Err(RustMlError::InvalidParameter("n_components >= 1".into()));
+        let k = self.n_components;
+        if k == 0 || k > dx.min(dy).min(n) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "n_components must be in 1..={}",
+                dx.min(dy).min(n)
+            )));
         }
-        let n_f = n as f64;
-        let mut x_mean = Array1::<f64>::zeros(dx);
-        for j in 0..dx {
-            x_mean[j] = x.column(j).sum() / n_f;
+        if n < 2 {
+            return Err(RustMlError::EmptyInput("need at least 2 samples".into()));
         }
-        let mut y_mean = Array1::<f64>::zeros(dy);
-        for j in 0..dy {
-            y_mean[j] = y.column(j).sum() / n_f;
-        }
+        let (mut xk, x_mean, x_std) = center_scale(x, self.scale);
+        let (mut yk, y_mean, y_std) = center_scale(y, self.scale);
+        let eps = f64::EPSILON;
 
-        let mut xc = x.clone();
-        let mut yc = y.clone();
-        for j in 0..dx {
-            for i in 0..n {
-                xc[[i, j]] -= x_mean[j];
+        let mut x_weights = Array2::<f64>::zeros((dx, k));
+        let mut y_weights = Array2::<f64>::zeros((dy, k));
+        let mut x_loadings = Array2::<f64>::zeros((dx, k));
+        let mut y_loadings = Array2::<f64>::zeros((dy, k));
+        let mut n_iter = Vec::with_capacity(k);
+        for c in 0..k {
+            // Columns of Y that are numerically zero are set to exactly 0.
+            for mut col in yk.columns_mut() {
+                if col.iter().all(|v| v.abs() < 10.0 * eps) {
+                    col.fill(0.0);
+                }
             }
+            let (mut w, mut cw, it) = power_method(&xk, &yk, self.max_iter, self.tol)?;
+            // _svd_flip_1d
+            let mut best = 0;
+            for j in 1..w.len() {
+                if w[j].abs() > w[best].abs() {
+                    best = j;
+                }
+            }
+            if w[best] < 0.0 {
+                w.mapv_inplace(|v| -v);
+                cw.mapv_inplace(|v| -v);
+            }
+            let t = xk.dot(&w);
+            let u = yk.dot(&cw); // norm_y_weights: y_ss = 1
+            let p = xk.t().dot(&t) / t.dot(&t);
+            let q = yk.t().dot(&u) / u.dot(&u);
+            xk -= &outer(&t, &p);
+            yk -= &outer(&u, &q);
+            x_weights.column_mut(c).assign(&w);
+            y_weights.column_mut(c).assign(&cw);
+            x_loadings.column_mut(c).assign(&p);
+            y_loadings.column_mut(c).assign(&q);
+            n_iter.push(it);
         }
-        for j in 0..dy {
-            for i in 0..n {
-                yc[[i, j]] -= y_mean[j];
-            }
-        }
-
-        // Whitening for X via SVD: X_centred = U_x Σ_x V_xᵀ.
-        // K_x = V_x Σ_x⁻¹ √(n-1).
-        let scale = (n as f64 - 1.0).sqrt();
-        let kx = whitening(&xc, scale)?;
-        let ky = whitening(&yc, scale)?;
-        let x_white = xc.dot(&kx);
-        let y_white = yc.dot(&ky);
-        // C = X_white' Y_white / (n - 1).
-        let c = x_white.t().dot(&y_white) / (n_f - 1.0).max(1.0);
-        let nx = c.nrows();
-        let ny = c.ncols();
-        let cm = Mat::<f64>::from_fn(nx, ny, |i, j| c[[i, j]]);
-        let svd = Svd::new_thin(cm.as_ref())
-            .map_err(|e| RustMlError::InvalidParameter(format!("SVD failed: {e:?}")))?;
-        let u = svd.U();
-        let s = svd.S();
-        let v = svd.V();
-        // x_weights = K_x · U[:, :k]; y_weights = K_y · V[:, :k].
-        let k_real = k.min(nx).min(ny);
-        let mut u_top = Array2::<f64>::zeros((nx, k_real));
-        let mut v_top = Array2::<f64>::zeros((ny, k_real));
-        let mut corrs = Array1::<f64>::zeros(k_real);
-        for c_i in 0..k_real {
-            corrs[c_i] = s.column_vector()[c_i];
-            for i in 0..nx {
-                u_top[[i, c_i]] = u[(i, c_i)];
-            }
-            for i in 0..ny {
-                v_top[[i, c_i]] = v[(i, c_i)];
-            }
-        }
-        let x_weights = kx.dot(&u_top);
-        let y_weights = ky.dot(&v_top);
-        Ok(FittedCca {
+        let x_rotations = x_weights.dot(&pinv(&x_loadings.t().dot(&x_weights))?);
+        let y_rotations = y_weights.dot(&pinv(&y_loadings.t().dot(&y_weights))?);
+        let mut fitted = FittedCca {
             x_mean,
             y_mean,
+            x_std,
+            y_std,
             x_weights,
             y_weights,
-            canonical_correlations: corrs,
-        })
+            x_loadings,
+            y_loadings,
+            x_rotations,
+            y_rotations,
+            canonical_correlations: Array1::zeros(k),
+            n_iter,
+        };
+        let (xs, ys) = (fitted.transform_x(x)?, fitted.transform_y(y)?);
+        fitted.canonical_correlations = (0..k)
+            .map(|c| pearson(xs.column(c), ys.column(c)))
+            .collect();
+        Ok(fitted)
     }
 }
 
-/// Returns whitening matrix `W` such that `X_centred · W` has identity covariance.
-fn whitening(xc: &Array2<f64>, scale: f64) -> Result<Array2<f64>> {
-    let n = xc.nrows();
-    let d = xc.ncols();
-    let m = Mat::<f64>::from_fn(n, d, |i, j| xc[[i, j]]);
+/// sklearn `_center_scale_xy` for one block.
+fn center_scale(a: &Array2<f64>, scale: bool) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+    let mean = a.mean_axis(Axis(0)).expect("rows > 0");
+    let std = if scale {
+        a.std_axis(Axis(0), 1.0)
+            .mapv(|s| if s == 0.0 { 1.0 } else { s })
+    } else {
+        Array1::ones(a.ncols())
+    };
+    ((a - &mean) / &std, mean, std)
+}
+
+fn outer(a: &Array1<f64>, b: &Array1<f64>) -> Array2<f64> {
+    Array2::from_shape_fn((a.len(), b.len()), |(i, j)| a[i] * b[j])
+}
+
+fn pearson(a: ndarray::ArrayView1<f64>, b: ndarray::ArrayView1<f64>) -> f64 {
+    let (ma, mb) = (a.mean().unwrap(), b.mean().unwrap());
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b.iter()) {
+        sab += (x - ma) * (y - mb);
+        saa += (x - ma) * (x - ma);
+        sbb += (y - mb) * (y - mb);
+    }
+    sab / (saa * sbb).sqrt()
+}
+
+/// sklearn `_pinv2_old`: pseudo-inverse with the singular-value cutoff
+/// `max(s) · 1e6 · eps`.
+fn pinv(a: &Array2<f64>) -> Result<Array2<f64>> {
+    let m = Mat::<f64>::from_fn(a.nrows(), a.ncols(), |i, j| a[[i, j]]);
     let svd = Svd::new_thin(m.as_ref())
-        .map_err(|e| RustMlError::InvalidParameter(format!("SVD failed: {e:?}")))?;
-    let s = svd.S();
-    let v = svd.V();
-    let r = s.column_vector().nrows();
-    let mut w = Array2::<f64>::zeros((d, r));
-    for c in 0..r {
-        let sigma = s.column_vector()[c].max(1e-12);
-        for j in 0..d {
-            w[[j, c]] = v[(j, c)] * scale / sigma;
-        }
-    }
-    Ok(w)
+        .map_err(|e| RustMlError::InvalidParameter(format!("CCA SVD failed: {e:?}")))?;
+    let (u, s, v) = (svd.U(), svd.S().column_vector(), svd.V());
+    let smax = (0..s.nrows()).map(|i| s[i]).fold(0.0, f64::max);
+    let cond = smax * 1e6 * f64::EPSILON;
+    Ok(Array2::from_shape_fn((a.ncols(), a.nrows()), |(i, j)| {
+        (0..s.nrows())
+            .filter(|&c| s[c] > cond)
+            .map(|c| v[(i, c)] * u[(j, c)] / s[c])
+            .sum()
+    }))
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// sklearn `_get_first_singular_vectors_power_method` with `mode="B"`,
+/// `norm_y_weights=True`.
+fn power_method(
+    x: &Array2<f64>,
+    y: &Array2<f64>,
+    max_iter: usize,
+    tol: f64,
+) -> Result<(Array1<f64>, Array1<f64>, usize)> {
+    let eps = f64::EPSILON;
+    let mut y_score = y
+        .columns()
+        .into_iter()
+        .find(|c| c.iter().any(|v| v.abs() > eps))
+        .ok_or_else(|| RustMlError::InvalidParameter("Y residual is constant".into()))?
+        .to_owned();
+    let x_pinv = pinv(x)?;
+    let y_pinv = pinv(y)?;
+    let mut w_old: Option<Array1<f64>> = None;
+    let (mut w, mut c) = (Array1::zeros(x.ncols()), Array1::zeros(y.ncols()));
+    let mut n_iter = max_iter;
+    for it in 0..max_iter {
+        w = x_pinv.dot(&y_score);
+        w /= w.dot(&w).sqrt() + eps;
+        let x_score = x.dot(&w);
+        c = y_pinv.dot(&x_score);
+        c /= c.dot(&c).sqrt() + eps;
+        y_score = y.dot(&c) / (c.dot(&c) + eps);
+        let diff = match &w_old {
+            Some(o) => (&w - o).mapv(|v| v * v).sum(),
+            None => (&w - 100.0).mapv(|v| v * v).sum(),
+        };
+        if diff < tol || y.ncols() == 1 {
+            n_iter = it + 1;
+            break;
+        }
+        w_old = Some(w.clone());
+    }
+    Ok((w, c, n_iter))
+}
+
 pub struct FittedCca {
     pub x_mean: Array1<f64>,
     pub y_mean: Array1<f64>,
-    /// X loadings, shape (n_features_x, n_components).
+    pub x_std: Array1<f64>,
+    pub y_std: Array1<f64>,
+    /// `(n_features_x, k)` (sklearn `x_weights_`).
     pub x_weights: Array2<f64>,
-    /// Y loadings, shape (n_features_y, n_components).
     pub y_weights: Array2<f64>,
-    /// Canonical correlations (diagonal of the cross-covariance SVD).
+    pub x_loadings: Array2<f64>,
+    pub y_loadings: Array2<f64>,
+    pub x_rotations: Array2<f64>,
+    pub y_rotations: Array2<f64>,
+    /// Correlation of each pair of training scores.
     pub canonical_correlations: Array1<f64>,
+    /// Power-method iterations per component (sklearn `n_iter_`).
+    pub n_iter: Vec<usize>,
 }
 
 impl FittedCca {
-    /// Project X into canonical x-space: (X − x̄) · x_weights.
+    /// X scores of new data: `((X − mean) / std) x_rotations`.
     pub fn transform_x(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if x.ncols() != self.x_mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} X-features, got {}",
+                "expected {} X features, got {}",
                 self.x_mean.len(),
                 x.ncols()
             )));
         }
-        let mut xc = x.clone();
-        for j in 0..x.ncols() {
-            for i in 0..x.nrows() {
-                xc[[i, j]] -= self.x_mean[j];
-            }
-        }
-        Ok(xc.dot(&self.x_weights))
+        Ok(((x - &self.x_mean) / &self.x_std).dot(&self.x_rotations))
     }
 
-    /// Project Y into canonical y-space: (Y − ȳ) · y_weights.
+    /// Y scores of new data: `((Y − mean) / std) y_rotations`.
     pub fn transform_y(&self, y: &Array2<f64>) -> Result<Array2<f64>> {
         if y.ncols() != self.y_mean.len() {
             return Err(RustMlError::ShapeMismatch(format!(
-                "expected {} Y-features, got {}",
+                "expected {} Y features, got {}",
                 self.y_mean.len(),
                 y.ncols()
             )));
         }
-        let mut yc = y.clone();
-        for j in 0..y.ncols() {
-            for i in 0..y.nrows() {
-                yc[[i, j]] -= self.y_mean[j];
-            }
-        }
-        Ok(yc.dot(&self.y_weights))
+        Ok(((y - &self.y_mean) / &self.y_std).dot(&self.y_rotations))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
 
     #[test]
-    fn test_cca_finds_high_correlation() {
-        // Construct X, Y where Y is essentially a noisy linear function of
-        // X[:, 0]. CCA should find the first canonical correlation near 1.
-        let n = 100;
-        let mut x = Array2::<f64>::zeros((n, 3));
-        let mut y = Array2::<f64>::zeros((n, 2));
-        for i in 0..n {
-            let t = (i as f64) * 0.1;
-            x[[i, 0]] = t.sin();
-            x[[i, 1]] = (i as f64) - 50.0;
-            x[[i, 2]] = ((i * 7) % 13) as f64;
-            y[[i, 0]] = t.sin() + 0.01;
-            y[[i, 1]] = -2.0 * t.sin();
+    fn test_matches_sklearn() {
+        // sklearn 1.8 CCA(2).fit(A, B): x_weights_, y_weights_, n_iter_ and
+        // transform(A, B) rows.
+        let a = Array2::from_shape_fn((30, 3), |(i, j)| {
+            ((i * (j + 2)) as f64 * 0.37).sin() + j as f64 * 0.1 * i as f64
+        });
+        let b = Array2::from_shape_fn((30, 2), |(i, j)| {
+            a[[i, j]] * 0.5 + ((i + j) as f64 * 0.9).cos()
+        });
+        let f = Cca::new(2).fit(&a, &b).unwrap();
+        let xw = [
+            -0.196_363_781_903_187_87,
+            0.950_591_961_615_063_4,
+            0.976_819_652_074_914_3,
+            0.168_331_363_465_421_44,
+            0.085_232_813_381_467_35,
+            0.260_843_774_291_617_65,
+        ];
+        let yw = [
+            -0.449_282_013_763_073_64,
+            0.893_389_988_811_714_8,
+            0.893_389_988_811_715_4,
+            0.449_282_013_763_073_5,
+        ];
+        for (g, w) in f.x_weights.iter().zip(xw) {
+            assert!((g - w).abs() < 1e-6, "{g} vs {w}");
         }
-        let fitted = Cca::new(1).fit(&x, &y).unwrap();
-        assert!(
-            fitted.canonical_correlations[0] > 0.9,
-            "first canonical correlation = {}",
-            fitted.canonical_correlations[0]
-        );
-        let _ = array![1.0_f64];
-    }
-
-    #[test]
-    fn test_cca_transform_shapes() {
-        let x = array![[1.0_f64, 0.0], [0.0, 1.0], [2.0, 1.0], [1.0, 2.0]];
-        let y = array![[1.0_f64, 0.0], [0.5, 0.5], [1.5, 0.5], [1.0, 1.0]];
-        let fitted = Cca::new(1).fit(&x, &y).unwrap();
-        let xt = fitted.transform_x(&x).unwrap();
-        let yt = fitted.transform_y(&y).unwrap();
-        assert_eq!(xt.shape(), &[4, 1]);
-        assert_eq!(yt.shape(), &[4, 1]);
+        for (g, w) in f.y_weights.iter().zip(yw) {
+            assert!((g - w).abs() < 1e-6, "{g} vs {w}");
+        }
+        assert_eq!(f.n_iter, vec![8, 2]);
+        let xs = f.transform_x(&a).unwrap();
+        let ys = f.transform_y(&b).unwrap();
+        for (g, w) in xs
+            .row(0)
+            .iter()
+            .zip([-1.431_608_874_686_806_8, -0.575_169_199_861_631_4])
+        {
+            assert!((g - w).abs() < 1e-6, "{g} vs {w}");
+        }
+        for (g, w) in ys
+            .row(5)
+            .iter()
+            .zip([0.159_884_416_254_659_2, -0.860_474_347_645_636_8])
+        {
+            assert!((g - w).abs() < 1e-6, "{g} vs {w}");
+        }
     }
 }
