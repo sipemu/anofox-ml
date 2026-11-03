@@ -6,6 +6,40 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### anofox-regression 0.10.0: the #72 blockers are lifted
+
+Every parity test that waited on upstream is enabled; none are ignored now.
+
+- **LassoLars** drops a feature whose coefficient crosses zero, as
+  sklearn's `lars_path(method="lasso")`. `active_set` is sklearn's
+  `active_` (entry order, re-entries included). Path, knots and `alpha`
+  fits match to 1e-10.
+- **LogisticRegressor** (#30): multinomial (softmax) loss and L1 /
+  elastic-net penalties (`with_l1_ratio`), with sample and class weights,
+  through upstream's `MultinomialLogisticRegressor`. Matches sklearn to
+  1e-7. **Breaking:** the multiclass default is now
+  `MultiClass::Multinomial` (sklearn's default); one-vs-rest is opt-in.
+  Wald inference stays available for binary L2 fits. Python
+  `LogisticRegression` gains `l1_ratio`.
+- **Poisson / Gamma / Tweedie** (#29) implement `FitWeighted` (upstream
+  prior weights), plus `fit_weighted_with_offset`. All 18 sklearn
+  reference fits (3 families × 3 alphas, weighted and not) match to 1e-6.
+  Python passes `sample_weight` through.
+- **HuberRegressor**: `HuberScale::Joint` (sklearn's joint coefficient /
+  scale estimate; `scale()` / `outliers()` are `scale_` / `outliers_`).
+  **Breaking:** it is the new default; `with_scale_method(HuberScale::Mad)`
+  gives the previous IRLS at the MAD scale.
+- **QuantileRegressor**: L1 penalty `with_alpha` (sklearn's objective,
+  exact LP, exact zeros). **Breaking:** `alpha` defaults to sklearn's 1.0
+  (Rust and Python); `with_alpha(0.0)` is the previous unpenalised fit.
+- **SplineTransformer** (#56, new): sklearn's B-spline expansion through
+  upstream's `splines::BSpline` (uniform / quantile / explicit knots, every
+  `extrapolation` mode, `include_bias`). Matches sklearn to 1e-12; Python
+  `SplineTransformer`.
+- BayesianRidge / ARD `predict_std` match sklearn ≥ 1.9, which centres the
+  query rows (upstream is correct; sklearn ≤ 1.8 used the raw rows). The
+  references are regenerated with sklearn 1.9.1.
+
 ### View-based estimator inputs (#37)
 
 - **Breaking:** the core traits take `ndarray` views. Implementors now

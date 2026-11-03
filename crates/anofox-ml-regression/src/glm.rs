@@ -4,12 +4,10 @@
 //! `BinomialRegressor`, penalised IRLS) and convert at the ndarray boundary.
 //! They support an offset / exposure, an sklearn-scaled ridge `alpha`
 //! (upstream `lambda = alpha · Σw`, intercept unpenalised) and opt-in Wald
-//! inference ([`RegressionSummary`]). Binomial additionally takes sample
-//! (trial) weights.
+//! inference ([`RegressionSummary`]). Both take sample weights
+//! (`FitWeighted`; prior weights upstream, as R's `glm(weights = )`).
 //!
-//! `PoissonRegressor` defaults to sklearn's `alpha = 1.0` (anofox-regression
-//! 0.8 converges there). Upstream has no Poisson sample weights yet, so it
-//! does not implement `FitWeighted` (#72).
+//! `PoissonRegressor` defaults to sklearn's `alpha = 1.0`.
 
 use crate::convert::{
     check_n_features, check_row_vector, check_xy, coef_from_col, exposure_to_offset,
@@ -175,21 +173,45 @@ impl PoissonRegressor {
         y: impl AsArray<'b, f64, Ix1>,
         offset: Option<&Array1<f64>>,
     ) -> Result<FittedPoissonRegressor> {
-        let x: ArrayView2<f64> = x.into();
-        let y: ArrayView1<f64> = y.into();
+        self.fit_impl(x.into(), y.into(), None, offset)
+    }
+
+    /// Fit with sample weights (sklearn's `sample_weight`, R's prior
+    /// weights) and an optional offset on the link scale.
+    pub fn fit_weighted_with_offset<'a, 'b>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+        sample_weight: Option<&Array1<f64>>,
+        offset: Option<&Array1<f64>>,
+    ) -> Result<FittedPoissonRegressor> {
+        self.fit_impl(x.into(), y.into(), sample_weight.map(|w| w.view()), offset)
+    }
+
+    fn fit_impl(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        offset: Option<&Array1<f64>>,
+    ) -> Result<FittedPoissonRegressor> {
         check_xy(x, y)?;
         check_response(y, "Poisson", |v| v >= 0.0, "non-negative")?;
         check_row_vector(offset, y.len(), "offset")?;
         if self.inference {
             crate::summary::validate_level(self.confidence_level)?;
         }
+        let w = resolve_sample_weight(sample_weight, y.len())?;
         let mut b = InnerPoisson::log()
             .with_intercept(self.with_intercept)
-            .lambda(upstream_lambda(self.alpha, y.len() as f64)?)
+            .lambda(upstream_lambda(self.alpha, w.sum())?)
             .max_iterations(self.max_iter)
             .tolerance(self.tol)
             .compute_inference(self.inference)
             .confidence_level(self.confidence_level);
+        if sample_weight.is_some() {
+            b = b.weights(ndarray_to_col(w.view()));
+        }
         if let Some(o) = offset {
             b = b.offset(ndarray_to_col(o.view()));
         }
@@ -315,6 +337,19 @@ impl Fit<f64> for PoissonRegressor {
 
     fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
         self.fit_with_offset(x, y, None)
+    }
+}
+
+impl FitWeighted<f64> for PoissonRegressor {
+    type Fitted = FittedPoissonRegressor;
+
+    fn fit_weighted_view(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<Self::Fitted> {
+        self.fit_impl(x, y, sample_weight, None)
     }
 }
 

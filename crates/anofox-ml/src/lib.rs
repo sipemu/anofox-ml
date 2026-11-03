@@ -120,8 +120,8 @@ pub mod prelude {
         MissingIndicator, MutualInformationSelector, Nmf, NormType, Normalizer, OneHotEncoder,
         OrdinalEncoder, OutputDistribution, Pca, PolynomialFeatures, PowerTransformer,
         QuantileTransformer, RcsTransformer, Rfe, RobustScaler, SelectFromModel, SelectKBest,
-        SequentialFeatureSelector, SimpleImputer, StandardScaler, TargetEncoder, TargetSmooth,
-        TargetType, TruncatedSvd, VarianceThreshold,
+        SequentialFeatureSelector, SimpleImputer, SplineTransformer, StandardScaler, TargetEncoder,
+        TargetSmooth, TargetType, TruncatedSvd, VarianceThreshold,
     };
 
     pub use anofox_ml_neighbors::{

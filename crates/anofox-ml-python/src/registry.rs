@@ -370,19 +370,19 @@ registry! {
     PoissonRegressor {
         config: reg::PoissonRegressor = Default::default(),
         fitted: reg::FittedPoissonRegressor,
-        fit: |c, x, y, w| sup(K, c, x, y, w),
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
     GammaRegressor {
         config: reg::GammaRegressor = Default::default(),
         fitted: reg::FittedTweedieRegressor,
-        fit: |c, x, y, w| sup(K, c, x, y, w),
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
     TweedieRegressor {
         config: reg::TweedieRegressor = reg::TweedieRegressor::new(0.0),
         fitted: reg::FittedTweedieRegressor,
-        fit: |c, x, y, w| sup(K, c, x, y, w),
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
     BayesianRidge {
@@ -613,6 +613,12 @@ registry! {
     RcsTransformer {
         config: pre::RcsTransformer = Default::default(),
         fitted: pre::FittedRcsTransformer<f64>,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    SplineTransformer {
+        config: pre::SplineTransformer = Default::default(),
+        fitted: pre::FittedSplineTransformer<f64>,
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }

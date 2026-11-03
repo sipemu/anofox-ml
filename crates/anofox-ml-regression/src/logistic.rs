@@ -1,8 +1,8 @@
 //! Logistic regression classifier.
 //!
-//! sklearn-compatible `LogisticRegression` for binary and one-vs-rest
-//! multiclass problems, with an L2 penalty `C`, `class_weight` and
-//! `sample_weight`.
+//! sklearn-compatible `LogisticRegression`: binary, multinomial (softmax)
+//! and one-vs-rest multiclass problems, with an L2, L1 or elastic-net
+//! penalty (`C`, `l1_ratio`), `class_weight` and `sample_weight`.
 //!
 //! Objective (sklearn's parametrisation, penalty on the *summed* loss):
 //!
@@ -10,14 +10,16 @@
 //! min  C Σᵢ sᵢ ℓᵢ(β, b) + ½ ‖β‖²
 //! ```
 //!
-//! with `sᵢ = sample_weightᵢ · class_weight[yᵢ]` and the intercept
-//! unpenalised. Every binary sub-fit is delegated to `anofox_regression`'s
-//! logit `BinomialRegressor` (penalised IRLS, upstream `lambda = 1/C`).
+//! with `sᵢ = sample_weightᵢ · class_weight[yᵢ]`, the intercept
+//! unpenalised and, for `l1_ratio = r`, the penalty
+//! `(1 − r)/2 ‖β‖² + r ‖β‖₁`. The fits are delegated to `anofox_regression`
+//! (upstream `lambda = 1/C`):
 //!
-//! Blocked on anofox-regression (#72): the multinomial (softmax) loss and
-//! L1 / elastic-net penalties need upstream support, so
-//! [`MultiClass::Multinomial`] and `l1_ratio > 0` return an error and the
-//! multiclass default is one-vs-rest.
+//! - L2 binary fits (and the one-vs-rest sub-fits) to the logit
+//!   `BinomialRegressor` (penalised IRLS), which also provides Wald
+//!   inference;
+//! - the multinomial loss and every L1 / elastic-net fit to
+//!   `MultinomialLogisticRegressor` (proximal Newton; exact zeros for L1).
 
 use crate::convert::{coef_from_col, ndarray_to_col, ndarray_to_mat, upstream_err};
 use crate::summary::{glm_summary_from_result, RegressionSummary, StatisticKind};
@@ -26,16 +28,11 @@ use anofox_ml_core::{
     Result, RustMlError,
 };
 use anofox_regression::solvers::{
-    BinomialRegressor as InnerBinomial, FittedRegressor as _, Regressor as _,
+    BinomialRegressor as InnerBinomial, FittedRegressor as _, IterativeFit as _,
+    MultinomialLogisticRegressor as InnerMultinomial, Regressor as _,
 };
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 use serde::{Deserialize, Serialize};
-
-fn blocked(what: &str) -> RustMlError {
-    RustMlError::InvalidParameter(format!(
-        "{what} is not supported yet: it needs anofox-regression support (see anofox-ml#72)"
-    ))
-}
 
 /// One binary logistic fit.
 struct BinaryFit {
@@ -50,12 +47,11 @@ struct BinaryFit {
 /// single logistic model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum MultiClass {
-    /// Softmax (multinomial) loss — sklearn's default with `lbfgs`. Not
-    /// supported yet (needs anofox-regression, #72).
+    /// Softmax (multinomial) loss — sklearn's default.
+    #[default]
     Multinomial,
     /// One binary model per class; probabilities are normalised
     /// (`sklearn.multiclass.OneVsRestClassifier(LogisticRegression())`).
-    #[default]
     OneVsRest,
 }
 
@@ -69,9 +65,8 @@ pub use anofox_ml_core::ClassWeight;
 /// `predict` returns class labels (the sorted unique values of `y`),
 /// `predict_proba` an `(n, K)` matrix (columns follow [`FittedLogisticRegressor::classes`]).
 ///
-/// Defaults follow sklearn (`C = 1.0`, L2, intercept) except for the
-/// multiclass strategy, which is one-vs-rest until upstream offers the
-/// multinomial loss (#72). Use [`LogisticRegressor::with_no_penalty`] for
+/// Defaults follow sklearn (`C = 1.0`, L2, intercept, multinomial loss for
+/// more than two classes). Use [`LogisticRegressor::with_no_penalty`] for
 /// the unpenalised maximum-likelihood fit (e.g. together with
 /// `with_inference(true)` for classical Wald tests / odds-ratio CIs).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -97,7 +92,7 @@ impl LogisticRegressor {
             threshold: 0.5,
             max_iter: 1000,
             tol: 1e-8,
-            multi_class: MultiClass::OneVsRest,
+            multi_class: MultiClass::Multinomial,
             class_weight: None,
             inference: false,
             confidence_level: 0.95,
@@ -127,8 +122,8 @@ impl LogisticRegressor {
         self
     }
 
-    /// Elastic-net mixing (sklearn's `l1_ratio`): 0 = L2 (default). Values
-    /// above 0 are not supported yet (need anofox-regression, #72).
+    /// Elastic-net mixing (sklearn's `l1_ratio`): 0 = L2 (default), 1 = L1.
+    /// Ignored without a penalty (`C = ∞`).
     pub fn with_l1_ratio(mut self, l1_ratio: f64) -> Self {
         self.l1_ratio = l1_ratio;
         self
@@ -147,19 +142,19 @@ impl LogisticRegressor {
         self
     }
 
-    /// Maximum IRLS iterations. Default: 1000.
+    /// Maximum solver iterations (IRLS / proximal Newton). Default: 1000.
     pub fn with_max_iter(mut self, max_iter: usize) -> Self {
         self.max_iter = max_iter;
         self
     }
 
-    /// IRLS convergence tolerance. Default: 1e-8.
+    /// Solver convergence tolerance. Default: 1e-8.
     pub fn with_tol(mut self, tol: f64) -> Self {
         self.tol = tol;
         self
     }
 
-    /// Multiclass strategy for `K > 2`. Default: one-vs-rest.
+    /// Multiclass strategy for `K > 2`. Default: multinomial.
     pub fn with_multi_class(mut self, multi_class: MultiClass) -> Self {
         self.multi_class = multi_class;
         self
@@ -171,7 +166,7 @@ impl LogisticRegressor {
         self
     }
 
-    /// Compute Wald inference (binary fits only). Default false.
+    /// Compute Wald inference (binary L2 fits only). Default false.
     /// With a finite `C` the covariance is the penalised one
     /// `(XᵀWX + I/C)⁻¹`; use [`Self::with_no_penalty`] for classical SEs.
     pub fn with_inference(mut self, inference: bool) -> Self {
@@ -207,9 +202,6 @@ impl LogisticRegressor {
                 self.l1_ratio
             )));
         }
-        if self.l1_ratio > 0.0 && self.c.is_finite() {
-            return Err(blocked("an L1 / elastic-net penalty"));
-        }
         if self.max_iter == 0 {
             return Err(RustMlError::InvalidParameter(
                 "max_iter must be >= 1".into(),
@@ -221,6 +213,11 @@ impl LogisticRegressor {
         crate::summary::validate_level(self.confidence_level)
     }
 
+    /// Whether the penalty has an L1 part.
+    fn has_l1(&self) -> bool {
+        self.l1_ratio > 0.0 && self.c.is_finite()
+    }
+
     fn fit_binary(
         &self,
         x: ArrayView2<f64>,
@@ -228,6 +225,16 @@ impl LogisticRegressor {
         w: &Array1<f64>,
         inference: bool,
     ) -> Result<BinaryFit> {
+        if self.has_l1() {
+            let fit = self.fit_softmax(x, y01, w)?;
+            return Ok(BinaryFit {
+                coef: fit.coef.row(0).to_owned(),
+                intercept: self.with_intercept.then(|| fit.intercepts[0]),
+                n_iter: fit.n_iter,
+                converged: fit.converged,
+                summary: None,
+            });
+        }
         let mut b = InnerBinomial::logistic()
             .with_intercept(self.with_intercept)
             .lambda(self.lambda())
@@ -254,6 +261,52 @@ impl LogisticRegressor {
             n_iter: inner.iterations,
             converged: inner.converged,
             summary,
+        })
+    }
+}
+
+/// A fit of upstream's `MultinomialLogisticRegressor`.
+struct SoftmaxFit {
+    /// `(1, p)` for two classes, `(K, p)` otherwise.
+    coef: Array2<f64>,
+    intercepts: Array1<f64>,
+    n_iter: usize,
+    converged: bool,
+}
+
+impl LogisticRegressor {
+    /// sklearn's `LogisticRegression` objective on the class indices `y`
+    /// (multinomial for `K > 2`, binary parameterization for two classes).
+    fn fit_softmax(
+        &self,
+        x: ArrayView2<f64>,
+        y: &Array1<f64>,
+        w: &Array1<f64>,
+    ) -> Result<SoftmaxFit> {
+        let mut b = InnerMultinomial::builder()
+            .lambda(self.lambda())
+            .l1_ratio(if self.c.is_finite() {
+                self.l1_ratio
+            } else {
+                0.0
+            })
+            .with_intercept(self.with_intercept)
+            .max_iterations(self.max_iter)
+            .tolerance(self.tol)
+            .error_on_non_convergence(false);
+        if w.iter().any(|&v| v != 1.0) {
+            b = b.weights(ndarray_to_col(w.view()));
+        }
+        let inner = b
+            .build()
+            .fit(&ndarray_to_mat(x), &ndarray_to_col(y.view()))
+            .map_err(upstream_err)?;
+        let c = inner.coefficients();
+        Ok(SoftmaxFit {
+            coef: Array2::from_shape_fn((c.nrows(), c.ncols()), |(i, j)| c[(i, j)]),
+            intercepts: coef_from_col(inner.intercepts()),
+            n_iter: inner.iterations(),
+            converged: inner.converged(),
         })
     }
 }
@@ -507,9 +560,9 @@ impl FitWeighted<f64> for LogisticRegressor {
             }
         }
         let p = x.ncols();
-        if self.inference && k > 2 {
+        if self.inference && (k > 2 || self.has_l1()) {
             return Err(RustMlError::InvalidParameter(
-                "inference is available for binary fits only".into(),
+                "inference is available for binary L2 fits only".into(),
             ));
         }
 
@@ -521,7 +574,11 @@ impl FitWeighted<f64> for LogisticRegressor {
             (coef, b, fit.n_iter, fit.converged, fit.summary)
         } else {
             match self.multi_class {
-                MultiClass::Multinomial => return Err(blocked("the multinomial loss")),
+                MultiClass::Multinomial => {
+                    let yk = Array1::from_iter(labels.iter().map(|&l| l as f64));
+                    let fit = self.fit_softmax(x, &yk, &w)?;
+                    (fit.coef, fit.intercepts, fit.n_iter, fit.converged, None)
+                }
                 MultiClass::OneVsRest => {
                     let mut coef = Array2::zeros((k, p));
                     let mut b = Array1::zeros(k);

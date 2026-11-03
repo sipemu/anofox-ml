@@ -326,3 +326,38 @@ def test_imputers_and_encoders_match_sklearn():
         train = ours.fit_transform(cats, yy)
         close(ours.transform(cats), skp.TargetEncoder().fit(cats, yy).transform(cats))
         assert train.shape == ours.transform(cats).shape
+
+
+def test_anofox_regression_0_10_features_match_sklearn():
+    """Multinomial / L1 logistic, weighted GLMs, Quantile L1, joint-scale
+    Huber and SplineTransformer (anofox-regression 0.10)."""
+    sl = pytest.importorskip("sklearn.linear_model")
+    skp = pytest.importorskip("sklearn.preprocessing")
+
+    def close(a, b, atol):
+        np.testing.assert_allclose(a, b, atol=atol)
+
+    w = rng.uniform(0.2, 3, len(X))
+    close(am.LogisticRegression(tol=1e-10).fit(X, y_multi).predict_proba(X),
+          sl.LogisticRegression(tol=1e-12, max_iter=10000).fit(X, y_multi).predict_proba(X),
+          1e-5)
+    y01 = (y_reg > 0).astype(float)
+    close(am.LogisticRegression(C=0.5, l1_ratio=1.0, tol=1e-10).fit(X, y01).predict_proba(X),
+          sl.LogisticRegression(C=0.5, l1_ratio=1.0, solver="saga", tol=1e-12,
+                                max_iter=100000).fit(X, y01).predict_proba(X),
+          1e-5)
+    y_cnt = np.round(np.exp(0.2 * X[:, 0] - 0.3 * X[:, 1]) * 2)
+    close(am.PoissonRegressor(alpha=0.1, tol=1e-12).fit(X, y_cnt, sample_weight=w).predict(X),
+          sl.PoissonRegressor(alpha=0.1, tol=1e-12, max_iter=1000)
+          .fit(X, y_cnt, sample_weight=w).predict(X),
+          1e-6)
+    close(am.QuantileRegressor(quantile=0.3, alpha=0.05).fit(X, y_reg).predict(X),
+          sl.QuantileRegressor(quantile=0.3, alpha=0.05, solver="highs").fit(X, y_reg).predict(X),
+          1e-7)
+    close(am.HuberRegressor(tol=1e-10, max_iter=1000).fit(X, y_reg).predict(X),
+          sl.HuberRegressor(tol=1e-12, max_iter=10000).fit(X, y_reg).predict(X),
+          1e-4)
+    for kw in [dict(), dict(knots="quantile", include_bias=False),
+               dict(extrapolation="periodic", n_knots=6), dict(extrapolation="linear", degree=2)]:
+        close(am.SplineTransformer(**kw).fit(X).transform(1.3 * X),
+              skp.SplineTransformer(**kw).fit(X).transform(1.3 * X), 1e-10)

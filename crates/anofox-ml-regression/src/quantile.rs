@@ -9,13 +9,19 @@ use ndarray::{Array1, ArrayView1, ArrayView2};
 /// Quantile regression estimator.
 ///
 /// Estimates conditional quantiles of the response variable.
-/// Set `quantile = 0.5` for median regression. Unpenalised (sklearn's
-/// `QuantileRegressor(alpha=0)`); [`FitWeighted`] minimises
-/// `Σ wᵢ ρ_τ(yᵢ - xᵢᵀβ)`.
+/// Set `quantile = 0.5` for median regression. Minimises sklearn's
+/// `QuantileRegressor` objective
+/// `(1/Σw) Σ wᵢ ρ_τ(yᵢ − xᵢᵀβ − b) + alpha ‖β‖₁` (intercept unpenalised),
+/// solved exactly as a linear program, so penalised slopes are exactly 0.
+/// `alpha` defaults to sklearn's 1.0; `with_alpha(0.0)` is the unpenalised
+/// fit (`quantreg::rq`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuantileRegressor {
     quantile: f64,
     with_intercept: bool,
+    /// Pre-0.10 models were unpenalised.
+    #[serde(default)]
+    alpha: f64,
 }
 
 impl QuantileRegressor {
@@ -23,7 +29,14 @@ impl QuantileRegressor {
         Self {
             quantile,
             with_intercept: true,
+            alpha: 1.0,
         }
+    }
+
+    /// L1 penalty strength (sklearn's `alpha`). Default: 1.0.
+    pub fn with_alpha(mut self, alpha: f64) -> Self {
+        self.alpha = alpha;
+        self
     }
 
     pub fn with_intercept(mut self, include: bool) -> Self {
@@ -82,8 +95,15 @@ impl FitWeighted<f64> for QuantileRegressor {
         let x_mat = ndarray_to_mat(x);
         let y_col = ndarray_to_col(y);
 
+        if !(self.alpha >= 0.0 && self.alpha.is_finite()) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "alpha must be finite and >= 0, got {}",
+                self.alpha
+            )));
+        }
         let mut builder = InnerQuantile::builder()
             .tau(self.quantile)
+            .alpha(self.alpha)
             .with_intercept(self.with_intercept);
         if let Some(w) = sample_weight {
             let w = crate::convert::resolve_sample_weight(Some(w), y.len())?;
@@ -130,7 +150,10 @@ mod tests {
         let x = Array2::from_shape_vec((10, 1), (0..10).map(|i| i as f64).collect()).unwrap();
         let y = Array1::from_vec((0..10).map(|i| 2.0 + 3.0 * i as f64).collect());
 
-        let fitted = QuantileRegressor::new(0.5).fit(&x, &y).unwrap();
+        let fitted = QuantileRegressor::new(0.5)
+            .with_alpha(0.0)
+            .fit(&x, &y)
+            .unwrap();
         assert!(fitted.r_squared() > 0.99);
     }
 
@@ -163,6 +186,7 @@ mod tests {
         for (tau, weighted, b, slope) in cases {
             let sw = if weighted { Some(&w) } else { None };
             let f = QuantileRegressor::new(tau)
+                .with_alpha(0.0)
                 .fit_weighted(&x, &y, sw)
                 .unwrap();
             // The upstream solver is a smoothed IRLS, so match the LP to ~1e-3.

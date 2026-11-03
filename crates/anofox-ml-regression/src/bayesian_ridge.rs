@@ -8,9 +8,9 @@
 //! delegated to `anofox_regression::solvers::{BayesianRidge, ArdRegression}`.
 //!
 //! `predict_std` delegates to upstream, which centres the query rows at the
-//! training mean before evaluating `sqrt(xᵀ Σ x + 1/α)`; sklearn's
-//! `return_std` uses the raw rows, so the two differ for non-centred data
-//! (tracked in #72).
+//! training mean before evaluating `sqrt(xᵀ Σ x + 1/α)` (`Σ` is the posterior
+//! covariance of the slopes in the centred parameterisation), as sklearn
+//! >= 1.9's `return_std`. sklearn <= 1.8 used the raw rows.
 
 use crate::convert::{
     check_n_features, check_xy, col_to_ndarray, linear_predict, mat_to_ndarray, ndarray_to_col,
@@ -362,7 +362,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "upstream anofox-regression 0.7 predict_std centres X; sklearn uses raw rows (#72)"]
     fn test_bayesian_ridge_return_std_matches_sklearn() {
         let (x, y) = make(25, 3, &[1.5, -2.0, 0.0]);
         let x = x + 3.0;
@@ -372,10 +371,11 @@ mod tests {
         close(
             &std,
             &[
-                0.7272844276581165,
-                0.7679079183609776,
-                0.9447285505810161,
-                0.784118088769497,
+                // sklearn 1.9.1 (centred query rows).
+                0.6606145261710049,
+                0.6710263873924674,
+                0.6699654322091376,
+                0.65627891139992,
             ],
             1e-8,
         );
@@ -402,7 +402,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "upstream anofox-regression 0.7 predict_std centres X; sklearn uses raw rows (#72)"]
     fn test_ard_return_std_matches_sklearn() {
         let (x, y) = make(30, 5, &[1.5, 0.0, 0.0, -2.0, 0.0]);
         let f = ARDRegression::new().fit(&x, &y).unwrap();
@@ -410,10 +409,11 @@ mod tests {
         close(
             &f.predict_std(&q).unwrap(),
             &[
-                0.6660447122857337,
-                0.6391903592890759,
-                0.6572354803017733,
-                0.6460091907360573,
+                // sklearn 1.9.1 (centred query rows).
+                0.669099879330345,
+                0.6375286087919487,
+                0.6549173491556525,
+                0.6499509955245063,
             ],
             1e-6,
         );
