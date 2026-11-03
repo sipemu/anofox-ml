@@ -1,15 +1,13 @@
 //! Python bindings for anofox-ml.
 //!
 //! The extension module `anofox_ml_python._native` exposes one generic
-//! estimator class (`Model`, backed by the registry in [`registry`]) plus
+//! estimator class (`Model`, backed by `anofox_ml_registry`) plus
 //! metric functions. The sklearn-compatible classes live in the Python
 //! package `anofox_ml_python` on top of it.
 
 mod helpers;
 mod metrics;
-mod model;
 mod native;
-mod registry;
 
 use pyo3::prelude::*;
 
