@@ -6,6 +6,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### faer runs sequentially
+
+- faer is built without its default features (which include `rayon`), as
+  in anofox-regression and the anofox-statistics DuckDB extension. faer
+  used to spread every decomposition and product over the global rayon
+  pool, which made small fits 5–25× slower on a many-core machine (LDA
+  5000×20: 16–20 ms → 3 ms, BayesianRidge 19–24 ms → 3 ms; 40× with 20
+  idle threads) and erratic under load. Large least squares and PCA are
+  unchanged; large dense Cholesky solves (GaussianProcess, KernelRidge with
+  thousands of samples) lose up to ~1.4× against faer's best parallel run.
+  The estimators still parallelise across trees, folds, classes and
+  branches with rayon. Results are unchanged.
+
 ### anofox-regression 0.10.0: the #72 blockers are lifted
 
 Every parity test that waited on upstream is enabled; none are ignored now.

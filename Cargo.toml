@@ -48,7 +48,11 @@ rand = "0.8"
 rayon = "1.10"
 proptest = "1.4"
 bincode = "1.3"
-faer = "0.23"
+# faer without its default features (which include rayon): every faer
+# operation runs sequentially. The estimators parallelise at a coarser level
+# (trees, folds, classes, branches) with rayon, where it pays off; faer's own
+# threads on small matrices cost far more than they save.
+faer = { version = "0.23", default-features = false, features = ["std", "linalg"] }
 
 # Internal workspace crates. Each carries both `path` (for local builds)
 # and `version` (for crates.io); without `version` cargo refuses to
