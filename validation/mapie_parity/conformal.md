@@ -18,6 +18,7 @@ coverage for any `Fit` + `Predict` regressor.
 | `NormalizedConformalRegressor`, `conformalize_normalized` | `SplitConformalRegressor(conformity_score=ResidualNormalisedScore)` |
 | `SplitConformalClassifier`, `conformalize_classifier` (`Lac`, `Aps(Include / Exclude / Randomized)`) | `SplitConformalClassifier(conformity_score="lac" / "aps")`, `include_last_label=True / False / "randomized"` |
 | `ClassificationScore::Raps(RapsParams)`, `conformalize_raps` | `SplitConformalClassifier(conformity_score=RAPSConformityScore())` |
+| `MondrianConformalRegressor`, `conformalize_mondrian`, `conformalize_classifier_mondrian` | none in MAPIE 1.6.0 (validated by definition, below) |
 
 Metrics: `coverage_score`, `mean_interval_width`, `interval_score`,
 `mean_pinball_loss`, `set_coverage_score`, `mean_set_size`
@@ -113,6 +114,15 @@ Behaviour tests in the regression file: nesting (lower α ⇒ wider; minmax ⊇ 
 median point prediction by hand, too-few-rows errors / infinite bounds,
 invalid splits and parameters.
 
+Mondrian (`tests/mondrian.rs`, no reference implementation):
+
+| Test | Check |
+|---|---|
+| one group = plain split conformal | regression intervals at α = 0.05 / 0.1 / 0.5 and classification sets (LAC, APS include / randomised, RAPS) **identical** to the non-Mondrian path |
+| two groups, noise sd 0.2 vs 2.0, α = 0.1, 100 reps × 400 rows | plain split: > 0.97 / < 0.86 per group; Mondrian: each group excess > −0.01 and < 0.93 |
+| classification, 40 % label noise in one group, LAC, 60 reps | plain under-covers the noisy group (< 0.87); Mondrian covers both (excess > −0.01) |
+| errors | unseen group, wrong number of group ids, too few rows in a group (or ±∞ when allowed), Mondrian sets from a classifier calibrated without groups |
+
 ## Differences from MAPIE (deliberate)
 
 - **Median point prediction** (`PointPrediction::Median`): MAPIE 1.6.0
@@ -166,6 +176,10 @@ invalid splits and parameters.
   model pair with identical probabilities.
 - **Tuned RAPS against a reference**: only possible once MAPIE's λ search
   is fixed upstream (or against the paper authors' code).
+- **Mondrian against a reference**: crepes (Boström) or MAPIE < 1.0's
+  `MondrianCP` could serve; today only the definition and coverage are
+  tested.
 - **Not yet validated**: top-k, cross-conformal classification,
-  Mondrian coverage, jackknife+-after-bootstrap, weighted (covariate-shift)
+  Mondrian for normalised / CQR / cross-conformal regressors,
+  jackknife+-after-bootstrap, weighted (covariate-shift)
   conformal — the next milestones of #93.
