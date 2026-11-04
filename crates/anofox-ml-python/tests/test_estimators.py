@@ -361,3 +361,17 @@ def test_anofox_regression_0_10_features_match_sklearn():
                dict(extrapolation="periodic", n_knots=6), dict(extrapolation="linear", degree=2)]:
         close(am.SplineTransformer(**kw).fit(X).transform(1.3 * X),
               skp.SplineTransformer(**kw).fit(X).transform(1.3 * X), 1e-10)
+
+
+def test_hist_gradient_boosting_quantile_loss():
+    rs = np.random.RandomState(1)
+    Xq = rs.rand(500, 2)
+    yq = Xq[:, 0] + rs.uniform(-1, 1, 500)
+    for q in (0.1, 0.9):
+        model = am.HistGradientBoostingRegressor(loss="quantile", quantile=q, max_iter=50)
+        below = np.mean(yq <= model.fit(Xq, yq).predict(Xq))
+        assert abs(below - q) < 0.08, (q, below)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(loss="quantile").fit(Xq, yq)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(loss="poisson").fit(Xq, yq)

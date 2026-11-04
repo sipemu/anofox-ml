@@ -316,6 +316,7 @@ impl Default for ConformalizedQuantileRegressorConfig {
 const QUANTILE_KINDS: &[&str] = &[
     "QuantileRegressor",
     "GradientBoostingRegressor",
+    "HistGradientBoostingRegressor",
     #[cfg(feature = "perpetual")]
     "PerpetualRegressor",
 ];
@@ -325,6 +326,9 @@ fn with_quantile(kind: &str, params: &serde_json::Value, q: f64) -> Result<serde
     let overrides = match kind {
         "QuantileRegressor" => serde_json::json!({ "quantile": q }),
         "GradientBoostingRegressor" => serde_json::json!({ "loss": "Quantile", "alpha": q }),
+        "HistGradientBoostingRegressor" => {
+            serde_json::json!({ "loss": "Quantile", "quantile": q })
+        }
         #[cfg(feature = "perpetual")]
         "PerpetualRegressor" => {
             serde_json::json!({ "objective": { "QuantileLoss": { "quantile": q } } })

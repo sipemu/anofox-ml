@@ -12,6 +12,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   depend on the rayon thread count (#108): block partials are summed in
   block order instead of with rayon's `reduce` / `sum`.
 
+### Quantile loss for histogram gradient boosting
+
+- `LgbmObjective::Quantile { alpha }` (LightGBM's `objective="quantile"`):
+  pinball-loss gradients, and leaf outputs and the baseline refit to the
+  `alpha`-percentile of the residuals (the L1 objective's median refit,
+  generalised). The regressor now rejects classification objectives with
+  an error instead of panicking.
+- `HistGradientBoostingRegressor` gains sklearn's `loss`
+  (`SquaredError` / `AbsoluteError` / `Quantile`) and `quantile`
+  (`with_loss`, `with_quantile`); Python: `loss="quantile", quantile=q`.
+  This closes the gap noted in #93: HGB can be the estimator of a
+  `ConformalizedQuantileRegressor` (registry and Python).
+
 ### Conformal predictors in the registry (#93, milestone 4)
 
 - `DynModel::predict_interval(x, alpha)` (`n × 2`: lower, upper) and
