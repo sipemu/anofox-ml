@@ -6,6 +6,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Fixed
+
+- `KMeans` centroids and inertia, and the exact t-SNE gradient, no longer
+  depend on the rayon thread count (#108): block partials are summed in
+  block order instead of with rayon's `reduce` / `sum`.
+
 ### Quantile loss for histogram gradient boosting
 
 - `LgbmObjective::Quantile { alpha }` (LightGBM's `objective="quantile"`):

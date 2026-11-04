@@ -159,6 +159,11 @@ struct LloydRun<F> {
     n_iter: usize,
 }
 
+/// Rows per block of the parallel reductions. The block partials are summed
+/// in block order, so results do not depend on the rayon thread count
+/// (rayon's `reduce` combines in an order that does).
+const BLOCK: usize = 1024;
+
 /// Weighted per-cluster coordinate sums and weight totals, in parallel over
 /// row blocks.
 fn cluster_sums<F: Float>(
@@ -169,8 +174,7 @@ fn cluster_sums<F: Float>(
 ) -> (Array2<F>, Vec<F>) {
     let n = x.nrows();
     let d = x.ncols();
-    const BLOCK: usize = 1024;
-    (0..n.div_ceil(BLOCK))
+    let parts: Vec<(Array2<F>, Vec<F>)> = (0..n.div_ceil(BLOCK))
         .into_par_iter()
         .map(|b| {
             let mut sums = Array2::<F>::zeros((k, d));
@@ -189,16 +193,17 @@ fn cluster_sums<F: Float>(
             }
             (sums, wsum)
         })
-        .reduce(
-            || (Array2::<F>::zeros((k, d)), vec![F::zero(); k]),
-            |(mut sa, mut wa), (sb, wb)| {
-                sa += &sb;
-                for (a, b) in wa.iter_mut().zip(wb) {
-                    *a += b;
-                }
-                (sa, wa)
-            },
-        )
+        .collect();
+    parts.into_iter().fold(
+        (Array2::<F>::zeros((k, d)), vec![F::zero(); k]),
+        |(mut sa, mut wa), (sb, wb)| {
+            sa += &sb;
+            for (a, b) in wa.iter_mut().zip(wb) {
+                *a += b;
+            }
+            (sa, wa)
+        },
+    )
 }
 
 /// Relocate empty clusters (zero total weight) to the points farthest from
@@ -309,14 +314,17 @@ fn inertia<F: Float>(
     centers: &Array2<F>,
     sample_weight: Option<ArrayView1<F>>,
 ) -> F {
-    (0..x.nrows())
+    let n = x.nrows();
+    let parts: Vec<F> = (0..n.div_ceil(BLOCK))
         .into_par_iter()
-        .with_min_len(256)
-        .map(|i| {
-            let w = sample_weight.map_or(F::one(), |sw| sw[i]);
-            sq_dist_rows(x.row(i), centers.row(labels[i])) * w
+        .map(|b| {
+            (b * BLOCK..((b + 1) * BLOCK).min(n)).fold(F::zero(), |acc, i| {
+                let w = sample_weight.map_or(F::one(), |sw| sw[i]);
+                acc + sq_dist_rows(x.row(i), centers.row(labels[i])) * w
+            })
         })
-        .reduce(F::zero, |a, b| a + b)
+        .collect();
+    parts.into_iter().fold(F::zero(), |a, b| a + b)
 }
 
 /// sklearn's `_tolerance`: `tol · mean(var(X, axis=0))` (unweighted, ddof 0).
@@ -474,6 +482,25 @@ impl<F: Float> Predict<F> for FittedKMeans<F> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fit_does_not_depend_on_the_thread_count() {
+        // Large enough for several reduction blocks (#108).
+        let x = Array2::from_shape_fn((5000, 4), |(i, j)| {
+            ((i * 7919 + j * 104729) % 1000) as f64 / 100.0
+        });
+        let fit = |threads| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| KMeans::new(5).with_seed(3).fit(&x).unwrap())
+        };
+        let (a, b) = (fit(1), fit(8));
+        assert_eq!(a.centroids(), b.centroids());
+        assert_eq!(a.inertia().to_bits(), b.inertia().to_bits());
+        assert_eq!(a.labels(), b.labels());
+    }
+
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::{array, Array2, Axis};
