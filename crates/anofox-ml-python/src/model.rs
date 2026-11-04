@@ -132,14 +132,14 @@ pub(crate) struct Est<C, M> {
 impl<C: Serialize + DeserializeOwned, M: Serialize + DeserializeOwned> Est<C, M> {
     pub fn bytes(&self, kind: &str) -> Result<Vec<u8>> {
         let fitted = self.fitted.as_ref().ok_or_else(|| not_fitted(kind))?;
-        persistence::to_bincode_bytes(&ModelBundle {
+        persistence::to_binary_bytes(&ModelBundle {
             config: &self.config,
             fitted,
         })
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let b: ModelBundle<C, M> = persistence::from_bincode_bytes(bytes)?;
+        let b: ModelBundle<C, M> = persistence::from_binary_bytes(bytes)?;
         Ok(Self {
             config: b.config,
             fitted: Some(b.fitted),

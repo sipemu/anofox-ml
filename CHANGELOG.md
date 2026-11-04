@@ -6,6 +6,27 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Model persistence format v2 (#87)
+
+- Binary model files are **format version 2**: the `ANOFOXML` envelope
+  header followed by zstd-compressed MessagePack with field names (zstd
+  frame checksum included). Saved models now survive changes to the fitted
+  types: fields added with `#[serde(default)]` are filled in, removed fields
+  are ignored, fields and enum variants may be reordered. Files are smaller
+  than before for tree models (a 100-tree forest: 2.28 MB → 0.66 MB);
+  loading a forest takes ~9 ms instead of ~4 ms.
+- Reading still accepts format version 1 (bincode, anofox-ml ≤ 0.2) and bare
+  legacy payloads; version-1 files load while the type's layout is
+  unchanged. anofox-ml 0.2 cannot read version-2 files (it reports a newer
+  format). JSON is unchanged.
+- New API: `to_binary_bytes`, `from_binary_bytes`, `binary_header`,
+  `save_binary`, `load_binary`, `BINARY_MAGIC`, `JSON_FORMAT_VERSION`. The
+  `*_bincode*` functions and `BINCODE_MAGIC` are deprecated aliases (they
+  write version 2). Python pickles use version 2; older pickles still load.
+- Golden fixtures (`crates/anofox-ml/tests/fixtures/persistence/v1`, `v2`):
+  17 fitted models per format version with their saved predictions; the
+  `persistence_compat` test loads all of them.
+
 ## [0.2.0] - 2026-11-03
 
 This release completes the October 2026 algorithm review (#26–#72). It fixes
