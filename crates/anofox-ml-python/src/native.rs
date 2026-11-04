@@ -8,8 +8,7 @@ use pyo3::types::PyBytes;
 
 use anofox_ml_core::RustMlError;
 
-use crate::model::{DynModel, Out};
-use crate::registry;
+use anofox_ml_registry::{self as registry, DynModel, Out};
 
 /// Map a Rust error to the closest Python exception: `NotFitted` →
 /// `RuntimeError` (the Python layer re-raises sklearn's `NotFittedError`),
@@ -111,7 +110,7 @@ impl PyModel {
         self.inner.fitted_json().map_err(to_py_err)
     }
 
-    /// Configuration and fitted state as versioned bincode bytes.
+    /// Configuration and fitted state in the versioned binary model format.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = self.inner.to_bytes().map_err(to_py_err)?;
         Ok(PyBytes::new(py, &bytes))

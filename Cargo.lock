@@ -69,6 +69,7 @@ dependencies = [
  "rand 0.8.6",
  "rayon",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -242,6 +243,19 @@ dependencies = [
 name = "anofox-ml-python"
 version = "0.2.0"
 dependencies = [
+ "anofox-ml-core",
+ "anofox-ml-metrics",
+ "anofox-ml-registry",
+ "ndarray",
+ "numpy",
+ "pyo3",
+ "serde_json",
+]
+
+[[package]]
+name = "anofox-ml-registry"
+version = "0.2.0"
+dependencies = [
  "anofox-ml-cluster",
  "anofox-ml-core",
  "anofox-ml-discriminant",
@@ -249,7 +263,6 @@ dependencies = [
  "anofox-ml-gaussian-process",
  "anofox-ml-linear",
  "anofox-ml-manifold",
- "anofox-ml-metrics",
  "anofox-ml-naive-bayes",
  "anofox-ml-neighbors",
  "anofox-ml-neural-networks",
@@ -257,10 +270,7 @@ dependencies = [
  "anofox-ml-regression",
  "anofox-ml-svm",
  "anofox-ml-trees",
- "bincode",
  "ndarray",
- "numpy",
- "pyo3",
  "serde",
  "serde_json",
 ]

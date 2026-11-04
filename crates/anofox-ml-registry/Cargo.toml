@@ -1,0 +1,32 @@
+[package]
+name = "anofox-ml-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Name-based estimator registry for anofox-ml: create, fit, predict and persist any estimator from a kind string and JSON parameters (used by the Python bindings and the DuckDB extension)"
+
+[dependencies]
+ndarray = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anofox-ml-core = { workspace = true }
+anofox-ml-preprocessing = { workspace = true }
+anofox-ml-neighbors = { workspace = true }
+anofox-ml-trees = { workspace = true }
+anofox-ml-ensemble = { workspace = true }
+anofox-ml-cluster = { workspace = true }
+anofox-ml-naive-bayes = { workspace = true }
+anofox-ml-svm = { workspace = true }
+anofox-ml-neural-networks = { workspace = true }
+anofox-ml-manifold = { workspace = true }
+anofox-ml-gaussian-process = { workspace = true }
+anofox-ml-discriminant = { workspace = true }
+anofox-ml-linear = { workspace = true }
+anofox-ml-regression = { workspace = true }

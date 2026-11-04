@@ -6,6 +6,18 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Estimator registry crate
+
+- New crate **`anofox-ml-registry`**: every estimator addressed by a kind
+  string and JSON parameters (`make`, `load`, `default_params`, `kinds`,
+  the object-safe `DynModel` trait). It was the core of the Python bindings
+  and is now shared with the planned DuckDB extension; the Python bindings
+  depend on it. A test builds every registered estimator from its default
+  parameters and round-trips a fitted model through bytes.
+- Fix: `Optics` could not be created from JSON parameters, because its
+  infinite `eps` / `eps_max` defaults became `null`. JSON now writes and
+  reads `null` as `+∞` for these fields; binary formats are unchanged.
+
 ### Model persistence format v2 (#87)
 
 - Binary model files are **format version 2**: the `ANOFOXML` envelope
