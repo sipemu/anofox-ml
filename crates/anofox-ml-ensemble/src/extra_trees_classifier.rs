@@ -286,8 +286,9 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
         let classes = self.classes();
         let n_samples = x.nrows();
         let n_classes = classes.len();
-        let w = F::one() / F::from_usize(self.trees.len()).unwrap();
 
+        // Sum per-tree probabilities, divide once (as sklearn): scaling each
+        // tree by 1/n can push a unanimous vote to 1 + 1 ulp.
         let per_tree: Vec<Array2<F>> = self
             .trees
             .par_iter()
@@ -302,14 +303,14 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
                             if total > F::zero() {
                                 for &(label, m) in &dist {
                                     if let Some(ci) = class_index(&classes, label) {
-                                        acc[[i, ci]] += w * m / total;
+                                        acc[[i, ci]] += m / total;
                                     }
                                 }
                             }
                         }
                         (None, TreeNode::Leaf { value, .. }) => {
                             if let Some(ci) = class_index(&classes, *value) {
-                                acc[[i, ci]] += w;
+                                acc[[i, ci]] += F::one();
                             }
                         }
                         (None, TreeNode::Split { .. }) => unreachable!(),
@@ -324,6 +325,7 @@ impl<F: Float> FittedExtraTreesClassifier<F> {
         for p in &per_tree {
             proba += p;
         }
+        proba.mapv_inplace(|v| v / F::from_usize(self.trees.len()).unwrap());
         Ok(proba)
     }
 

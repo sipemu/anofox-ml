@@ -353,15 +353,15 @@ impl<F: Float> FittedRandomForestClassifier<F> {
         let classes = self.classes();
         let n_samples = x.nrows();
         let n_classes = classes.len();
-        let w = F::one() / F::from_usize(self.trees.len()).unwrap();
-
         // Per-tree probabilities in parallel, reduced in tree order so the
-        // floating-point sum is deterministic.
+        // floating-point sum is deterministic. Sum first, divide once (as
+        // sklearn): scaling each tree by 1/n can push a unanimous vote to
+        // 1 + 1 ulp.
         let per_tree: Result<Vec<Array2<F>>> = (0..self.trees.len())
             .into_par_iter()
             .map(|t| {
                 let mut acc = Array2::<F>::zeros((n_samples, n_classes));
-                self.accumulate_tree_proba(t, x, &classes, w, &mut acc)?;
+                self.accumulate_tree_proba(t, x, &classes, F::one(), &mut acc)?;
                 Ok(acc)
             })
             .collect();
@@ -369,6 +369,7 @@ impl<F: Float> FittedRandomForestClassifier<F> {
         for p in per_tree? {
             avg_proba += &p;
         }
+        avg_proba.mapv_inplace(|v| v / F::from_usize(self.trees.len()).unwrap());
 
         Ok(avg_proba)
     }
@@ -1068,5 +1069,32 @@ mod regression_tests {
         let (x, y) = data(20, 4, 1);
         let rf = RandomForestClassifier::new(2).with_max_features(Some(MaxFeatures::Fraction(1.5)));
         assert!(Fit::<f64>::fit(&rf, &x, &y).is_err());
+    }
+}
+
+#[cfg(test)]
+mod proba_range_tests {
+    use crate::{ExtraTreesClassifier, RandomForestClassifier};
+    use anofox_ml_core::Fit;
+    use ndarray::{Array1, Array2};
+
+    /// A unanimous vote of 20 trees is exactly 1, not 1 + 1 ulp (summing
+    /// 20 × 1/20 gives 1.0000000000000002).
+    #[test]
+    fn unanimous_votes_are_exactly_one() {
+        let x = Array2::from_shape_fn((120, 2), |(i, j)| ((i * (3 + j * 4)) % 17) as f64);
+        let y = Array1::from_shape_fn(120, |i| {
+            if x[[i, 0]] + 0.5 * x[[i, 1]] > 10.0 {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        let rf = RandomForestClassifier::new(20).fit(&x, &y).unwrap();
+        let et = ExtraTreesClassifier::new(20).fit(&x, &y).unwrap();
+        for p in [rf.predict_proba(&x).unwrap(), et.predict_proba(&x).unwrap()] {
+            assert!(p.iter().all(|&v| (0.0..=1.0).contains(&v)), "{p:?}");
+            assert!(p.iter().any(|&v| v == 1.0));
+        }
     }
 }
