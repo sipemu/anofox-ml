@@ -58,6 +58,10 @@ zstd = "0.13"
 # (trees, folds, classes, branches) with rayon, where it pays off; faer's own
 # threads on small matrices cost far more than they save.
 faer = { version = "0.23", default-features = false, features = ["std", "linalg"] }
+# PerpetualBooster (optional `perpetual` feature). Pinned exactly: 3.0 is
+# a release candidate, and the 2.x releases need nightly Rust. Its deps
+# need Rust 1.88, above the workspace MSRV, so the feature is off by default.
+perpetual = "=3.0.0-rc.2"
 
 # Internal workspace crates. Each carries both `path` (for local builds)
 # and `version` (for crates.io); without `version` cargo refuses to

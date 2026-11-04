@@ -35,6 +35,10 @@ anofox-ml-conformal = { workspace = true }
 ndarray = { workspace = true }
 num-traits = { workspace = true }
 
+[features]
+# PerpetualRegressor / PerpetualClassifier in `ensemble` (needs Rust 1.88).
+perpetual = ["anofox-ml-ensemble/perpetual"]
+
 [dev-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

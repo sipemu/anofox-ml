@@ -173,6 +173,9 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// }
 /// ```
 ///
+/// An entry may carry attributes such as `#[cfg(feature = "...")]`; they
+/// apply to everything generated for it.
+///
 /// `fit` receives the config `c`, `x`, `y: Option<&Array1>` and
 /// `w: Option<&Array1>` and returns the fitted model; inside it `K` is the
 /// estimator's kind. Prediction methods receive the fitted model `m` and
@@ -180,6 +183,7 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// receive only `m`.
 macro_rules! registry {
     ($(
+        $(#[$meta:meta])*
         $kind:ident {
             config: $cfg:ty = $default:expr,
             fitted: $fitted:ty,
@@ -188,9 +192,11 @@ macro_rules! registry {
         }
     )*) => {
         $(
+            $(#[$meta])*
             #[allow(non_camel_case_types)]
             struct $kind($crate::model::Est<$cfg, $fitted>);
 
+            $(#[$meta])*
             impl $crate::model::DynModel for $kind {
                 fn kind(&self) -> &'static str {
                     stringify!($kind)
@@ -242,6 +248,7 @@ macro_rules! registry {
         ) -> anofox_ml_core::Result<Box<dyn $crate::model::DynModel>> {
             match kind {
                 $(
+                    $(#[$meta])*
                     stringify!($kind) => {
                         let default: $cfg = $default;
                         let config = $crate::model::config_from_params(kind, default, params)?;
@@ -261,6 +268,7 @@ macro_rules! registry {
         ) -> anofox_ml_core::Result<Box<dyn $crate::model::DynModel>> {
             match kind {
                 $(
+                    $(#[$meta])*
                     stringify!($kind) => Ok(Box::new($kind(
                         $crate::model::Est::<$cfg, $fitted>::from_bytes(bytes)?,
                     ))),
@@ -275,6 +283,7 @@ macro_rules! registry {
         pub fn default_params(kind: &str) -> anofox_ml_core::Result<serde_json::Value> {
             match kind {
                 $(
+                    $(#[$meta])*
                     stringify!($kind) => {
                         let default: $cfg = $default;
                         serde_json::to_value(&default).map_err(|e| {
@@ -290,7 +299,12 @@ macro_rules! registry {
 
         /// All registered kinds.
         pub fn kinds() -> Vec<&'static str> {
-            vec![$(stringify!($kind)),*]
+            let mut kinds = Vec::new();
+            $(
+                $(#[$meta])*
+                kinds.push(stringify!($kind));
+            )*
+            kinds
         }
     };
 

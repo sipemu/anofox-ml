@@ -72,3 +72,36 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "perpetual"))]
+mod perpetual_tests {
+    #[test]
+    fn perpetual_kinds_fit_predict_and_round_trip() {
+        let x = ndarray::Array2::from_shape_fn((120, 2), |(i, j)| ((i * (j + 2)) % 23) as f64);
+        let y_reg = x.column(0).mapv(|v| 0.5 * v) - &x.column(1);
+        let y_clf = x.column(0).mapv(|v| if v > 11.0 { 1.0 } else { 0.0 });
+        for (kind, y) in [
+            ("PerpetualRegressor", &y_reg),
+            ("PerpetualClassifier", &y_clf),
+        ] {
+            assert!(super::kinds().contains(&kind));
+            let params = serde_json::json!({ "budget": 1.0, "num_threads": 1 });
+            let mut model = super::make(kind, &params).unwrap();
+            model.fit(x.view(), Some(y.view()), None).unwrap();
+            let loaded = super::load(kind, &model.to_bytes().unwrap()).unwrap();
+            assert_eq!(loaded.params().unwrap()["budget"], 1.0);
+            match (
+                model.predict(x.view()).unwrap(),
+                loaded.predict(x.view()).unwrap(),
+            ) {
+                (super::Out::A1(a), super::Out::A1(b)) => assert_eq!(a, b),
+                _ => panic!("expected 1-D predictions"),
+            }
+        }
+        assert!(super::make(
+            "PerpetualRegressor",
+            &serde_json::json!({ "learning_rate": 0.1 })
+        )
+        .is_err());
+    }
+}

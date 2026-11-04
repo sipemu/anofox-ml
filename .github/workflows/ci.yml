@@ -35,6 +35,10 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude anofox-ml-python
+      # The optional PerpetualBooster wrapper needs Rust 1.88, so it is
+      # tested on stable only.
+      - if: matrix.rust == 'stable'
+        run: cargo test -p anofox-ml-ensemble -p anofox-ml-registry -p anofox-ml --features perpetual --lib
 
   clippy:
     name: Clippy
@@ -52,7 +56,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo clippy --workspace --exclude anofox-ml-python --all-targets -- \
+          cargo clippy --workspace --exclude anofox-ml-python --all-targets --features anofox-ml/perpetual,anofox-ml-registry/perpetual -- \
             -A clippy::all \
             -W clippy::correctness \
             -W clippy::suspicious \
