@@ -6,6 +6,10 @@ Numbers may differ by floating-point noise between machines (BLAS / CPU
 paths), so they are compared with a tolerance; any structural change (keys,
 lengths, strings, booleans) or a number beyond the tolerance is drift.
 
+Fields listed in drift_ignore.txt ("file:key", any depth) are skipped:
+they are known to differ between machines (e.g. sklearn's unstable tie
+breaking).
+
 Usage: check_fixture_drift.py [--rtol 1e-9] [--atol 1e-12] DIR...
 Exit status 1 if any fixture drifted.
 """
@@ -23,7 +27,22 @@ def committed(path):
     return json.loads(out.stdout) if out.returncode == 0 else None
 
 
-def compare(a, b, path, rtol, atol, issues, noise):
+IGNORE_FILE = Path(__file__).with_name("drift_ignore.txt")
+
+
+def load_ignored():
+    """{file name: {keys}} from drift_ignore.txt."""
+    ignored = {}
+    if IGNORE_FILE.exists():
+        for line in IGNORE_FILE.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                name, key = line.split(":", 1)
+                ignored.setdefault(name.strip(), set()).add(key.strip())
+    return ignored
+
+
+def compare(a, b, path, rtol, atol, issues, noise, skip=frozenset()):
     if isinstance(a, bool) or isinstance(b, bool) or not (
         isinstance(a, (int, float)) and isinstance(b, (int, float))
     ):
@@ -31,16 +50,18 @@ def compare(a, b, path, rtol, atol, issues, noise):
             issues.append(f"{path}: type {type(a).__name__} -> {type(b).__name__}")
         elif isinstance(a, dict):
             for k in sorted(a.keys() | b.keys()):
+                if k in skip:
+                    continue
                 if k not in a or k not in b:
                     issues.append(f"{path}/{k}: {'added' if k not in a else 'removed'}")
                 else:
-                    compare(a[k], b[k], f"{path}/{k}", rtol, atol, issues, noise)
+                    compare(a[k], b[k], f"{path}/{k}", rtol, atol, issues, noise, skip)
         elif isinstance(a, list):
             if len(a) != len(b):
                 issues.append(f"{path}: length {len(a)} -> {len(b)}")
             else:
                 for i, (x, y) in enumerate(zip(a, b)):
-                    compare(x, y, f"{path}[{i}]", rtol, atol, issues, noise)
+                    compare(x, y, f"{path}[{i}]", rtol, atol, issues, noise, skip)
         elif a != b:
             issues.append(f"{path}: {a!r} -> {b!r}")
         return
@@ -58,6 +79,7 @@ def main():
     ap.add_argument("--atol", type=float, default=1e-12)
     ap.add_argument("dirs", nargs="+")
     args = ap.parse_args()
+    ignored = load_ignored()
     drifted = 0
     for d in args.dirs:
         for f in sorted(Path(d).glob("*.json")):
@@ -67,7 +89,8 @@ def main():
                 drifted += 1
                 continue
             issues, noise = [], []
-            compare(old, json.loads(f.read_text()), "", args.rtol, args.atol, issues, noise)
+            skip = frozenset(ignored.get(f.name, ()))
+            compare(old, json.loads(f.read_text()), "", args.rtol, args.atol, issues, noise, skip)
             if issues:
                 drifted += 1
                 print(f"DRIFT    {f}: {len(issues)} difference(s)")

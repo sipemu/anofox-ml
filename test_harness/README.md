@@ -25,6 +25,10 @@ machines change the last bits; anything beyond that, and any structural
 change, is reported as drift (exit status 1). Revert noise-only changes
 (`git checkout -- crates/*/tests/golden_data`) instead of committing them.
 
+Fields that legitimately differ between machines are listed in
+`drift_ignore.txt` (`file:key`, with the reason), e.g. sklearn HDBSCAN's
+`labels_public`, whose tie breaking depends on the CPU.
+
 CI (*Golden Data Sync*) runs the same regeneration and check on every PR
 (advisory for now).
 
