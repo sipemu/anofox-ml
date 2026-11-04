@@ -1,5 +1,6 @@
 //! Mondrian (group-conditional) split conformal regression.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
@@ -17,7 +18,7 @@ use crate::split::{check_xy, split_indices, too_few};
 /// The [`Fit`] trait has no place for groups, so fit with
 /// [`fit_with_groups`](Self::fit_with_groups), or calibrate a fitted model
 /// with [`conformalize_mondrian`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MondrianConformalRegressor<E> {
     pub estimator: E,
     /// Fraction of the rows held out for calibration, in (0, 1).
@@ -122,7 +123,7 @@ pub fn conformalize_mondrian<F: Float, M: Predict<F>>(
 }
 
 /// A model plus calibration scores per group.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedMondrianRegressor<M, F> {
     model: M,
     scores: BTreeMap<usize, Vec<F>>,

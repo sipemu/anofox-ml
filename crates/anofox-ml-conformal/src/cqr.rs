@@ -1,5 +1,6 @@
 //! Conformalized quantile regression (CQR).
 
+use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
@@ -131,7 +132,7 @@ pub fn conformalize_quantiles<F: Float, M: Predict<F>>(
 }
 
 /// Quantile models plus their calibration errors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedConformalizedQuantileRegressor<M, F> {
     lower: M,
     upper: M,

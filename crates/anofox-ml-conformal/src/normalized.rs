@@ -2,6 +2,7 @@
 
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, ArrayView1, ArrayView2, Axis};
+use serde::{Deserialize, Serialize};
 
 use crate::quantile::{check_alpha, lower_quantile};
 use crate::split::{check_xy, split_indices, too_few};
@@ -16,7 +17,7 @@ const EPS: f64 = 1e-8;
 /// where the model is unsure, narrow where it is accurate, with the same
 /// marginal coverage `≥ 1 − α`. Equivalent to MAPIE's
 /// `SplitConformalRegressor` with `ResidualNormalisedScore`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedConformalRegressor<E, R> {
     pub estimator: E,
     pub residual_estimator: R,
@@ -150,7 +151,7 @@ fn scale<F: Float, RM: Predict<F>>(residual_model: &RM, x: ArrayView2<F>) -> Res
 }
 
 /// A model, its residual-scale model and the normalised calibration scores.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedNormalizedConformalRegressor<M, RM, F> {
     model: M,
     residual_model: RM,

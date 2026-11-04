@@ -4,6 +4,7 @@ use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, ArrayView1, ArrayView2, Axis};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 
 use crate::quantile::{check_alpha, lower_quantile, needed};
 
@@ -15,7 +16,7 @@ use crate::quantile::{check_alpha, lower_quantile, needed};
 ///
 /// To calibrate an already fitted model on your own calibration data, use
 /// [`conformalize`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitConformalRegressor<E> {
     pub estimator: E,
     /// Fraction of the rows held out for calibration, in (0, 1).
@@ -105,7 +106,7 @@ pub fn conformalize<F: Float, M: Predict<F>>(
 }
 
 /// A model plus its calibration scores.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedSplitConformalRegressor<M, F> {
     model: M,
     scores: Vec<F>,
