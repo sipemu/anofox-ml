@@ -13,12 +13,13 @@ use anofox_ml_core::{Fit, FitWeighted, Predict, Result};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
 
 use crate::lgbm::{
-    BinningMethod, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassifier, LgbmRegressor,
+    BinningMethod, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassifier, LgbmObjective,
+    LgbmRegressor,
 };
 
 /// Shared hyperparameters and builder methods of the two facades.
 macro_rules! hist_gb_config {
-    ($name:ident) => {
+    ($name:ident $(, $field:ident: $value:expr)*) => {
         impl $name {
             pub fn new() -> Self {
                 Self {
@@ -29,6 +30,7 @@ macro_rules! hist_gb_config {
                     min_samples_leaf: 20,
                     l2_regularization: 0.0,
                     max_bins: 255,
+                    $($field: $value,)*
                 }
             }
 
@@ -94,7 +96,20 @@ macro_rules! hist_gb_config {
     };
 }
 
-/// Histogram-based gradient boosting regressor (squared error).
+/// Loss of a [`HistGradientBoostingRegressor`] (sklearn's `loss`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum HistGradientBoostingLoss {
+    #[default]
+    SquaredError,
+    /// Leaves are refit to residual medians.
+    AbsoluteError,
+    /// Pinball loss at level `quantile`; leaves are refit to residual
+    /// quantiles.
+    Quantile,
+}
+
+/// Histogram-based gradient boosting regressor (squared error, absolute
+/// error or quantile loss).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HistGradientBoostingRegressor {
     pub n_estimators: usize,
@@ -107,6 +122,11 @@ pub struct HistGradientBoostingRegressor {
     pub min_samples_leaf: usize,
     pub l2_regularization: f64,
     pub max_bins: usize,
+    #[serde(default)]
+    pub loss: HistGradientBoostingLoss,
+    /// Quantile level in (0, 1) for `loss = Quantile`.
+    #[serde(default)]
+    pub quantile: Option<f64>,
 }
 
 /// Histogram-based gradient boosting classifier (binary log-loss or
@@ -129,13 +149,45 @@ fn default_leaves() -> Option<usize> {
     Some(31)
 }
 
-hist_gb_config!(HistGradientBoostingRegressor);
+hist_gb_config!(
+    HistGradientBoostingRegressor,
+    loss: HistGradientBoostingLoss::SquaredError,
+    quantile: None
+);
 hist_gb_config!(HistGradientBoostingClassifier);
 
 impl HistGradientBoostingRegressor {
+    pub fn with_loss(mut self, loss: HistGradientBoostingLoss) -> Self {
+        self.loss = loss;
+        self
+    }
+
+    /// Quantile loss at level `q` (sklearn's `loss="quantile", quantile=q`).
+    pub fn with_quantile(mut self, q: f64) -> Self {
+        self.loss = HistGradientBoostingLoss::Quantile;
+        self.quantile = Some(q);
+        self
+    }
+
+    fn objective(&self) -> Result<LgbmObjective> {
+        Ok(match self.loss {
+            HistGradientBoostingLoss::SquaredError => LgbmObjective::Regression,
+            HistGradientBoostingLoss::AbsoluteError => LgbmObjective::RegressionL1,
+            HistGradientBoostingLoss::Quantile => match self.quantile {
+                Some(alpha) if alpha > 0.0 && alpha < 1.0 => LgbmObjective::Quantile { alpha },
+                other => {
+                    return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                        "loss = Quantile needs quantile in (0, 1), got {other:?}"
+                    )))
+                }
+            },
+        })
+    }
+
     fn engine(&self) -> Result<LgbmRegressor> {
         self.validate()?;
         Ok(LgbmRegressor::new()
+            .with_objective(self.objective()?)
             .with_n_estimators(self.n_estimators)
             .with_learning_rate(self.learning_rate)
             .with_num_leaves(self.num_leaves())
@@ -287,6 +339,48 @@ mod tests {
         let x = Array2::from_shape_fn((n, 3), |(i, j)| ((i * (j + 2) * 37) % 101) as f64 / 10.0);
         let y = x.column(0).mapv(|v| v * 2.0) - x.column(1);
         (x, y)
+    }
+
+    #[test]
+    fn quantile_loss_brackets_the_data() {
+        let n = 400;
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| ((i * (j + 3)) % 41) as f64 / 41.0);
+        // y = x0 + noise uniform on [-1, 1).
+        let y: Array1<f64> = (0..n)
+            .map(|i| x[[i, 0]] + ((i * 7919) % 200) as f64 / 100.0 - 1.0)
+            .collect();
+        let frac_below = |q: f64| {
+            let f = HistGradientBoostingRegressor::new()
+                .with_n_estimators(50)
+                .with_quantile(q)
+                .fit(&x, &y)
+                .unwrap();
+            let p = f.predict(&x).unwrap();
+            y.iter().zip(&p).filter(|(y, p)| y <= p).count() as f64 / n as f64
+        };
+        for q in [0.1, 0.5, 0.9] {
+            let below = frac_below(q);
+            assert!((below - q).abs() < 0.08, "q = {q}: {below}");
+        }
+        let l1 = HistGradientBoostingRegressor::new()
+            .with_loss(HistGradientBoostingLoss::AbsoluteError)
+            .with_n_estimators(50)
+            .fit(&x, &y)
+            .unwrap();
+        let median = HistGradientBoostingRegressor::new()
+            .with_quantile(0.5)
+            .with_n_estimators(50)
+            .fit(&x, &y)
+            .unwrap();
+        assert_eq!(l1.predict(&x).unwrap(), median.predict(&x).unwrap());
+        assert!(HistGradientBoostingRegressor::new()
+            .with_loss(HistGradientBoostingLoss::Quantile)
+            .fit(&x, &y)
+            .is_err());
+        assert!(HistGradientBoostingRegressor::new()
+            .with_quantile(1.0)
+            .fit(&x, &y)
+            .is_err());
     }
 
     #[test]
