@@ -99,10 +99,9 @@ invalid splits and parameters.
 ## To re-run or refine later
 
 - **When MAPIE or sklearn is bumped**: regenerate (command above) and
-  re-run; update this file's versions. The *Golden Data Sync* CI job only
-  regenerates `crates/anofox-ml/tests/golden_data` via
-  `generate_golden_data.py`, so the conformal fixture is not drift-checked
-  in CI — add `gen_conformal.py` there (or run `regenerate_all.sh`).
+  re-run; update this file's versions. The *Golden Data Sync* CI job
+  regenerates this fixture with the pinned versions and diffs it
+  (advisory: it reports drift without failing the workflow).
 - **Coverage thresholds**: replace the empirical bands with binomial /
   Clopper–Pearson bounds derived from reps × test rows, and add α = 0.05.
 - **Real learners in the golden data**: compare CQR with an actual quantile
