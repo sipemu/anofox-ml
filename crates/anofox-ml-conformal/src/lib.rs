@@ -17,6 +17,10 @@
 //!   error scale).
 //! - [`SplitConformalClassifier`] / [`conformalize_classifier`]: prediction
 //!   sets for classifiers with the LAC, APS or RAPS score.
+//! - Mondrian (group-conditional) calibration: [`MondrianConformalRegressor`]
+//!   / [`conformalize_mondrian`] and [`conformalize_classifier_mondrian`]
+//!   give coverage within every group (store, segment), not only on
+//!   average.
 //!
 //! The miscoverage `alpha` is chosen at prediction time (CQR: at fit time,
 //! since the quantile models are trained for it). Results match MAPIE
@@ -43,13 +47,14 @@
 mod classification;
 mod cqr;
 mod cross;
+mod mondrian;
 mod normalized;
 mod quantile;
 mod split;
 
 pub use classification::{
-    conformalize_classifier, conformalize_raps, ApsMode, ClassificationScore,
-    FittedSplitConformalClassifier, RapsParams, SplitConformalClassifier,
+    conformalize_classifier, conformalize_classifier_mondrian, conformalize_raps, ApsMode,
+    ClassificationScore, FittedSplitConformalClassifier, RapsParams, SplitConformalClassifier,
 };
 pub use cqr::{
     conformalize_quantiles, ConformalizedQuantileRegressor, FittedConformalizedQuantileRegressor,
@@ -57,6 +62,7 @@ pub use cqr::{
 pub use cross::{
     CrossConformalRegressor, CrossMethod, FittedCrossConformalRegressor, PointPrediction,
 };
+pub use mondrian::{conformalize_mondrian, FittedMondrianRegressor, MondrianConformalRegressor};
 pub use normalized::{
     conformalize_normalized, fit_residual_model, FittedNormalizedConformalRegressor,
     NormalizedConformalRegressor,

@@ -4,6 +4,7 @@ use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rand::{Rng, SeedableRng};
 
+use crate::mondrian::check_groups;
 use crate::quantile::{check_alpha, lower_quantile};
 use crate::split::{check_xy, split_indices, too_few};
 
@@ -233,6 +234,46 @@ pub fn conformalize_raps<F: Float, M: Predict<F> + PredictProba<F>>(
     )
 }
 
+/// Mondrian (group-conditional) [`conformalize_classifier`]: the threshold
+/// is calibrated within each group, so sets cover `≥ 1 − α` within every
+/// group. `groups` holds the group id of every calibration row; predict
+/// with [`FittedSplitConformalClassifier::predict_set_mondrian`]. For RAPS,
+/// `k_reg` / `lambda` are tuned on all groups together.
+pub fn conformalize_classifier_mondrian<F: Float, M: Predict<F> + PredictProba<F>>(
+    model: M,
+    classes: Vec<F>,
+    x_cal: ArrayView2<F>,
+    y_cal: ArrayView1<F>,
+    groups: &[usize],
+    score: ClassificationScore,
+    seed: u64,
+) -> Result<FittedSplitConformalClassifier<M, F>> {
+    check_xy(x_cal, y_cal)?;
+    check_groups(groups, x_cal.nrows())?;
+    let (cal, mut fitted) = match score {
+        ClassificationScore::Raps(params) if params.needs_tuning() => {
+            let (cal, tune) = split_indices(x_cal.nrows(), params.tuning_size, seed ^ 0x5EED)?;
+            let fitted = conformalize_raps(
+                model,
+                classes,
+                x_cal.select(Axis(0), &cal).view(),
+                y_cal.select(Axis(0), &cal).view(),
+                x_cal.select(Axis(0), &tune).view(),
+                y_cal.select(Axis(0), &tune).view(),
+                params,
+                seed,
+            )?;
+            (cal, fitted)
+        }
+        _ => {
+            let fitted = calibrate(model, classes, x_cal, y_cal, score, seed, None)?;
+            ((0..x_cal.nrows()).collect(), fitted)
+        }
+    };
+    fitted.groups = Some(cal.iter().map(|&i| groups[i]).collect());
+    Ok(fitted)
+}
+
 /// Column index of every label in `classes`.
 fn encode<F: Float>(classes: &[F], y: ArrayView1<F>) -> Result<Vec<usize>> {
     y.iter()
@@ -297,6 +338,7 @@ fn calibrate<F: Float, M: Predict<F> + PredictProba<F>>(
         classes,
         scores,
         ranks,
+        groups: None,
         tuning,
         score,
         seed,
@@ -343,6 +385,8 @@ pub struct FittedSplitConformalClassifier<M, F> {
     scores: Vec<F>,
     /// 1-based rank of the true class of every calibration row (RAPS).
     ranks: Vec<usize>,
+    /// Group of every calibration row (Mondrian).
+    groups: Option<Vec<usize>>,
     /// RAPS tuning rows: probabilities and true columns.
     tuning: Option<(Array2<F>, Vec<usize>)>,
     score: ClassificationScore,
@@ -466,26 +510,91 @@ impl<M: Predict<F> + PredictProba<F>, F: Float> FittedSplitConformalClassifier<M
     pub fn threshold(&self, alpha: f64) -> Result<Option<F>> {
         check_alpha(alpha)?;
         let reg = self.regularization(alpha)?;
-        let mut s: Vec<F> = match reg {
-            None => self.scores.clone(),
-            Some(reg) => self
-                .scores
-                .iter()
-                .zip(&self.ranks)
-                .map(|(&s, &rank)| s + penalty(rank, reg))
-                .collect(),
-        };
+        self.threshold_over(alpha, reg, |_| true)
+    }
+
+    /// Mondrian: the threshold of group `group` (`None`: full sets allowed
+    /// and too few rows in the group).
+    pub fn group_threshold(&self, group: usize, alpha: f64) -> Result<Option<F>> {
+        check_alpha(alpha)?;
+        let reg = self.regularization(alpha)?;
+        self.group_threshold_with(group, alpha, reg)
+    }
+
+    fn group_threshold_with(
+        &self,
+        group: usize,
+        alpha: f64,
+        reg: Option<Reg<F>>,
+    ) -> Result<Option<F>> {
+        let groups = self.groups.as_ref().ok_or_else(|| {
+            RustMlError::InvalidParameter(
+                "calibrated without groups; use conformalize_classifier_mondrian".into(),
+            )
+        })?;
+        if !groups.contains(&group) {
+            return Err(RustMlError::InvalidParameter(format!(
+                "group {group} has no calibration rows"
+            )));
+        }
+        self.threshold_over(alpha, reg, |i| groups[i] == group)
+            .map_err(|e| RustMlError::InvalidParameter(format!("group {group}: {e}")))
+    }
+
+    /// Conformal threshold over the calibration rows selected by `keep`.
+    fn threshold_over(
+        &self,
+        alpha: f64,
+        reg: Option<Reg<F>>,
+        keep: impl Fn(usize) -> bool,
+    ) -> Result<Option<F>> {
+        let mut s: Vec<F> = (0..self.scores.len())
+            .filter(|&i| keep(i))
+            .map(|i| self.scores[i] + reg.map_or(F::zero(), |r| penalty(self.ranks[i], r)))
+            .collect();
+        let n = s.len();
         match lower_quantile(&mut s, 1.0 - alpha) {
             Some(q) => Ok(Some(q)),
             None if self.allow_full_sets => Ok(None),
-            None => Err(too_few(self.scores.len(), alpha)),
+            None => Err(too_few(n, alpha)),
         }
     }
 
     /// Prediction sets at miscoverage `alpha`: `sets[[i, k]]` is true when
     /// class `classes()[k]` is in the set of row `i`.
     pub fn predict_set(&self, x: ArrayView2<F>, alpha: f64) -> Result<Array2<bool>> {
-        let threshold = self.threshold(alpha)?;
+        let q = self.threshold(alpha)?;
+        let reg = self.regularization(alpha)?;
+        self.sets(x, |_| q, reg)
+    }
+
+    /// Mondrian prediction sets: row `i` uses the threshold of `groups[i]`,
+    /// so coverage holds within each group.
+    pub fn predict_set_mondrian(
+        &self,
+        x: ArrayView2<F>,
+        groups: &[usize],
+        alpha: f64,
+    ) -> Result<Array2<bool>> {
+        check_alpha(alpha)?;
+        check_groups(groups, x.nrows())?;
+        let reg = self.regularization(alpha)?;
+        let mut q = std::collections::BTreeMap::new();
+        for &g in groups {
+            if let std::collections::btree_map::Entry::Vacant(e) = q.entry(g) {
+                e.insert(self.group_threshold_with(g, alpha, reg)?);
+            }
+        }
+        self.sets(x, |i| q[&groups[i]], reg)
+    }
+
+    /// Sets with threshold `q(i)` for row `i` (`None`: all classes).
+    fn sets(
+        &self,
+        x: ArrayView2<F>,
+        q: impl Fn(usize) -> Option<F>,
+        reg: Option<Reg<F>>,
+    ) -> Result<Array2<bool>> {
         let proba = self.model.predict_proba_view(x)?;
         let (n, k) = proba.dim();
         if k != self.classes.len() {
@@ -494,26 +603,24 @@ impl<M: Predict<F> + PredictProba<F>, F: Float> FittedSplitConformalClassifier<M
                 self.classes.len()
             )));
         }
-        let Some(q) = threshold else {
-            return Ok(Array2::from_elem((n, k), true));
-        };
         let eps = F::from_f64(EPS).expect("fits");
         let mut sets = Array2::from_elem((n, k), false);
         // A separate stream from the calibration draws, the same on every call.
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed ^ 0x9E37_79B9_7F4A_7C15);
-        match self.score {
-            ClassificationScore::Lac => {
-                sets.zip_mut_with(&proba, |s, &p| *s = (F::one() - p) - q <= eps);
-            }
-            ClassificationScore::Aps(mode) => {
-                for (set, p) in sets.rows_mut().into_iter().zip(proba.rows()) {
-                    aps_row(p, q, mode, eps, &mut rng, set, None);
+        for (i, (mut set, p)) in sets.rows_mut().into_iter().zip(proba.rows()).enumerate() {
+            let Some(qi) = q(i) else {
+                set.fill(true);
+                continue;
+            };
+            match self.score {
+                ClassificationScore::Lac => {
+                    for (s, &v) in set.iter_mut().zip(p) {
+                        *s = (F::one() - v) - qi <= eps;
+                    }
                 }
-            }
-            ClassificationScore::Raps(params) => {
-                let reg = self.regularization(alpha)?;
-                for (set, p) in sets.rows_mut().into_iter().zip(proba.rows()) {
-                    aps_row(p, q, params.mode, eps, &mut rng, set, reg);
+                ClassificationScore::Aps(mode) => aps_row(p, qi, mode, eps, &mut rng, set, None),
+                ClassificationScore::Raps(params) => {
+                    aps_row(p, qi, params.mode, eps, &mut rng, set, reg)
                 }
             }
         }

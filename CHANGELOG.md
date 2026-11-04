@@ -26,6 +26,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   (`tuning_size`, or `conformalize_raps` with your own split). Matches
   MAPIE 1.6.0 exactly with λ pinned; MAPIE's own λ search has a bug (it
   uses λ in place of k*), which we do not reproduce.
+- Mondrian (group-conditional) conformal: `MondrianConformalRegressor`
+  (`fit_with_groups`) / `conformalize_mondrian` for split regression, and
+  `conformalize_classifier_mondrian` + `predict_set_mondrian` for LAC /
+  APS / RAPS sets. The threshold is calibrated within each group (store,
+  segment, sensor), so coverage holds per group, not only on average.
 
 ### Conformal prediction: CQR and normalised scores (#93)
 
