@@ -31,6 +31,7 @@ pub mod classification_extra;
 pub mod clustering;
 pub mod clustering_extra;
 pub mod curves;
+pub mod intervals;
 mod labels;
 pub mod regression;
 pub mod regression_extended;
@@ -52,6 +53,7 @@ pub use classification_extra::{
 };
 pub use clustering::silhouette_score;
 pub use clustering_extra::{adjusted_rand_score, normalized_mutual_info_score};
+pub use intervals::{coverage_score, interval_score, mean_interval_width};
 pub use curves::{brier_score_loss, brier_score_loss_with, precision_recall_curve, roc_curve};
 pub use regression::{mae, mse, r2_score};
 pub use regression_extended::{
