@@ -57,8 +57,8 @@ CRATES=(
     anofox-ml-regression
     anofox-ml-ensemble
     anofox-ml-preprocessing
-    anofox-ml-registry
     anofox-ml-conformal
+    anofox-ml-registry
     anofox-ml
 )
 

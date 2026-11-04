@@ -275,6 +275,7 @@ name = "anofox-ml-registry"
 version = "0.2.0"
 dependencies = [
  "anofox-ml-cluster",
+ "anofox-ml-conformal",
  "anofox-ml-core",
  "anofox-ml-discriminant",
  "anofox-ml-ensemble",

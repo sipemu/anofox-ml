@@ -23,6 +23,9 @@ use anofox_ml_regression as reg;
 use anofox_ml_svm as svm;
 use anofox_ml_trees as trees;
 
+use anofox_ml_conformal as conformal;
+
+use crate::estimator::{RegistryEstimator, RegistryFitted};
 use crate::model::{need_y, no_weight, registry};
 
 /// Compact fitted form of a linear model whose full fitted type holds
@@ -95,6 +98,198 @@ fn unsup<C: FitUnsupervised<f64>>(
 ) -> Result<C::Fitted> {
     no_weight(k, w)?;
     FitUnsupervised::fit(c, x)
+}
+
+// ------------------------------------------------- conformal configs
+//
+// The conformal predictors wrap any registered estimator, given by its kind
+// (`estimator`) and JSON parameters (`estimator_params`). The defaults are
+// MAPIE's: a linear regression or a logistic regression.
+
+fn default_regressor() -> String {
+    "OlsRegressor".into()
+}
+
+fn empty_params() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// `SplitConformalRegressor` over a registered estimator.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct SplitConformalRegressorConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    calibration_size: f64,
+    seed: u64,
+    allow_infinite_bounds: bool,
+}
+
+impl Default for SplitConformalRegressorConfig {
+    fn default() -> Self {
+        let d = conformal::SplitConformalRegressor::new(());
+        Self {
+            estimator: default_regressor(),
+            estimator_params: empty_params(),
+            calibration_size: d.calibration_size,
+            seed: d.seed,
+            allow_infinite_bounds: d.allow_infinite_bounds,
+        }
+    }
+}
+
+impl SplitConformalRegressorConfig {
+    fn build(&self) -> conformal::SplitConformalRegressor<RegistryEstimator> {
+        conformal::SplitConformalRegressor::new(RegistryEstimator::new(
+            &self.estimator,
+            self.estimator_params.clone(),
+        ))
+        .with_calibration_size(self.calibration_size)
+        .with_seed(self.seed)
+        .with_allow_infinite_bounds(self.allow_infinite_bounds)
+    }
+}
+
+/// `CrossConformalRegressor` (CV+, jackknife+ with `cv` = n, minmax, base)
+/// over a registered estimator.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct CrossConformalRegressorConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    cv: usize,
+    method: conformal::CrossMethod,
+    point_prediction: conformal::PointPrediction,
+    seed: u64,
+    allow_infinite_bounds: bool,
+}
+
+impl Default for CrossConformalRegressorConfig {
+    fn default() -> Self {
+        let d = conformal::CrossConformalRegressor::new(());
+        Self {
+            estimator: default_regressor(),
+            estimator_params: empty_params(),
+            cv: d.cv,
+            method: d.method,
+            point_prediction: d.point_prediction,
+            seed: d.seed,
+            allow_infinite_bounds: d.allow_infinite_bounds,
+        }
+    }
+}
+
+impl CrossConformalRegressorConfig {
+    fn build(&self) -> conformal::CrossConformalRegressor<RegistryEstimator> {
+        conformal::CrossConformalRegressor::new(RegistryEstimator::new(
+            &self.estimator,
+            self.estimator_params.clone(),
+        ))
+        .with_cv(self.cv)
+        .with_method(self.method)
+        .with_point_prediction(self.point_prediction)
+        .with_seed(self.seed)
+        .with_allow_infinite_bounds(self.allow_infinite_bounds)
+    }
+}
+
+/// `NormalizedConformalRegressor` (residual-normalised scores) over two
+/// registered estimators: the point model and the model of `|residual|`.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct NormalizedConformalRegressorConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    residual_estimator: String,
+    residual_estimator_params: serde_json::Value,
+    calibration_size: f64,
+    residual_size: f64,
+    seed: u64,
+    allow_infinite_bounds: bool,
+}
+
+impl Default for NormalizedConformalRegressorConfig {
+    fn default() -> Self {
+        let d = conformal::NormalizedConformalRegressor::new((), ());
+        Self {
+            estimator: default_regressor(),
+            estimator_params: empty_params(),
+            residual_estimator: default_regressor(),
+            residual_estimator_params: empty_params(),
+            calibration_size: d.calibration_size,
+            residual_size: d.residual_size,
+            seed: d.seed,
+            allow_infinite_bounds: d.allow_infinite_bounds,
+        }
+    }
+}
+
+impl NormalizedConformalRegressorConfig {
+    fn build(
+        &self,
+    ) -> conformal::NormalizedConformalRegressor<RegistryEstimator, RegistryEstimator> {
+        conformal::NormalizedConformalRegressor::new(
+            RegistryEstimator::new(&self.estimator, self.estimator_params.clone()),
+            RegistryEstimator::new(
+                &self.residual_estimator,
+                self.residual_estimator_params.clone(),
+            ),
+        )
+        .with_calibration_size(self.calibration_size)
+        .with_residual_size(self.residual_size)
+        .with_seed(self.seed)
+        .with_allow_infinite_bounds(self.allow_infinite_bounds)
+    }
+}
+
+/// `SplitConformalClassifier` (LAC, APS, RAPS) over a registered
+/// classifier with `predict_proba`.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct SplitConformalClassifierConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    score: conformal::ClassificationScore,
+    calibration_size: f64,
+    seed: u64,
+    allow_full_sets: bool,
+}
+
+impl Default for SplitConformalClassifierConfig {
+    fn default() -> Self {
+        let d = conformal::SplitConformalClassifier::new(());
+        Self {
+            estimator: "LogisticRegressor".into(),
+            estimator_params: empty_params(),
+            score: d.score,
+            calibration_size: d.calibration_size,
+            seed: d.seed,
+            allow_full_sets: d.allow_full_sets,
+        }
+    }
+}
+
+impl SplitConformalClassifierConfig {
+    fn build(&self) -> conformal::SplitConformalClassifier<RegistryEstimator> {
+        conformal::SplitConformalClassifier::new(RegistryEstimator::new(
+            &self.estimator,
+            self.estimator_params.clone(),
+        ))
+        .with_score(self.score)
+        .with_calibration_size(self.calibration_size)
+        .with_seed(self.seed)
+        .with_allow_full_sets(self.allow_full_sets)
+    }
+}
+
+/// `(lower, upper)` as an `n × 2` array.
+fn interval((lo, hi): (Array1<f64>, Array1<f64>)) -> Array2<f64> {
+    ndarray::stack(ndarray::Axis(1), &[lo.view(), hi.view()]).expect("bounds of equal length")
+}
+
+/// A membership matrix as 0 / 1.
+fn membership(sets: Array2<bool>) -> Array2<f64> {
+    sets.mapv(|b| if b { 1.0 } else { 0.0 })
 }
 
 registry! {
@@ -228,6 +423,49 @@ registry! {
         predict: |m, x| m.predict(x),
         score_samples: |m, x| Ok::<_, anofox_ml_core::RustMlError>(m.score_samples(x)),
         decision_function: |m, x| Ok::<_, anofox_ml_core::RustMlError>(m.decision_function(x)),
+    }
+
+    // ------------------------------------------------------- conformal
+    SplitConformalRegressor {
+        config: SplitConformalRegressorConfig = Default::default(),
+        fitted: conformal::FittedSplitConformalRegressor<RegistryFitted, f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.build().fit_view(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_interval: |m, x, alpha| m.predict_interval(x, alpha).map(interval),
+    }
+    CrossConformalRegressor {
+        config: CrossConformalRegressorConfig = Default::default(),
+        fitted: conformal::FittedCrossConformalRegressor<RegistryFitted, f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.build().fit_view(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_interval: |m, x, alpha| m.predict_interval(x, alpha).map(interval),
+    }
+    NormalizedConformalRegressor {
+        config: NormalizedConformalRegressorConfig = Default::default(),
+        fitted: conformal::FittedNormalizedConformalRegressor<RegistryFitted, RegistryFitted, f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.build().fit_view(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_interval: |m, x, alpha| m.predict_interval(x, alpha).map(interval),
+    }
+    SplitConformalClassifier {
+        config: SplitConformalClassifierConfig = Default::default(),
+        fitted: conformal::FittedSplitConformalClassifier<RegistryFitted, f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.build().fit_view(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m.model(), x),
+        predict_set: |m, x, alpha| m.predict_set(x, alpha).map(membership),
     }
 
     // ------------------------------------------------------------- svm

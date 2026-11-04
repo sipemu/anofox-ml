@@ -6,6 +6,29 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Conformal predictors in the registry (#93, milestone 4)
+
+- `DynModel::predict_interval(x, alpha)` (`n × 2`: lower, upper) and
+  `DynModel::predict_set(x, alpha)` (`n × classes`, 1 = in the set). Both
+  default to "unsupported", like the other methods. `Out` derives `Debug`.
+- `RegistryEstimator { kind, params }` implements `Fit<f64>` for any
+  registered estimator. Its `RegistryFitted` implements `Predict` /
+  `PredictProba` and serialises as `{kind, bytes}`, so the typed generic
+  wrappers can use estimators chosen by name.
+- New kinds `SplitConformalRegressor`, `CrossConformalRegressor`,
+  `NormalizedConformalRegressor` and `SplitConformalClassifier`. Their
+  parameters are `estimator` + `estimator_params` (plus
+  `residual_estimator` / `residual_estimator_params` for the normalised
+  one) and the wrapper's own settings, e.g. `{"estimator":
+  "HistGradientBoostingRegressor", "estimator_params": {"max_iter": 200},
+  "calibration_size": 0.25, "seed": 0}`. The default estimators are MAPIE's:
+  `OlsRegressor` / `LogisticRegressor`. The results match the typed
+  wrappers exactly.
+- Not included yet: CQR (it needs the quantile parameter of each estimator
+  kind) and Mondrian (the registry `fit` has no group argument).
+- `anofox-ml-registry` now depends on `anofox-ml-conformal`, and
+  `scripts/publish.sh` publishes conformal first.
+
 ### PerpetualBooster (optional `perpetual` feature)
 
 - `PerpetualRegressor` / `PerpetualClassifier` in `anofox-ml-ensemble`
