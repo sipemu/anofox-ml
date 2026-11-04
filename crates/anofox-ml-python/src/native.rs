@@ -179,6 +179,10 @@ impl PyModel {
 }
 
 impl PyModel {
+    pub(crate) fn from_inner(inner: Box<dyn DynModel>) -> Self {
+        Self { inner }
+    }
+
     fn call(
         &self,
         py: Python<'_>,

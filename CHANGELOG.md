@@ -21,7 +21,17 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   seeded. Failing parameter combinations are recorded as failed trials.
   Multi-objective searches add `objectives` (more metrics, `fit_time`,
   `model_size`) and return the Pareto front; NSGA-II is available as a
-  sampler. Pruning waits for rustuna pruners.
+  sampler. In a multi-objective search the best trial is the best one on
+  the Pareto front. `tune_with_splits_mapped` takes a search space in
+  another vocabulary plus a per-trial translation. Pruning waits for
+  rustuna pruners.
+- Python: `anofox_ml_python.TuneSearchCV(estimator, param_distributions,
+  …)` (also in `model_selection`, with the `Int` / `Float` / `Categorical`
+  helpers). It searches the estimator's scikit-learn parameters in Rust with
+  the GIL released, accepts `cv` as a fold count or any splitter (with
+  `groups`), supports `scoring`, `objectives` and the `tpe` / `random` /
+  `nsgaii` samplers, and refits a clone of the estimator as
+  `best_estimator_`.
 
 ### Fixes
 

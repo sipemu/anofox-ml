@@ -43,4 +43,7 @@ mod tune;
 
 pub use metric::{is_classifier, Metric};
 pub use space::{Param, SearchSpace};
-pub use tune::{tune, tune_with_splits, Objective, Sampler, TrialRecord, TuneOptions, TuneResult};
+pub use tune::{
+    tune, tune_with_splits, tune_with_splits_mapped, Objective, ParamMap, Sampler, TrialRecord,
+    TuneOptions, TuneResult,
+};

@@ -216,6 +216,53 @@ pub fn tune_with_splits(
     splits: &[CvSplit],
     options: &TuneOptions,
 ) -> Result<TuneResult> {
+    run(kind, space, x, y, sample_weight, splits, options, None)
+}
+
+/// Translates the suggested values of a trial into estimator parameters.
+pub type ParamMap<'a> = &'a dyn Fn(&Map<String, Value>) -> Result<Map<String, Value>>;
+
+/// [`tune_with_splits`] for a search space in another vocabulary than the
+/// estimator's parameters (e.g. the scikit-learn names of the Python
+/// wrappers): `map_params` turns each trial's suggested values into
+/// estimator parameters, which override the defaults and `options.params`.
+/// The space's names are not checked against the estimator; an unknown
+/// mapped parameter fails the trial. `TrialRecord::params` keep the
+/// suggested values, `best_params` the mapped ones.
+#[allow(clippy::too_many_arguments)]
+pub fn tune_with_splits_mapped(
+    kind: &str,
+    space: &Value,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    sample_weight: Option<ArrayView1<f64>>,
+    splits: &[CvSplit],
+    options: &TuneOptions,
+    map_params: ParamMap<'_>,
+) -> Result<TuneResult> {
+    run(
+        kind,
+        space,
+        x,
+        y,
+        sample_weight,
+        splits,
+        options,
+        Some(map_params),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run(
+    kind: &str,
+    space: &Value,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    sample_weight: Option<ArrayView1<f64>>,
+    splits: &[CvSplit],
+    options: &TuneOptions,
+    map_params: Option<ParamMap<'_>>,
+) -> Result<TuneResult> {
     let space = SearchSpace::from_json(space)?;
     let metric = match &options.metric {
         Some(name) => Metric::from_name(name)?,
@@ -229,7 +276,19 @@ pub fn tune_with_splits(
         }
         objectives.push(o);
     }
-    let fixed = check_params(kind, &space, &options.params)?;
+    let fixed = check_params(
+        kind,
+        map_params.is_none().then_some(&space),
+        &options.params,
+    )?;
+    let mapped = |suggested: &Map<String, Value>| -> Result<Map<String, Value>> {
+        let mut params = fixed.clone();
+        params.extend(match map_params {
+            Some(map) => map(suggested)?,
+            None => suggested.clone(),
+        });
+        Ok(params)
+    };
     if options.n_trials == 0 {
         return Err(invalid("n_trials must be at least 1"));
     }
@@ -250,17 +309,17 @@ pub fn tune_with_splits(
         let mut trial = study.ask().map_err(study_err)?;
         let number = trial.number;
         let suggested = space.suggest(&mut trial)?;
-        let mut params = fixed.clone();
-        params.extend(suggested.clone());
-        let outcome = cv_evaluate(
-            kind,
-            &Value::Object(params),
-            x,
-            y,
-            sample_weight,
-            splits,
-            &objectives,
-        );
+        let outcome = mapped(&suggested).and_then(|params| {
+            cv_evaluate(
+                kind,
+                &Value::Object(params),
+                x,
+                y,
+                sample_weight,
+                splits,
+                &objectives,
+            )
+        });
         let mut record = TrialRecord {
             number: number as usize,
             params: Value::Object(suggested),
@@ -297,32 +356,22 @@ pub fn tune_with_splits(
         trials.push(record);
     }
 
-    let best = trials
-        .iter()
-        .filter_map(|t| t.score.map(|s| (t, s)))
-        .reduce(|a, b| {
-            let better = if metric.maximize() {
-                b.1 > a.1
-            } else {
-                b.1 < a.1
-            };
-            if better {
-                b
-            } else {
-                a
-            }
-        })
-        .map(|(t, _)| t)
-        .ok_or_else(|| {
-            let first = trials
-                .iter()
-                .find_map(|t| t.error.clone())
-                .unwrap_or_default();
-            invalid(format!("every trial failed; first error: {first}"))
-        })?;
-
-    let pareto_front = if objectives.len() == 1 {
-        vec![best.number]
+    if trials.iter().all(|t| t.score.is_none()) {
+        let first = trials
+            .iter()
+            .find_map(|t| t.error.clone())
+            .unwrap_or_default();
+        return Err(invalid(format!("every trial failed; first error: {first}")));
+    }
+    // Candidates for the best trial: every completed trial, or the Pareto
+    // front of a multi-objective search (so a trial that ties on the metric
+    // but loses on another objective is never "best").
+    let candidates: Vec<usize> = if objectives.len() == 1 {
+        trials
+            .iter()
+            .filter(|t| t.score.is_some())
+            .map(|t| t.number)
+            .collect()
     } else {
         let mut front: Vec<usize> = get_pareto_front(&study)
             .map_err(study_err)?
@@ -332,10 +381,31 @@ pub fn tune_with_splits(
         front.sort_unstable();
         front
     };
+    let score = |n: usize| trials[n].score.expect("completed trial");
+    let best_number = candidates
+        .iter()
+        .copied()
+        .reduce(|a, b| {
+            let better = if metric.maximize() {
+                score(b) > score(a)
+            } else {
+                score(b) < score(a)
+            };
+            if better {
+                b
+            } else {
+                a
+            }
+        })
+        .expect("at least one completed trial");
+    let best = &trials[best_number];
+    let pareto_front = if objectives.len() == 1 {
+        vec![best_number]
+    } else {
+        candidates
+    };
 
-    let mut best_params = fixed;
-    best_params.extend(best.params.as_object().cloned().unwrap_or_default());
-    let best_params = Value::Object(best_params);
+    let best_params = Value::Object(mapped(best.params.as_object().expect("an object"))?);
     let model = if options.refit {
         let mut model = anofox_ml_registry::make(kind, &best_params)?;
         model.fit(x, Some(y), sample_weight)?;
@@ -360,9 +430,14 @@ pub fn tune_with_splits(
     })
 }
 
-/// Validate the fixed and searched parameter names against the estimator's
-/// parameters; returns the defaults merged with the fixed parameters.
-fn check_params(kind: &str, space: &SearchSpace, fixed: &Value) -> Result<Map<String, Value>> {
+/// Validate the fixed and (when given) searched parameter names against the
+/// estimator's parameters; returns the defaults merged with the fixed
+/// parameters.
+fn check_params(
+    kind: &str,
+    space: Option<&SearchSpace>,
+    fixed: &Value,
+) -> Result<Map<String, Value>> {
     let defaults = anofox_ml_registry::default_params(kind)?;
     let known = defaults
         .as_object()
@@ -372,7 +447,8 @@ fn check_params(kind: &str, space: &SearchSpace, fixed: &Value) -> Result<Map<St
         Value::Object(m) => m.clone(),
         _ => return Err(invalid("params must be a JSON object")),
     };
-    for name in space.names().chain(fixed.keys().map(String::as_str)) {
+    let searched = space.into_iter().flat_map(SearchSpace::names);
+    for name in searched.chain(fixed.keys().map(String::as_str)) {
         if !known.contains_key(name) {
             let mut names: Vec<&String> = known.keys().collect();
             names.sort();
@@ -381,7 +457,11 @@ fn check_params(kind: &str, space: &SearchSpace, fixed: &Value) -> Result<Map<St
             )));
         }
     }
-    if let Some(name) = space.names().find(|n| fixed.contains_key(*n)) {
+    if let Some(name) = space
+        .into_iter()
+        .flat_map(SearchSpace::names)
+        .find(|n| fixed.contains_key(*n))
+    {
         return Err(invalid(format!(
             "'{name}' is both fixed (params) and searched"
         )));

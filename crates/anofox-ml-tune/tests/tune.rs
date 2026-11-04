@@ -443,3 +443,48 @@ fn invalid_objectives_fail_up_front() {
         .to_string();
     assert!(e.contains("population_size"), "{e}");
 }
+
+#[test]
+fn mapped_search_spaces_translate_each_trial() {
+    use anofox_ml_core::RustMlError;
+    use serde_json::{Map, Value};
+    let (x, y) = step_data(96);
+    let splits = anofox_ml_core::utils::default_cv_splits(x.view(), y.view(), 4, 0).unwrap();
+    // "depth" (outside vocabulary) -> max_depth; depth 2 is rejected by the map.
+    let map = |s: &Map<String, Value>| -> anofox_ml_core::Result<Map<String, Value>> {
+        let d = s["depth"].as_i64().unwrap();
+        if d == 2 {
+            return Err(RustMlError::InvalidParameter(
+                "depth 2 is not allowed".into(),
+            ));
+        }
+        Ok(Map::from_iter([("max_depth".to_string(), json!(d))]))
+    };
+    let r = anofox_ml_tune::tune_with_splits_mapped(
+        "DecisionTreeRegressor",
+        &json!({"depth": {"int": [1, 6]}}),
+        x.view(),
+        y.view(),
+        None,
+        &splits,
+        &TuneOptions {
+            sampler: Sampler::Random,
+            ..options(12)
+        },
+        &map,
+    )
+    .unwrap();
+    assert!(r.trials.iter().all(|t| t.params.get("depth").is_some()));
+    assert_eq!(
+        r.best_params["max_depth"],
+        r.trials[r.best_trial].params["depth"]
+    );
+    assert_eq!(r.best_params["min_samples_leaf"], 1, "defaults merged");
+    for t in &r.trials {
+        assert_eq!(
+            t.params["depth"] == 2,
+            t.error.as_deref() == Some("Invalid parameter: depth 2 is not allowed"),
+            "{t:?}"
+        );
+    }
+}
