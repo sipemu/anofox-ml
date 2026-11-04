@@ -270,6 +270,45 @@ supervised_v2!(
     )
 );
 
+// The anofox-regression wrappers, serializable since anofox-regression 0.11
+// (its `serde` feature, sipemu/anofox-regression#321).
+supervised_v2!(ols_regressor, "ols_regressor", OlsRegressor::new());
+supervised_v2!(ridge_regressor, "ridge_regressor", RidgeRegressor::new());
+supervised_v2!(lasso_regressor, "lasso_regressor", LassoRegressor::new());
+supervised_v2!(
+    elastic_net_regressor,
+    "elastic_net_regressor",
+    ElasticNetRegressor::new()
+);
+supervised_v2!(huber_regressor, "huber_regressor", HuberRegressor::new());
+supervised_v2!(
+    quantile_regressor,
+    "quantile_regressor",
+    QuantileRegressor::new(0.5)
+);
+supervised_v2!(
+    wls_regressor,
+    "wls_regressor",
+    WlsRegressor::new(Array1::from_shape_fn(60, |i| 1.0 + (i % 3) as f64))
+);
+
+#[test]
+fn ols_inference_survives_a_round_trip() {
+    let (x, y, _) = data();
+    let fitted = OlsRegressor::new()
+        .with_inference(true)
+        .fit(&x, &y)
+        .unwrap();
+    let bytes = persistence::to_binary_bytes(&fitted).unwrap();
+    let back: anofox_ml::regression::FittedOlsRegressor =
+        persistence::from_binary_bytes(&bytes).unwrap();
+    assert_eq!(
+        format!("{:?}", fitted.summary().unwrap()),
+        format!("{:?}", back.summary().unwrap())
+    );
+    assert_eq!(fitted.r_squared(), back.r_squared());
+}
+
 #[test]
 fn isotonic() {
     let (x, y, _) = data();

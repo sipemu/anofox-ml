@@ -68,7 +68,7 @@ impl Default for ElasticNetRegressor {
 }
 
 /// A fitted Elastic Net regression model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedElasticNetRegressor {
     inner: FittedElasticNet,
     n_features: usize,

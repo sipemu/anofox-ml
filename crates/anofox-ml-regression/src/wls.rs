@@ -52,7 +52,7 @@ impl WlsRegressor {
 }
 
 /// A fitted WLS regression model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedWlsRegressor {
     inner: FittedWls,
     n_features: usize,

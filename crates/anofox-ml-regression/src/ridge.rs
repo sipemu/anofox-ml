@@ -66,7 +66,7 @@ impl Default for RidgeRegressor {
 }
 
 /// A fitted Ridge regression model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedRidgeRegressor {
     inner: FittedRidge,
     n_features: usize,

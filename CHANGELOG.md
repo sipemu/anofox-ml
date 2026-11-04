@@ -6,6 +6,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Persistence for the anofox-regression wrappers (#87)
+
+- anofox-regression 0.11 (its new `serde` feature, enabled here). The
+  remaining seven wrappers without serde support are now serializable,
+  with v2 golden fixtures: `FittedOlsRegressor`, `FittedRidgeRegressor`,
+  `FittedLassoRegressor`, `FittedElasticNetRegressor`,
+  `FittedWlsRegressor`, `FittedHuberRegressor` and
+  `FittedQuantileRegressor`. Inference survives the round trip (an OLS
+  `summary()` after loading is identical). Every fitted type in the
+  workspace can now be saved.
+- The registry keeps its compact form for these kinds, so registry bytes
+  and Python pickles saved earlier still load.
+
 ### Fixed
 
 - `KMeans` centroids and inertia, and the exact t-SNE gradient, no longer

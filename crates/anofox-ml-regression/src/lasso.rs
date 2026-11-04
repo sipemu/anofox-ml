@@ -61,7 +61,7 @@ impl Default for LassoRegressor {
 }
 
 /// A fitted Lasso regression model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedLassoRegressor {
     inner: FittedElasticNet,
     n_features: usize,
