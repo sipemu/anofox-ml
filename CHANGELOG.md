@@ -415,6 +415,11 @@ Every parity test that waited on upstream is enabled; none are ignored now.
 
 ### Fixes
 
+- `RandomForestClassifier` and `ExtraTreesClassifier`: `predict_proba`
+  could return `1.0000000000000002` for a unanimous vote, because each
+  tree was scaled by `1/n_estimators` before summing; probability metrics
+  (`log_loss`) rejected it. The probabilities are now summed and divided
+  once, as in scikit-learn.
 - `LassoLarsIC` AIC formula corrected.
 - Stacking estimators now prefer `PredictProba` when the base estimator
   provides it (matches sklearn behaviour).

@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-conformal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-regression",
