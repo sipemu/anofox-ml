@@ -77,14 +77,14 @@ impl Default for OlsRegressor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum OlsInner {
     Ols(FittedOls),
     Wls(FittedWls),
 }
 
 /// A fitted OLS (or, via [`FitWeighted`], WLS) regression model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedOlsRegressor {
     inner: OlsInner,
     n_features: usize,

@@ -116,7 +116,7 @@ impl Default for HuberRegressor {
 }
 
 /// A fitted Huber robust regression model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedHuberRegressor {
     inner: FittedHuber,
     n_features: usize,
