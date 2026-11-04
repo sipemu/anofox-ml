@@ -216,3 +216,122 @@ fn errors_and_full_sets() {
     assert!(fit(vec![0.0, 1.0, 2.0]).is_err());
     assert!(fit(vec![0.0]).is_err());
 }
+
+#[test]
+fn raps_covers_and_tunes_its_regularization() {
+    use anofox_ml_conformal::RapsParams;
+    let alpha = 0.1;
+    for (mode, check) in [
+        (ApsMode::Include, "at_least"),
+        (ApsMode::Randomized, "about"),
+    ] {
+        let (cov, _) = mean_coverage(ClassificationScore::Raps(RapsParams::new(mode)), alpha, 150);
+        match check {
+            // 80 calibration rows after the 20 % tuning split.
+            "at_least" => assert!(cov - (1.0 - alpha) > -0.01, "{mode:?}: {cov}"),
+            _ => assert!((cov - (1.0 - alpha)).abs() < 0.02, "{mode:?}: {cov}"),
+        }
+    }
+    let (xc, yc) = data(300, 41);
+    let fitted = conformalize_classifier(
+        Softmax { w: w() },
+        CLASSES.to_vec(),
+        xc.view(),
+        yc.view(),
+        ClassificationScore::Raps(RapsParams::new(ApsMode::Include)),
+        0,
+    )
+    .unwrap();
+    let (k, lambda) = fitted.raps_regularization(alpha).unwrap().unwrap();
+    assert!((1..=4).contains(&k), "{k}");
+    assert!([0.001, 0.01, 0.1, 0.2, 0.5].contains(&lambda), "{lambda}");
+    // 300 rows, 20 % tuning: 240 calibration scores.
+    assert_eq!(fitted.conformity_scores().len(), 240);
+    // Fixed k_reg and lambda: no tuning split, all rows calibrate.
+    let fixed = conformalize_classifier(
+        Softmax { w: w() },
+        CLASSES.to_vec(),
+        xc.view(),
+        yc.view(),
+        ClassificationScore::Raps(
+            RapsParams::new(ApsMode::Include)
+                .with_k_reg(2)
+                .with_lambda(0.2),
+        ),
+        0,
+    )
+    .unwrap();
+    assert_eq!(fixed.conformity_scores().len(), 300);
+    assert_eq!(fixed.raps_regularization(alpha).unwrap(), Some((2, 0.2)));
+    assert_eq!(
+        conformalize_classifier(
+            Softmax { w: w() },
+            CLASSES.to_vec(),
+            xc.view(),
+            yc.view(),
+            ClassificationScore::Lac,
+            0
+        )
+        .unwrap()
+        .raps_regularization(alpha)
+        .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn raps_sets_are_no_larger_than_aps_with_many_classes() {
+    use anofox_ml_conformal::RapsParams;
+    // 10 classes, two of them likely and eight with small tails.
+    let w10 = Array2::from_shape_fn((3, 10), |(i, j)| {
+        if j < 2 {
+            [2.5, -2.5][j] * [1.0, 0.5, -0.5][i]
+        } else {
+            0.15 * ((i * 7 + j * 3) % 5) as f64 - 0.3
+        }
+    });
+    let gen = |n: usize, seed: u64| {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let x = Array2::from_shape_fn((n, 3), |_| rng.gen_range(-2.0..2.0));
+        let p = Softmax { w: w10.clone() }
+            .predict_proba_view(x.view())
+            .unwrap();
+        let y: Array1<f64> = p
+            .rows()
+            .into_iter()
+            .map(|r| {
+                let u: f64 = rng.gen();
+                let mut acc = 0.0;
+                for (k, &v) in r.iter().enumerate() {
+                    acc += v;
+                    if u < acc {
+                        return k as f64;
+                    }
+                }
+                9.0
+            })
+            .collect();
+        (x, y)
+    };
+    let classes: Vec<f64> = (0..10).map(f64::from).collect();
+    let (mut aps, mut raps) = (0.0, 0.0);
+    for r in 0..20 {
+        let (xc, yc) = gen(500, 100 + 2 * r);
+        let (xt, _) = gen(300, 101 + 2 * r);
+        let size = |score| {
+            let f = conformalize_classifier(
+                Softmax { w: w10.clone() },
+                classes.clone(),
+                xc.view(),
+                yc.view(),
+                score,
+                r,
+            )
+            .unwrap();
+            anofox_ml_metrics::mean_set_size(&f.predict_set(xt.view(), 0.1).unwrap()).unwrap()
+        };
+        aps += size(ClassificationScore::Aps(ApsMode::Include));
+        raps += size(ClassificationScore::Raps(RapsParams::new(ApsMode::Include)));
+    }
+    assert!(raps <= aps, "RAPS {} vs APS {}", raps / 20.0, aps / 20.0);
+}
