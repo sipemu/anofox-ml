@@ -282,6 +282,112 @@ impl SplitConformalClassifierConfig {
     }
 }
 
+/// `ConformalizedQuantileRegressor` (CQR) over a registered estimator that
+/// can fit a quantile. `alpha` is fixed at fit time: the quantile models
+/// are trained for `alpha / 2`, `1 − alpha / 2` and the median.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ConformalizedQuantileRegressorConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    alpha: f64,
+    calibration_size: f64,
+    seed: u64,
+    symmetric_correction: bool,
+    allow_infinite_bounds: bool,
+}
+
+impl Default for ConformalizedQuantileRegressorConfig {
+    fn default() -> Self {
+        let d = conformal::ConformalizedQuantileRegressor::new(0.1, |_| ());
+        Self {
+            estimator: "QuantileRegressor".into(),
+            estimator_params: empty_params(),
+            alpha: d.alpha,
+            calibration_size: d.calibration_size,
+            seed: d.seed,
+            symmetric_correction: d.symmetric_correction,
+            allow_infinite_bounds: d.allow_infinite_bounds,
+        }
+    }
+}
+
+/// Estimator kinds CQR can use, with the JSON that sets their quantile.
+const QUANTILE_KINDS: &[&str] = &[
+    "QuantileRegressor",
+    "GradientBoostingRegressor",
+    #[cfg(feature = "perpetual")]
+    "PerpetualRegressor",
+];
+
+/// `params` with the quantile of `kind` set to `q`.
+fn with_quantile(kind: &str, params: &serde_json::Value, q: f64) -> Result<serde_json::Value> {
+    let overrides = match kind {
+        "QuantileRegressor" => serde_json::json!({ "quantile": q }),
+        "GradientBoostingRegressor" => serde_json::json!({ "loss": "Quantile", "alpha": q }),
+        #[cfg(feature = "perpetual")]
+        "PerpetualRegressor" => {
+            serde_json::json!({ "objective": { "QuantileLoss": { "quantile": q } } })
+        }
+        other => {
+            return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                "ConformalizedQuantileRegressor cannot fit quantiles with '{other}' \
+                 (supported: {QUANTILE_KINDS:?})"
+            )))
+        }
+    };
+    let mut merged = match params {
+        serde_json::Value::Null => serde_json::Map::new(),
+        serde_json::Value::Object(m) => m.clone(),
+        _ => {
+            return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                "estimator_params must be a JSON object".into(),
+            ))
+        }
+    };
+    for (k, v) in overrides.as_object().expect("object literal") {
+        merged.insert(k.clone(), v.clone());
+    }
+    Ok(serde_json::Value::Object(merged))
+}
+
+impl ConformalizedQuantileRegressorConfig {
+    fn fit(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+    ) -> Result<conformal::FittedConformalizedQuantileRegressor<RegistryFitted, f64>> {
+        // Check the kind and the parameters once, so `make` cannot fail.
+        with_quantile(&self.estimator, &self.estimator_params, 0.5)?;
+        let make = |q: f64| {
+            let params =
+                with_quantile(&self.estimator, &self.estimator_params, q).expect("checked above");
+            RegistryEstimator::new(&self.estimator, params)
+        };
+        conformal::ConformalizedQuantileRegressor::new(self.alpha, make)
+            .with_calibration_size(self.calibration_size)
+            .with_seed(self.seed)
+            .with_symmetric_correction(self.symmetric_correction)
+            .with_allow_infinite_bounds(self.allow_infinite_bounds)
+            .fit_view(x, y)
+    }
+}
+
+/// CQR intervals, for the `alpha` the model was fitted for only.
+fn cqr_interval(
+    m: &conformal::FittedConformalizedQuantileRegressor<RegistryFitted, f64>,
+    x: ArrayView2<f64>,
+    alpha: f64,
+) -> Result<Array2<f64>> {
+    if (alpha - m.alpha()).abs() > 1e-12 {
+        return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+            "ConformalizedQuantileRegressor was fitted for alpha = {}; refit it for alpha = {alpha}",
+            m.alpha()
+        )));
+    }
+    m.predict_interval(x).map(interval)
+}
+
 /// `(lower, upper)` as an `n × 2` array.
 fn interval((lo, hi): (Array1<f64>, Array1<f64>)) -> Array2<f64> {
     ndarray::stack(ndarray::Axis(1), &[lo.view(), hi.view()]).expect("bounds of equal length")
@@ -455,6 +561,16 @@ registry! {
         },
         predict: |m, x| m.predict(x),
         predict_interval: |m, x, alpha| m.predict_interval(x, alpha).map(interval),
+    }
+    ConformalizedQuantileRegressor {
+        config: ConformalizedQuantileRegressorConfig = Default::default(),
+        fitted: conformal::FittedConformalizedQuantileRegressor<RegistryFitted, f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_interval: |m, x, alpha| cqr_interval(m, x, alpha),
     }
     SplitConformalClassifier {
         config: SplitConformalClassifierConfig = Default::default(),

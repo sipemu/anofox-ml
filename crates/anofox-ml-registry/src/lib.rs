@@ -78,6 +78,26 @@ mod tests {
 #[cfg(all(test, feature = "perpetual"))]
 mod perpetual_tests {
     #[test]
+    fn perpetual_as_a_cqr_estimator() {
+        let x = ndarray::Array2::from_shape_fn((200, 2), |(i, j)| ((i * (j + 2)) % 23) as f64);
+        let y = x.column(0).mapv(|v| 0.5 * v) - &x.column(1);
+        let params = serde_json::json!({
+            "estimator": "PerpetualRegressor",
+            "estimator_params": { "num_threads": 1 },
+            "alpha": 0.2,
+        });
+        let mut model = super::make("ConformalizedQuantileRegressor", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        match model.predict_interval(x.view(), 0.2).unwrap() {
+            super::Out::A2(iv) => {
+                assert_eq!(iv.dim(), (200, 2));
+                assert!(iv.rows().into_iter().all(|r| r[0] <= r[1]));
+            }
+            _ => panic!("expected n × 2 intervals"),
+        }
+    }
+
+    #[test]
     fn perpetual_inside_a_conformal_kind() {
         let x = ndarray::Array2::from_shape_fn((160, 2), |(i, j)| ((i * (j + 2)) % 23) as f64);
         let y = x.column(0).mapv(|v| 0.5 * v) - &x.column(1);
@@ -242,6 +262,74 @@ mod conformal_tests {
                 super::load("SplitConformalClassifier", &model.to_bytes().unwrap()).unwrap();
             assert_eq!(sets, a2(loaded.predict_set(x.view(), 0.1).unwrap()));
         }
+    }
+
+    #[test]
+    fn cqr_kind_with_each_quantile_estimator() {
+        let (x, y) = regression();
+        for (est, params) in [
+            ("QuantileRegressor", json!({})),
+            (
+                "GradientBoostingRegressor",
+                json!({ "n_estimators": 30, "max_depth": 2 }),
+            ),
+        ] {
+            let mut model = super::make(
+                "ConformalizedQuantileRegressor",
+                &json!({ "estimator": est, "estimator_params": params, "alpha": 0.2 }),
+            )
+            .unwrap();
+            model.fit(x.view(), Some(y.view()), None).unwrap();
+            let iv = a2(model.predict_interval(x.view(), 0.2).unwrap());
+            assert_eq!(iv.dim(), (200, 2), "{est}");
+            assert!(iv.rows().into_iter().all(|r| r[0] <= r[1]), "{est}");
+            let covered = (0..200)
+                .filter(|&i| iv[[i, 0]] <= y[i] && y[i] <= iv[[i, 1]])
+                .count();
+            assert!(covered >= 150, "{est}: {covered} of 200");
+            let err = model
+                .predict_interval(x.view(), 0.1)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("refit"), "{err}");
+            let loaded =
+                super::load("ConformalizedQuantileRegressor", &model.to_bytes().unwrap()).unwrap();
+            assert_eq!(iv, a2(loaded.predict_interval(x.view(), 0.2).unwrap()));
+        }
+        let mut bad = super::make(
+            "ConformalizedQuantileRegressor",
+            &json!({ "estimator": "RidgeRegressor" }),
+        )
+        .unwrap();
+        let err = bad
+            .fit(x.view(), Some(y.view()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("RidgeRegressor") && err.contains("supported"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn cqr_matches_the_typed_wrapper() {
+        let (x, y) = regression();
+        let mut model = super::make(
+            "ConformalizedQuantileRegressor",
+            &json!({ "alpha": 0.2, "seed": 3 }),
+        )
+        .unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let typed = anofox_ml_conformal::ConformalizedQuantileRegressor::new(0.2, |q| {
+            anofox_ml_regression::QuantileRegressor::new(q)
+        })
+        .with_seed(3)
+        .fit(&x, &y)
+        .unwrap();
+        let (lo, hi) = typed.predict_interval(x.view()).unwrap();
+        let iv = a2(model.predict_interval(x.view(), 0.2).unwrap());
+        assert_eq!(iv.column(0), lo);
+        assert_eq!(iv.column(1), hi);
     }
 
     #[test]
