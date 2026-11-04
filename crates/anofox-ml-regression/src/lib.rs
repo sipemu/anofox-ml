@@ -61,7 +61,9 @@ pub use robust::{
 pub use summary::{
     InterceptSummary, IntervalKind, PredictionInterval, RegressionSummary, StatisticKind,
 };
-pub use transformed_target::{FittedTransformedTargetRegressor, TransformedTargetRegressor};
+pub use transformed_target::{
+    FittedTransformedTargetRegressor, TargetTransform, TransformedTargetRegressor,
+};
 pub use tweedie::{
     gamma_regressor, FittedGammaRegressor, FittedTweedieRegressor, GammaRegressor, TweedieRegressor,
 };

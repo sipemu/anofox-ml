@@ -5,10 +5,11 @@
 //! saved. Every fixture must keep loading and predicting the same values,
 //! so a change to a fitted type that breaks old files fails here.
 //!
-//! Fixtures of a new format version are written with
-//! `ANOFOX_WRITE_FIXTURES=1 cargo test -p anofox-ml --test persistence_compat`,
-//! which saves into the directory of the current format version only. Files
-//! of older versions are never rewritten.
+//! Missing fixtures of the current format version are written with
+//! `ANOFOX_WRITE_FIXTURES=1 cargo test -p anofox-ml --test persistence_compat`.
+//! Existing files, and files of older versions, are never rewritten. A model
+//! that became serializable in a later format version has fixtures from that
+//! version on (`since`).
 
 use std::path::PathBuf;
 
@@ -54,6 +55,9 @@ fn data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
 fn write_fixture<M: Serialize>(name: &str, model: &M, out: &[f64]) {
     let version = persistence::FORMAT_VERSION;
     let dir = fixture_dir(version);
+    if dir.join(format!("{name}.bin")).exists() {
+        return;
+    }
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join(format!("{name}.bin")),
@@ -73,12 +77,20 @@ fn case<M>(name: &str, fit: impl FnOnce() -> M, out: impl Fn(&M) -> Vec<f64>)
 where
     M: Serialize + DeserializeOwned,
 {
+    case_since(1, name, fit, out)
+}
+
+/// [`case`] for a model with fixtures from format version `since` on.
+fn case_since<M>(since: u32, name: &str, fit: impl FnOnce() -> M, out: impl Fn(&M) -> Vec<f64>)
+where
+    M: Serialize + DeserializeOwned,
+{
     if writing() {
         let model = fit();
         write_fixture(name, &model, &out(&model));
         return;
     }
-    for &version in VERSIONS {
+    for &version in VERSIONS.iter().filter(|&&v| v >= since) {
         let dir = fixture_dir(version);
         let bytes = std::fs::read(dir.join(format!("{name}.bin")))
             .unwrap_or_else(|e| panic!("v{version} fixture {name}: {e}"));
@@ -224,3 +236,48 @@ transformer!(
 );
 unsupervised_predict!(kmeans, "kmeans", KMeans::new(3));
 unsupervised_predict!(isolation_forest, "isolation_forest", IsolationForest::new());
+
+// Serializable since format version 2.
+
+macro_rules! supervised_v2 {
+    ($test:ident, $name:literal, $est:expr) => {
+        #[test]
+        fn $test() {
+            let (x, y, _) = data();
+            case_since(
+                2,
+                $name,
+                || Fit::fit(&$est, &x, &y).unwrap(),
+                |m| Predict::predict(m, &x).unwrap().to_vec(),
+            );
+        }
+    };
+}
+
+supervised_v2!(ridge_cv, "ridge_cv", RidgeCrossValidated::new());
+supervised_v2!(lasso_cv, "lasso_cv", LassoCrossValidated::new());
+supervised_v2!(
+    elastic_net_cv,
+    "elastic_net_cv",
+    ElasticNetCrossValidated::new()
+);
+supervised_v2!(
+    transformed_target,
+    "transformed_target_regressor",
+    anofox_ml::regression::TransformedTargetRegressor::with_transform(
+        BayesianRidge::new(),
+        anofox_ml::regression::TargetTransform::Identity,
+    )
+);
+
+#[test]
+fn isotonic() {
+    let (x, y, _) = data();
+    let x1 = x.column(0).to_owned().insert_axis(ndarray::Axis(1));
+    case_since(
+        2,
+        "isotonic_regressor",
+        || Fit::fit(&IsotonicRegressor::new(), &x1, &y).unwrap(),
+        |m| Predict::predict(m, &x1).unwrap().to_vec(),
+    );
+}

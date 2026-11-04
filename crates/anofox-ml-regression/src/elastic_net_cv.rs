@@ -209,7 +209,7 @@ pub(crate) fn sorted_alphas(alphas: &[f64]) -> Result<Vec<f64>> {
 }
 
 /// CV result over one alpha grid.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PathCv {
     pub alphas: Array1<f64>,
     /// Held-out MSE per alpha and fold (`n_alphas × n_folds`).
@@ -405,7 +405,7 @@ impl Default for ElasticNetCrossValidated {
 }
 
 /// A fitted Elastic Net regression model selected via cross-validation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedElasticNetCrossValidated {
     coef: Array1<f64>,
     intercept: Option<f64>,

@@ -2,13 +2,13 @@
 
 use crate::convert::{col_to_ndarray, ndarray_to_col, ndarray_to_mat};
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
-use anofox_regression::{FittedIsotonic, IsotonicRegressor as InnerIsotonic};
+use anofox_regression::IsotonicRegressor as InnerIsotonic;
 use anofox_regression::{FittedRegressor as _, Regressor as _};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Handling of inputs outside the training range at prediction time
 /// (sklearn `out_of_bounds`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OutOfBounds {
     /// Predict NaN (sklearn's default).
     #[default]
@@ -59,9 +59,10 @@ impl Default for IsotonicRegressor {
 }
 
 /// A fitted isotonic regression model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedIsotonicRegressor {
-    inner: FittedIsotonic,
+    /// Training R² of the upstream fit.
+    r_squared: f64,
     /// Sorted distinct training inputs (sklearn `X_thresholds_`).
     x_thresholds: Vec<f64>,
     /// Fitted values at `x_thresholds` (sklearn `y_thresholds_`).
@@ -71,7 +72,7 @@ pub struct FittedIsotonicRegressor {
 
 impl FittedIsotonicRegressor {
     pub fn r_squared(&self) -> f64 {
-        self.inner.r_squared()
+        self.r_squared
     }
 }
 
@@ -112,7 +113,7 @@ impl Fit<f64> for IsotonicRegressor {
         let knots = Array2::from_shape_vec((xs.len(), 1), xs.clone()).expect("one column");
         let ys = col_to_ndarray(&fitted.predict(&ndarray_to_mat(knots.view()))).to_vec();
         Ok(FittedIsotonicRegressor {
-            inner: fitted,
+            r_squared: fitted.r_squared(),
             x_thresholds: xs,
             y_thresholds: ys,
             out_of_bounds: self.out_of_bounds,
