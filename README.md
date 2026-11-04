@@ -24,7 +24,7 @@ A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 | **GLMs** | `PoissonRegressor`, `BinomialRegressor`, `TweedieRegressor`, `GammaRegressor` | `sklearn.linear_model` GLM family |
 | **Discriminant analysis** | `LinearDiscriminantAnalysis` (+`transform`), `QuadraticDiscriminantAnalysis` | `sklearn.discriminant_analysis` |
 | **Trees** | `DecisionTreeClassifier` (+`predict_proba`), `DecisionTreeRegressor` | `sklearn.tree` |
-| **Ensemble** | `RandomForest{Classifier,Regressor}`, `ExtraTrees{Classifier,Regressor}`, `GradientBoosting{Classifier,Regressor}`, `HistGradientBoosting{Classifier,Regressor}`, `LgbmClassifier`, `LgbmRegressor`, `Bagging{Classifier,Regressor}`, `AdaBoost{Classifier,Regressor}`, `Voting{Classifier,Regressor}`, `Stacking{Classifier,Regressor}` (+`push_proba`), `CalibratedClassifierCV`, `IsolationForest` (rayon-parallel) | `sklearn.ensemble`, `lightgbm` |
+| **Ensemble** | `RandomForest{Classifier,Regressor}`, `ExtraTrees{Classifier,Regressor}`, `GradientBoosting{Classifier,Regressor}`, `HistGradientBoosting{Classifier,Regressor}`, `LgbmClassifier`, `LgbmRegressor`, `Bagging{Classifier,Regressor}`, `AdaBoost{Classifier,Regressor}`, `Voting{Classifier,Regressor}`, `Stacking{Classifier,Regressor}` (+`push_proba`), `CalibratedClassifierCV`, `IsolationForest` (rayon-parallel); `Perpetual{Classifier,Regressor}` with the optional `perpetual` feature | `sklearn.ensemble`, `lightgbm`, `perpetual` |
 | **Clustering** | `KMeans`, `MiniBatchKMeans`, `Dbscan`, `Hdbscan`, `Optics`, `Birch`, `AgglomerativeClustering` (Ward/single/complete/average), `SpectralClustering`, `MeanShift`, `AffinityPropagation`, `GaussianMixture`, `BayesianGaussianMixture` | `sklearn.cluster`, `sklearn.mixture` |
 | **Naive Bayes** | `GaussianNB`, `MultinomialNB`, `BernoulliNB` (all with `predict_proba`) | `sklearn.naive_bayes` |
 | **SVM** | `Svc`, `Svr`, `NuSvc`, `NuSvr`, `LinearSvc`, `LinearSvr`, `OneClassSvm` | `sklearn.svm` |
@@ -273,27 +273,10 @@ resolver doesn't fork.
 
 ### Continuous performance tracking (codspeed)
 
-CI sends the criterion benchmarks to [codspeed.io](https://codspeed.io)
-on every push to `master` and every PR. codspeed uses **cachegrind to
-count CPU instructions** instead of wall-time, so the numbers are
-deterministic across noisy GH runners — a 1 % delta is a real
-algorithmic change, not a hot/cold cache or a busy hypervisor.
-
-Benches are unchanged: the `codspeed-criterion-compat` shim
-re-exports criterion's API verbatim, so `cargo bench` locally still
-works exactly as before. The shim only switches to cachegrind when
-codspeed's runner sets `CODSPEED_CARGO_WORKSPACE_ROOT`.
-
-The `codspeed` job is `continue-on-error: true`, so a missing
-`CODSPEED_TOKEN` doesn't block CI — forks and pre-setup clones just
-skip the job silently. To enable it:
-
-1. Sign in at <https://codspeed.io> with the GitHub account that owns the repo.
-2. Register the `anofox-ml` repository under your codspeed dashboard.
-3. Copy the generated upload token and add it as the
-   `CODSPEED_TOKEN` repo secret.
-
-That's it — the workflow file picks it up from env on the next push.
+The codspeed CI job is paused: its cachegrind run took 40–60 minutes per
+push. The benches still use the `codspeed-criterion-compat` shim, so
+`cargo bench` works as before and the job can be restored from git
+history (`.github/workflows/ci.yml`, before the conformal-registry PR).
 
 ### Scaling profiles
 
@@ -398,6 +381,18 @@ from sklearn.model_selection import GridSearchCV
 clf = am.RandomForestClassifier(n_estimators=200, random_state=0).fit(X, y)
 proba = clf.predict_proba(X_test)
 search = GridSearchCV(am.SVC(), {"C": [0.1, 1, 10]}).fit(X, y)
+```
+
+Conformal prediction (`anofox_ml_python.conformal`) wraps any of these
+estimators and gives intervals or sets with coverage `≥ 1 − alpha`:
+
+```python
+from anofox_ml_python import conformal
+
+reg = conformal.CrossConformalRegressor(am.HistGradientBoostingRegressor(), cv=5).fit(X, y)
+bounds = reg.predict_interval(X_test, alpha=0.1)      # (n, 2)
+clf = conformal.SplitConformalClassifier(conformity_score="aps").fit(X, y)
+sets = clf.predict_set(X_test, alpha=0.1)             # (n, n_classes), bool
 ```
 
 ## License

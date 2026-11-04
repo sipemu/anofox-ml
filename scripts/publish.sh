@@ -54,11 +54,11 @@ CRATES=(
     anofox-ml-gaussian-process
     anofox-ml-manifold
     anofox-ml-cluster
-    anofox-ml-ensemble
     anofox-ml-regression
+    anofox-ml-ensemble
     anofox-ml-preprocessing
-    anofox-ml-registry
     anofox-ml-conformal
+    anofox-ml-registry
     anofox-ml
 )
 
@@ -73,7 +73,8 @@ for p in json.load(sys.stdin)["packages"]:
     if p["name"] not in pos:
         continue
     for d in p["dependencies"]:
-        if d["name"].startswith("anofox-ml") and d["kind"] in (None, "build") and pos.get(d["name"], -1) > pos[p["name"]]:
+        # dev-dependencies count too: crates.io resolves versioned ones.
+        if d["name"].startswith("anofox-ml") and pos.get(d["name"], -1) > pos[p["name"]]:
             bad.append(p["name"] + " before its dependency " + d["name"])
 if bad:
     sys.exit("publish order is not topological: " + "; ".join(bad))

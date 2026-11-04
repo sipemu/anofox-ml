@@ -1,0 +1,9 @@
+# Fixture fields that legitimately differ between machines, skipped by
+# check_fixture_drift.py. One "file:key" per line; the key matches at any
+# depth. Give the reason in a comment.
+
+# sklearn's public HDBSCAN sorts MST edges with an unstable argsort; tied
+# edge weights resolve differently on different CPUs. The strict reference
+# is `labels` (stable sort); `labels_public` is only compared by adjusted
+# Rand index in golden_hdbscan.rs.
+hdbscan.json:labels_public

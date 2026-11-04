@@ -4,6 +4,7 @@ use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, ArrayView1, ArrayView2, Axis};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 
 use crate::quantile::{check_alpha, lower_quantile, needed};
 
@@ -15,7 +16,7 @@ use crate::quantile::{check_alpha, lower_quantile, needed};
 ///
 /// To calibrate an already fitted model on your own calibration data, use
 /// [`conformalize`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitConformalRegressor<E> {
     pub estimator: E,
     /// Fraction of the rows held out for calibration, in (0, 1).
@@ -61,22 +62,8 @@ where
 
     fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
         check_xy(x, y)?;
-        if !(self.calibration_size > 0.0 && self.calibration_size < 1.0) {
-            return Err(RustMlError::InvalidParameter(format!(
-                "calibration_size must lie in (0, 1), got {}",
-                self.calibration_size
-            )));
-        }
-        let n = x.nrows();
-        let n_cal = ((self.calibration_size * n as f64).ceil() as usize).min(n - 1);
-        if n_cal == 0 || n < 2 {
-            return Err(RustMlError::InvalidParameter(format!(
-                "{n} rows are too few for a train / calibration split"
-            )));
-        }
-        let mut perm: Vec<usize> = (0..n).collect();
-        perm.shuffle(&mut rand::rngs::StdRng::seed_from_u64(self.seed));
-        let (cal, train) = perm.split_at(n_cal);
+        let (train, cal) = split_indices(x.nrows(), self.calibration_size, self.seed)?;
+        let (train, cal) = (&train[..], &cal[..]);
         let model = self.estimator.fit_view(
             x.select(Axis(0), train).view(),
             y.select(Axis(0), train).view(),
@@ -119,7 +106,7 @@ pub fn conformalize<F: Float, M: Predict<F>>(
 }
 
 /// A model plus its calibration scores.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedSplitConformalRegressor<M, F> {
     model: M,
     scores: Vec<F>,
@@ -189,4 +176,28 @@ pub(crate) fn check_xy<F: Float>(x: ArrayView2<F>, y: ArrayView1<F>) -> Result<(
         return Err(RustMlError::EmptyInput("no rows".into()));
     }
     Ok(())
+}
+
+/// Seeded random split of `0..n` into `(train, held_out)`, with
+/// `⌈fraction · n⌉` held-out rows (at least one row on each side).
+pub(crate) fn split_indices(
+    n: usize,
+    fraction: f64,
+    seed: u64,
+) -> Result<(Vec<usize>, Vec<usize>)> {
+    if !(fraction > 0.0 && fraction < 1.0) {
+        return Err(RustMlError::InvalidParameter(format!(
+            "split fraction must lie in (0, 1), got {fraction}"
+        )));
+    }
+    let n_out = ((fraction * n as f64).ceil() as usize).min(n.saturating_sub(1));
+    if n_out == 0 || n < 2 {
+        return Err(RustMlError::InvalidParameter(format!(
+            "{n} rows are too few to split"
+        )));
+    }
+    let mut perm: Vec<usize> = (0..n).collect();
+    perm.shuffle(&mut rand::rngs::StdRng::seed_from_u64(seed));
+    let train = perm.split_off(n_out);
+    Ok((train, perm))
 }

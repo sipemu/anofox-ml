@@ -6,6 +6,133 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Fixed
+
+- `KMeans` centroids and inertia, and the exact t-SNE gradient, no longer
+  depend on the rayon thread count (#108): block partials are summed in
+  block order instead of with rayon's `reduce` / `sum`.
+
+### Quantile loss for histogram gradient boosting
+
+- `LgbmObjective::Quantile { alpha }` (LightGBM's `objective="quantile"`):
+  pinball-loss gradients, and leaf outputs and the baseline refit to the
+  `alpha`-percentile of the residuals (the L1 objective's median refit,
+  generalised). The regressor now rejects classification objectives with
+  an error instead of panicking.
+- `HistGradientBoostingRegressor` gains sklearn's `loss`
+  (`SquaredError` / `AbsoluteError` / `Quantile`) and `quantile`
+  (`with_loss`, `with_quantile`); Python: `loss="quantile", quantile=q`.
+  This closes the gap noted in #93: HGB can be the estimator of a
+  `ConformalizedQuantileRegressor` (registry and Python).
+
+### Conformal predictors in the registry (#93, milestone 4)
+
+- `DynModel::predict_interval(x, alpha)` (`n × 2`: lower, upper) and
+  `DynModel::predict_set(x, alpha)` (`n × classes`, 1 = in the set). Both
+  default to "unsupported", like the other methods. `Out` derives `Debug`.
+- `RegistryEstimator { kind, params }` implements `Fit<f64>` for any
+  registered estimator. Its `RegistryFitted` implements `Predict` /
+  `PredictProba` and serialises as `{kind, bytes}`, so the typed generic
+  wrappers can use estimators chosen by name.
+- New kinds `SplitConformalRegressor`, `CrossConformalRegressor`,
+  `NormalizedConformalRegressor` and `SplitConformalClassifier`. Their
+  parameters are `estimator` + `estimator_params` (plus
+  `residual_estimator` / `residual_estimator_params` for the normalised
+  one) and the wrapper's own settings, e.g. `{"estimator":
+  "HistGradientBoostingRegressor", "estimator_params": {"max_iter": 200},
+  "calibration_size": 0.25, "seed": 0}`. The default estimators are MAPIE's:
+  `OlsRegressor` / `LogisticRegressor`. The results match the typed
+  wrappers exactly.
+- `ConformalizedQuantileRegressor` (CQR) kind over `QuantileRegressor`
+  (default, as in MAPIE), `GradientBoostingRegressor` or
+  `PerpetualRegressor`; the registry sets each kind's quantile parameter.
+  `alpha` is a fit parameter here; `predict_interval` with another `alpha`
+  is an error that asks for a refit.
+- `MondrianConformalRegressor` / `MondrianConformalClassifier` kinds
+  (group-conditional coverage). The registry `fit` has no group argument,
+  so the group id of each row is read from column `group_column` of `x`
+  (non-negative integers) at fit and predict time; the estimator sees the
+  other columns.
+- `SplitConformalClassifier::fit_with_groups`, the classifier counterpart
+  of `MondrianConformalRegressor::fit_with_groups`.
+- Python: `anofox_ml_python.conformal` with sklearn-style
+  `SplitConformalRegressor`, `CrossConformalRegressor`,
+  `NormalizedConformalRegressor`, `ConformalizedQuantileRegressor`,
+  `MondrianConformalRegressor`, `SplitConformalClassifier` and
+  `MondrianConformalClassifier`. They wrap any of the package's
+  regressors / classifiers (`estimator=None`: MAPIE's linear defaults);
+  `predict_interval(X, alpha)` returns `(n, 2)` bounds, `predict_set(X,
+  alpha)` an `(n, n_classes)` boolean array; the Mondrian classes take
+  `groups` at fit and predict. `_native.Model` gains `predict_interval` /
+  `predict_set`.
+- `anofox-ml-registry` now depends on `anofox-ml-conformal`, and
+  `scripts/publish.sh` publishes conformal first.
+
+### PerpetualBooster (optional `perpetual` feature)
+
+- `PerpetualRegressor` / `PerpetualClassifier` in `anofox-ml-ensemble`
+  wrap the [perpetual](https://crates.io/crates/perpetual) crate
+  (Apache-2.0, pinned to `=3.0.0-rc.2`): gradient boosting tuned by a
+  single `budget` instead of a learning rate, depth and number of rounds,
+  with native missing-value handling. Regression objectives through
+  `PerpetualObjective` (squared, absolute, Huber, quantile, Poisson, Gamma,
+  Tweedie, ...); binary and multiclass classification with any class labels;
+  `sample_weight`. Fitted models persist in perpetual's own JSON format.
+- Registered as `PerpetualRegressor` / `PerpetualClassifier` in
+  `anofox-ml-registry`, with flat JSON parameters (`{"budget": 1.0,
+  "objective": "SquaredLoss"}`).
+- Off by default: enable `perpetual` on `anofox-ml`, `anofox-ml-ensemble`
+  or `anofox-ml-registry`. It needs Rust 1.88 (perpetual's dependencies),
+  above the workspace MSRV of 1.87. Its 2.x releases need nightly Rust,
+  which is why the release candidate is used.
+- The `registry!` macro accepts attributes such as `#[cfg(...)]` per entry.
+
+### Conformal prediction sets for classifiers (#93)
+
+- `SplitConformalClassifier` / `conformalize_classifier`: prediction sets
+  that contain the true class with probability `≥ 1 − α`, with the LAC
+  score (smallest sets) or APS (sets grow on hard inputs) in three modes:
+  `Include` (conservative), `Exclude` (smaller sets) and `Randomized`
+  (coverage `1 − α` on average, seeded). `predict_set` returns an
+  `n × classes` membership matrix, `predict_set_labels` the labels;
+  `allow_full_sets` instead of an error for too few calibration rows.
+- Matches MAPIE 1.6.0's `SplitConformalClassifier` exactly on every set
+  (LAC and APS include / exclude, three levels); seeded tests check
+  coverage, set size and adaptivity.
+- New metrics `set_coverage_score` and `mean_set_size`.
+- RAPS (`ClassificationScore::Raps(RapsParams)`, Angelopoulos et al.
+  2021): APS with a penalty on classes ranked after `k_reg`, for smaller
+  sets when the model spreads mass over many unlikely classes. `k_reg` and
+  `lambda` are fixed or tuned per `alpha` on held-out tuning rows
+  (`tuning_size`, or `conformalize_raps` with your own split). Matches
+  MAPIE 1.6.0 exactly with λ pinned; MAPIE's own λ search has a bug (it
+  uses λ in place of k*), which we do not reproduce.
+- Mondrian (group-conditional) conformal: `MondrianConformalRegressor`
+  (`fit_with_groups`) / `conformalize_mondrian` for split regression, and
+  `conformalize_classifier_mondrian` + `predict_set_mondrian` for LAC /
+  APS / RAPS sets. The threshold is calibrated within each group (store,
+  segment, sensor), so coverage holds per group, not only on average.
+- Every fitted conformal model (split, cross, CQR, normalised, Mondrian,
+  classifiers) implements `Serialize` / `Deserialize` and round-trips
+  through the binary persistence format with identical intervals and sets
+  (when its base model is serializable).
+
+### Conformal prediction: CQR and normalised scores (#93)
+
+- `ConformalizedQuantileRegressor` (conformalized quantile regression,
+  Romano et al. 2019): quantile models at `α/2`, `1 − α/2` and the median
+  are built by a closure (e.g. `GradientBoostingRegressor` with
+  `GbLoss::Quantile`), and their band is corrected by the conformal
+  quantile of the calibration errors, per bound (default) or symmetric.
+  `conformalize_quantiles` calibrates three models you fitted yourself.
+- `NormalizedConformalRegressor`: split conformal with residual-normalised
+  scores; a second model learns `log |y − ŷ|`, so interval widths follow
+  the local error scale. `fit_residual_model` and `conformalize_normalized`
+  for prefit models.
+- Both match MAPIE 1.6.0 to 1e-9 (5 new golden cases); seeded tests check
+  coverage and that the widths track heteroscedastic noise.
+- New metric `mean_pinball_loss` (sklearn's).
+
 ### Hyperparameter search with rustuna (#92)
 
 - New crate **`anofox-ml-tune`** (not published while

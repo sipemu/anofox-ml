@@ -35,6 +35,10 @@ jobs:
           toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude anofox-ml-python
+      # The optional PerpetualBooster wrapper needs Rust 1.88, so it is
+      # tested on stable only.
+      - if: matrix.rust == 'stable'
+        run: cargo test -p anofox-ml-ensemble -p anofox-ml-registry -p anofox-ml --features perpetual --lib
 
   clippy:
     name: Clippy
@@ -52,7 +56,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo clippy --workspace --exclude anofox-ml-python --all-targets -- \
+          cargo clippy --workspace --exclude anofox-ml-python --all-targets --features anofox-ml/perpetual,anofox-ml-registry/perpetual -- \
             -A clippy::all \
             -W clippy::correctness \
             -W clippy::suspicious \
@@ -95,10 +99,11 @@ jobs:
     name: Golden Data Sync
     runs-on: ubuntu-latest
     needs: sklearn-version
-    # Advisory: the diff check trips on float-determinism differences
-    # between developer machines (different BLAS / CPU paths) and the
-    # CI runner. Keep the job so we still surface accidental drift, but
-    # don't fail the workflow on bit-level mismatches.
+    # Regenerates every golden fixture with the pinned sklearn / MAPIE and
+    # compares it with the committed file. Numbers are compared with a
+    # tolerance (rtol 1e-9), so BLAS / CPU noise between machines passes
+    # and only real drift or structural changes are reported. Advisory
+    # until it has run clean for a while.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -106,9 +111,17 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r test_harness/requirements.txt
-      - run: python test_harness/generate_golden_data.py
-      - name: Check fixtures unchanged (advisory)
-        run: git diff --exit-code crates/anofox-ml/tests/golden_data/
+      - name: Regenerate every fixture
+        run: |
+          python test_harness/generate_golden_data.py
+          for gen in test_harness/generators/gen_*.py; do
+            grep -q "__main__" "$gen" && python "$gen"
+          done
+      - name: Check fixtures for drift (advisory)
+        run: |
+          python test_harness/check_fixture_drift.py \
+            crates/anofox-ml/tests/golden_data \
+            crates/anofox-ml-conformal/tests/golden_data
 
   python-bindings:
     name: Python Bindings
@@ -133,37 +146,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench --workspace --exclude anofox-ml-python --no-run
-
-  codspeed:
-    name: Codspeed perf tracking
-    runs-on: ubuntu-latest
-    # Tracks per-commit perf via codspeed.io. codspeed's simulation
-    # instrument counts CPU instructions via cachegrind instead of
-    # wall-time, so results are deterministic across noisy GH runners —
-    # a 1 % drift in this number is a real algorithmic change, not a
-    # hot/cold cache. Authentication is handled via GitHub OIDC, so no
-    # CODSPEED_TOKEN secret is required.
-    permissions:
-      contents: read
-      id-token: write
-    if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/master')
-      || (github.event_name == 'pull_request')
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-codspeed
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-codspeed
-      - name: Build benchmarks under codspeed
-        run: cargo codspeed build -p anofox-ml
-      - name: Run benchmarks
-        uses: CodSpeedHQ/action@v4
-        with:
-          mode: simulation
-          run: cargo codspeed run -p anofox-ml
 
   coverage:
     name: Coverage

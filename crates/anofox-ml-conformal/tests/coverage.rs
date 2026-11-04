@@ -220,3 +220,122 @@ fn invalid_inputs_are_rejected() {
         .fit(&x, &y)
         .is_err());
 }
+
+/// Mean coverage and the correlation between interval width and the noise
+/// scale |x0| (adaptive methods should track it).
+fn coverage_and_adaptivity(
+    reps: u64,
+    fit_interval: impl Fn(&Array2<f64>, &Array1<f64>, &Array2<f64>) -> (Array1<f64>, Array1<f64>),
+) -> (f64, f64) {
+    let mut cov = 0.0;
+    let mut corr = 0.0;
+    for r in 0..reps {
+        let (x, y) = data(300, 100 + 2 * r);
+        let (xt, yt) = data(400, 101 + 2 * r);
+        let (lo, hi) = fit_interval(&x, &y, &xt);
+        cov += coverage(&yt, &lo, &hi);
+        let w = &hi - &lo;
+        let s = xt.column(0).mapv(f64::abs);
+        let (mw, ms) = (w.mean().unwrap(), s.mean().unwrap());
+        let cv: f64 = w.iter().zip(&s).map(|(a, b)| (a - mw) * (b - ms)).sum();
+        let (vw, vs): (f64, f64) = (
+            w.iter().map(|a| (a - mw).powi(2)).sum(),
+            s.iter().map(|b| (b - ms).powi(2)).sum(),
+        );
+        corr += cv / (vw * vs).sqrt();
+    }
+    (cov / reps as f64, corr / reps as f64)
+}
+
+#[test]
+fn cqr_covers_and_adapts_to_the_noise() {
+    use anofox_ml_conformal::ConformalizedQuantileRegressor;
+    use anofox_ml_ensemble::{GbLoss, GradientBoostingRegressor};
+    let alpha = 0.2;
+    for symmetric in [false, true] {
+        let (cov, corr) = coverage_and_adaptivity(20, |x, y, xt| {
+            ConformalizedQuantileRegressor::new(alpha, |q| {
+                GradientBoostingRegressor::new()
+                    .with_loss(GbLoss::Quantile)
+                    .with_alpha(q)
+                    .with_n_estimators(60)
+                    .with_max_depth(Some(3))
+            })
+            .with_calibration_size(0.3)
+            .with_symmetric_correction(symmetric)
+            .fit(x, y)
+            .unwrap()
+            .predict_interval(xt.view())
+            .unwrap()
+        });
+        // 20 reps x 400 test rows: the mean is close to 1 - alpha.
+        assert!(
+            (cov - (1.0 - alpha)).abs() < 0.04,
+            "symmetric={symmetric}: {cov}"
+        );
+        assert!(
+            corr > 0.3,
+            "symmetric={symmetric}: width/noise correlation {corr}"
+        );
+    }
+}
+
+#[test]
+fn normalized_scores_cover_and_adapt_to_the_noise() {
+    use anofox_ml_conformal::NormalizedConformalRegressor;
+    let alpha = 0.1;
+    let tree = DecisionTreeRegressor {
+        max_depth: Some(3),
+        ..Default::default()
+    };
+    let (cov, corr) = coverage_and_adaptivity(30, |x, y, xt| {
+        NormalizedConformalRegressor::new(OlsRegressor::new(), tree.clone())
+            .fit(x, y)
+            .unwrap()
+            .predict_interval(xt.view(), alpha)
+            .unwrap()
+    });
+    assert!((cov - (1.0 - alpha)).abs() < 0.03, "{cov}");
+    assert!(corr > 0.3, "width/noise correlation {corr}");
+    // Plain split conformal has constant width (up to rounding): no correlation.
+    let (_, flat) = coverage_and_adaptivity(5, |x, y, xt| {
+        SplitConformalRegressor::new(OlsRegressor::new())
+            .fit(x, y)
+            .unwrap()
+            .predict_interval(xt.view(), alpha)
+            .unwrap()
+    });
+    assert!(flat.is_nan() || flat.abs() < 0.05, "{flat}");
+}
+
+#[test]
+fn cqr_and_normalized_reject_bad_input() {
+    use anofox_ml_conformal::{
+        conformalize_quantiles, ConformalizedQuantileRegressor, NormalizedConformalRegressor,
+    };
+    let (x, y) = data(40, 11);
+    let make = |_q: f64| OlsRegressor::new();
+    assert!(ConformalizedQuantileRegressor::new(0.0, make)
+        .fit(&x, &y)
+        .is_err());
+    let m = || OlsRegressor::new().fit(&x, &y).unwrap();
+    let (xc, yc) = data(5, 12);
+    let fitted = conformalize_quantiles(m(), m(), m(), xc.view(), yc.view(), 0.1).unwrap();
+    assert!(fitted
+        .predict_interval(x.view())
+        .unwrap_err()
+        .to_string()
+        .contains("too few"));
+    assert!(fitted
+        .with_allow_infinite_bounds(true)
+        .predict_interval(x.view())
+        .unwrap()
+        .0[0]
+        .is_infinite());
+    assert!(
+        NormalizedConformalRegressor::new(OlsRegressor::new(), OlsRegressor::new())
+            .with_residual_size(1.0)
+            .fit(&x, &y)
+            .is_err()
+    );
+}

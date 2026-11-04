@@ -73,6 +73,68 @@ pub fn interval_score<F: Float>(
     Ok(sum / F::from_usize(y.len()).unwrap())
 }
 
+/// Mean pinball (quantile) loss of predictions of the `alpha` quantile
+/// (sklearn `mean_pinball_loss`): `alpha · (y − q)` when `y ≥ q`,
+/// `(1 − alpha) · (q − y)` otherwise.
+pub fn mean_pinball_loss<F: Float>(y: &Array1<F>, pred: &Array1<F>, alpha: F) -> Result<F> {
+    check(y, pred, pred)?;
+    if !(alpha >= F::zero() && alpha <= F::one()) {
+        return Err(RustMlError::InvalidParameter(
+            "alpha must lie in [0, 1]".into(),
+        ));
+    }
+    let sum = y.iter().zip(pred.iter()).fold(F::zero(), |acc, (&t, &q)| {
+        let d = t - q;
+        acc + if d >= F::zero() {
+            alpha * d
+        } else {
+            (alpha - F::one()) * d
+        }
+    });
+    Ok(sum / F::from_usize(y.len()).unwrap())
+}
+
+/// Fraction of rows whose prediction set contains the true label
+/// (MAPIE's `classification_coverage_score`). `sets[[i, k]]` marks class
+/// `classes[k]` as in the set of row `i`.
+pub fn set_coverage_score<F: Float>(
+    y: &Array1<F>,
+    sets: &ndarray::Array2<bool>,
+    classes: &[F],
+) -> Result<F> {
+    if sets.nrows() != y.len() || sets.ncols() != classes.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "sets are {:?} for {} rows and {} classes",
+            sets.dim(),
+            y.len(),
+            classes.len()
+        )));
+    }
+    if y.is_empty() {
+        return Err(RustMlError::EmptyInput("input arrays are empty".into()));
+    }
+    let covered = y
+        .iter()
+        .zip(sets.rows())
+        .filter(|(&label, row)| {
+            classes
+                .iter()
+                .position(|&c| c == label)
+                .is_some_and(|k| row[k])
+        })
+        .count();
+    Ok(F::from_usize(covered).unwrap() / F::from_usize(y.len()).unwrap())
+}
+
+/// Mean number of classes per prediction set (MAPIE's
+/// `classification_mean_width_score`).
+pub fn mean_set_size(sets: &ndarray::Array2<bool>) -> Result<f64> {
+    if sets.nrows() == 0 {
+        return Err(RustMlError::EmptyInput("no prediction sets".into()));
+    }
+    Ok(sets.iter().filter(|&&b| b).count() as f64 / sets.nrows() as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +154,36 @@ mod tests {
         );
         assert!(coverage_score(&y, &lo, &array![1.0]).is_err());
         assert!(interval_score(&y, &lo, &hi, 0.0).is_err());
+    }
+
+    #[test]
+    fn set_metrics() {
+        let sets = ndarray::array![
+            [true, false, true],
+            [false, false, false],
+            [true, true, true]
+        ];
+        let classes = [0.0, 1.0, 2.0];
+        let y: Array1<f64> = array![2.0, 1.0, 1.0];
+        assert!((set_coverage_score(&y, &sets, &classes).unwrap() - 2.0 / 3.0).abs() < 1e-15);
+        assert_eq!(mean_set_size(&sets).unwrap(), 5.0 / 3.0);
+        // A label outside the classes is never covered.
+        assert_eq!(
+            set_coverage_score(&array![7.0, 1.0, 1.0], &sets, &classes).unwrap(),
+            1.0 / 3.0
+        );
+        assert!(set_coverage_score(&array![1.0], &sets, &classes).is_err());
+    }
+
+    #[test]
+    fn pinball_loss_matches_sklearn() {
+        // sklearn.metrics.mean_pinball_loss([1, 2, 3, 10], [0, 2, 3.5, 8], alpha=0.9)
+        let y = array![1.0, 2.0, 3.0, 10.0];
+        let q = array![0.0, 2.0, 3.5, 8.0];
+        let expected: f64 = (0.9 * 1.0 + 0.0 + 0.1 * 0.5 + 0.9 * 2.0) / 4.0;
+        assert!((mean_pinball_loss(&y, &q, 0.9).unwrap() - expected).abs() < 1e-15);
+        // alpha = 0.5 is half the mean absolute error
+        assert_eq!(mean_pinball_loss(&y, &q, 0.5).unwrap(), 0.5 * 3.5 / 4.0);
+        assert!(mean_pinball_loss(&y, &q, 1.5).is_err());
     }
 }

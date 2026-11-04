@@ -3,12 +3,13 @@
 use anofox_ml_core::utils::{shuffled_k_fold, CvSplit};
 use anofox_ml_core::{Fit, Float, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use serde::{Deserialize, Serialize};
 
 use crate::quantile::{check_alpha, lower_quantile};
 use crate::split::{check_xy, too_few};
 
 /// How the fold models become an interval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Default)]
 pub enum CrossMethod {
     /// CV+ (jackknife+ with leave-one-out splits): quantiles of each fold
     /// model's prediction ∓ the out-of-fold residuals of its own fold
@@ -28,7 +29,7 @@ pub enum CrossMethod {
 
 /// Point prediction of the fitted cross-conformal regressor (MAPIE's
 /// `aggregate_point_predictions`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Default)]
 pub enum PointPrediction {
     /// Mean of the fold models, each weighted by its fold's size.
     #[default]
@@ -46,7 +47,7 @@ pub enum PointPrediction {
 /// conformity score. Jackknife+ is [`CrossMethod::Plus`] with
 /// leave-one-out splits ([`fit_with_splits`](Self::fit_with_splits) with
 /// `anofox_ml_core::utils::leave_one_out`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossConformalRegressor<E> {
     pub estimator: E,
     /// Number of folds (shuffled K-fold); see also
@@ -179,7 +180,7 @@ where
 }
 
 /// Full-data model, fold models and out-of-fold residuals.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedCrossConformalRegressor<M, F> {
     full: M,
     folds: Vec<M>,

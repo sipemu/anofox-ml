@@ -6,7 +6,7 @@ unchanged (``get_params`` / ``set_params`` / ``sklearn.base.clone`` work),
 and the heavy work runs in Rust with the GIL released.
 """
 
-from . import metrics, model_selection
+from . import conformal, metrics, model_selection
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
     DecisionTreeClassifier,
@@ -128,7 +128,8 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
-    "BaseEstimator", "NotFittedError", "metrics", "model_selection", "train_test_split", "TuneSearchCV",
+    "BaseEstimator", "NotFittedError", "conformal", "metrics", "model_selection", "train_test_split",
+    "TuneSearchCV",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",
     "RandomForestClassifier",

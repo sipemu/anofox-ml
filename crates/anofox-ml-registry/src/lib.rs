@@ -28,9 +28,11 @@
 //! assert!(loaded.is_fitted());
 //! ```
 
+mod estimator;
 mod model;
 mod registry;
 
+pub use estimator::{RegistryEstimator, RegistryFitted};
 pub use model::{DynModel, Out};
 pub use registry::{default_params, kinds, load, make};
 
@@ -70,5 +72,363 @@ mod tests {
             (super::Out::A1(a), super::Out::A1(b)) => assert_eq!(a, b),
             _ => panic!("expected 1-D predictions"),
         }
+    }
+}
+
+#[cfg(all(test, feature = "perpetual"))]
+mod perpetual_tests {
+    #[test]
+    fn perpetual_as_a_cqr_estimator() {
+        let x = ndarray::Array2::from_shape_fn((200, 2), |(i, j)| ((i * (j + 2)) % 23) as f64);
+        let y = x.column(0).mapv(|v| 0.5 * v) - &x.column(1);
+        let params = serde_json::json!({
+            "estimator": "PerpetualRegressor",
+            "estimator_params": { "num_threads": 1 },
+            "alpha": 0.2,
+        });
+        let mut model = super::make("ConformalizedQuantileRegressor", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        match model.predict_interval(x.view(), 0.2).unwrap() {
+            super::Out::A2(iv) => {
+                assert_eq!(iv.dim(), (200, 2));
+                assert!(iv.rows().into_iter().all(|r| r[0] <= r[1]));
+            }
+            _ => panic!("expected n × 2 intervals"),
+        }
+    }
+
+    #[test]
+    fn perpetual_inside_a_conformal_kind() {
+        let x = ndarray::Array2::from_shape_fn((160, 2), |(i, j)| ((i * (j + 2)) % 23) as f64);
+        let y = x.column(0).mapv(|v| 0.5 * v) - &x.column(1);
+        let params = serde_json::json!({
+            "estimator": "PerpetualRegressor",
+            "estimator_params": { "budget": 0.5, "num_threads": 1 },
+        });
+        let mut model = super::make("SplitConformalRegressor", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let loaded = super::load("SplitConformalRegressor", &model.to_bytes().unwrap()).unwrap();
+        match (
+            model.predict_interval(x.view(), 0.1).unwrap(),
+            loaded.predict_interval(x.view(), 0.1).unwrap(),
+        ) {
+            (super::Out::A2(a), super::Out::A2(b)) => {
+                assert_eq!(a.dim(), (160, 2));
+                assert_eq!(a, b);
+            }
+            _ => panic!("expected n × 2 intervals"),
+        }
+    }
+
+    #[test]
+    fn perpetual_kinds_fit_predict_and_round_trip() {
+        let x = ndarray::Array2::from_shape_fn((120, 2), |(i, j)| ((i * (j + 2)) % 23) as f64);
+        let y_reg = x.column(0).mapv(|v| 0.5 * v) - &x.column(1);
+        let y_clf = x.column(0).mapv(|v| if v > 11.0 { 1.0 } else { 0.0 });
+        for (kind, y) in [
+            ("PerpetualRegressor", &y_reg),
+            ("PerpetualClassifier", &y_clf),
+        ] {
+            assert!(super::kinds().contains(&kind));
+            let params = serde_json::json!({ "budget": 1.0, "num_threads": 1 });
+            let mut model = super::make(kind, &params).unwrap();
+            model.fit(x.view(), Some(y.view()), None).unwrap();
+            let loaded = super::load(kind, &model.to_bytes().unwrap()).unwrap();
+            assert_eq!(loaded.params().unwrap()["budget"], 1.0);
+            match (
+                model.predict(x.view()).unwrap(),
+                loaded.predict(x.view()).unwrap(),
+            ) {
+                (super::Out::A1(a), super::Out::A1(b)) => assert_eq!(a, b),
+                _ => panic!("expected 1-D predictions"),
+            }
+        }
+        assert!(super::make(
+            "PerpetualRegressor",
+            &serde_json::json!({ "learning_rate": 0.1 })
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod conformal_tests {
+    use super::Out;
+    use anofox_ml_core::Fit;
+    use ndarray::{Array1, Array2};
+    use serde_json::json;
+
+    fn regression() -> (Array2<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((200, 2), |(i, j)| ((i * (j + 3)) % 37) as f64 / 37.0);
+        let y = x
+            .rows()
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| 2.0 * r[0] - r[1] + ((i * 17) % 11) as f64 / 11.0)
+            .collect();
+        (x, y)
+    }
+
+    fn a2(out: Out) -> Array2<f64> {
+        match out {
+            Out::A2(a) => a,
+            Out::A1(_) => panic!("expected a 2-D output"),
+        }
+    }
+
+    #[test]
+    fn conformal_regressor_kinds_give_intervals_and_round_trip() {
+        let (x, y) = regression();
+        for (kind, params) in [
+            (
+                "SplitConformalRegressor",
+                json!({ "estimator": "DecisionTreeRegressor", "estimator_params": { "max_depth": 3 } }),
+            ),
+            (
+                "CrossConformalRegressor",
+                json!({ "estimator": "RidgeRegressor", "cv": 4, "method": "MinMax" }),
+            ),
+            (
+                "NormalizedConformalRegressor",
+                json!({ "residual_estimator": "KnnRegressor" }),
+            ),
+        ] {
+            let mut model = super::make(kind, &params).unwrap();
+            assert!(model.capabilities().contains(&"predict_interval"), "{kind}");
+            model.fit(x.view(), Some(y.view()), None).unwrap();
+            let iv = a2(model.predict_interval(x.view(), 0.1).unwrap());
+            assert_eq!(iv.dim(), (200, 2), "{kind}");
+            assert!(iv.rows().into_iter().all(|r| r[0] <= r[1]), "{kind}");
+            let loaded = super::load(kind, &model.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                iv,
+                a2(loaded.predict_interval(x.view(), 0.1).unwrap()),
+                "{kind}"
+            );
+            // Narrower at a larger alpha.
+            let iv5 = a2(model.predict_interval(x.view(), 0.5).unwrap());
+            let width = |a: &Array2<f64>| (&a.column(1) - &a.column(0)).sum();
+            assert!(width(&iv5) <= width(&iv), "{kind}");
+            assert!(model.predict_set(x.view(), 0.1).is_err());
+        }
+    }
+
+    #[test]
+    fn registry_conformal_matches_the_typed_wrapper() {
+        let (x, y) = regression();
+        let params = json!({ "estimator": "KnnRegressor", "calibration_size": 0.3, "seed": 7 });
+        let mut model = super::make("SplitConformalRegressor", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let typed = anofox_ml_conformal::SplitConformalRegressor::new(
+            anofox_ml_neighbors::KnnRegressor::default(),
+        )
+        .with_calibration_size(0.3)
+        .with_seed(7)
+        .fit(&x, &y)
+        .unwrap();
+        let (lo, hi) = typed.predict_interval(x.view(), 0.2).unwrap();
+        let iv = a2(model.predict_interval(x.view(), 0.2).unwrap());
+        assert_eq!(iv.column(0), lo);
+        assert_eq!(iv.column(1), hi);
+    }
+
+    #[test]
+    fn conformal_classifier_kind_gives_sets() {
+        let x = Array2::from_shape_fn((240, 2), |(i, j)| ((i * (j + 5)) % 41) as f64 / 41.0);
+        let y: Array1<f64> = x.column(0).mapv(|v| {
+            if v < 0.33 {
+                0.0
+            } else if v < 0.66 {
+                1.0
+            } else {
+                2.0
+            }
+        });
+        for score in [json!("Lac"), json!({ "Aps": "Include" })] {
+            let params = json!({ "estimator": "RandomForestClassifier", "score": score });
+            let mut model = super::make("SplitConformalClassifier", &params).unwrap();
+            model.fit(x.view(), Some(y.view()), None).unwrap();
+            let sets = a2(model.predict_set(x.view(), 0.1).unwrap());
+            assert_eq!(sets.dim(), (240, 3));
+            assert!(sets.iter().all(|&v| v == 0.0 || v == 1.0));
+            let covered = y
+                .iter()
+                .enumerate()
+                .filter(|&(i, &c)| sets[[i, c as usize]] == 1.0)
+                .count();
+            assert!(covered as f64 / 240.0 >= 0.85, "{score}: {covered}");
+            assert_eq!(a2(model.predict_proba(x.view()).unwrap()).dim(), (240, 3));
+            let loaded =
+                super::load("SplitConformalClassifier", &model.to_bytes().unwrap()).unwrap();
+            assert_eq!(sets, a2(loaded.predict_set(x.view(), 0.1).unwrap()));
+        }
+    }
+
+    #[test]
+    fn cqr_kind_with_each_quantile_estimator() {
+        let (x, y) = regression();
+        for (est, params) in [
+            ("QuantileRegressor", json!({})),
+            (
+                "GradientBoostingRegressor",
+                json!({ "n_estimators": 30, "max_depth": 2 }),
+            ),
+            (
+                "HistGradientBoostingRegressor",
+                json!({ "n_estimators": 30 }),
+            ),
+        ] {
+            let mut model = super::make(
+                "ConformalizedQuantileRegressor",
+                &json!({ "estimator": est, "estimator_params": params, "alpha": 0.2 }),
+            )
+            .unwrap();
+            model.fit(x.view(), Some(y.view()), None).unwrap();
+            let iv = a2(model.predict_interval(x.view(), 0.2).unwrap());
+            assert_eq!(iv.dim(), (200, 2), "{est}");
+            assert!(iv.rows().into_iter().all(|r| r[0] <= r[1]), "{est}");
+            let covered = (0..200)
+                .filter(|&i| iv[[i, 0]] <= y[i] && y[i] <= iv[[i, 1]])
+                .count();
+            assert!(covered >= 150, "{est}: {covered} of 200");
+            let err = model
+                .predict_interval(x.view(), 0.1)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("refit"), "{err}");
+            let loaded =
+                super::load("ConformalizedQuantileRegressor", &model.to_bytes().unwrap()).unwrap();
+            assert_eq!(iv, a2(loaded.predict_interval(x.view(), 0.2).unwrap()));
+        }
+        let mut bad = super::make(
+            "ConformalizedQuantileRegressor",
+            &json!({ "estimator": "RidgeRegressor" }),
+        )
+        .unwrap();
+        let err = bad
+            .fit(x.view(), Some(y.view()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("RidgeRegressor") && err.contains("supported"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn cqr_matches_the_typed_wrapper() {
+        let (x, y) = regression();
+        let mut model = super::make(
+            "ConformalizedQuantileRegressor",
+            &json!({ "alpha": 0.2, "seed": 3 }),
+        )
+        .unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let typed = anofox_ml_conformal::ConformalizedQuantileRegressor::new(0.2, |q| {
+            anofox_ml_regression::QuantileRegressor::new(q)
+        })
+        .with_seed(3)
+        .fit(&x, &y)
+        .unwrap();
+        let (lo, hi) = typed.predict_interval(x.view()).unwrap();
+        let iv = a2(model.predict_interval(x.view(), 0.2).unwrap());
+        assert_eq!(iv.column(0), lo);
+        assert_eq!(iv.column(1), hi);
+    }
+
+    /// Column 0 is the group (0 or 1); group 1 is much noisier.
+    fn grouped_regression() -> (Array2<f64>, Array1<f64>) {
+        let n = 400;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => (i % 2) as f64,
+            _ => ((i * (j + 3)) % 37) as f64 / 37.0,
+        });
+        let y = (0..n)
+            .map(|i| {
+                let noise = ((i * 7919) % 101) as f64 / 101.0 - 0.5;
+                x[[i, 1]] - x[[i, 2]] + noise * if i % 2 == 1 { 4.0 } else { 0.2 }
+            })
+            .collect();
+        (x, y)
+    }
+
+    #[test]
+    fn mondrian_regressor_kind_widens_the_noisy_group() {
+        let (x, y) = grouped_regression();
+        let params =
+            json!({ "estimator": "OlsRegressor", "group_column": 0, "calibration_size": 0.5 });
+        let mut model = super::make("MondrianConformalRegressor", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let iv = a2(model.predict_interval(x.view(), 0.1).unwrap());
+        let width = |i: usize| iv[[i, 1]] - iv[[i, 0]];
+        assert!(width(1) > 5.0 * width(0), "{} vs {}", width(1), width(0));
+        let loaded = super::load("MondrianConformalRegressor", &model.to_bytes().unwrap()).unwrap();
+        assert_eq!(iv, a2(loaded.predict_interval(x.view(), 0.1).unwrap()));
+        // Group ids must be non-negative integers, and the column must exist.
+        let mut bad = x.clone();
+        bad[[0, 0]] = 0.5;
+        assert!(model.predict_interval(bad.view(), 0.1).is_err());
+        let mut out_of_range =
+            super::make("MondrianConformalRegressor", &json!({ "group_column": 9 })).unwrap();
+        let err = out_of_range
+            .fit(x.view(), Some(y.view()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("group_column"), "{err}");
+    }
+
+    #[test]
+    fn mondrian_classifier_kind_gives_sets_per_group() {
+        let n = 400;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            2 => (i % 3) as f64,
+            _ => ((i * (j + 5)) % 41) as f64 / 41.0,
+        });
+        let y: Array1<f64> = x.column(0).mapv(|v| {
+            if v < 0.33 {
+                0.0
+            } else if v < 0.66 {
+                1.0
+            } else {
+                2.0
+            }
+        });
+        let params = json!({ "estimator": "RandomForestClassifier", "group_column": 2 });
+        let mut model = super::make("MondrianConformalClassifier", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let sets = a2(model.predict_set(x.view(), 0.2).unwrap());
+        assert_eq!(sets.dim(), (n, 3));
+        let covered = (0..n).filter(|&i| sets[[i, y[i] as usize]] == 1.0).count();
+        assert!(covered as f64 / n as f64 >= 0.75, "{covered}");
+        assert_eq!(a2(model.predict_proba(x.view()).unwrap()).dim(), (n, 3));
+        match model.predict(x.view()).unwrap() {
+            super::Out::A1(p) => assert_eq!(p.len(), n),
+            super::Out::A2(_) => panic!("expected 1-D predictions"),
+        }
+        let loaded =
+            super::load("MondrianConformalClassifier", &model.to_bytes().unwrap()).unwrap();
+        assert_eq!(sets, a2(loaded.predict_set(x.view(), 0.2).unwrap()));
+    }
+
+    #[test]
+    fn conformal_errors_name_the_problem() {
+        let (x, y) = regression();
+        let mut bad = super::make(
+            "SplitConformalRegressor",
+            &json!({ "estimator": "NoSuchModel" }),
+        )
+        .unwrap();
+        let err = bad
+            .fit(x.view(), Some(y.view()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NoSuchModel"), "{err}");
+        let mut plain = super::make("OlsRegressor", &json!({})).unwrap();
+        plain.fit(x.view(), Some(y.view()), None).unwrap();
+        let err = plain
+            .predict_interval(x.view(), 0.1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("predict_interval"), "{err}");
     }
 }

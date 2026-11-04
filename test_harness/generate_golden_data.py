@@ -24,7 +24,7 @@ from generators import (
 )
 
 OUTPUT_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "crates", "rustml", "tests", "golden_data"
+    os.path.dirname(__file__), "..", "crates", "anofox-ml", "tests", "golden_data"
 )
 
 
@@ -54,7 +54,7 @@ def main():
     write_json("feature_selection.json", gen_feature_selection.generate())
 
     print()
-    print("Done! All fixtures written to crates/rustml/tests/golden_data/")
+    print("Done! All fixtures written to crates/anofox-ml/tests/golden_data/")
 
 
 if __name__ == "__main__":

@@ -30,3 +30,8 @@ anofox-ml-gaussian-process = { workspace = true }
 anofox-ml-discriminant = { workspace = true }
 anofox-ml-linear = { workspace = true }
 anofox-ml-regression = { workspace = true }
+anofox-ml-conformal = { workspace = true }
+
+[features]
+# Registers PerpetualRegressor / PerpetualClassifier (needs Rust 1.88).
+perpetual = ["anofox-ml-ensemble/perpetual"]

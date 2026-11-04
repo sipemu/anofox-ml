@@ -10,6 +10,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Output of a prediction method that may be 1-D or 2-D.
+#[derive(Debug)]
 pub enum Out {
     A1(Array1<f64>),
     A2(Array2<f64>),
@@ -79,6 +80,17 @@ pub trait DynModel: Send + Sync {
     /// cross-fitted TargetEncoder output.
     fn embedding(&self) -> Result<Out> {
         Err(unsupported(self.kind(), "embedding"))
+    }
+    /// Prediction intervals at miscoverage `alpha`: an `n × 2` array of
+    /// lower and upper bounds (conformal regressors).
+    fn predict_interval(&self, _x: ArrayView2<f64>, _alpha: f64) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_interval"))
+    }
+    /// Prediction sets at miscoverage `alpha`: an `n × classes` array, 1 for
+    /// the classes in each row's set and 0 otherwise (conformal
+    /// classifiers).
+    fn predict_set(&self, _x: ArrayView2<f64>, _alpha: f64) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_set"))
     }
 }
 
@@ -173,24 +185,31 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// }
 /// ```
 ///
+/// An entry may carry attributes such as `#[cfg(feature = "...")]`; they
+/// apply to everything generated for it.
+///
 /// `fit` receives the config `c`, `x`, `y: Option<&Array1>` and
 /// `w: Option<&Array1>` and returns the fitted model; inside it `K` is the
 /// estimator's kind. Prediction methods receive the fitted model `m` and
-/// `x` and return `Result<Array1 | Array2>`; `labels` / `embedding`
-/// receive only `m`.
+/// `x` and return `Result<Array1 | Array2>`; `predict_interval` /
+/// `predict_set` also receive `alpha` (`|m, x, alpha|`); `labels` /
+/// `embedding` receive only `m`.
 macro_rules! registry {
     ($(
+        $(#[$meta:meta])*
         $kind:ident {
             config: $cfg:ty = $default:expr,
             fitted: $fitted:ty,
             fit: |$c:ident, $x:ident, $y:ident, $w:ident| $fit:expr,
-            $( $cap:ident : |$m:ident $(, $cx:ident)?| $body:expr ),* $(,)?
+            $( $cap:ident : |$m:ident $(, $cx:ident $(, $ca:ident)?)?| $body:expr ),* $(,)?
         }
     )*) => {
         $(
+            $(#[$meta])*
             #[allow(non_camel_case_types)]
             struct $kind($crate::model::Est<$cfg, $fitted>);
 
+            $(#[$meta])*
             impl $crate::model::DynModel for $kind {
                 fn kind(&self) -> &'static str {
                     stringify!($kind)
@@ -231,7 +250,7 @@ macro_rules! registry {
                     serde_json::to_string(f)
                         .map_err(|e| anofox_ml_core::RustMlError::Serialization(e.to_string()))
                 }
-                $( registry!(@cap $kind, $cap, $m $(, $cx)?, $body); )*
+                $( registry!(@cap $kind, $cap, $m $(, $cx $(, $ca)?)?, $body); )*
             }
         )*
 
@@ -242,6 +261,7 @@ macro_rules! registry {
         ) -> anofox_ml_core::Result<Box<dyn $crate::model::DynModel>> {
             match kind {
                 $(
+                    $(#[$meta])*
                     stringify!($kind) => {
                         let default: $cfg = $default;
                         let config = $crate::model::config_from_params(kind, default, params)?;
@@ -261,6 +281,7 @@ macro_rules! registry {
         ) -> anofox_ml_core::Result<Box<dyn $crate::model::DynModel>> {
             match kind {
                 $(
+                    $(#[$meta])*
                     stringify!($kind) => Ok(Box::new($kind(
                         $crate::model::Est::<$cfg, $fitted>::from_bytes(bytes)?,
                     ))),
@@ -275,6 +296,7 @@ macro_rules! registry {
         pub fn default_params(kind: &str) -> anofox_ml_core::Result<serde_json::Value> {
             match kind {
                 $(
+                    $(#[$meta])*
                     stringify!($kind) => {
                         let default: $cfg = $default;
                         serde_json::to_value(&default).map_err(|e| {
@@ -290,7 +312,12 @@ macro_rules! registry {
 
         /// All registered kinds.
         pub fn kinds() -> Vec<&'static str> {
-            vec![$(stringify!($kind)),*]
+            let mut kinds = Vec::new();
+            $(
+                $(#[$meta])*
+                kinds.push(stringify!($kind));
+            )*
+            kinds
         }
     };
 
@@ -304,6 +331,16 @@ macro_rules! registry {
         fn embedding(&self) -> anofox_ml_core::Result<$crate::model::Out> {
             let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
             Ok($crate::model::Out::from($body))
+        }
+    };
+    (@cap $kind:ident, $cap:ident, $m:ident, $x:ident, $a:ident, $body:expr) => {
+        fn $cap(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $a: f64,
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
         }
     };
     (@cap $kind:ident, $cap:ident, $m:ident, $x:ident, $body:expr) => {

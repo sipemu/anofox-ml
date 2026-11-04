@@ -15,6 +15,7 @@ description = "Conformal prediction intervals (split conformal, CV+, jackknife+)
 [dependencies]
 ndarray = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
 anofox-ml-core = { workspace = true }
 
 [dev-dependencies]
@@ -22,3 +23,5 @@ rand = { workspace = true }
 serde_json = { workspace = true }
 anofox-ml-trees = { workspace = true }
 anofox-ml-regression = { workspace = true }
+anofox-ml-ensemble = { workspace = true }
+anofox-ml-metrics = { workspace = true }

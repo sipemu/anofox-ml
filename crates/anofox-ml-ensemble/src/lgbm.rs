@@ -1238,6 +1238,10 @@ pub enum LgbmObjective {
     RegressionL1,
     /// Regression with Huber loss.
     Huber,
+    /// Quantile regression: pinball loss at level `alpha` in (0, 1)
+    /// (LightGBM's `objective="quantile"`). Leaf outputs are refit to the
+    /// `alpha`-percentile of their residuals.
+    Quantile { alpha: f64 },
     /// Binary classification with log-loss.
     Binary,
     /// Multi-class classification with softmax.
@@ -1600,10 +1604,43 @@ fn compute_regression_gradients(
                 hess[i] = 1.0;
             }
         }
+        LgbmObjective::Quantile { alpha } => {
+            // LightGBM: 1 − alpha above the target, −alpha below.
+            for i in 0..n {
+                grad[i] = if preds[i] - y[i] >= 0.0 {
+                    1.0 - alpha
+                } else {
+                    -alpha
+                };
+                hess[i] = 1.0;
+            }
+        }
         _ => unreachable!("regressor only supports regression objectives"),
     }
 
     (grad, hess)
+}
+
+fn validate_regression_objective(objective: LgbmObjective) -> Result<()> {
+    match objective {
+        LgbmObjective::Binary | LgbmObjective::Multiclass => Err(RustMlError::InvalidParameter(
+            format!("{objective:?} is a classification objective; use LgbmClassifier"),
+        )),
+        LgbmObjective::Quantile { alpha } if !(alpha > 0.0 && alpha < 1.0) => Err(
+            RustMlError::InvalidParameter(format!("quantile alpha must be in (0, 1), got {alpha}")),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Level of the residual percentile that leaf outputs and the baseline are
+/// refit to (L1: the median), or `None` for Newton leaves.
+fn refit_percentile(objective: LgbmObjective) -> Option<f64> {
+    match objective {
+        LgbmObjective::RegressionL1 => Some(0.5),
+        LgbmObjective::Quantile { alpha } => Some(alpha),
+        _ => None,
+    }
 }
 
 /// `alpha`-percentile of `values` with linear interpolation between order
@@ -1652,33 +1689,39 @@ fn weighted_percentile(values: &[f64], weights: &[f64], alpha: f64) -> f64 {
     }
 }
 
-/// Median of `values[rows]`, weighted when `weights` is given.
-fn rows_median(values: &[f64], rows: &[usize], weights: Option<ArrayView1<f64>>) -> f64 {
+/// `alpha`-percentile of `values[rows]`, weighted when `weights` is given.
+fn rows_percentile(
+    values: &[f64],
+    rows: &[usize],
+    weights: Option<ArrayView1<f64>>,
+    alpha: f64,
+) -> f64 {
     let mut v: Vec<f64> = rows.iter().map(|&i| values[i]).collect();
     match weights {
         Some(w) => {
             let wv: Vec<f64> = rows.iter().map(|&i| w[i]).collect();
-            weighted_percentile(&v, &wv, 0.5)
+            weighted_percentile(&v, &wv, alpha)
         }
-        None => percentile(&mut v, 0.5),
+        None => percentile(&mut v, alpha),
     }
 }
 
-/// Replace every leaf output with the median residual of the training rows
-/// `rows` that reach it (LightGBM's `RenewTreeOutput` for the L1
-/// objective). `binned_x` is column-major; leaves no row reaches keep their
-/// value.
+/// Replace every leaf output with the `alpha`-percentile residual of the
+/// training rows `rows` that reach it (LightGBM's `RenewTreeOutput` for the
+/// L1 and quantile objectives). `binned_x` is column-major; leaves no row
+/// reaches keep their value.
 fn renew_leaf_outputs(
     node: &mut TreeNode,
     binned_x: &Array2<u8>,
     rows: Vec<usize>,
     residuals: &[f64],
     weights: Option<ArrayView1<f64>>,
+    alpha: f64,
 ) {
     match node {
         TreeNode::Leaf { value } => {
             if !rows.is_empty() {
-                *value = rows_median(residuals, &rows, weights);
+                *value = rows_percentile(residuals, &rows, weights, alpha);
             }
         }
         TreeNode::Internal {
@@ -1697,8 +1740,8 @@ fn renew_leaf_outputs(
             let (l, r): (Vec<usize>, Vec<usize>) = rows
                 .into_iter()
                 .partition(|&i| goes_left(col[i], *bin_threshold, *missing_left, mask.as_deref()));
-            renew_leaf_outputs(left, binned_x, l, residuals, weights);
-            renew_leaf_outputs(right, binned_x, r, residuals, weights);
+            renew_leaf_outputs(left, binned_x, l, residuals, weights, alpha);
+            renew_leaf_outputs(right, binned_x, r, residuals, weights, alpha);
         }
     }
 }
@@ -1710,15 +1753,16 @@ fn effective_sample_weight(w: Option<ArrayView1<f64>>) -> Option<ArrayView1<f64>
 }
 
 /// Initial score of a regression objective: the weighted mean (squared
-/// error, Huber) or the weighted median (L1), as LightGBM's `BoostFromScore`.
+/// error, Huber) or the weighted median / `alpha`-percentile (L1,
+/// quantile), as LightGBM's `BoostFromScore`.
 fn regression_baseline(
     y: &[f64],
     weights: Option<ArrayView1<f64>>,
     objective: LgbmObjective,
 ) -> f64 {
-    if objective == LgbmObjective::RegressionL1 {
+    if let Some(alpha) = refit_percentile(objective) {
         let rows: Vec<usize> = (0..y.len()).collect();
-        return rows_median(y, &rows, weights);
+        return rows_percentile(y, &rows, weights, alpha);
     }
     match weights {
         Some(w) => y.iter().zip(w).map(|(&v, &wi)| v * wi).sum::<f64>() / w.sum(),
@@ -1799,6 +1843,7 @@ impl LgbmRegressor {
         }
         validate_eval_opts(opts, x.ncols())?;
         validate_max_bins(self.max_bins)?;
+        validate_regression_objective(self.objective)?;
 
         let n = x.nrows();
         let p = x.ncols();
@@ -1889,8 +1934,7 @@ impl LgbmRegressor {
             };
 
             let feature_indices = sample_features(p, self.colsample_bytree, &mut rng);
-            let refit_rows =
-                (self.objective == LgbmObjective::RegressionL1).then(|| row_indices.clone());
+            let refit = refit_percentile(self.objective).map(|a| (a, row_indices.clone()));
 
             let mut tree = build_lgbm_tree(
                 &binned_x,
@@ -1903,9 +1947,9 @@ impl LgbmRegressor {
                 &mut feature_gain,
                 &mut feature_split_count,
             );
-            if let Some(rows) = refit_rows {
+            if let Some((alpha, rows)) = refit {
                 let residuals: Vec<f64> = y_vec.iter().zip(&preds).map(|(y, p)| y - p).collect();
-                renew_leaf_outputs(&mut tree, &binned_x, rows, &residuals, sample_weight);
+                renew_leaf_outputs(&mut tree, &binned_x, rows, &residuals, sample_weight, alpha);
             }
 
             // Update predictions (on ALL rows, not just sampled)
@@ -1999,6 +2043,14 @@ fn eval_loss(
         let loss_i = match objective {
             LgbmObjective::Regression => 0.5 * r * r,
             LgbmObjective::RegressionL1 => r.abs(),
+            // Pinball loss; r = prediction − target.
+            LgbmObjective::Quantile { alpha } => {
+                if r >= 0.0 {
+                    (1.0 - alpha) * r
+                } else {
+                    -alpha * r
+                }
+            }
             LgbmObjective::Huber => {
                 if r.abs() <= huber_delta {
                     0.5 * r * r

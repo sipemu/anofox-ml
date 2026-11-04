@@ -57,6 +57,8 @@ pub mod gradient_boosting_regressor;
 pub mod hist_gradient_boosting;
 pub mod isolation_forest;
 pub mod lgbm;
+#[cfg(feature = "perpetual")]
+pub mod perpetual;
 pub mod random_forest_classifier;
 pub mod random_forest_regressor;
 pub mod stacking_classifier;
@@ -65,6 +67,11 @@ mod util;
 pub mod voting_classifier;
 pub mod voting_regressor;
 
+#[cfg(feature = "perpetual")]
+pub use self::perpetual::{
+    FittedPerpetualClassifier, FittedPerpetualRegressor, PerpetualClassifier, PerpetualObjective,
+    PerpetualParams, PerpetualRegressor,
+};
 pub use adaboost_classifier::{AdaBoostClassifier, FittedAdaBoostClassifier};
 pub use adaboost_regressor::{AdaBoostLoss, AdaBoostRegressor, FittedAdaBoostRegressor};
 pub use bagging_classifier::{BaggingClassifier, FittedBaggingClassifier};
@@ -83,7 +90,7 @@ pub use gradient_boosting_regressor::{
 };
 pub use hist_gradient_boosting::{
     FittedHistGradientBoostingClassifier, FittedHistGradientBoostingRegressor,
-    HistGradientBoostingClassifier, HistGradientBoostingRegressor,
+    HistGradientBoostingClassifier, HistGradientBoostingLoss, HistGradientBoostingRegressor,
 };
 pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{
