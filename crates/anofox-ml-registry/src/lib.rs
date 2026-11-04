@@ -273,6 +273,10 @@ mod conformal_tests {
                 "GradientBoostingRegressor",
                 json!({ "n_estimators": 30, "max_depth": 2 }),
             ),
+            (
+                "HistGradientBoostingRegressor",
+                json!({ "n_estimators": 30 }),
+            ),
         ] {
             let mut model = super::make(
                 "ConformalizedQuantileRegressor",
