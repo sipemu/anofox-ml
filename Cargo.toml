@@ -19,6 +19,7 @@ members = [
     "crates/anofox-ml-regression",
     "crates/anofox-ml-linear",
     "crates/anofox-ml-registry",
+    "crates/anofox-ml-conformal",
     "crates/anofox-ml-python",
     "crates/anofox-ml",
 ]
@@ -79,3 +80,4 @@ anofox-ml-neural-networks = { version = "0.2.0", path = "crates/anofox-ml-neural
 anofox-ml-regression = { version = "0.2.0", path = "crates/anofox-ml-regression" }
 anofox-ml-registry = { version = "0.2.0", path = "crates/anofox-ml-registry" }
 anofox-ml-linear = { version = "0.2.0", path = "crates/anofox-ml-linear" }
+anofox-ml-conformal = { version = "0.2.0", path = "crates/anofox-ml-conformal" }

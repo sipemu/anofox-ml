@@ -20,8 +20,9 @@
 //!   "…", "type_name": "…", "payload": …}`
 //!
 //! Reading also accepts binary format version 1 (the same header followed
-//! by a bincode payload, written by anofox-ml 0.2 and earlier) and files
-//! written before the envelope existed (a bare bincode or JSON payload).
+//! by a bincode payload, written by development versions between 0.1 and
+//! 0.2) and files written before the envelope existed (a bare bincode or
+//! JSON payload, as anofox-ml 0.1 wrote them).
 //! Version-1 payloads are positional, so they load only while the fitted
 //! type's layout is unchanged.
 //!
@@ -67,7 +68,7 @@ pub const FORMAT_NAME: &str = "anofox-ml";
 pub const BINARY_MAGIC: &[u8; 8] = b"ANOFOXML";
 
 /// Leading bytes of an enveloped binary file.
-#[deprecated(since = "0.3.0", note = "renamed to BINARY_MAGIC")]
+#[deprecated(since = "0.2.0", note = "renamed to BINARY_MAGIC")]
 pub const BINCODE_MAGIC: &[u8; 8] = BINARY_MAGIC;
 
 /// zstd compression level of format version 2.
@@ -284,19 +285,19 @@ pub fn binary_header(bytes: &[u8]) -> Result<Option<ModelHeader>> {
 }
 
 /// Serialize a model to enveloped binary bytes.
-#[deprecated(since = "0.3.0", note = "use to_binary_bytes (format version 2)")]
+#[deprecated(since = "0.2.0", note = "use to_binary_bytes (format version 2)")]
 pub fn to_bincode_bytes<T: Serialize>(model: &T) -> Result<Vec<u8>> {
     to_binary_bytes(model)
 }
 
 /// Deserialize a model from binary bytes.
-#[deprecated(since = "0.3.0", note = "use from_binary_bytes")]
+#[deprecated(since = "0.2.0", note = "use from_binary_bytes")]
 pub fn from_bincode_bytes<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     from_binary_bytes(bytes)
 }
 
 /// Read only the envelope header of binary model bytes.
-#[deprecated(since = "0.3.0", note = "use binary_header")]
+#[deprecated(since = "0.2.0", note = "use binary_header")]
 pub fn bincode_header(bytes: &[u8]) -> Result<Option<ModelHeader>> {
     binary_header(bytes)
 }
@@ -333,13 +334,13 @@ pub fn load_binary<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 /// Serialize a model to an enveloped binary file.
-#[deprecated(since = "0.3.0", note = "use save_binary (format version 2)")]
+#[deprecated(since = "0.2.0", note = "use save_binary (format version 2)")]
 pub fn save_bincode<T: Serialize>(model: &T, path: impl AsRef<Path>) -> Result<()> {
     save_binary(model, path)
 }
 
 /// Deserialize a model from a binary file.
-#[deprecated(since = "0.3.0", note = "use load_binary")]
+#[deprecated(since = "0.2.0", note = "use load_binary")]
 pub fn load_bincode<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     load_binary(path)
 }
@@ -502,7 +503,7 @@ mod tests {
         dir
     }
 
-    /// Bytes as written by anofox-ml 0.2 (binary format version 1).
+    /// Bytes as written before 0.2.0 (binary format version 1).
     fn v1_bytes<T: Serialize>(model: &T) -> Vec<u8> {
         let mut out = BINARY_MAGIC.to_vec();
         bincode::serialize_into(&mut out, &ModelHeader::with_version::<T>(1)).unwrap();
