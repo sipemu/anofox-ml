@@ -147,6 +147,8 @@ pub mod prelude {
         RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor,
         VotingClassifier, VotingRegressor,
     };
+    #[cfg(feature = "perpetual")]
+    pub use anofox_ml_ensemble::{PerpetualClassifier, PerpetualObjective, PerpetualRegressor};
 
     pub use anofox_ml_cluster::{
         AgglomerativeClustering, CovarianceType, Dbscan, GaussianMixture, KMeans, Linkage,

@@ -206,6 +206,21 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
+    #[cfg(feature = "perpetual")]
+    PerpetualRegressor {
+        config: ensemble::PerpetualRegressor = Default::default(),
+        fitted: ensemble::FittedPerpetualRegressor,
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+    }
+    #[cfg(feature = "perpetual")]
+    PerpetualClassifier {
+        config: ensemble::PerpetualClassifier = Default::default(),
+        fitted: ensemble::FittedPerpetualClassifier,
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m, x),
+    }
     IsolationForest {
         config: ensemble::IsolationForest = Default::default(),
         fitted: ensemble::FittedIsolationForest,

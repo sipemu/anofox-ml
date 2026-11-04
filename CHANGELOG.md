@@ -6,6 +6,25 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### PerpetualBooster (optional `perpetual` feature)
+
+- `PerpetualRegressor` / `PerpetualClassifier` in `anofox-ml-ensemble`
+  wrap the [perpetual](https://crates.io/crates/perpetual) crate
+  (Apache-2.0, pinned to `=3.0.0-rc.2`): gradient boosting tuned by a
+  single `budget` instead of a learning rate, depth and number of rounds,
+  with native missing-value handling. Regression objectives through
+  `PerpetualObjective` (squared, absolute, Huber, quantile, Poisson, Gamma,
+  Tweedie, ...); binary and multiclass classification with any class labels;
+  `sample_weight`. Fitted models persist in perpetual's own JSON format.
+- Registered as `PerpetualRegressor` / `PerpetualClassifier` in
+  `anofox-ml-registry`, with flat JSON parameters (`{"budget": 1.0,
+  "objective": "SquaredLoss"}`).
+- Off by default: enable `perpetual` on `anofox-ml`, `anofox-ml-ensemble`
+  or `anofox-ml-registry`. It needs Rust 1.88 (perpetual's dependencies),
+  above the workspace MSRV of 1.87. Its 2.x releases need nightly Rust,
+  which is why the release candidate is used.
+- The `registry!` macro accepts attributes such as `#[cfg(...)]` per entry.
+
 ### Conformal prediction sets for classifiers (#93)
 
 - `SplitConformalClassifier` / `conformalize_classifier`: prediction sets
