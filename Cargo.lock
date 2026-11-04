@@ -264,6 +264,7 @@ dependencies = [
  "anofox-ml-core",
  "anofox-ml-metrics",
  "anofox-ml-registry",
+ "anofox-ml-tune",
  "ndarray",
  "numpy",
  "pyo3",
@@ -344,6 +345,20 @@ dependencies = [
  "ndarray",
  "num-traits",
  "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "anofox-ml-tune"
+version = "0.2.0"
+dependencies = [
+ "anofox-ml-core",
+ "anofox-ml-metrics",
+ "anofox-ml-registry",
+ "ndarray",
+ "rustuna_core",
+ "rustuna_sampler",
  "serde",
  "serde_json",
 ]
@@ -2179,6 +2194,27 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rustuna_core"
+version = "0.1.0-dev"
+source = "git+https://github.com/optuna/rustuna?rev=d0ec7db#d0ec7dbe903984c52b648c37faf68fba3e979a56"
+dependencies = [
+ "js-sys",
+ "rand 0.8.6",
+ "rand_distr 0.4.3",
+ "serde_json",
+]
+
+[[package]]
+name = "rustuna_sampler"
+version = "0.1.0-dev"
+source = "git+https://github.com/optuna/rustuna?rev=d0ec7db#d0ec7dbe903984c52b648c37faf68fba3e979a56"
+dependencies = [
+ "rand 0.8.6",
+ "rustuna_core",
+ "serde_json",
 ]
 
 [[package]]

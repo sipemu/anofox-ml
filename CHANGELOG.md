@@ -133,6 +133,33 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   coverage and that the widths track heteroscedastic noise.
 - New metric `mean_pinball_loss` (sklearn's).
 
+### Hyperparameter search with rustuna (#92)
+
+- New crate **`anofox-ml-tune`** (not published while
+  [optuna/rustuna](https://github.com/optuna/rustuna) is only available from
+  git): Optuna-style search over any registry estimator. `tune(kind,
+  search_space, x, y, options)` / `tune_with_splits` (custom splitters,
+  sample weights) take a JSON search space (`int` / `float` ranges with
+  `log` and `step`, `categorical` lists of any JSON values), score each
+  trial by cross-validation with a named metric (`r2`, `rmse`, `mae`,
+  `accuracy`, `f1_macro`, `roc_auc`, `log_loss`, …; default accuracy for
+  classifiers, R² otherwise) and return the best parameters, the trial
+  table and the refitted model. Samplers: TPE (default) and random,
+  seeded. Failing parameter combinations are recorded as failed trials.
+  Multi-objective searches add `objectives` (more metrics, `fit_time`,
+  `model_size`) and return the Pareto front; NSGA-II is available as a
+  sampler. In a multi-objective search the best trial is the best one on
+  the Pareto front. `tune_with_splits_mapped` takes a search space in
+  another vocabulary plus a per-trial translation. Pruning waits for
+  rustuna pruners.
+- Python: `anofox_ml_python.TuneSearchCV(estimator, param_distributions,
+  …)` (also in `model_selection`, with the `Int` / `Float` / `Categorical`
+  helpers). It searches the estimator's scikit-learn parameters in Rust with
+  the GIL released, accepts `cv` as a fold count or any splitter (with
+  `groups`), supports `scoring`, `objectives` and the `tpe` / `random` /
+  `nsgaii` samplers, and refits a clone of the estimator as
+  `best_estimator_`.
+
 ## [0.2.0] - 2026-11-04
 
 This release completes the October 2026 algorithm review (#26–#72). It fixes

@@ -113,7 +113,7 @@ from ._estimators import (
     LocallyLinearEmbedding,
     ClassicalMDS,
 )
-from .model_selection import train_test_split
+from .model_selection import TuneSearchCV, train_test_split
 
 #: Previous (0.1) class names.
 KnnClassifier = KNeighborsClassifier
@@ -129,6 +129,7 @@ TSne = TSNE
 
 __all__ = [
     "BaseEstimator", "NotFittedError", "conformal", "metrics", "model_selection", "train_test_split",
+    "TuneSearchCV",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",
     "RandomForestClassifier",
