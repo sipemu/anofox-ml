@@ -54,7 +54,10 @@ pub use classification_extra::{
 pub use clustering::silhouette_score;
 pub use clustering_extra::{adjusted_rand_score, normalized_mutual_info_score};
 pub use curves::{brier_score_loss, brier_score_loss_with, precision_recall_curve, roc_curve};
-pub use intervals::{coverage_score, interval_score, mean_interval_width, mean_pinball_loss};
+pub use intervals::{
+    coverage_score, interval_score, mean_interval_width, mean_pinball_loss, mean_set_size,
+    set_coverage_score,
+};
 pub use regression::{mae, mse, r2_score};
 pub use regression_extended::{
     explained_variance_score, max_error, mean_absolute_percentage_error,

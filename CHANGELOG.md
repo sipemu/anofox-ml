@@ -6,6 +6,32 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Conformal prediction sets for classifiers (#93)
+
+- `SplitConformalClassifier` / `conformalize_classifier`: prediction sets
+  that contain the true class with probability `≥ 1 − α`, with the LAC
+  score (smallest sets) or APS (sets grow on hard inputs) in three modes:
+  `Include` (conservative), `Exclude` (smaller sets) and `Randomized`
+  (coverage `1 − α` on average, seeded). `predict_set` returns an
+  `n × classes` membership matrix, `predict_set_labels` the labels;
+  `allow_full_sets` instead of an error for too few calibration rows.
+- Matches MAPIE 1.6.0's `SplitConformalClassifier` exactly on every set
+  (LAC and APS include / exclude, three levels); seeded tests check
+  coverage, set size and adaptivity.
+- New metrics `set_coverage_score` and `mean_set_size`.
+- RAPS (`ClassificationScore::Raps(RapsParams)`, Angelopoulos et al.
+  2021): APS with a penalty on classes ranked after `k_reg`, for smaller
+  sets when the model spreads mass over many unlikely classes. `k_reg` and
+  `lambda` are fixed or tuned per `alpha` on held-out tuning rows
+  (`tuning_size`, or `conformalize_raps` with your own split). Matches
+  MAPIE 1.6.0 exactly with λ pinned; MAPIE's own λ search has a bug (it
+  uses λ in place of k*), which we do not reproduce.
+- Mondrian (group-conditional) conformal: `MondrianConformalRegressor`
+  (`fit_with_groups`) / `conformalize_mondrian` for split regression, and
+  `conformalize_classifier_mondrian` + `predict_set_mondrian` for LAC /
+  APS / RAPS sets. The threshold is calibrated within each group (store,
+  segment, sensor), so coverage holds per group, not only on average.
+
 ### Conformal prediction: CQR and normalised scores (#93)
 
 - `ConformalizedQuantileRegressor` (conformalized quantile regression,
