@@ -49,6 +49,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   other columns.
 - `SplitConformalClassifier::fit_with_groups`, the classifier counterpart
   of `MondrianConformalRegressor::fit_with_groups`.
+- Python: `anofox_ml_python.conformal` with sklearn-style
+  `SplitConformalRegressor`, `CrossConformalRegressor`,
+  `NormalizedConformalRegressor`, `ConformalizedQuantileRegressor`,
+  `MondrianConformalRegressor`, `SplitConformalClassifier` and
+  `MondrianConformalClassifier`. They wrap any of the package's
+  regressors / classifiers (`estimator=None`: MAPIE's linear defaults);
+  `predict_interval(X, alpha)` returns `(n, 2)` bounds, `predict_set(X,
+  alpha)` an `(n, n_classes)` boolean array; the Mondrian classes take
+  `groups` at fit and predict. `_native.Model` gains `predict_interval` /
+  `predict_set`.
 - `anofox-ml-registry` now depends on `anofox-ml-conformal`, and
   `scripts/publish.sh` publishes conformal first.
 
