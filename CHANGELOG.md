@@ -19,7 +19,9 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   classifiers, R² otherwise) and return the best parameters, the trial
   table and the refitted model. Samplers: TPE (default) and random,
   seeded. Failing parameter combinations are recorded as failed trials.
-  Pruning waits for rustuna pruners.
+  Multi-objective searches add `objectives` (more metrics, `fit_time`,
+  `model_size`) and return the Pareto front; NSGA-II is available as a
+  sampler. Pruning waits for rustuna pruners.
 
 ### Fixes
 

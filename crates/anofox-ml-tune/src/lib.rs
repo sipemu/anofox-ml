@@ -31,9 +31,11 @@
 //! assert!(result.trials.iter().all(|t| t.error.is_none()));
 //! ```
 //!
-//! Not yet available: pruning (rustuna has no pruners yet) and
-//! multi-objective search (#92). This crate is not published while
-//! rustuna is only available from git.
+//! Multi-objective searches add `objectives` (further metrics, `fit_time`,
+//! `model_size`) and report the Pareto front; the NSGA-II sampler is
+//! available for them. Not yet available: pruning (rustuna has no pruners
+//! yet). This crate is not published while rustuna is only available from
+//! git.
 
 mod metric;
 mod space;
@@ -41,4 +43,4 @@ mod tune;
 
 pub use metric::{is_classifier, Metric};
 pub use space::{Param, SearchSpace};
-pub use tune::{tune, tune_with_splits, Sampler, TrialRecord, TuneOptions, TuneResult};
+pub use tune::{tune, tune_with_splits, Objective, Sampler, TrialRecord, TuneOptions, TuneResult};

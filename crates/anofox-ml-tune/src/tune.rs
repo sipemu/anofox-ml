@@ -6,8 +6,9 @@ use anofox_ml_registry::{DynModel, Out};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rustuna_core::sampler::RandomSampler;
 use rustuna_core::storage::InMemoryStorage;
-use rustuna_core::study::{create_study, Direction, Study};
+use rustuna_core::study::{create_study, get_pareto_front, Direction, Study};
 use rustuna_core::trial::TrialStateValues;
+use rustuna_sampler::nsgaii::NsgaiiBuilder;
 use rustuna_sampler::tpe::TpeBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -23,6 +24,42 @@ pub enum Sampler {
     #[default]
     Tpe,
     Random,
+    /// NSGA-II genetic algorithm, for multi-objective searches.
+    Nsgaii,
+}
+
+/// What a trial is scored on: a [`Metric`], the mean fit time per fold
+/// (seconds, `fit_time`) or the mean size of the persisted fold models
+/// (bytes, `model_size`). Time and size are minimised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Objective {
+    Metric(Metric),
+    FitTime,
+    ModelSize,
+}
+
+impl Objective {
+    pub fn from_name(name: &str) -> Result<Self> {
+        match name {
+            "fit_time" => Ok(Objective::FitTime),
+            "model_size" => Ok(Objective::ModelSize),
+            _ => Metric::from_name(name)
+                .map(Objective::Metric)
+                .map_err(|e| invalid(format!("{e}, or fit_time / model_size"))),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Objective::Metric(m) => m.name(),
+            Objective::FitTime => "fit_time",
+            Objective::ModelSize => "model_size",
+        }
+    }
+
+    pub fn maximize(self) -> bool {
+        matches!(self, Objective::Metric(m) if m.maximize())
+    }
 }
 
 /// Search settings. Deserializes from JSON with every field optional.
@@ -42,6 +79,12 @@ pub struct TuneOptions {
     /// Metric name (see [`Metric`]); default: accuracy for classifiers, R²
     /// otherwise.
     pub metric: Option<String>,
+    /// Further objectives for a multi-objective search: metric names,
+    /// `fit_time` or `model_size` (see [`Objective`]). The result then
+    /// reports the Pareto front; `best_*` still refer to `metric`.
+    pub objectives: Vec<String>,
+    /// Population size of the NSGA-II sampler.
+    pub population_size: usize,
     /// Fixed estimator parameters, applied to every trial.
     pub params: Value,
     /// Refit the best parameters on all rows and return the model.
@@ -57,6 +100,8 @@ impl Default for TuneOptions {
             seed: 0,
             cv: 5,
             metric: None,
+            objectives: Vec::new(),
+            population_size: 50,
             params: Value::Object(Map::new()),
             refit: true,
         }
@@ -69,9 +114,13 @@ pub struct TrialRecord {
     pub number: usize,
     /// The searched parameters of this trial.
     pub params: Value,
-    /// Mean CV score; `None` when the trial failed.
+    /// Mean CV score of `metric`; `None` when the trial failed.
     pub score: Option<f64>,
+    /// `metric` per fold.
     pub fold_scores: Vec<f64>,
+    /// Mean of every objective, `metric` first, then `objectives`; empty
+    /// when the trial failed.
+    pub values: Vec<f64>,
     /// Why the trial failed (an invalid parameter combination, a fit error,
     /// a NaN score).
     pub error: Option<String>,
@@ -83,6 +132,11 @@ pub struct TuneResult {
     pub kind: String,
     pub metric: String,
     pub maximize: bool,
+    /// Every objective with its direction: `metric` first.
+    pub objectives: Vec<(String, bool)>,
+    /// Trials no other trial beats on every objective (only the best trial
+    /// for a single objective).
+    pub pareto_front: Vec<usize>,
     /// Full estimator parameters of the best trial: defaults, overridden by
     /// the fixed `params`, overridden by the searched values.
     pub best_params: Value,
@@ -167,6 +221,14 @@ pub fn tune_with_splits(
         Some(name) => Metric::from_name(name)?,
         None => Metric::default_for(kind),
     };
+    let mut objectives = vec![Objective::Metric(metric)];
+    for name in &options.objectives {
+        let o = Objective::from_name(name)?;
+        if objectives.contains(&o) {
+            return Err(invalid(format!("objective '{name}' is listed twice")));
+        }
+        objectives.push(o);
+    }
     let fixed = check_params(kind, &space, &options.params)?;
     if options.n_trials == 0 {
         return Err(invalid("n_trials must be at least 1"));
@@ -182,7 +244,7 @@ pub fn tune_with_splits(
         )));
     }
 
-    let study = new_study(kind, metric, options)?;
+    let study = new_study(kind, &objectives, options)?;
     let mut trials = Vec::with_capacity(options.n_trials);
     for _ in 0..options.n_trials {
         let mut trial = study.ask().map_err(study_err)?;
@@ -190,47 +252,46 @@ pub fn tune_with_splits(
         let suggested = space.suggest(&mut trial)?;
         let mut params = fixed.clone();
         params.extend(suggested.clone());
-        let outcome = cv_scores(
+        let outcome = cv_evaluate(
             kind,
             &Value::Object(params),
             x,
             y,
             sample_weight,
             splits,
-            metric,
+            &objectives,
         );
-        let record = match outcome {
-            Ok(fold_scores) => {
-                let mean = fold_scores.iter().sum::<f64>() / fold_scores.len() as f64;
-                if mean.is_finite() {
-                    TrialRecord {
-                        number: number as usize,
-                        params: Value::Object(suggested),
-                        score: Some(mean),
-                        fold_scores,
-                        error: None,
+        let mut record = TrialRecord {
+            number: number as usize,
+            params: Value::Object(suggested),
+            score: None,
+            fold_scores: Vec::new(),
+            values: Vec::new(),
+            error: None,
+        };
+        match outcome {
+            Ok(folds) => {
+                let n = folds.len() as f64;
+                let means: Vec<f64> = (0..objectives.len())
+                    .map(|k| folds.iter().map(|f| f[k]).sum::<f64>() / n)
+                    .collect();
+                record.fold_scores = folds.iter().map(|f| f[0]).collect();
+                match means.iter().position(|v| !v.is_finite()) {
+                    None => {
+                        record.score = Some(means[0]);
+                        record.values = means;
                     }
-                } else {
-                    TrialRecord {
-                        number: number as usize,
-                        params: Value::Object(suggested),
-                        score: None,
-                        fold_scores,
-                        error: Some(format!("{} is not finite", metric.name())),
+                    Some(k) => {
+                        record.error = Some(format!("{} is not finite", objectives[k].name()));
                     }
                 }
             }
-            Err(e) => TrialRecord {
-                number: number as usize,
-                params: Value::Object(suggested),
-                score: None,
-                fold_scores: Vec::new(),
-                error: Some(e.to_string()),
-            },
-        };
-        let state = match record.score {
-            Some(s) => TrialStateValues::Complete(vec![s]),
-            None => TrialStateValues::Fail,
+            Err(e) => record.error = Some(e.to_string()),
+        }
+        let state = if record.values.is_empty() {
+            TrialStateValues::Fail
+        } else {
+            TrialStateValues::Complete(record.values.clone())
         };
         study.tell(number, state).map_err(study_err)?;
         trials.push(record);
@@ -260,6 +321,18 @@ pub fn tune_with_splits(
             invalid(format!("every trial failed; first error: {first}"))
         })?;
 
+    let pareto_front = if objectives.len() == 1 {
+        vec![best.number]
+    } else {
+        let mut front: Vec<usize> = get_pareto_front(&study)
+            .map_err(study_err)?
+            .into_iter()
+            .map(|n| n as usize)
+            .collect();
+        front.sort_unstable();
+        front
+    };
+
     let mut best_params = fixed;
     best_params.extend(best.params.as_object().cloned().unwrap_or_default());
     let best_params = Value::Object(best_params);
@@ -274,6 +347,11 @@ pub fn tune_with_splits(
         kind: kind.to_string(),
         metric: metric.name().to_string(),
         maximize: metric.maximize(),
+        objectives: objectives
+            .iter()
+            .map(|o| (o.name().to_string(), o.maximize()))
+            .collect(),
+        pareto_front,
         best_params,
         best_score: best.score.expect("best has a score"),
         best_trial: best.number,
@@ -313,13 +391,19 @@ fn check_params(kind: &str, space: &SearchSpace, fixed: &Value) -> Result<Map<St
     Ok(params)
 }
 
-fn new_study(kind: &str, metric: Metric, options: &TuneOptions) -> Result<Study> {
-    let direction = if metric.maximize() {
-        Direction::Maximize
-    } else {
-        Direction::Minimize
-    };
-    let name = format!("{kind}-{}", metric.name());
+fn new_study(kind: &str, objectives: &[Objective], options: &TuneOptions) -> Result<Study> {
+    let directions: Vec<Direction> = objectives
+        .iter()
+        .map(|o| {
+            if o.maximize() {
+                Direction::Maximize
+            } else {
+                Direction::Minimize
+            }
+        })
+        .collect();
+    let names: Vec<&str> = objectives.iter().map(|o| o.name()).collect();
+    let name = format!("{kind}-{}", names.join("-"));
     match options.sampler {
         Sampler::Tpe => create_study(
             &name,
@@ -328,28 +412,51 @@ fn new_study(kind: &str, metric: Metric, options: &TuneOptions) -> Result<Study>
                 .n_startup_trials(options.n_startup_trials)
                 .seed(options.seed)
                 .build(),
-            vec![direction],
+            directions,
         ),
         Sampler::Random => create_study(
             &name,
             InMemoryStorage::new(),
             RandomSampler::seed_from_u64(options.seed),
-            vec![direction],
+            directions,
         ),
+        Sampler::Nsgaii => {
+            if options.population_size < 2 {
+                return Err(invalid("population_size must be at least 2"));
+            }
+            create_study(
+                &name,
+                InMemoryStorage::new(),
+                NsgaiiBuilder::new()
+                    .population_size(options.population_size)
+                    .seed(options.seed)
+                    .build(),
+                directions,
+            )
+        }
     }
     .map_err(study_err)
 }
 
-/// Fit and score `kind` with `params` on every split.
-fn cv_scores(
+/// Fit `kind` with `params` on every split and evaluate every objective;
+/// returns one row of objective values per split.
+fn cv_evaluate(
     kind: &str,
     params: &Value,
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
     sample_weight: Option<ArrayView1<f64>>,
     splits: &[CvSplit],
-    metric: Metric,
-) -> Result<Vec<f64>> {
+    objectives: &[Objective],
+) -> Result<Vec<Vec<f64>>> {
+    let metrics = || {
+        objectives.iter().filter_map(|o| match o {
+            Objective::Metric(m) => Some(*m),
+            _ => None,
+        })
+    };
+    let need_pred = metrics().any(|m| !m.needs_proba());
+    let need_proba = metrics().any(Metric::needs_proba);
     splits
         .iter()
         .map(|(train, test)| {
@@ -359,21 +466,37 @@ fn cv_scores(
             let x_test = x.select(Axis(0), test);
             let y_test = y.select(Axis(0), test);
             let mut model = anofox_ml_registry::make(kind, params)?;
+            let start = std::time::Instant::now();
             model.fit(
                 x_train.view(),
                 Some(y_train.view()),
                 w_train.as_ref().map(Array1::view),
             )?;
-            if metric.needs_proba() {
-                let proba = as_2d(model.predict_proba(x_test.view())?);
-                let mut classes = y_train.to_vec();
-                classes.sort_by(f64::total_cmp);
-                classes.dedup();
-                metric.score_proba(&y_test, &proba, &classes)
+            let fit_time = start.elapsed().as_secs_f64();
+            let pred = if need_pred {
+                Some(as_1d(model.predict(x_test.view())?)?)
             } else {
-                let pred = as_1d(model.predict(x_test.view())?)?;
-                metric.score(&y_test, &pred)
-            }
+                None
+            };
+            let proba = if need_proba {
+                Some(as_2d(model.predict_proba(x_test.view())?))
+            } else {
+                None
+            };
+            let mut classes = y_train.to_vec();
+            classes.sort_by(f64::total_cmp);
+            classes.dedup();
+            objectives
+                .iter()
+                .map(|o| match o {
+                    Objective::Metric(m) if m.needs_proba() => {
+                        m.score_proba(&y_test, proba.as_ref().expect("computed"), &classes)
+                    }
+                    Objective::Metric(m) => m.score(&y_test, pred.as_ref().expect("computed")),
+                    Objective::FitTime => Ok(fit_time),
+                    Objective::ModelSize => Ok(model.to_bytes()?.len() as f64),
+                })
+                .collect()
         })
         .collect()
 }

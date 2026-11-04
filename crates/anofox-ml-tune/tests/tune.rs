@@ -308,3 +308,138 @@ fn result_serializes_without_the_model() {
     assert_eq!((o.n_trials, o.sampler, o.cv), (7, Sampler::Random, 5));
     assert!(serde_json::from_value::<TuneOptions>(json!({"trials": 7})).is_err());
 }
+
+/// Whether `a` is at least as good as `b` everywhere and better somewhere.
+fn dominates(a: &[f64], b: &[f64], maximize: &[bool]) -> bool {
+    let ge = |i: usize| {
+        if maximize[i] {
+            a[i] >= b[i]
+        } else {
+            a[i] <= b[i]
+        }
+    };
+    let gt = |i: usize| {
+        if maximize[i] {
+            a[i] > b[i]
+        } else {
+            a[i] < b[i]
+        }
+    };
+    (0..a.len()).all(ge) && (0..a.len()).any(gt)
+}
+
+#[test]
+fn multi_objective_reports_the_pareto_front() {
+    let (x, y) = step_data(128);
+    let space = json!({"max_depth": {"int": [1, 10]}, "min_samples_leaf": {"int": [1, 20]}});
+    for sampler in [Sampler::Tpe, Sampler::Nsgaii] {
+        let o = TuneOptions {
+            sampler,
+            objectives: vec!["model_size".into(), "mae".into()],
+            population_size: 6,
+            ..options(18)
+        };
+        let r = tune("DecisionTreeRegressor", &space, x.view(), y.view(), &o).unwrap();
+        assert_eq!(
+            r.objectives,
+            [
+                ("r2".to_string(), true),
+                ("model_size".to_string(), false),
+                ("mae".to_string(), false)
+            ]
+        );
+        let maximize: Vec<bool> = r.objectives.iter().map(|o| o.1).collect();
+        assert!(r
+            .trials
+            .iter()
+            .all(|t| t.values.len() == 3 && t.values[0] == t.score.unwrap()));
+        // Brute force: the front is exactly the non-dominated trials.
+        let expected: Vec<usize> = r
+            .trials
+            .iter()
+            .filter(|t| {
+                !r.trials
+                    .iter()
+                    .any(|o| dominates(&o.values, &t.values, &maximize))
+            })
+            .map(|t| t.number)
+            .collect();
+        assert_eq!(r.pareto_front, expected, "{sampler:?}");
+        // Bigger trees fit better: the front trades size for accuracy, and
+        // best_* still refer to the primary metric.
+        assert!(
+            r.pareto_front.len() >= 2,
+            "{sampler:?}: {:?}",
+            r.pareto_front
+        );
+        assert!(r.pareto_front.contains(&r.best_trial));
+        let sizes: Vec<f64> = r
+            .pareto_front
+            .iter()
+            .map(|&n| r.trials[n].values[1])
+            .collect();
+        assert!(sizes.iter().any(|&s| s != sizes[0]));
+    }
+}
+
+#[test]
+fn nsgaii_is_seeded_and_fit_time_is_measured() {
+    let (x, y) = step_data(64);
+    let space = json!({"max_depth": {"int": [1, 8]}});
+    let run = |seed| {
+        let o = TuneOptions {
+            sampler: Sampler::Nsgaii,
+            population_size: 4,
+            objectives: vec!["model_size".into()],
+            seed,
+            ..options(10)
+        };
+        tune("DecisionTreeRegressor", &space, x.view(), y.view(), &o).unwrap()
+    };
+    let (a, b) = (run(3), run(3));
+    let params = |r: &anofox_ml_tune::TuneResult| {
+        r.trials
+            .iter()
+            .map(|t| t.params.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(params(&a), params(&b));
+
+    let o = TuneOptions {
+        objectives: vec!["fit_time".into()],
+        ..options(3)
+    };
+    let r = tune("DecisionTreeRegressor", &space, x.view(), y.view(), &o).unwrap();
+    assert!(r
+        .trials
+        .iter()
+        .all(|t| t.values[1] > 0.0 && t.values[1] < 10.0));
+}
+
+#[test]
+fn invalid_objectives_fail_up_front() {
+    let (x, y) = step_data(32);
+    let space = json!({"max_depth": {"int": [1, 4]}});
+    for (objectives, msg) in [
+        (vec!["r2".to_string()], "listed twice"),
+        (vec!["speed".to_string()], "fit_time / model_size"),
+    ] {
+        let o = TuneOptions {
+            objectives,
+            ..options(2)
+        };
+        let e = tune("DecisionTreeRegressor", &space, x.view(), y.view(), &o)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(msg), "{msg}: {e}");
+    }
+    let o = TuneOptions {
+        sampler: Sampler::Nsgaii,
+        population_size: 1,
+        ..options(2)
+    };
+    let e = tune("DecisionTreeRegressor", &space, x.view(), y.view(), &o)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("population_size"), "{e}");
+}
