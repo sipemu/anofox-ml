@@ -147,6 +147,45 @@ impl<E> SplitConformalClassifier<E> {
     }
 }
 
+impl<E> SplitConformalClassifier<E> {
+    /// Mondrian fit: train `estimator` on part of the rows (all groups
+    /// together) and calibrate the threshold per group on the rest;
+    /// `groups` holds one group id per row. Predict with
+    /// [`FittedSplitConformalClassifier::predict_set_mondrian`].
+    pub fn fit_with_groups<F: Float>(
+        &self,
+        x: ArrayView2<F>,
+        y: ArrayView1<F>,
+        groups: &[usize],
+    ) -> Result<FittedSplitConformalClassifier<E::Fitted, F>>
+    where
+        E: Fit<F>,
+        E::Fitted: Predict<F> + PredictProba<F>,
+    {
+        check_xy(x, y)?;
+        check_groups(groups, x.nrows())?;
+        let (train, cal) = split_indices(x.nrows(), self.calibration_size, self.seed)?;
+        let y_train = y.select(Axis(0), &train);
+        let mut classes = y_train.to_vec();
+        classes.sort_by(|a, b| a.partial_cmp(b).expect("no NaN labels"));
+        classes.dedup();
+        let model = self
+            .estimator
+            .fit_view(x.select(Axis(0), &train).view(), y_train.view())?;
+        let cal_groups: Vec<usize> = cal.iter().map(|&i| groups[i]).collect();
+        Ok(conformalize_classifier_mondrian(
+            model,
+            classes,
+            x.select(Axis(0), &cal).view(),
+            y.select(Axis(0), &cal).view(),
+            &cal_groups,
+            self.score,
+            self.seed,
+        )?
+        .with_allow_full_sets(self.allow_full_sets))
+    }
+}
+
 impl<F: Float, E: Fit<F>> Fit<F> for SplitConformalClassifier<E>
 where
     E::Fitted: Predict<F> + PredictProba<F>,

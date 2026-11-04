@@ -332,6 +332,80 @@ mod conformal_tests {
         assert_eq!(iv.column(1), hi);
     }
 
+    /// Column 0 is the group (0 or 1); group 1 is much noisier.
+    fn grouped_regression() -> (Array2<f64>, Array1<f64>) {
+        let n = 400;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => (i % 2) as f64,
+            _ => ((i * (j + 3)) % 37) as f64 / 37.0,
+        });
+        let y = (0..n)
+            .map(|i| {
+                let noise = ((i * 7919) % 101) as f64 / 101.0 - 0.5;
+                x[[i, 1]] - x[[i, 2]] + noise * if i % 2 == 1 { 4.0 } else { 0.2 }
+            })
+            .collect();
+        (x, y)
+    }
+
+    #[test]
+    fn mondrian_regressor_kind_widens_the_noisy_group() {
+        let (x, y) = grouped_regression();
+        let params =
+            json!({ "estimator": "OlsRegressor", "group_column": 0, "calibration_size": 0.5 });
+        let mut model = super::make("MondrianConformalRegressor", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let iv = a2(model.predict_interval(x.view(), 0.1).unwrap());
+        let width = |i: usize| iv[[i, 1]] - iv[[i, 0]];
+        assert!(width(1) > 5.0 * width(0), "{} vs {}", width(1), width(0));
+        let loaded = super::load("MondrianConformalRegressor", &model.to_bytes().unwrap()).unwrap();
+        assert_eq!(iv, a2(loaded.predict_interval(x.view(), 0.1).unwrap()));
+        // Group ids must be non-negative integers, and the column must exist.
+        let mut bad = x.clone();
+        bad[[0, 0]] = 0.5;
+        assert!(model.predict_interval(bad.view(), 0.1).is_err());
+        let mut out_of_range =
+            super::make("MondrianConformalRegressor", &json!({ "group_column": 9 })).unwrap();
+        let err = out_of_range
+            .fit(x.view(), Some(y.view()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("group_column"), "{err}");
+    }
+
+    #[test]
+    fn mondrian_classifier_kind_gives_sets_per_group() {
+        let n = 400;
+        let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            2 => (i % 3) as f64,
+            _ => ((i * (j + 5)) % 41) as f64 / 41.0,
+        });
+        let y: Array1<f64> = x.column(0).mapv(|v| {
+            if v < 0.33 {
+                0.0
+            } else if v < 0.66 {
+                1.0
+            } else {
+                2.0
+            }
+        });
+        let params = json!({ "estimator": "RandomForestClassifier", "group_column": 2 });
+        let mut model = super::make("MondrianConformalClassifier", &params).unwrap();
+        model.fit(x.view(), Some(y.view()), None).unwrap();
+        let sets = a2(model.predict_set(x.view(), 0.2).unwrap());
+        assert_eq!(sets.dim(), (n, 3));
+        let covered = (0..n).filter(|&i| sets[[i, y[i] as usize]] == 1.0).count();
+        assert!(covered as f64 / n as f64 >= 0.75, "{covered}");
+        assert_eq!(a2(model.predict_proba(x.view()).unwrap()).dim(), (n, 3));
+        match model.predict(x.view()).unwrap() {
+            super::Out::A1(p) => assert_eq!(p.len(), n),
+            super::Out::A2(_) => panic!("expected 1-D predictions"),
+        }
+        let loaded =
+            super::load("MondrianConformalClassifier", &model.to_bytes().unwrap()).unwrap();
+        assert_eq!(sets, a2(loaded.predict_set(x.view(), 0.2).unwrap()));
+    }
+
     #[test]
     fn conformal_errors_name_the_problem() {
         let (x, y) = regression();
