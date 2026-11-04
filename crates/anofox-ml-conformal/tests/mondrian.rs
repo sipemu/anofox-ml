@@ -47,10 +47,7 @@ fn one_group_is_plain_split_conformal() {
     let (xt, _, _) = grouped(50, 2);
     let model = || {
         OlsRegressor::new()
-            .fit(
-                x.slice(ndarray::s![..100, ..]),
-                y.slice(ndarray::s![..100]),
-            )
+            .fit(x.slice(ndarray::s![..100, ..]), y.slice(ndarray::s![..100]))
             .unwrap()
     };
     let (xc, yc) = (x.slice(ndarray::s![100.., ..]), y.slice(ndarray::s![100..]));
