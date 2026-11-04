@@ -383,6 +383,18 @@ proba = clf.predict_proba(X_test)
 search = GridSearchCV(am.SVC(), {"C": [0.1, 1, 10]}).fit(X, y)
 ```
 
+Conformal prediction (`anofox_ml_python.conformal`) wraps any of these
+estimators and gives intervals or sets with coverage `≥ 1 − alpha`:
+
+```python
+from anofox_ml_python import conformal
+
+reg = conformal.CrossConformalRegressor(am.HistGradientBoostingRegressor(), cv=5).fit(X, y)
+bounds = reg.predict_interval(X_test, alpha=0.1)      # (n, 2)
+clf = conformal.SplitConformalClassifier(conformity_score="aps").fit(X, y)
+sets = clf.predict_set(X_test, alpha=0.1)             # (n, n_classes), bool
+```
+
 ## License
 
 Licensed under either of
