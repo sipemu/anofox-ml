@@ -95,10 +95,11 @@ jobs:
     name: Golden Data Sync
     runs-on: ubuntu-latest
     needs: sklearn-version
-    # Advisory: the diff check trips on float-determinism differences
-    # between developer machines (different BLAS / CPU paths) and the
-    # CI runner. Keep the job so we still surface accidental drift, but
-    # don't fail the workflow on bit-level mismatches.
+    # Regenerates every golden fixture with the pinned sklearn / MAPIE and
+    # compares it with the committed file. Numbers are compared with a
+    # tolerance (rtol 1e-9), so BLAS / CPU noise between machines passes
+    # and only real drift or structural changes are reported. Advisory
+    # until it has run clean for a while.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -106,13 +107,17 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r test_harness/requirements.txt
-      - run: python test_harness/generate_golden_data.py
-      - run: python test_harness/generators/gen_conformal.py
-      - name: Check fixtures unchanged (advisory)
+      - name: Regenerate every fixture
         run: |
-          git status --short
-          git diff --exit-code crates/anofox-ml/tests/golden_data/ \
-            crates/anofox-ml-conformal/tests/golden_data/
+          python test_harness/generate_golden_data.py
+          for gen in test_harness/generators/gen_*.py; do
+            grep -q "__main__" "$gen" && python "$gen"
+          done
+      - name: Check fixtures for drift (advisory)
+        run: |
+          python test_harness/check_fixture_drift.py \
+            crates/anofox-ml/tests/golden_data \
+            crates/anofox-ml-conformal/tests/golden_data
 
   python-bindings:
     name: Python Bindings
