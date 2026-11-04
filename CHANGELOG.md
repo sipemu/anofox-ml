@@ -6,6 +6,79 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-04
+
+This release completes the October 2026 algorithm review (#26–#72). It fixes
+wrong results and panics, brings every estimator to checked parity with
+scikit-learn 1.8 / 1.9, redesigns the core traits around `ndarray` views,
+and adopts anofox-regression 0.10. Most of the API surface changed in some
+way; the summary below lists what to look at when upgrading, and the
+detailed sections follow.
+
+### Highlights
+
+- **Correctness and sklearn parity.** The estimators are checked against
+  hardcoded scikit-learn reference values (no parity test is skipped).
+  Among the fixes: ROC-AUC / average-precision ties, LDA scalings, PCA,
+  SVR / OneClassSVM, DBSCAN / HDBSCAN / LOF / Isomap, random-forest
+  feature sampling, LightGBM early stopping, calibration, SGD stopping,
+  panics on Fortran-order or NaN input, and HashMap-order nondeterminism.
+- **New estimators.** HDBSCAN, BayesianGaussianMixture, MeanShift, OPTICS,
+  Birch, SpectralClustering, AffinityPropagation, Isomap, LLE, t-SNE
+  (Barnes-Hut), GaussianProcessClassifier, FastICA, CCA, NMF, PLS,
+  KernelPCA, TruncatedSVD, RFECV, LocalOutlierFactor, SplineTransformer,
+  RcsTransformer, KNNImputer, IterativeImputer, IncrementalPCA and more.
+- **Core API.** View-based trait inputs (`fit` / `predict` / `transform`
+  accept `&Array2`, `ArrayView2` and slices without a copy); `FitWeighted`,
+  `PartialFit`, `PredictProba` and `DecisionFunction` across most
+  estimators; `Pipeline` implements `Fit`, is refittable, forwards
+  `predict_proba` and accepts supervised steps (`Supervised`); shared
+  `ClassWeight`; `sample_weight` and `groups` through the CV helpers.
+- **Cross-validation.** Group, stratified-group, purged / combinatorial,
+  time-series, spatial-block and buffered splitters, nested CV and
+  permutation tests (#74–#79).
+- **Regression** delegates to anofox-regression 0.10: multinomial and L1 /
+  elastic-net logistic regression, weighted Poisson / Gamma / Tweedie GLMs
+  with offsets and opt-in inference, sklearn's Huber and L1 quantile
+  regression, LassoLars.
+- **Performance.** libsvm's SMO solver with a kernel cache for the kernel
+  SVMs, nn-chain Ward clustering, KD-tree neighbours, and faer without its
+  thread pool (small fits 5–25× faster).
+- **Model persistence.** Binary models are saved as zstd-compressed
+  MessagePack with field names (format version 2): smaller files for tree
+  models, and saved models survive added, removed and reordered fields.
+- **Conformal prediction.** New crate `anofox-ml-conformal`: split
+  conformal, CV+ and jackknife+ prediction intervals for any regressor,
+  checked against MAPIE.
+- **Estimator registry.** New crate `anofox-ml-registry`: every estimator
+  by name and JSON parameters, shared by the Python bindings and the
+  DuckDB extension.
+
+### Upgrading from 0.1
+
+- **Implementing the traits:** write the `*_view` methods
+  (`fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>)`, `predict_view`,
+  `transform_view`, ...). Calls to `fit` / `predict` / ... are unchanged.
+  Custom pipeline steps (`FitTransform`, `TransformStep`, `FitPredict`,
+  `PredictStep`) take views and the pipeline target.
+- **Defaults now follow sklearn** (results change without code changes):
+  multinomial logistic regression for more than two classes, Huber's joint
+  scale, Quantile `alpha = 1.0`, Poisson / Gamma / Tweedie `alpha = 1.0`,
+  SVM `gamma = Gamma::Scale` and libsvm tolerances, LDA `Svd` solver,
+  NMF `Auto` init, IsolationForest contamination, MiniBatchKMeans batch
+  size, tree `max_depth = None`, LightGBM `huber_delta`, GaussianNB
+  `var_smoothing`, and more. The sections below mark each one
+  **Breaking**.
+- **Renamed or reshaped API:** sklearn class names in Python, `Option`
+  parameters (`n_components`, `learning_rate`, `bandwidth`, ...), array
+  shapes of fitted coefficients (`(K, p)` / `(n, K)`), `ClassicalMDS`,
+  removed `seed` fields and the public `kdtree` module.
+- **Saving models:** `save_bincode` / `load_bincode` and the other
+  `*_bincode*` functions are deprecated aliases of `save_binary` /
+  `load_binary` (format version 2); files from 0.1 still load.
+- **Random results:** fold assignment, bootstrap draws and tree seeds
+  changed, so seeded runs do not reproduce 0.1 numbers.
+
 ### Conformal prediction intervals (#93)
 
 - New crate **`anofox-ml-conformal`** (also `anofox_ml::conformal`):
@@ -19,6 +92,49 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   golden tests; seeded replications check the empirical coverage.
 - New metrics: `coverage_score`, `mean_interval_width` and
   `interval_score` (Winkler score).
+
+### Estimator registry crate
+
+- New crate **`anofox-ml-registry`**: every estimator addressed by a kind
+  string and JSON parameters (`make`, `load`, `default_params`, `kinds`,
+  the object-safe `DynModel` trait). It was the core of the Python bindings
+  and is now shared with the planned DuckDB extension; the Python bindings
+  depend on it. A test builds every registered estimator from its default
+  parameters and round-trips a fitted model through bytes.
+- Fix: `Optics` could not be created from JSON parameters, because its
+  infinite `eps` / `eps_max` defaults became `null`. JSON now writes and
+  reads `null` as `+∞` for these fields; binary formats are unchanged.
+
+### Model persistence format v2 (#87)
+
+- Binary model files are **format version 2**: the `ANOFOXML` envelope
+  header followed by zstd-compressed MessagePack with field names (zstd
+  frame checksum included). Saved models now survive changes to the fitted
+  types: fields added with `#[serde(default)]` are filled in, removed fields
+  are ignored, fields and enum variants may be reordered. Files are smaller
+  than before for tree models (a 100-tree forest: 2.28 MB → 0.66 MB);
+  loading a forest takes ~9 ms instead of ~4 ms.
+- Reading still accepts format version 1 (envelope + bincode, written by
+  development versions between 0.1 and 0.2) and bare bincode payloads
+  (anofox-ml 0.1); these load while the type's layout is unchanged.
+  Older versions cannot read version-2 files. JSON is unchanged.
+- New API: `to_binary_bytes`, `from_binary_bytes`, `binary_header`,
+  `save_binary`, `load_binary`, `BINARY_MAGIC`, `JSON_FORMAT_VERSION`. The
+  `*_bincode*` functions and `BINCODE_MAGIC` are deprecated aliases (they
+  write version 2). Python pickles use version 2; older pickles still load.
+- `RidgeCrossValidated`, `LassoCrossValidated`, `ElasticNetCrossValidated`,
+  `IsotonicRegressor` and `TransformedTargetRegressor` fitted models are
+  serializable. `FittedIsotonicRegressor` stores its R² instead of the
+  upstream fit. `TransformedTargetRegressor` takes a `TargetTransform`
+  (`with_transform`: `Identity`, `Log`, `Log1p`, `Sqrt`); `new(regressor,
+  func, inverse_func)` keeps working as `TargetTransform::Custom`, which
+  cannot be saved. The remaining OLS / Ridge / Lasso / ElasticNet / WLS /
+  Huber / Quantile wrappers wait for serde support in anofox-regression
+  (sipemu/anofox-regression#321).
+- Golden fixtures (`crates/anofox-ml/tests/fixtures/persistence/v1`, `v2`):
+  17 fitted models per format version with their saved predictions; the
+  `persistence_compat` test loads all of them.
+
 
 ### faer runs sequentially
 
@@ -299,6 +415,11 @@ Every parity test that waited on upstream is enabled; none are ignored now.
 
 ### Fixes
 
+- `RandomForestClassifier` and `ExtraTreesClassifier`: `predict_proba`
+  could return `1.0000000000000002` for a unanimous vote, because each
+  tree was scaled by `1/n_estimators` before summing; probability metrics
+  (`log_loss`) rejected it. The probabilities are now summed and divided
+  once, as in scikit-learn.
 - `LassoLarsIC` AIC formula corrected.
 - Stacking estimators now prefer `PredictProba` when the base estimator
   provides it (matches sklearn behaviour).

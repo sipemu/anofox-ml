@@ -44,11 +44,36 @@ pub enum OpticsClusterMethod {
     },
 }
 
+/// `f64` that may be `+∞`: JSON has no infinity (serde_json writes `null`),
+/// so human-readable formats write and read `null` for `+∞`. Binary formats
+/// keep the plain float.
+mod inf_as_null {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() && *v == f64::INFINITY {
+            s.serialize_none()
+        } else {
+            s.serialize_f64(*v)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        if d.is_human_readable() {
+            Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::INFINITY))
+        } else {
+            f64::deserialize(d)
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Optics {
     pub min_samples: usize,
     /// Cut level of the DBSCAN extraction.
+    #[serde(with = "inf_as_null")]
     pub eps: f64,
+    #[serde(with = "inf_as_null")]
     pub eps_max: f64,
     #[serde(default)]
     pub cluster_method: OpticsClusterMethod,
@@ -550,5 +575,26 @@ mod tests {
             }
             assert_eq!(f.labels.to_vec(), labels, "min_samples={ms}");
         }
+    }
+}
+
+#[cfg(test)]
+mod serde_inf_tests {
+    use super::Optics;
+
+    #[test]
+    fn infinite_eps_round_trips_through_json_and_binary() {
+        let o = Optics::xi(5, 0.05);
+        assert!(o.eps.is_infinite() && o.eps_max.is_infinite());
+        let json = serde_json::to_string(&o).unwrap();
+        let back: Optics = serde_json::from_str(&json).unwrap();
+        assert!(back.eps.is_infinite() && back.eps_max.is_infinite());
+        let bytes = anofox_ml_core::persistence::to_binary_bytes(&o).unwrap();
+        let back: Optics = anofox_ml_core::persistence::from_binary_bytes(&bytes).unwrap();
+        assert!(back.eps.is_infinite() && back.eps_max.is_infinite());
+        // Finite values are unchanged.
+        let o = Optics::new(5, 0.5).with_eps_max(2.0);
+        let back: Optics = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!((back.eps, back.eps_max), (0.5, 2.0));
     }
 }

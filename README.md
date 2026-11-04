@@ -35,7 +35,7 @@ A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 | **Inspection** | `permutation_importance` (rayon-parallel) | `sklearn.inspection` |
 | **Metrics** | `accuracy_score`, `precision`, `recall`, `f1_score`, `confusion_matrix`, `roc_auc_score`, `roc_curve`, `precision_recall_curve`, `log_loss`, `brier_score_loss`, `matthews_corrcoef`, `cohen_kappa_score`, `silhouette_score`, `adjusted_rand_score`, `mse`, `mae`, `r2_score`, `mean_absolute_percentage_error`, `median_absolute_error`, `mean_squared_log_error`, ... | `sklearn.metrics` |
 | **Utilities** | `train_test_split`, `cross_val_score`, `cross_validate`, `grid_search_cv`, `randomized_search_cv`, `halving_grid_search_cv`, `halving_random_search_cv`, `k_fold` (+ stratified / group / time-series / shuffle / leave-one-out), `learning_curve`, `validation_curve`, `Pipeline`, `ColumnTransformer`, `FunctionTransformer`, `FeatureUnion` | `sklearn.model_selection`, `sklearn.pipeline`, `sklearn.compose` |
-| **I/O & persistence** | CSV reader with ndarray integration, JSON / bincode serde round-tripping for fitted models | `pandas.read_csv`, `joblib.dump` |
+| **I/O & persistence** | CSV reader with ndarray integration, versioned binary (MessagePack + zstd, tolerant to type changes) and JSON persistence for fitted models | `pandas.read_csv`, `joblib.dump` |
 
 ## Quick Start
 
@@ -43,7 +43,7 @@ Add anofox-ml to your project:
 
 ```toml
 [dependencies]
-anofox-ml = "0.1"
+anofox-ml = "0.2"
 ndarray = "0.16"
 ```
 
@@ -111,6 +111,10 @@ anofox-ml (facade)
   +-- anofox-ml-neural-networks   MLPClassifier, MLPRegressor
   +-- anofox-ml-text              Count/Tfidf/Hashing vectorizers
   +-- anofox-ml-io                CSV loading
+  +-- anofox-ml-conformal         Conformal prediction intervals: split conformal,
+                               CV+, jackknife+, CV-minmax (checked against MAPIE)
+  +-- anofox-ml-registry          Every estimator by name + JSON parameters
+                               (used by the Python bindings and DuckDB)
 ```
 
 ### Type-state pattern

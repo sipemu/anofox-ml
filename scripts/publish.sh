@@ -51,14 +51,33 @@ CRATES=(
     anofox-ml-trees
     anofox-ml-discriminant
     anofox-ml-metrics
-    anofox-ml-cluster
     anofox-ml-gaussian-process
     anofox-ml-manifold
-    anofox-ml-preprocessing
+    anofox-ml-cluster
     anofox-ml-ensemble
     anofox-ml-regression
+    anofox-ml-preprocessing
+    anofox-ml-registry
+    anofox-ml-conformal
     anofox-ml
 )
+
+# Fail fast if a crate is listed before one of its internal dependencies
+# (cargo would refuse that upload halfway through a release).
+cargo metadata --format-version 1 --no-deps | python3 -c '
+import json, sys
+order = sys.argv[1:]
+pos = {c: i for i, c in enumerate(order)}
+bad = []
+for p in json.load(sys.stdin)["packages"]:
+    if p["name"] not in pos:
+        continue
+    for d in p["dependencies"]:
+        if d["name"].startswith("anofox-ml") and d["kind"] in (None, "build") and pos.get(d["name"], -1) > pos[p["name"]]:
+            bad.append(p["name"] + " before its dependency " + d["name"])
+if bad:
+    sys.exit("publish order is not topological: " + "; ".join(bad))
+' "${CRATES[@]}"
 
 # Detect the workspace version once; we use it to skip crates that have
 # already been published at this exact version (idempotent re-runs).

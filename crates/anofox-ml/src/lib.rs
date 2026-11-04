@@ -183,5 +183,7 @@ pub mod prelude {
 
     pub use anofox_ml_text::{CountVectorizer, HashingVectorizer, TfidfVectorizer};
 
-    pub use anofox_ml_core::persistence::{load_bincode, load_json, save_bincode, save_json};
+    pub use anofox_ml_core::persistence::{load_binary, load_json, save_binary, save_json};
+    #[allow(deprecated)]
+    pub use anofox_ml_core::persistence::{load_bincode, save_bincode};
 }

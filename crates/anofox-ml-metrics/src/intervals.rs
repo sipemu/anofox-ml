@@ -57,19 +57,19 @@ pub fn interval_score<F: Float>(
         ));
     }
     let k = (F::one() + F::one()) / alpha;
-    let sum = y
-        .iter()
-        .zip(lower.iter().zip(upper.iter()))
-        .fold(F::zero(), |acc, (&v, (&l, &u))| {
-            let penalty = if v < l {
-                k * (l - v)
-            } else if v > u {
-                k * (v - u)
-            } else {
-                F::zero()
-            };
-            acc + (u - l) + penalty
-        });
+    let sum =
+        y.iter()
+            .zip(lower.iter().zip(upper.iter()))
+            .fold(F::zero(), |acc, (&v, (&l, &u))| {
+                let penalty = if v < l {
+                    k * (l - v)
+                } else if v > u {
+                    k * (v - u)
+                } else {
+                    F::zero()
+                };
+                acc + (u - l) + penalty
+            });
     Ok(sum / F::from_usize(y.len()).unwrap())
 }
 
@@ -86,7 +86,10 @@ mod tests {
         assert_eq!(coverage_score(&y, &lo, &hi).unwrap(), 0.5);
         assert_eq!(mean_interval_width(&lo, &hi).unwrap(), 1.625);
         // widths 2+2+1.5+1 = 6.5; misses: (3.5-3)*20 = 10, (10-9)*20 = 20
-        assert_eq!(interval_score(&y, &lo, &hi, 0.1).unwrap(), (6.5 + 30.0) / 4.0);
+        assert_eq!(
+            interval_score(&y, &lo, &hi, 0.1).unwrap(),
+            (6.5 + 30.0) / 4.0
+        );
         assert!(coverage_score(&y, &lo, &array![1.0]).is_err());
         assert!(interval_score(&y, &lo, &hi, 0.0).is_err());
     }

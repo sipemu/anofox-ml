@@ -83,7 +83,7 @@ impl Default for RidgeCrossValidated {
 }
 
 /// A fitted Ridge regression model selected via cross-validation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedRidgeCrossValidated {
     coef: Array1<f64>,
     intercept: Option<f64>,

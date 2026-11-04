@@ -1,15 +1,8 @@
-//! Generic estimator binding.
+//! The object-safe model interface and the `registry!` macro.
 //!
-//! Every estimator is exposed through one Python class, `_native.Model`,
-//! created from a registry `kind` and its parameters as JSON. The JSON uses
-//! the Rust config's serde field names and is merged into the config's
-//! default, so Python only has to send the parameters it overrides. The
-//! sklearn-style classes in the `anofox_ml_python` package map sklearn
-//! parameter names onto these fields.
-//!
-//! The registry (see [`registry!`]) lists, per estimator, its config and
-//! fitted types, how it is fitted and which prediction methods it has.
-//! Unsupported methods raise `AttributeError` in Python.
+//! The registry lists, per estimator, its config and fitted types, how it is
+//! fitted and which prediction methods it has. Unsupported methods return an
+//! error naming the estimator and the method.
 
 use anofox_ml_core::persistence::{self, ModelBundle};
 use anofox_ml_core::{Result, RustMlError};
@@ -17,7 +10,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Output of a prediction method that may be 1-D or 2-D.
-pub(crate) enum Out {
+pub enum Out {
     A1(Array1<f64>),
     A2(Array2<f64>),
 }
@@ -45,7 +38,7 @@ pub(crate) fn not_fitted(kind: &str) -> RustMlError {
 
 /// Object-safe view of a registered estimator (config + optional fitted
 /// state).
-pub(crate) trait DynModel: Send + Sync {
+pub trait DynModel: Send + Sync {
     fn kind(&self) -> &'static str;
     fn capabilities(&self) -> Vec<&'static str>;
     fn params(&self) -> Result<serde_json::Value>;
@@ -132,14 +125,14 @@ pub(crate) struct Est<C, M> {
 impl<C: Serialize + DeserializeOwned, M: Serialize + DeserializeOwned> Est<C, M> {
     pub fn bytes(&self, kind: &str) -> Result<Vec<u8>> {
         let fitted = self.fitted.as_ref().ok_or_else(|| not_fitted(kind))?;
-        persistence::to_bincode_bytes(&ModelBundle {
+        persistence::to_binary_bytes(&ModelBundle {
             config: &self.config,
             fitted,
         })
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let b: ModelBundle<C, M> = persistence::from_bincode_bytes(bytes)?;
+        let b: ModelBundle<C, M> = persistence::from_binary_bytes(bytes)?;
         Ok(Self {
             config: b.config,
             fitted: Some(b.fitted),
@@ -243,7 +236,7 @@ macro_rules! registry {
         )*
 
         /// Create an unfitted estimator of `kind` from JSON parameters.
-        pub(crate) fn make(
+        pub fn make(
             kind: &str,
             params: &serde_json::Value,
         ) -> anofox_ml_core::Result<Box<dyn $crate::model::DynModel>> {
@@ -262,7 +255,7 @@ macro_rules! registry {
         }
 
         /// Restore a fitted estimator from `to_bytes` output.
-        pub(crate) fn load(
+        pub fn load(
             kind: &str,
             bytes: &[u8],
         ) -> anofox_ml_core::Result<Box<dyn $crate::model::DynModel>> {
@@ -279,7 +272,7 @@ macro_rules! registry {
         }
 
         /// Default parameters of `kind` as JSON.
-        pub(crate) fn default_params(kind: &str) -> anofox_ml_core::Result<serde_json::Value> {
+        pub fn default_params(kind: &str) -> anofox_ml_core::Result<serde_json::Value> {
             match kind {
                 $(
                     stringify!($kind) => {
@@ -296,7 +289,7 @@ macro_rules! registry {
         }
 
         /// All registered kinds.
-        pub(crate) fn kinds() -> Vec<&'static str> {
+        pub fn kinds() -> Vec<&'static str> {
             vec![$(stringify!($kind)),*]
         }
     };
