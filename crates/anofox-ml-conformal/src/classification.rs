@@ -11,7 +11,7 @@ use crate::split::{check_xy, split_indices, too_few};
 const EPS: f64 = 1e-8;
 
 /// How a class's conformity is scored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ClassificationScore {
     /// Least ambiguous set-valued classifier (Sadinle et al. 2019): score
     /// `1 − p̂_y(x)`; a set holds every class with `p̂ ≥ 1 − q`. Smallest
@@ -23,7 +23,60 @@ pub enum ClassificationScore {
     /// one; a set holds the most probable classes until their mass reaches
     /// `q`. Sets grow on hard inputs.
     Aps(ApsMode),
+    /// Regularized APS (Angelopoulos et al. 2021): APS plus a penalty
+    /// `λ · max(0, rank − k_reg)` on every class ranked after `k_reg`, which
+    /// keeps sets small when the model puts mass on many unlikely classes.
+    Raps(RapsParams),
 }
+
+/// Settings of [`ClassificationScore::Raps`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RapsParams {
+    pub mode: ApsMode,
+    /// Rank after which classes are penalised; `None`: tuned per `alpha` as
+    /// the conformal quantile of the true class's rank on the tuning rows,
+    /// plus one.
+    pub k_reg: Option<usize>,
+    /// Penalty weight; `None`: tuned per `alpha` on the tuning rows as the
+    /// value of `[0.001, 0.01, 0.1, 0.2, 0.5]` giving the smallest sets.
+    pub lambda: Option<f64>,
+    /// Fraction of the calibration rows held out for tuning `k_reg` /
+    /// `lambda` (only when one of them is `None`).
+    pub tuning_size: f64,
+}
+
+impl RapsParams {
+    pub fn new(mode: ApsMode) -> Self {
+        Self {
+            mode,
+            k_reg: None,
+            lambda: None,
+            tuning_size: 0.2,
+        }
+    }
+
+    pub fn with_k_reg(mut self, k_reg: usize) -> Self {
+        self.k_reg = Some(k_reg);
+        self
+    }
+
+    pub fn with_lambda(mut self, lambda: f64) -> Self {
+        self.lambda = Some(lambda);
+        self
+    }
+
+    pub fn with_tuning_size(mut self, tuning_size: f64) -> Self {
+        self.tuning_size = tuning_size;
+        self
+    }
+
+    fn needs_tuning(&self) -> bool {
+        self.k_reg.is_none() || self.lambda.is_none()
+    }
+}
+
+/// λ values searched when [`RapsParams::lambda`] is `None` (from the paper).
+const LAMBDA_GRID: [f64; 5] = [0.001, 0.01, 0.1, 0.2, 0.5];
 
 /// Treatment of the class that crosses the APS threshold (MAPIE's
 /// `include_last_label`).
@@ -122,8 +175,9 @@ where
 
 /// Calibrate a fitted classifier on rows it was not trained on. `classes`
 /// are the labels of its `predict_proba` columns, in order; every
-/// calibration label must be one of them. `seed` drives the APS
-/// randomisation (unused otherwise).
+/// calibration label must be one of them. `seed` drives the APS / RAPS
+/// randomisation and, for RAPS with tuning, the split into calibration and
+/// tuning rows (use [`conformalize_raps`] to choose that split yourself).
 pub fn conformalize_classifier<F: Float, M: Predict<F> + PredictProba<F>>(
     model: M,
     classes: Vec<F>,
@@ -131,6 +185,75 @@ pub fn conformalize_classifier<F: Float, M: Predict<F> + PredictProba<F>>(
     y_cal: ArrayView1<F>,
     score: ClassificationScore,
     seed: u64,
+) -> Result<FittedSplitConformalClassifier<M, F>> {
+    check_xy(x_cal, y_cal)?;
+    if let ClassificationScore::Raps(params) = score {
+        if params.needs_tuning() {
+            let (cal, tune) = split_indices(x_cal.nrows(), params.tuning_size, seed ^ 0x5EED)?;
+            return conformalize_raps(
+                model,
+                classes,
+                x_cal.select(Axis(0), &cal).view(),
+                y_cal.select(Axis(0), &cal).view(),
+                x_cal.select(Axis(0), &tune).view(),
+                y_cal.select(Axis(0), &tune).view(),
+                params,
+                seed,
+            );
+        }
+    }
+    calibrate(model, classes, x_cal, y_cal, score, seed, None)
+}
+
+/// [`conformalize_classifier`] with RAPS and an explicit tuning set: rows
+/// `(x_tune, y_tune)` choose `k_reg` / `lambda` (where `params` leaves them
+/// `None`), rows `(x_cal, y_cal)` give the conformity scores.
+#[allow(clippy::too_many_arguments)]
+pub fn conformalize_raps<F: Float, M: Predict<F> + PredictProba<F>>(
+    model: M,
+    classes: Vec<F>,
+    x_cal: ArrayView2<F>,
+    y_cal: ArrayView1<F>,
+    x_tune: ArrayView2<F>,
+    y_tune: ArrayView1<F>,
+    params: RapsParams,
+    seed: u64,
+) -> Result<FittedSplitConformalClassifier<M, F>> {
+    check_xy(x_tune, y_tune)?;
+    let tune_proba = model.predict_proba_view(x_tune)?;
+    let tune_labels = encode(&classes, y_tune)?;
+    calibrate(
+        model,
+        classes,
+        x_cal,
+        y_cal,
+        ClassificationScore::Raps(params),
+        seed,
+        Some((tune_proba, tune_labels)),
+    )
+}
+
+/// Column index of every label in `classes`.
+fn encode<F: Float>(classes: &[F], y: ArrayView1<F>) -> Result<Vec<usize>> {
+    y.iter()
+        .map(|&label| {
+            classes.iter().position(|&c| c == label).ok_or_else(|| {
+                RustMlError::InvalidParameter(format!(
+                    "calibration label {label:?} is not one of the classes"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn calibrate<F: Float, M: Predict<F> + PredictProba<F>>(
+    model: M,
+    classes: Vec<F>,
+    x_cal: ArrayView2<F>,
+    y_cal: ArrayView1<F>,
+    score: ClassificationScore,
+    seed: u64,
+    tuning: Option<(Array2<F>, Vec<usize>)>,
 ) -> Result<FittedSplitConformalClassifier<M, F>> {
     check_xy(x_cal, y_cal)?;
     if classes.len() < 2 {
@@ -146,17 +269,14 @@ pub fn conformalize_classifier<F: Float, M: Predict<F> + PredictProba<F>>(
             classes.len()
         )));
     }
+    let labels = encode(&classes, y_cal)?;
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let mut scores = Vec::with_capacity(y_cal.len());
-    for (row, &label) in proba.rows().into_iter().zip(y_cal) {
-        let k = classes.iter().position(|&c| c == label).ok_or_else(|| {
-            RustMlError::InvalidParameter(format!(
-                "calibration label {label:?} is not one of the classes"
-            ))
-        })?;
+    let mut scores = Vec::with_capacity(labels.len());
+    let mut ranks = Vec::with_capacity(labels.len());
+    for (row, &k) in proba.rows().into_iter().zip(&labels) {
         let s = match score {
             ClassificationScore::Lac => F::one() - row[k],
-            ClassificationScore::Aps(mode) => {
+            ClassificationScore::Aps(mode) | ClassificationScore::Raps(RapsParams { mode, .. }) => {
                 let mut s = mass_up_to(row, k);
                 if mode == ApsMode::Randomized {
                     s -= F::from_f64(rng.gen::<f64>()).expect("fits") * row[k];
@@ -170,11 +290,14 @@ pub fn conformalize_classifier<F: Float, M: Predict<F> + PredictProba<F>>(
             ));
         }
         scores.push(s);
+        ranks.push(rank_of(row, k));
     }
     Ok(FittedSplitConformalClassifier {
         model,
         classes,
         scores,
+        ranks,
+        tuning,
         score,
         seed,
         allow_full_sets: false,
@@ -188,6 +311,15 @@ fn order_desc<F: Float>(p: ArrayView1<F>) -> Vec<usize> {
     idx.sort_by(|&a, &b| p[a].partial_cmp(&p[b]).expect("no NaN"));
     idx.reverse();
     idx
+}
+
+/// 1-based rank of class `k` in decreasing probability.
+fn rank_of<F: Float>(p: ArrayView1<F>, k: usize) -> usize {
+    order_desc(p)
+        .iter()
+        .position(|&i| i == k)
+        .expect("k is a column")
+        + 1
 }
 
 /// Probability mass of the classes ranked up to and including class `k`.
@@ -207,10 +339,22 @@ fn mass_up_to<F: Float>(p: ArrayView1<F>, k: usize) -> F {
 pub struct FittedSplitConformalClassifier<M, F> {
     model: M,
     classes: Vec<F>,
+    /// LAC / APS scores; for RAPS the unregularized APS part.
     scores: Vec<F>,
+    /// 1-based rank of the true class of every calibration row (RAPS).
+    ranks: Vec<usize>,
+    /// RAPS tuning rows: probabilities and true columns.
+    tuning: Option<(Array2<F>, Vec<usize>)>,
     score: ClassificationScore,
     seed: u64,
     allow_full_sets: bool,
+}
+
+/// RAPS regularization `(k_reg, lambda)` in use for one `alpha`.
+#[derive(Debug, Clone, Copy)]
+struct Reg<F> {
+    k: usize,
+    lambda: F,
 }
 
 impl<M: Predict<F> + PredictProba<F>, F: Float> FittedSplitConformalClassifier<M, F> {
@@ -232,11 +376,105 @@ impl<M: Predict<F> + PredictProba<F>, F: Float> FittedSplitConformalClassifier<M
         self
     }
 
+    /// RAPS: the `(k_reg, lambda)` used at `alpha` (tuned or fixed).
+    pub fn raps_regularization(&self, alpha: f64) -> Result<Option<(usize, f64)>> {
+        Ok(self
+            .regularization(alpha)?
+            .map(|r| (r.k, r.lambda.to_f64().expect("finite"))))
+    }
+
+    fn regularization(&self, alpha: f64) -> Result<Option<Reg<F>>> {
+        let ClassificationScore::Raps(params) = self.score else {
+            return Ok(None);
+        };
+        check_alpha(alpha)?;
+        let tuning = || {
+            self.tuning
+                .as_ref()
+                .ok_or_else(|| RustMlError::InvalidParameter("RAPS tuning rows are missing".into()))
+        };
+        let k = match params.k_reg {
+            Some(k) => k,
+            None => {
+                let (proba, labels) = tuning()?;
+                let mut pos: Vec<F> = proba
+                    .rows()
+                    .into_iter()
+                    .zip(labels)
+                    .map(|(r, &y)| F::from_usize(rank_of(r, y) - 1).expect("fits"))
+                    .collect();
+                let q = lower_quantile(&mut pos, 1.0 - alpha)
+                    .ok_or_else(|| too_few(labels.len(), alpha))?;
+                q.to_usize().expect("a rank") + 1
+            }
+        };
+        let lambda = match params.lambda {
+            Some(l) => F::from_f64(l).expect("fits"),
+            None => self.tune_lambda(tuning()?, k, params.mode, alpha)?,
+        };
+        Ok(Some(Reg { k, lambda }))
+    }
+
+    /// The grid value of λ giving the smallest mean set on the tuning rows.
+    fn tune_lambda(
+        &self,
+        tuning: &(Array2<F>, Vec<usize>),
+        k: usize,
+        mode: ApsMode,
+        alpha: f64,
+    ) -> Result<F> {
+        let (proba, labels) = tuning;
+        let eps = F::from_f64(EPS).expect("fits");
+        // Randomisation plays no part in the choice (as in MAPIE).
+        let mode = if mode == ApsMode::Exclude {
+            ApsMode::Exclude
+        } else {
+            ApsMode::Include
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let (mut best, mut best_size) = (F::zero(), f64::MAX);
+        for &l in &LAMBDA_GRID {
+            let reg = Reg {
+                k,
+                lambda: F::from_f64(l).expect("fits"),
+            };
+            let mut scores: Vec<F> = proba
+                .rows()
+                .into_iter()
+                .zip(labels)
+                .map(|(r, &y)| mass_up_to(r, y) + penalty(rank_of(r, y), reg))
+                .collect();
+            let q = lower_quantile(&mut scores, 1.0 - alpha)
+                .ok_or_else(|| too_few(labels.len(), alpha))?;
+            let mut size = 0usize;
+            let mut set = Array1::from_elem(proba.ncols(), false);
+            for r in proba.rows() {
+                aps_row(r, q, mode, eps, &mut rng, set.view_mut(), Some(reg));
+                size += set.iter().filter(|&&b| b).count();
+            }
+            let size = size as f64 / labels.len() as f64;
+            if size < best_size - EPS {
+                best = reg.lambda;
+                best_size = size;
+            }
+        }
+        Ok(best)
+    }
+
     /// The calibrated threshold `q` at `alpha` (`None` when there are too
     /// few calibration rows and full sets are allowed).
     pub fn threshold(&self, alpha: f64) -> Result<Option<F>> {
         check_alpha(alpha)?;
-        let mut s = self.scores.clone();
+        let reg = self.regularization(alpha)?;
+        let mut s: Vec<F> = match reg {
+            None => self.scores.clone(),
+            Some(reg) => self
+                .scores
+                .iter()
+                .zip(&self.ranks)
+                .map(|(&s, &rank)| s + penalty(rank, reg))
+                .collect(),
+        };
         match lower_quantile(&mut s, 1.0 - alpha) {
             Some(q) => Ok(Some(q)),
             None if self.allow_full_sets => Ok(None),
@@ -261,16 +499,21 @@ impl<M: Predict<F> + PredictProba<F>, F: Float> FittedSplitConformalClassifier<M
         };
         let eps = F::from_f64(EPS).expect("fits");
         let mut sets = Array2::from_elem((n, k), false);
+        // A separate stream from the calibration draws, the same on every call.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed ^ 0x9E37_79B9_7F4A_7C15);
         match self.score {
             ClassificationScore::Lac => {
                 sets.zip_mut_with(&proba, |s, &p| *s = (F::one() - p) - q <= eps);
             }
             ClassificationScore::Aps(mode) => {
-                // A separate stream from the calibration draws, the same on
-                // every call.
-                let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed ^ 0x9E37_79B9_7F4A_7C15);
                 for (set, p) in sets.rows_mut().into_iter().zip(proba.rows()) {
-                    aps_row(p, q, mode, eps, &mut rng, set);
+                    aps_row(p, q, mode, eps, &mut rng, set, None);
+                }
+            }
+            ClassificationScore::Raps(params) => {
+                let reg = self.regularization(alpha)?;
+                for (set, p) in sets.rows_mut().into_iter().zip(proba.rows()) {
+                    aps_row(p, q, params.mode, eps, &mut rng, set, reg);
                 }
             }
         }
@@ -294,7 +537,13 @@ impl<M: Predict<F> + PredictProba<F>, F: Float> FittedSplitConformalClassifier<M
     }
 }
 
-/// One APS set (MAPIE's `_get_last_included_proba` + `get_prediction_sets`).
+/// RAPS penalty of the class at 1-based `rank`.
+fn penalty<F: Float>(rank: usize, reg: Reg<F>) -> F {
+    reg.lambda * F::from_usize(rank.saturating_sub(reg.k)).expect("fits")
+}
+
+/// One APS / RAPS set (MAPIE's `_get_last_included_proba` +
+/// `get_prediction_sets`); `reg` adds the RAPS penalty.
 fn aps_row<F: Float>(
     p: ArrayView1<F>,
     q: F,
@@ -302,14 +551,15 @@ fn aps_row<F: Float>(
     eps: F,
     rng: &mut rand::rngs::StdRng,
     mut set: ndarray::ArrayViewMut1<bool>,
+    reg: Option<Reg<F>>,
 ) {
     let k = p.len();
-    // Cumulative mass in decreasing-probability order, by class.
+    // Cumulative (regularized) mass in decreasing-probability order, by class.
     let mut cum = vec![F::zero(); k];
     let mut sum = F::zero();
-    for i in order_desc(p) {
+    for (j, i) in order_desc(p).into_iter().enumerate() {
         sum += p[i];
-        cum[i] = sum;
+        cum[i] = sum + reg.map_or(F::zero(), |r| penalty(j + 1, r));
     }
     let last = match mode {
         ApsMode::Include | ApsMode::Randomized => {
@@ -346,7 +596,18 @@ fn aps_row<F: Float>(
         *s = v - p_last >= -eps;
     }
     if mode == ApsMode::Randomized {
-        let v = (cum[last] - q) / p_last;
+        let denom = match reg {
+            None => p_last,
+            Some(r) => {
+                // MAPIE's RAPS `_compute_v_parameter`: L is the set size
+                // before randomisation.
+                let l = set.iter().filter(|&&b| b).count();
+                let over = F::from_usize(l.saturating_sub(r.k)).expect("fits");
+                let flag = if l > r.k { F::one() } else { F::zero() };
+                p_last - r.lambda * over + r.lambda * flag
+            }
+        };
+        let v = (cum[last] - q) / denom;
         let u = F::from_f64(rng.gen::<f64>()).expect("fits");
         set[last] = v - u <= eps;
     }

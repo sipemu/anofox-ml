@@ -2,9 +2,11 @@
 //! (test_harness/generators/gen_conformal_classification.py). Both sides use
 //! the same fixed softmax model, so only the conformal logic is compared.
 
-use anofox_ml_conformal::{conformalize_classifier, ApsMode, ClassificationScore};
+use anofox_ml_conformal::{
+    conformalize_classifier, conformalize_raps, ApsMode, ClassificationScore, RapsParams,
+};
 use anofox_ml_core::{Predict, PredictProba, Result};
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2, Axis};
 use serde_json::Value;
 
 /// P(y = k | x) = softmax(x W)_k, classes 0..K.
@@ -62,27 +64,50 @@ fn sets_match_mapie() {
         .into();
     let classes: Vec<f64> = (0..w.ncols()).map(|k| k as f64).collect();
     let cases = g["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 3);
+    assert_eq!(cases.len(), 6);
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        let score = match (
-            case["score"].as_str().unwrap(),
-            case["include_last_label"].as_bool(),
-        ) {
-            ("lac", _) => ClassificationScore::Lac,
-            ("aps", Some(true)) => ClassificationScore::Aps(ApsMode::Include),
-            ("aps", Some(false)) => ClassificationScore::Aps(ApsMode::Exclude),
-            other => panic!("unknown case {other:?}"),
+        let include = case["include_last_label"].as_bool();
+        let mode = if include == Some(false) {
+            ApsMode::Exclude
+        } else {
+            ApsMode::Include
         };
-        let fitted = conformalize_classifier(
-            FixedSoftmax { w: w.clone() },
-            classes.clone(),
-            x_cal.view(),
-            y_cal.view(),
-            score,
-            0,
-        )
-        .unwrap();
+        let fitted = match case["score"].as_str().unwrap() {
+            "raps" => {
+                // MAPIE's tuning rows and lambda are pinned in the generator.
+                let tune: Vec<usize> = serde_json::from_value(case["tune_index"].clone()).unwrap();
+                let cal: Vec<usize> = (0..x_cal.nrows()).filter(|i| !tune.contains(i)).collect();
+                let params = RapsParams::new(mode).with_lambda(case["lambda"].as_f64().unwrap());
+                conformalize_raps(
+                    FixedSoftmax { w: w.clone() },
+                    classes.clone(),
+                    x_cal.select(Axis(0), &cal).view(),
+                    y_cal.select(Axis(0), &cal).view(),
+                    x_cal.select(Axis(0), &tune).view(),
+                    y_cal.select(Axis(0), &tune).view(),
+                    params,
+                    0,
+                )
+                .unwrap()
+            }
+            other => {
+                let score = match other {
+                    "lac" => ClassificationScore::Lac,
+                    "aps" => ClassificationScore::Aps(mode),
+                    _ => panic!("unknown case {name}"),
+                };
+                conformalize_classifier(
+                    FixedSoftmax { w: w.clone() },
+                    classes.clone(),
+                    x_cal.view(),
+                    y_cal.view(),
+                    score,
+                    0,
+                )
+                .unwrap()
+            }
+        };
         let y_pred: Vec<f64> = serde_json::from_value(case["y_pred"].clone()).unwrap();
         assert_eq!(fitted.predict(&x_test).unwrap().to_vec(), y_pred, "{name}");
         let levels: Vec<f64> = serde_json::from_value(case["levels"].clone()).unwrap();

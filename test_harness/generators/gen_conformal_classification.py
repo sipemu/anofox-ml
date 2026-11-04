@@ -12,6 +12,7 @@ import os
 
 import numpy as np
 from mapie.classification import SplitConformalClassifier
+from mapie.conformity_scores import RAPSConformityScore
 from sklearn.base import BaseEstimator, ClassifierMixin
 
 LEVELS = [0.9, 0.8, 0.5]
@@ -48,6 +49,38 @@ class ZeroUniform(np.random.RandomState):
         return np.zeros(size)
 
 
+class PinnedRAPS(RAPSConformityScore):
+    """RAPS with a fixed tuning split and a fixed lambda.
+
+    MAPIE draws the tuning rows with a StratifiedShuffleSplit and, while
+    searching lambda, regularizes with lambda in place of k* (see
+    `_add_regularization` in the non-prediction phase). Pinning both leaves
+    the part we compare: k* from the tuning rows, the regularized scores,
+    the threshold and the sets.
+    """
+
+    def __init__(self, tune_index, fixed_lambda):
+        super().__init__(size_raps=0.2)
+        self.tune_index = np.asarray(tune_index)
+        self.fixed_lambda = fixed_lambda
+
+    def split_data(self, X, y, y_enc, sample_weight=None, groups=None):
+        tune = np.zeros(len(y_enc), dtype=bool)
+        tune[self.tune_index] = True
+        self.X_raps, self.y_raps = X[tune], y_enc[tune]
+        self.y_raps_no_enc = self.label_encoder_.inverse_transform(self.y_raps)
+        X, y_enc = X[~tune], y_enc[~tune]
+        y = self.label_encoder_.inverse_transform(y_enc)
+        self.n_samples_ = len(y_enc)
+        return X, y, y_enc, sample_weight, groups
+
+    def _find_lambda_star(self, y_raps_no_enc, y_pred_proba_raps, alpha_np,
+                          include_last_label, k_star):
+        if len(alpha_np) == 1:
+            return float(self.fixed_lambda)
+        return np.full(len(alpha_np), self.fixed_lambda)
+
+
 def generate():
     rng = np.random.default_rng(3)
     W = rng.standard_normal((3, 4)) * 1.5
@@ -73,6 +106,26 @@ def generate():
             "levels": LEVELS,
             "y_pred": y_pred.tolist(),
             # sets[level][row][class]
+            "sets": [y_sets[:, :, j].astype(int).tolist() for j in range(len(LEVELS))],
+        })
+
+    # RAPS: rows 0..30 tune k* (lambda pinned), rows 30..120 calibrate.
+    tune_index = list(range(30))
+    for include_last, lam in [(True, 0.1), (False, 0.1), (True, 0.5)]:
+        scc = SplitConformalClassifier(model, confidence_level=LEVELS,
+                                       conformity_score=PinnedRAPS(tune_index, lam),
+                                       prefit=True, random_state=ZeroUniform(0))
+        scc.conformalize(X_cal, y_cal)
+        y_pred, y_sets = scc.predict_set(
+            X_test, conformity_score_params={"include_last_label": include_last})
+        cases.append({
+            "name": f"raps_last_{include_last}_lambda_{lam}",
+            "score": "raps",
+            "include_last_label": include_last,
+            "lambda": lam,
+            "tune_index": tune_index,
+            "levels": LEVELS,
+            "y_pred": y_pred.tolist(),
             "sets": [y_sets[:, :, j].astype(int).tolist() for j in range(len(LEVELS))],
         })
 
