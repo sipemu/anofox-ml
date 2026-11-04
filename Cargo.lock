@@ -78,6 +78,7 @@ name = "anofox-ml-conformal"
 version = "0.2.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-ensemble",
  "anofox-ml-regression",
  "anofox-ml-trees",
  "ndarray",

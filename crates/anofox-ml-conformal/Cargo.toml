@@ -22,3 +22,4 @@ rand = { workspace = true }
 serde_json = { workspace = true }
 anofox-ml-trees = { workspace = true }
 anofox-ml-regression = { workspace = true }
+anofox-ml-ensemble = { workspace = true }
