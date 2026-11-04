@@ -147,37 +147,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench --workspace --exclude anofox-ml-python --no-run
 
-  codspeed:
-    name: Codspeed perf tracking
-    runs-on: ubuntu-latest
-    # Tracks per-commit perf via codspeed.io. codspeed's simulation
-    # instrument counts CPU instructions via cachegrind instead of
-    # wall-time, so results are deterministic across noisy GH runners —
-    # a 1 % drift in this number is a real algorithmic change, not a
-    # hot/cold cache. Authentication is handled via GitHub OIDC, so no
-    # CODSPEED_TOKEN secret is required.
-    permissions:
-      contents: read
-      id-token: write
-    if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/master')
-      || (github.event_name == 'pull_request')
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-codspeed
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-codspeed
-      - name: Build benchmarks under codspeed
-        run: cargo codspeed build -p anofox-ml
-      - name: Run benchmarks
-        uses: CodSpeedHQ/action@v4
-        with:
-          mode: simulation
-          run: cargo codspeed run -p anofox-ml
-
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
