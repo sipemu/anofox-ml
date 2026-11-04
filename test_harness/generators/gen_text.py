@@ -35,7 +35,7 @@ def generate():
 if __name__ == "__main__":
     import json, os
     out = os.path.join(os.path.dirname(__file__), "..", "..",
-                        "crates", "rustml", "tests", "golden_data",
+                        "crates", "anofox-ml", "tests", "golden_data",
                         "text.json")
     with open(out, "w") as f:
         json.dump(generate(), f, indent=2)
