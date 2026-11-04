@@ -3,6 +3,7 @@
 use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use rand::{Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 
 use crate::mondrian::check_groups;
 use crate::quantile::{check_alpha, lower_quantile};
@@ -12,7 +13,7 @@ use crate::split::{check_xy, split_indices, too_few};
 const EPS: f64 = 1e-8;
 
 /// How a class's conformity is scored.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq, Default)]
 pub enum ClassificationScore {
     /// Least ambiguous set-valued classifier (Sadinle et al. 2019): score
     /// `1 − p̂_y(x)`; a set holds every class with `p̂ ≥ 1 − q`. Smallest
@@ -31,7 +32,7 @@ pub enum ClassificationScore {
 }
 
 /// Settings of [`ClassificationScore::Raps`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub struct RapsParams {
     pub mode: ApsMode,
     /// Rank after which classes are penalised; `None`: tuned per `alpha` as
@@ -81,7 +82,7 @@ const LAMBDA_GRID: [f64; 5] = [0.001, 0.01, 0.1, 0.2, 0.5];
 
 /// Treatment of the class that crosses the APS threshold (MAPIE's
 /// `include_last_label`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq, Eq, Default)]
 pub enum ApsMode {
     /// Always include it: coverage `≥ 1 − α`, conservative.
     #[default]
@@ -101,7 +102,7 @@ pub enum ApsMode {
 /// Probability columns are taken to follow the sorted distinct training
 /// labels (the convention of anofox-ml's classifiers). To calibrate a model
 /// you fitted yourself, use [`conformalize_classifier`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitConformalClassifier<E> {
     pub estimator: E,
     pub score: ClassificationScore,
@@ -377,7 +378,7 @@ fn mass_up_to<F: Float>(p: ArrayView1<F>, k: usize) -> F {
 }
 
 /// Calibrated classifier: model, classes and calibration scores.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FittedSplitConformalClassifier<M, F> {
     model: M,
     classes: Vec<F>,

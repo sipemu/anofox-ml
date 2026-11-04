@@ -31,6 +31,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `conformalize_classifier_mondrian` + `predict_set_mondrian` for LAC /
   APS / RAPS sets. The threshold is calibrated within each group (store,
   segment, sensor), so coverage holds per group, not only on average.
+- Every fitted conformal model (split, cross, CQR, normalised, Mondrian,
+  classifiers) implements `Serialize` / `Deserialize` and round-trips
+  through the binary persistence format with identical intervals and sets
+  (when its base model is serializable).
 
 ### Conformal prediction: CQR and normalised scores (#93)
 
