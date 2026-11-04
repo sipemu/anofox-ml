@@ -9,10 +9,16 @@
 //! - [`CrossConformalRegressor`]: CV+, jackknife+ (leave-one-out splits),
 //!   CV-minmax and the cheaper "base" variant (K + 1 fits, uses every row
 //!   for both fitting and calibration).
+//! - [`ConformalizedQuantileRegressor`] / [`conformalize_quantiles`]:
+//!   conformalized quantile regression (CQR) on quantile models, for
+//!   intervals that adapt to heteroscedastic noise.
+//! - [`NormalizedConformalRegressor`] / [`conformalize_normalized`]: split
+//!   conformal with residual-normalised scores (a second model learns the
+//!   error scale).
 //!
-//! The miscoverage `alpha` is chosen at prediction time; the conformity
-//! score is the absolute residual. Results match MAPIE (`mapie.regression`)
-//! to rounding.
+//! The miscoverage `alpha` is chosen at prediction time (CQR: at fit time,
+//! since the quantile models are trained for it). Results match MAPIE
+//! (`mapie.regression`) to rounding.
 //!
 //! ```
 //! use anofox_ml_conformal::{CrossConformalRegressor, CrossMethod};
@@ -32,12 +38,21 @@
 //! assert!(lower.iter().zip(&upper).all(|(l, u)| l <= u));
 //! ```
 
+mod cqr;
 mod cross;
+mod normalized;
 mod quantile;
 mod split;
 
+pub use cqr::{
+    conformalize_quantiles, ConformalizedQuantileRegressor, FittedConformalizedQuantileRegressor,
+};
 pub use cross::{
     CrossConformalRegressor, CrossMethod, FittedCrossConformalRegressor, PointPrediction,
+};
+pub use normalized::{
+    conformalize_normalized, fit_residual_model, FittedNormalizedConformalRegressor,
+    NormalizedConformalRegressor,
 };
 pub use quantile::conformal_quantile;
 pub use split::{conformalize, FittedSplitConformalRegressor, SplitConformalRegressor};

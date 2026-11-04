@@ -6,6 +6,22 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Conformal prediction: CQR and normalised scores (#93)
+
+- `ConformalizedQuantileRegressor` (conformalized quantile regression,
+  Romano et al. 2019): quantile models at `α/2`, `1 − α/2` and the median
+  are built by a closure (e.g. `GradientBoostingRegressor` with
+  `GbLoss::Quantile`), and their band is corrected by the conformal
+  quantile of the calibration errors, per bound (default) or symmetric.
+  `conformalize_quantiles` calibrates three models you fitted yourself.
+- `NormalizedConformalRegressor`: split conformal with residual-normalised
+  scores; a second model learns `log |y − ŷ|`, so interval widths follow
+  the local error scale. `fit_residual_model` and `conformalize_normalized`
+  for prefit models.
+- Both match MAPIE 1.6.0 to 1e-9 (5 new golden cases); seeded tests check
+  coverage and that the widths track heteroscedastic noise.
+- New metric `mean_pinball_loss` (sklearn's).
+
 ## [0.2.0] - 2026-11-04
 
 This release completes the October 2026 algorithm review (#26–#72). It fixes

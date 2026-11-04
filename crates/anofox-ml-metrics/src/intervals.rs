@@ -73,6 +73,27 @@ pub fn interval_score<F: Float>(
     Ok(sum / F::from_usize(y.len()).unwrap())
 }
 
+/// Mean pinball (quantile) loss of predictions of the `alpha` quantile
+/// (sklearn `mean_pinball_loss`): `alpha · (y − q)` when `y ≥ q`,
+/// `(1 − alpha) · (q − y)` otherwise.
+pub fn mean_pinball_loss<F: Float>(y: &Array1<F>, pred: &Array1<F>, alpha: F) -> Result<F> {
+    check(y, pred, pred)?;
+    if !(alpha >= F::zero() && alpha <= F::one()) {
+        return Err(RustMlError::InvalidParameter(
+            "alpha must lie in [0, 1]".into(),
+        ));
+    }
+    let sum = y.iter().zip(pred.iter()).fold(F::zero(), |acc, (&t, &q)| {
+        let d = t - q;
+        acc + if d >= F::zero() {
+            alpha * d
+        } else {
+            (alpha - F::one()) * d
+        }
+    });
+    Ok(sum / F::from_usize(y.len()).unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +113,17 @@ mod tests {
         );
         assert!(coverage_score(&y, &lo, &array![1.0]).is_err());
         assert!(interval_score(&y, &lo, &hi, 0.0).is_err());
+    }
+
+    #[test]
+    fn pinball_loss_matches_sklearn() {
+        // sklearn.metrics.mean_pinball_loss([1, 2, 3, 10], [0, 2, 3.5, 8], alpha=0.9)
+        let y = array![1.0, 2.0, 3.0, 10.0];
+        let q = array![0.0, 2.0, 3.5, 8.0];
+        let expected: f64 = (0.9 * 1.0 + 0.0 + 0.1 * 0.5 + 0.9 * 2.0) / 4.0;
+        assert!((mean_pinball_loss(&y, &q, 0.9).unwrap() - expected).abs() < 1e-15);
+        // alpha = 0.5 is half the mean absolute error
+        assert_eq!(mean_pinball_loss(&y, &q, 0.5).unwrap(), 0.5 * 3.5 / 4.0);
+        assert!(mean_pinball_loss(&y, &q, 1.5).is_err());
     }
 }

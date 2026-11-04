@@ -1,7 +1,10 @@
 //! Parity with MAPIE 1.6.0 (test_harness/generators/gen_conformal.py), with
 //! ordinary least squares as the base estimator on both sides.
 
-use anofox_ml_conformal::{conformalize, CrossConformalRegressor, CrossMethod, PointPrediction};
+use anofox_ml_conformal::{
+    conformalize, conformalize_normalized, conformalize_quantiles, fit_residual_model,
+    CrossConformalRegressor, CrossMethod, PointPrediction,
+};
 use anofox_ml_core::utils::CvSplit;
 use anofox_ml_core::Fit;
 use anofox_ml_regression::OlsRegressor;
@@ -50,7 +53,7 @@ fn matches_mapie() {
     let g = golden();
     let (x, y, x_test) = (matrix(&g["X"]), vector(&g["y"]), matrix(&g["X_test"]));
     let cases = g["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 9);
+    assert_eq!(cases.len(), 14);
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let levels: Vec<f64> = serde_json::from_value(case["levels"].clone()).unwrap();
@@ -63,6 +66,67 @@ fn matches_mapie() {
                     .unwrap();
                 let fitted = conformalize(
                     model,
+                    x.select(Axis(0), &cal).view(),
+                    y.select(Axis(0), &cal).view(),
+                )
+                .unwrap();
+                let pred = anofox_ml_core::Predict::predict(&fitted, &x_test).unwrap();
+                let xt = x_test.clone();
+                (
+                    pred,
+                    Box::new(move |a| fitted.predict_interval(xt.view(), a)),
+                )
+            }
+            "cqr" => {
+                let (train, cal) = (indices(&case["train"]), indices(&case["calibration"]));
+                let (xt, yt) = (x.select(Axis(0), &train), y.select(Axis(0), &train));
+                let off = case["offset"].as_f64().unwrap();
+                let fit = |shift: f64| {
+                    OlsRegressor::new()
+                        .fit(&xt, &yt.mapv(|v| v + shift))
+                        .unwrap()
+                };
+                let alpha = 1.0 - levels[0];
+                let fitted = conformalize_quantiles(
+                    fit(-off),
+                    fit(off),
+                    fit(0.0),
+                    x.select(Axis(0), &cal).view(),
+                    y.select(Axis(0), &cal).view(),
+                    alpha,
+                )
+                .unwrap()
+                .with_symmetric_correction(case["symmetric"].as_bool().unwrap());
+                let pred = anofox_ml_core::Predict::predict(&fitted, &x_test).unwrap();
+                let xt = x_test.clone();
+                // CQR's alpha is fixed at calibration; check it is the one asked for.
+                (
+                    pred,
+                    Box::new(move |a: f64| {
+                        assert!((a - alpha).abs() < 1e-12);
+                        fitted.predict_interval(xt.view())
+                    }),
+                )
+            }
+            "normalized" => {
+                let (train, res, cal) = (
+                    indices(&case["train"]),
+                    indices(&case["residual"]),
+                    indices(&case["calibration"]),
+                );
+                let model = OlsRegressor::new()
+                    .fit(&x.select(Axis(0), &train), &y.select(Axis(0), &train))
+                    .unwrap();
+                let residual_model = fit_residual_model(
+                    &OlsRegressor::new(),
+                    &model,
+                    x.select(Axis(0), &res).view(),
+                    y.select(Axis(0), &res).view(),
+                )
+                .unwrap();
+                let fitted = conformalize_normalized(
+                    model,
+                    residual_model,
                     x.select(Axis(0), &cal).view(),
                     y.select(Axis(0), &cal).view(),
                 )

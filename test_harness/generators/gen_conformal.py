@@ -9,7 +9,13 @@ import json
 import os
 
 import numpy as np
-from mapie.regression import CrossConformalRegressor, SplitConformalRegressor
+from mapie.conformity_scores import ResidualNormalisedScore
+from mapie.regression import (
+    ConformalizedQuantileRegressor,
+    CrossConformalRegressor,
+    SplitConformalRegressor,
+)
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import LeaveOneOut, PredefinedSplit
 
@@ -102,6 +108,56 @@ def generate():
         "levels": LEVELS,
         "error_levels": [],
         "fold": list(range(25)),
+        "y_pred": y_pred.tolist(),
+        "intervals": intervals(y_pis),
+    })
+
+    # CQR, prefit: lower / upper / median "quantile models" are OLS fits on
+    # y - 1.5, y + 1.5 and y (rows 0..50), so both sides start from the same
+    # predictions; calibrated on rows 50..80.
+    lo = LinearRegression().fit(X[:50], y[:50] - 1.5)
+    hi = LinearRegression().fit(X[:50], y[:50] + 1.5)
+    med = LinearRegression().fit(X[:50], y[:50])
+    for level in [0.9, 0.8]:
+        for symmetric in [False, True]:
+            cqr = ConformalizedQuantileRegressor([lo, hi, med], confidence_level=level,
+                                                 prefit=True)
+            cqr.conformalize(X[50:80], y[50:80])
+            y_pred, y_pis = cqr.predict_interval(X_test, symmetric_correction=symmetric)
+            cases.append({
+                "name": f"cqr_{level}_{'sym' if symmetric else 'asym'}",
+                "kind": "cqr",
+                "levels": [level],
+                "error_levels": [],
+                "symmetric": symmetric,
+                "train": list(range(50)),
+                "calibration": list(range(50, 80)),
+                "offset": 1.5,
+                "y_pred": y_pred.tolist(),
+                "intervals": intervals(y_pis),
+            })
+
+    # Residual-normalised score, prefit: model on rows 0..50, residual model
+    # (OLS on log|residual|, predicting exp) on rows 50..62, scores on 62..80.
+    model = LinearRegression().fit(X[:50], y[:50])
+    resid = np.maximum(np.abs(y[50:62] - model.predict(X[50:62])), 1e-8)
+    res_model = TransformedTargetRegressor(LinearRegression(), func=np.log,
+                                           inverse_func=np.exp,
+                                           check_inverse=False).fit(X[50:62], resid)
+    scr = SplitConformalRegressor(
+        model, confidence_level=LEVELS, prefit=True,
+        conformity_score=ResidualNormalisedScore(residual_estimator=res_model, prefit=True),
+    )
+    scr.conformalize(X[62:80], y[62:80])
+    y_pred, y_pis = scr.predict_interval(X_test)
+    cases.append({
+        "name": "normalized",
+        "kind": "normalized",
+        "levels": LEVELS,
+        "error_levels": [],
+        "train": list(range(50)),
+        "residual": list(range(50, 62)),
+        "calibration": list(range(62, 80)),
         "y_pred": y_pred.tolist(),
         "intervals": intervals(y_pis),
     })
