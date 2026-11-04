@@ -15,6 +15,8 @@
 //! - [`NormalizedConformalRegressor`] / [`conformalize_normalized`]: split
 //!   conformal with residual-normalised scores (a second model learns the
 //!   error scale).
+//! - [`SplitConformalClassifier`] / [`conformalize_classifier`]: prediction
+//!   sets for classifiers with the LAC or APS score.
 //!
 //! The miscoverage `alpha` is chosen at prediction time (CQR: at fit time,
 //! since the quantile models are trained for it). Results match MAPIE
@@ -38,12 +40,17 @@
 //! assert!(lower.iter().zip(&upper).all(|(l, u)| l <= u));
 //! ```
 
+mod classification;
 mod cqr;
 mod cross;
 mod normalized;
 mod quantile;
 mod split;
 
+pub use classification::{
+    conformalize_classifier, ApsMode, ClassificationScore, FittedSplitConformalClassifier,
+    SplitConformalClassifier,
+};
 pub use cqr::{
     conformalize_quantiles, ConformalizedQuantileRegressor, FittedConformalizedQuantileRegressor,
 };

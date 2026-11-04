@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Conformal prediction sets for classifiers (#93)
+
+- `SplitConformalClassifier` / `conformalize_classifier`: prediction sets
+  that contain the true class with probability `≥ 1 − α`, with the LAC
+  score (smallest sets) or APS (sets grow on hard inputs) in three modes:
+  `Include` (conservative), `Exclude` (smaller sets) and `Randomized`
+  (coverage `1 − α` on average, seeded). `predict_set` returns an
+  `n × classes` membership matrix, `predict_set_labels` the labels;
+  `allow_full_sets` instead of an error for too few calibration rows.
+- Matches MAPIE 1.6.0's `SplitConformalClassifier` exactly on every set
+  (LAC and APS include / exclude, three levels); seeded tests check
+  coverage, set size and adaptivity.
+- New metrics `set_coverage_score` and `mean_set_size`.
+
 ### Conformal prediction: CQR and normalised scores (#93)
 
 - `ConformalizedQuantileRegressor` (conformalized quantile regression,

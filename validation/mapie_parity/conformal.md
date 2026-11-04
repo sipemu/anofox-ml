@@ -16,9 +16,11 @@ coverage for any `Fit` + `Predict` regressor.
 | `CrossConformalRegressor::fit_with_splits` + `leave_one_out` | jackknife+ (`cv=LeaveOneOut()`) |
 | `ConformalizedQuantileRegressor`, `conformalize_quantiles` | `ConformalizedQuantileRegressor`, `prefit=True` |
 | `NormalizedConformalRegressor`, `conformalize_normalized` | `SplitConformalRegressor(conformity_score=ResidualNormalisedScore)` |
+| `SplitConformalClassifier`, `conformalize_classifier` (`Lac`, `Aps(Include / Exclude / Randomized)`) | `SplitConformalClassifier(conformity_score="lac" / "aps")`, `include_last_label=True / False / "randomized"` |
 
 Metrics: `coverage_score`, `mean_interval_width`, `interval_score`,
-`mean_pinball_loss` (anofox-ml-metrics).
+`mean_pinball_loss`, `set_coverage_score`, `mean_set_size`
+(anofox-ml-metrics).
 
 ## Reference
 
@@ -60,6 +62,20 @@ MAPIE's float formulas (`ceil(level · (n + 1)) / n` with numpy's `"lower"`
 index; `(1 − 2α) + α` for the CV+ lower bound) so order statistics agree
 exactly rather than within a rank.
 
+### Classification sets
+
+- Generator: `test_harness/generators/gen_conformal_classification.py`
+- Fixture:   `crates/anofox-ml-conformal/tests/golden_data/mapie_classification.json`
+- Rust test: `crates/anofox-ml-conformal/tests/golden_mapie_classification.rs`
+
+Both sides use a fixed softmax model `P(y = k | x) = softmax(x W)_k`
+(3 features, 4 classes); 120 calibration rows with labels drawn from the
+model, 25 test rows. Cases: `lac`, `aps` with `include_last_label=True`
+and `False`, each at levels 0.9 / 0.8 / 0.5. Every set (25 rows × 4
+classes × 3 levels) and the point predictions must match **exactly**.
+APS is compared without randomisation: MAPIE's `random_state` is a
+`RandomState` whose `uniform` returns zeros.
+
 ## Coverage tests (statistical)
 
 `crates/anofox-ml-conformal/tests/coverage.rs`, seeded, on heteroscedastic
@@ -74,7 +90,18 @@ tests were written; they are the first thing to revisit (see below).
 | normalised (OLS + depth-3 tree residual model), α = 0.1 | 30 × 400 | \|coverage − 0.9\| < 0.03; correlation > 0.3 |
 | plain split (control) | 5 × 400 | width–\|x0\| correlation < 0.05 (constant width) |
 
-Behaviour tests in the same file: nesting (lower α ⇒ wider; minmax ⊇ CV+),
+Classification (`tests/classification.rs`, labels drawn from a known
+softmax model, 100 calibration × 400 test rows):
+
+| Test | Reps | Check |
+|---|---|---|
+| LAC, APS-include, α = 0.1 and 0.3 | 150 | mean coverage − (1 − α) > −0.01 (theory: [0, 1/(n + 1)]) |
+| APS-randomised, α = 0.1 and 0.3 | 150 | \|coverage − (1 − α)\| < 0.015 (exact on average) |
+| LAC vs APS-include set size, α = 0.1 | 30 | LAC sets are smaller |
+| APS adaptivity | 1 × 500 | set size falls as the top probability rises; exclude ⊆ include |
+| `SplitConformalClassifier` + random forest, randomised APS, α = 0.2 | 1 × 1000 | \|coverage − 0.8\| < 0.06; same sets on repeated calls |
+
+Behaviour tests in the regression file: nesting (lower α ⇒ wider; minmax ⊇ CV+),
 median point prediction by hand, too-few-rows errors / infinite bounds,
 invalid splits and parameters.
 
@@ -90,6 +117,17 @@ invalid splits and parameters.
   `n ≥ max(1/α′, 1/(1 − α′))`; we only require the conformal rank to exist.
 - **`Base` method**: point predictions are always the full-data model's
   (as MAPIE's no-aggregation methods), whatever `point_prediction` says.
+- **APS calibration scores**: MAPIE always randomises them (subtracting
+  `u · p̂_y`), whatever `include_last_label` is; we randomise them only for
+  `ApsMode::Randomized`, so `Include` / `Exclude` are deterministic.
+  Randomised APS uses our seeded RNG, so it is checked for coverage, not
+  against MAPIE's draws.
+- **APS ties**: classes with equal probability are ordered higher index
+  first (numpy's `flip(argsort)` for small arrays); MAPIE's order for large
+  class counts depends on numpy's sort algorithm.
+- **Too few calibration rows (classification)**: MAPIE raises (numpy
+  quantile above 1); we raise too, or return the set of all classes with
+  `allow_full_sets`.
 - **Normalised score, non-prefit split**: our train / residual /
   calibration split uses our seeded RNG, not sklearn's `train_test_split`,
   so only the prefit path is compared exactly.
@@ -107,6 +145,9 @@ invalid splits and parameters.
 - **Real learners in the golden data**: compare CQR with an actual quantile
   learner and the normalised score with a non-linear residual model once a
   bit-identical pair exists on both sides (today OLS proxies stand in).
-- **Not yet validated**: classification sets (LAC / APS / RAPS), Mondrian
-  coverage, jackknife+-after-bootstrap, weighted (covariate-shift)
+- **Real classifiers in the golden data**: the softmax stand-in matches
+  bit for bit; a comparison with an actual sklearn classifier needs a
+  model pair with identical probabilities.
+- **Not yet validated**: RAPS, top-k, cross-conformal classification,
+  Mondrian coverage, jackknife+-after-bootstrap, weighted (covariate-shift)
   conformal — the next milestones of #93.

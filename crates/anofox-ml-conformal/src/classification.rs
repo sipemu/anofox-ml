@@ -1,0 +1,372 @@
+//! Conformal prediction sets for classifiers: LAC and APS.
+
+use anofox_ml_core::{Fit, Float, Predict, PredictProba, Result, RustMlError};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use rand::{Rng, SeedableRng};
+
+use crate::quantile::{check_alpha, lower_quantile};
+use crate::split::{check_xy, split_indices, too_few};
+
+/// Tolerance of the set-membership comparisons (MAPIE's `EPSILON`).
+const EPS: f64 = 1e-8;
+
+/// How a class's conformity is scored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClassificationScore {
+    /// Least ambiguous set-valued classifier (Sadinle et al. 2019): score
+    /// `1 − p̂_y(x)`; a set holds every class with `p̂ ≥ 1 − q`. Smallest
+    /// sets on average; they may be empty and adapt little to difficulty.
+    #[default]
+    Lac,
+    /// Adaptive prediction sets (Romano, Sesia & Candès 2020): score = the
+    /// probability mass of the classes ranked up to and including the true
+    /// one; a set holds the most probable classes until their mass reaches
+    /// `q`. Sets grow on hard inputs.
+    Aps(ApsMode),
+}
+
+/// Treatment of the class that crosses the APS threshold (MAPIE's
+/// `include_last_label`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApsMode {
+    /// Always include it: coverage `≥ 1 − α`, conservative.
+    #[default]
+    Include,
+    /// Never include it: smaller sets, coverage can fall below `1 − α`.
+    Exclude,
+    /// Randomised scores and a randomised decision for the crossing class:
+    /// coverage `1 − α` on average, not just at least (seeded).
+    Randomized,
+}
+
+/// Split conformal classifier: fits `estimator` on part of the rows and
+/// calibrates its `predict_proba` on the rest, giving prediction sets that
+/// contain the true class with probability `≥ 1 − α`. Equivalent to
+/// MAPIE's `SplitConformalClassifier` with the `lac` / `aps` scores.
+///
+/// Probability columns are taken to follow the sorted distinct training
+/// labels (the convention of anofox-ml's classifiers). To calibrate a model
+/// you fitted yourself, use [`conformalize_classifier`].
+#[derive(Debug, Clone)]
+pub struct SplitConformalClassifier<E> {
+    pub estimator: E,
+    pub score: ClassificationScore,
+    /// Fraction of the rows held out for calibration, in (0, 1).
+    pub calibration_size: f64,
+    /// Seeds the split and, for [`ApsMode::Randomized`], the randomisation.
+    pub seed: u64,
+    /// Return the set of all classes instead of an error when there are too
+    /// few calibration rows for the requested `alpha`.
+    pub allow_full_sets: bool,
+}
+
+impl<E> SplitConformalClassifier<E> {
+    pub fn new(estimator: E) -> Self {
+        Self {
+            estimator,
+            score: ClassificationScore::Lac,
+            calibration_size: 0.25,
+            seed: 0,
+            allow_full_sets: false,
+        }
+    }
+
+    pub fn with_score(mut self, score: ClassificationScore) -> Self {
+        self.score = score;
+        self
+    }
+
+    pub fn with_calibration_size(mut self, calibration_size: f64) -> Self {
+        self.calibration_size = calibration_size;
+        self
+    }
+
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    pub fn with_allow_full_sets(mut self, allow: bool) -> Self {
+        self.allow_full_sets = allow;
+        self
+    }
+}
+
+impl<F: Float, E: Fit<F>> Fit<F> for SplitConformalClassifier<E>
+where
+    E::Fitted: Predict<F> + PredictProba<F>,
+{
+    type Fitted = FittedSplitConformalClassifier<E::Fitted, F>;
+
+    fn fit_view(&self, x: ArrayView2<F>, y: ArrayView1<F>) -> Result<Self::Fitted> {
+        check_xy(x, y)?;
+        let (train, cal) = split_indices(x.nrows(), self.calibration_size, self.seed)?;
+        let y_train = y.select(Axis(0), &train);
+        let mut classes = y_train.to_vec();
+        classes.sort_by(|a, b| a.partial_cmp(b).expect("no NaN labels"));
+        classes.dedup();
+        let model = self
+            .estimator
+            .fit_view(x.select(Axis(0), &train).view(), y_train.view())?;
+        Ok(conformalize_classifier(
+            model,
+            classes,
+            x.select(Axis(0), &cal).view(),
+            y.select(Axis(0), &cal).view(),
+            self.score,
+            self.seed,
+        )?
+        .with_allow_full_sets(self.allow_full_sets))
+    }
+}
+
+/// Calibrate a fitted classifier on rows it was not trained on. `classes`
+/// are the labels of its `predict_proba` columns, in order; every
+/// calibration label must be one of them. `seed` drives the APS
+/// randomisation (unused otherwise).
+pub fn conformalize_classifier<F: Float, M: Predict<F> + PredictProba<F>>(
+    model: M,
+    classes: Vec<F>,
+    x_cal: ArrayView2<F>,
+    y_cal: ArrayView1<F>,
+    score: ClassificationScore,
+    seed: u64,
+) -> Result<FittedSplitConformalClassifier<M, F>> {
+    check_xy(x_cal, y_cal)?;
+    if classes.len() < 2 {
+        return Err(RustMlError::InvalidParameter(
+            "conformal classification needs at least 2 classes".into(),
+        ));
+    }
+    let proba = model.predict_proba_view(x_cal)?;
+    if proba.ncols() != classes.len() {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "predict_proba returned {} columns for {} classes",
+            proba.ncols(),
+            classes.len()
+        )));
+    }
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut scores = Vec::with_capacity(y_cal.len());
+    for (row, &label) in proba.rows().into_iter().zip(y_cal) {
+        let k = classes.iter().position(|&c| c == label).ok_or_else(|| {
+            RustMlError::InvalidParameter(format!(
+                "calibration label {label:?} is not one of the classes"
+            ))
+        })?;
+        let s = match score {
+            ClassificationScore::Lac => F::one() - row[k],
+            ClassificationScore::Aps(mode) => {
+                let mut s = mass_up_to(row, k);
+                if mode == ApsMode::Randomized {
+                    s -= F::from_f64(rng.gen::<f64>()).expect("fits") * row[k];
+                }
+                s
+            }
+        };
+        if s.is_nan() {
+            return Err(RustMlError::InvalidParameter(
+                "NaN in the calibration probabilities".into(),
+            ));
+        }
+        scores.push(s);
+    }
+    Ok(FittedSplitConformalClassifier {
+        model,
+        classes,
+        scores,
+        score,
+        seed,
+        allow_full_sets: false,
+    })
+}
+
+/// Classes in decreasing probability; ties put the higher index first
+/// (numpy's `flip(argsort(p))` for small arrays).
+fn order_desc<F: Float>(p: ArrayView1<F>) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..p.len()).collect();
+    idx.sort_by(|&a, &b| p[a].partial_cmp(&p[b]).expect("no NaN"));
+    idx.reverse();
+    idx
+}
+
+/// Probability mass of the classes ranked up to and including class `k`.
+fn mass_up_to<F: Float>(p: ArrayView1<F>, k: usize) -> F {
+    let mut sum = F::zero();
+    for i in order_desc(p) {
+        sum += p[i];
+        if i == k {
+            break;
+        }
+    }
+    sum
+}
+
+/// Calibrated classifier: model, classes and calibration scores.
+#[derive(Debug, Clone)]
+pub struct FittedSplitConformalClassifier<M, F> {
+    model: M,
+    classes: Vec<F>,
+    scores: Vec<F>,
+    score: ClassificationScore,
+    seed: u64,
+    allow_full_sets: bool,
+}
+
+impl<M: Predict<F> + PredictProba<F>, F: Float> FittedSplitConformalClassifier<M, F> {
+    pub fn model(&self) -> &M {
+        &self.model
+    }
+
+    /// Labels of the set columns.
+    pub fn classes(&self) -> &[F] {
+        &self.classes
+    }
+
+    pub fn conformity_scores(&self) -> &[F] {
+        &self.scores
+    }
+
+    pub fn with_allow_full_sets(mut self, allow: bool) -> Self {
+        self.allow_full_sets = allow;
+        self
+    }
+
+    /// The calibrated threshold `q` at `alpha` (`None` when there are too
+    /// few calibration rows and full sets are allowed).
+    pub fn threshold(&self, alpha: f64) -> Result<Option<F>> {
+        check_alpha(alpha)?;
+        let mut s = self.scores.clone();
+        match lower_quantile(&mut s, 1.0 - alpha) {
+            Some(q) => Ok(Some(q)),
+            None if self.allow_full_sets => Ok(None),
+            None => Err(too_few(self.scores.len(), alpha)),
+        }
+    }
+
+    /// Prediction sets at miscoverage `alpha`: `sets[[i, k]]` is true when
+    /// class `classes()[k]` is in the set of row `i`.
+    pub fn predict_set(&self, x: ArrayView2<F>, alpha: f64) -> Result<Array2<bool>> {
+        let threshold = self.threshold(alpha)?;
+        let proba = self.model.predict_proba_view(x)?;
+        let (n, k) = proba.dim();
+        if k != self.classes.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "predict_proba returned {k} columns for {} classes",
+                self.classes.len()
+            )));
+        }
+        let Some(q) = threshold else {
+            return Ok(Array2::from_elem((n, k), true));
+        };
+        let eps = F::from_f64(EPS).expect("fits");
+        let mut sets = Array2::from_elem((n, k), false);
+        match self.score {
+            ClassificationScore::Lac => {
+                sets.zip_mut_with(&proba, |s, &p| *s = (F::one() - p) - q <= eps);
+            }
+            ClassificationScore::Aps(mode) => {
+                // A separate stream from the calibration draws, the same on
+                // every call.
+                let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed ^ 0x9E37_79B9_7F4A_7C15);
+                for (set, p) in sets.rows_mut().into_iter().zip(proba.rows()) {
+                    aps_row(p, q, mode, eps, &mut rng, set);
+                }
+            }
+        }
+        Ok(sets)
+    }
+
+    /// Prediction sets as lists of class labels, one per row.
+    pub fn predict_set_labels(&self, x: ArrayView2<F>, alpha: f64) -> Result<Vec<Vec<F>>> {
+        let sets = self.predict_set(x, alpha)?;
+        Ok(sets
+            .rows()
+            .into_iter()
+            .map(|r| {
+                r.iter()
+                    .zip(&self.classes)
+                    .filter(|(&inside, _)| inside)
+                    .map(|(_, &c)| c)
+                    .collect()
+            })
+            .collect())
+    }
+}
+
+/// One APS set (MAPIE's `_get_last_included_proba` + `get_prediction_sets`).
+fn aps_row<F: Float>(
+    p: ArrayView1<F>,
+    q: F,
+    mode: ApsMode,
+    eps: F,
+    rng: &mut rand::rngs::StdRng,
+    mut set: ndarray::ArrayViewMut1<bool>,
+) {
+    let k = p.len();
+    // Cumulative mass in decreasing-probability order, by class.
+    let mut cum = vec![F::zero(); k];
+    let mut sum = F::zero();
+    for i in order_desc(p) {
+        sum += p[i];
+        cum[i] = sum;
+    }
+    let last = match mode {
+        ApsMode::Include | ApsMode::Randomized => {
+            // The class with the smallest cumulative mass reaching q.
+            (0..k)
+                .filter(|&i| cum[i] - q >= -eps)
+                .min_by(|&a, &b| (cum[a] - q).partial_cmp(&(cum[b] - q)).expect("no NaN"))
+                .unwrap_or_else(|| argmax(&cum))
+        }
+        ApsMode::Exclude => {
+            // The class with the largest cumulative mass not above q (or the
+            // top class when even it exceeds q).
+            let min_cum = cum.iter().copied().fold(F::infinity(), F::min);
+            let t = q.max(min_cum);
+            let mut best: Option<usize> = None;
+            for i in 0..k {
+                if cum[i] - t <= eps && best.is_none_or(|b| cum[i] - t > cum[b] - t) {
+                    best = Some(i);
+                }
+            }
+            best.unwrap_or_else(|| argmax(&cum))
+        }
+    };
+    let mut p_last = p[last];
+    if p_last <= eps {
+        // Zero-probability crossing class: use the smallest non-zero one.
+        p_last = p
+            .iter()
+            .copied()
+            .filter(|&v| v >= eps)
+            .fold(F::infinity(), F::min);
+    }
+    for (s, &v) in set.iter_mut().zip(p) {
+        *s = v - p_last >= -eps;
+    }
+    if mode == ApsMode::Randomized {
+        let v = (cum[last] - q) / p_last;
+        let u = F::from_f64(rng.gen::<f64>()).expect("fits");
+        set[last] = v - u <= eps;
+    }
+}
+
+fn argmax<F: Float>(v: &[F]) -> usize {
+    let mut best = 0;
+    for i in 1..v.len() {
+        if v[i] > v[best] {
+            best = i;
+        }
+    }
+    best
+}
+
+impl<M: Predict<F> + PredictProba<F>, F: Float> Predict<F>
+    for FittedSplitConformalClassifier<M, F>
+{
+    /// The underlying classifier's prediction.
+    fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
+        self.model.predict_view(x)
+    }
+}
