@@ -1,0 +1,24 @@
+[package]
+name = "anofox-ml-conformal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Conformal prediction intervals (split conformal, CV+, jackknife+) for anofox-ml regressors, matching MAPIE"
+
+[dependencies]
+ndarray = { workspace = true }
+rand = { workspace = true }
+anofox-ml-core = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+serde_json = { workspace = true }
+anofox-ml-trees = { workspace = true }
+anofox-ml-regression = { workspace = true }

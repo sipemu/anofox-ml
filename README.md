@@ -111,6 +111,10 @@ anofox-ml (facade)
   +-- anofox-ml-neural-networks   MLPClassifier, MLPRegressor
   +-- anofox-ml-text              Count/Tfidf/Hashing vectorizers
   +-- anofox-ml-io                CSV loading
+  +-- anofox-ml-conformal         Conformal prediction intervals: split conformal,
+                               CV+, jackknife+, CV-minmax (checked against MAPIE)
+  +-- anofox-ml-registry          Every estimator by name + JSON parameters
+                               (used by the Python bindings and DuckDB)
 ```
 
 ### Type-state pattern
