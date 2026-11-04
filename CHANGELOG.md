@@ -6,6 +6,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Fixed
+
+- `KMeans` centroids and inertia, and the exact t-SNE gradient, no longer
+  depend on the rayon thread count (#108): block partials are summed in
+  block order instead of with rayon's `reduce` / `sum`.
+
 ### Conformal predictors in the registry (#93, milestone 4)
 
 - `DynModel::predict_interval(x, alpha)` (`n × 2`: lower, upper) and

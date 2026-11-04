@@ -570,11 +570,14 @@ fn objective_exact(
         let d2: f64 = (0..k).map(|c| (y[[i, c]] - y[[j, c]]).powi(2)).sum();
         (d2 / dof + 1.0).powf(exponent)
     };
-    // Σ over i<j of the unnormalised Student-t kernel.
-    let half_sum: f64 = (0..n)
+    // Σ over i<j of the unnormalised Student-t kernel. The row sums are
+    // added in row order: rayon's `sum` would combine them in an order that
+    // depends on the thread count (#108).
+    let row_sums: Vec<f64> = (0..n)
         .into_par_iter()
         .map(|i| ((i + 1)..n).map(|j| w(i, j)).sum::<f64>())
-        .sum();
+        .collect();
+    let half_sum: f64 = row_sums.iter().sum();
     let denom = 2.0 * half_sum;
     let c = 2.0 * (dof + 1.0) / dof;
     let rows: Vec<(Vec<f64>, f64)> = (0..n)
