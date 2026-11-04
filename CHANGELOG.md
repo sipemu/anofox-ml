@@ -24,8 +24,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   "calibration_size": 0.25, "seed": 0}`. The default estimators are MAPIE's:
   `OlsRegressor` / `LogisticRegressor`. The results match the typed
   wrappers exactly.
-- Not included yet: CQR (it needs the quantile parameter of each estimator
-  kind) and Mondrian (the registry `fit` has no group argument).
+- `ConformalizedQuantileRegressor` (CQR) kind over `QuantileRegressor`
+  (default, as in MAPIE), `GradientBoostingRegressor` or
+  `PerpetualRegressor`; the registry sets each kind's quantile parameter.
+  `alpha` is a fit parameter here; `predict_interval` with another `alpha`
+  is an error that asks for a refit.
 - `anofox-ml-registry` now depends on `anofox-ml-conformal`, and
   `scripts/publish.sh` publishes conformal first.
 
