@@ -388,6 +388,173 @@ fn cqr_interval(
     m.predict_interval(x).map(interval)
 }
 
+// ----------------------------------------------------- Mondrian
+//
+// The registry `fit` has no group argument, so the Mondrian kinds read the
+// group id of each row from column `group_column` of `x` (a non-negative
+// integer), at fit and at predict time. The estimator sees the other
+// columns.
+
+/// `x` without column `col`, and that column as group ids.
+fn split_groups(x: ArrayView2<f64>, col: usize) -> Result<(Array2<f64>, Vec<usize>)> {
+    if col >= x.ncols() {
+        return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+            "group_column {col} is out of range for {} columns",
+            x.ncols()
+        )));
+    }
+    let groups = x
+        .column(col)
+        .iter()
+        .map(|&g| {
+            if g.is_finite() && g >= 0.0 && g.fract() == 0.0 {
+                Ok(g as usize)
+            } else {
+                Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                    "group ids must be non-negative integers, got {g}"
+                )))
+            }
+        })
+        .collect::<Result<Vec<usize>>>()?;
+    let keep: Vec<usize> = (0..x.ncols()).filter(|&j| j != col).collect();
+    Ok((x.select(ndarray::Axis(1), &keep), groups))
+}
+
+/// A Mondrian model plus the column its group ids come from.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Grouped<M> {
+    model: M,
+    group_column: usize,
+}
+
+/// `MondrianConformalRegressor` over a registered estimator.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct MondrianConformalRegressorConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    group_column: usize,
+    calibration_size: f64,
+    seed: u64,
+    allow_infinite_bounds: bool,
+}
+
+impl Default for MondrianConformalRegressorConfig {
+    fn default() -> Self {
+        let d = conformal::MondrianConformalRegressor::new(());
+        Self {
+            estimator: default_regressor(),
+            estimator_params: empty_params(),
+            group_column: 0,
+            calibration_size: d.calibration_size,
+            seed: d.seed,
+            allow_infinite_bounds: d.allow_infinite_bounds,
+        }
+    }
+}
+
+type MondrianRegFit = Grouped<conformal::FittedMondrianRegressor<RegistryFitted, f64>>;
+
+impl MondrianConformalRegressorConfig {
+    fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<MondrianRegFit> {
+        let (x, groups) = split_groups(x, self.group_column)?;
+        let model = conformal::MondrianConformalRegressor::new(RegistryEstimator::new(
+            &self.estimator,
+            self.estimator_params.clone(),
+        ))
+        .with_calibration_size(self.calibration_size)
+        .with_seed(self.seed)
+        .with_allow_infinite_bounds(self.allow_infinite_bounds)
+        .fit_with_groups(x.view(), y, &groups)?;
+        Ok(Grouped {
+            model,
+            group_column: self.group_column,
+        })
+    }
+}
+
+impl MondrianRegFit {
+    fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let (x, _) = split_groups(x, self.group_column)?;
+        self.model.predict(&x)
+    }
+
+    fn predict_interval(&self, x: ArrayView2<f64>, alpha: f64) -> Result<Array2<f64>> {
+        let (x, groups) = split_groups(x, self.group_column)?;
+        self.model
+            .predict_interval(x.view(), &groups, alpha)
+            .map(interval)
+    }
+}
+
+/// Mondrian `SplitConformalClassifier` over a registered classifier.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct MondrianConformalClassifierConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    group_column: usize,
+    score: conformal::ClassificationScore,
+    calibration_size: f64,
+    seed: u64,
+    allow_full_sets: bool,
+}
+
+impl Default for MondrianConformalClassifierConfig {
+    fn default() -> Self {
+        let d = SplitConformalClassifierConfig::default();
+        Self {
+            estimator: d.estimator,
+            estimator_params: d.estimator_params,
+            group_column: 0,
+            score: d.score,
+            calibration_size: d.calibration_size,
+            seed: d.seed,
+            allow_full_sets: d.allow_full_sets,
+        }
+    }
+}
+
+type MondrianClfFit = Grouped<conformal::FittedSplitConformalClassifier<RegistryFitted, f64>>;
+
+impl MondrianConformalClassifierConfig {
+    fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<MondrianClfFit> {
+        let (x, groups) = split_groups(x, self.group_column)?;
+        let model = conformal::SplitConformalClassifier::new(RegistryEstimator::new(
+            &self.estimator,
+            self.estimator_params.clone(),
+        ))
+        .with_score(self.score)
+        .with_calibration_size(self.calibration_size)
+        .with_seed(self.seed)
+        .with_allow_full_sets(self.allow_full_sets)
+        .fit_with_groups(x.view(), y, &groups)?;
+        Ok(Grouped {
+            model,
+            group_column: self.group_column,
+        })
+    }
+}
+
+impl MondrianClfFit {
+    fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let (x, _) = split_groups(x, self.group_column)?;
+        self.model.predict(&x)
+    }
+
+    fn predict_proba(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        let (x, _) = split_groups(x, self.group_column)?;
+        PredictProba::predict_proba(self.model.model(), &x)
+    }
+
+    fn predict_set(&self, x: ArrayView2<f64>, alpha: f64) -> Result<Array2<f64>> {
+        let (x, groups) = split_groups(x, self.group_column)?;
+        self.model
+            .predict_set_mondrian(x.view(), &groups, alpha)
+            .map(membership)
+    }
+}
+
 /// `(lower, upper)` as an `n × 2` array.
 fn interval((lo, hi): (Array1<f64>, Array1<f64>)) -> Array2<f64> {
     ndarray::stack(ndarray::Axis(1), &[lo.view(), hi.view()]).expect("bounds of equal length")
@@ -571,6 +738,27 @@ registry! {
         },
         predict: |m, x| m.predict(x),
         predict_interval: |m, x, alpha| cqr_interval(m, x, alpha),
+    }
+    MondrianConformalRegressor {
+        config: MondrianConformalRegressorConfig = Default::default(),
+        fitted: MondrianRegFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_interval: |m, x, alpha| m.predict_interval(x, alpha),
+    }
+    MondrianConformalClassifier {
+        config: MondrianConformalClassifierConfig = Default::default(),
+        fitted: MondrianClfFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        predict_set: |m, x, alpha| m.predict_set(x, alpha),
     }
     SplitConformalClassifier {
         config: SplitConformalClassifierConfig = Default::default(),

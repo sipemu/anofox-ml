@@ -282,3 +282,35 @@ fn mondrian_errors() {
         .to_string()
         .contains("without groups"));
 }
+
+#[test]
+fn classifier_fit_with_groups_one_group_is_plain_fit() {
+    use anofox_ml_conformal::SplitConformalClassifier;
+    use anofox_ml_trees::DecisionTreeClassifier;
+    let (x, y, groups) = class_data(400, 9);
+    let (xt, _, _) = class_data(100, 10);
+    let conformal = SplitConformalClassifier::new(DecisionTreeClassifier::default())
+        .with_score(ClassificationScore::Aps(ApsMode::Include))
+        .with_seed(4);
+    let plain = conformal.fit(&x, &y).unwrap();
+    let one = conformal
+        .fit_with_groups(x.view(), y.view(), &[3; 400])
+        .unwrap();
+    assert_eq!(
+        plain.predict_set(xt.view(), 0.2).unwrap(),
+        one.predict_set_mondrian(xt.view(), &[3; 100], 0.2).unwrap()
+    );
+    // Two groups calibrate separately; an unseen group is an error.
+    let two = conformal
+        .fit_with_groups(x.view(), y.view(), &groups)
+        .unwrap();
+    let tg: Vec<usize> = (0..100).map(|i| i % 2).collect();
+    assert_eq!(
+        two.predict_set_mondrian(xt.view(), &tg, 0.2).unwrap().dim(),
+        (100, 3)
+    );
+    assert!(two.predict_set_mondrian(xt.view(), &[5; 100], 0.2).is_err());
+    assert!(conformal
+        .fit_with_groups(x.view(), y.view(), &[0; 10])
+        .is_err());
+}

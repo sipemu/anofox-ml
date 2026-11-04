@@ -29,6 +29,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `PerpetualRegressor`; the registry sets each kind's quantile parameter.
   `alpha` is a fit parameter here; `predict_interval` with another `alpha`
   is an error that asks for a refit.
+- `MondrianConformalRegressor` / `MondrianConformalClassifier` kinds
+  (group-conditional coverage). The registry `fit` has no group argument,
+  so the group id of each row is read from column `group_column` of `x`
+  (non-negative integers) at fit and predict time; the estimator sees the
+  other columns.
+- `SplitConformalClassifier::fit_with_groups`, the classifier counterpart
+  of `MondrianConformalRegressor::fit_with_groups`.
 - `anofox-ml-registry` now depends on `anofox-ml-conformal`, and
   `scripts/publish.sh` publishes conformal first.
 
