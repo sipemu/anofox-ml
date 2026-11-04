@@ -1,0 +1,43 @@
+//! Conformal prediction intervals for anofox-ml regressors.
+//!
+//! Wraps any regressor (`Fit` + `Predict`) and turns its point predictions
+//! into intervals with a finite-sample coverage guarantee under
+//! exchangeability, without distributional assumptions:
+//!
+//! - [`SplitConformalRegressor`] / [`conformalize`]: calibrate on held-out
+//!   rows (one fit).
+//! - [`CrossConformalRegressor`]: CV+, jackknife+ (leave-one-out splits),
+//!   CV-minmax and the cheaper "base" variant (K + 1 fits, uses every row
+//!   for both fitting and calibration).
+//!
+//! The miscoverage `alpha` is chosen at prediction time; the conformity
+//! score is the absolute residual. Results match MAPIE (`mapie.regression`)
+//! to rounding.
+//!
+//! ```
+//! use anofox_ml_conformal::{CrossConformalRegressor, CrossMethod};
+//! use anofox_ml_core::Fit;
+//! use anofox_ml_trees::DecisionTreeRegressor;
+//! use ndarray::{Array1, Array2};
+//!
+//! let x = Array2::from_shape_fn((200, 1), |(i, _)| i as f64 / 20.0);
+//! let y = Array1::from_shape_fn(200, |i| (i as f64 / 20.0).sin() + 0.1 * ((i * 37 % 11) as f64 - 5.0) / 5.0);
+//! let tree = DecisionTreeRegressor { max_depth: Some(4), ..Default::default() };
+//! let model = CrossConformalRegressor::new(tree)
+//!     .with_cv(5)
+//!     .with_method(CrossMethod::Plus)
+//!     .fit(&x, &y)
+//!     .unwrap();
+//! let (lower, upper) = model.predict_interval(x.view(), 0.1).unwrap();
+//! assert!(lower.iter().zip(&upper).all(|(l, u)| l <= u));
+//! ```
+
+mod cross;
+mod quantile;
+mod split;
+
+pub use cross::{
+    CrossConformalRegressor, CrossMethod, FittedCrossConformalRegressor, PointPrediction,
+};
+pub use quantile::conformal_quantile;
+pub use split::{conformalize, FittedSplitConformalRegressor, SplitConformalRegressor};

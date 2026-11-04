@@ -84,6 +84,11 @@ pub mod linear {
     pub use anofox_ml_linear::*;
 }
 
+/// Conformal prediction intervals (split conformal, CV+, jackknife+).
+pub mod conformal {
+    pub use anofox_ml_conformal::*;
+}
+
 /// Data I/O utilities (CSV reading).
 pub mod io {
     pub use anofox_ml_io::*;

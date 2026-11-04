@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Conformal prediction intervals (#93)
+
+- New crate **`anofox-ml-conformal`** (also `anofox_ml::conformal`):
+  distribution-free prediction intervals for any regressor.
+  `SplitConformalRegressor` (or `conformalize` for a fitted model and your
+  own calibration rows) and `CrossConformalRegressor` with the `Plus`
+  (CV+, and jackknife+ with leave-one-out splits), `MinMax` and `Base`
+  methods. `alpha` is chosen at prediction time; too few calibration rows
+  for an `alpha` is an error unless `allow_infinite_bounds` is set.
+  Intervals match MAPIE 1.6.0 (absolute conformity score) to 1e-9 in
+  golden tests; seeded replications check the empirical coverage.
+- New metrics: `coverage_score`, `mean_interval_width` and
+  `interval_score` (Winkler score).
+
 ### faer runs sequentially
 
 - faer is built without its default features (which include `rayon`), as
