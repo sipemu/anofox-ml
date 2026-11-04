@@ -6,6 +6,29 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Hyperparameter search with rustuna (#92)
+
+- New crate **`anofox-ml-tune`** (not published while
+  [optuna/rustuna](https://github.com/optuna/rustuna) is only available from
+  git): Optuna-style search over any registry estimator. `tune(kind,
+  search_space, x, y, options)` / `tune_with_splits` (custom splitters,
+  sample weights) take a JSON search space (`int` / `float` ranges with
+  `log` and `step`, `categorical` lists of any JSON values), score each
+  trial by cross-validation with a named metric (`r2`, `rmse`, `mae`,
+  `accuracy`, `f1_macro`, `roc_auc`, `log_loss`, …; default accuracy for
+  classifiers, R² otherwise) and return the best parameters, the trial
+  table and the refitted model. Samplers: TPE (default) and random,
+  seeded. Failing parameter combinations are recorded as failed trials.
+  Pruning waits for rustuna pruners.
+
+### Fixes
+
+- `RandomForestClassifier` and `ExtraTreesClassifier`: `predict_proba`
+  could return `1.0000000000000002` for a unanimous vote, because each
+  tree was scaled by `1/n_estimators` before summing; probability metrics
+  (`log_loss`) rejected it. The probabilities are now summed and divided
+  once, as in scikit-learn.
+
 ### Estimator registry crate
 
 - New crate **`anofox-ml-registry`**: every estimator addressed by a kind

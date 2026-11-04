@@ -1,0 +1,26 @@
+[package]
+name = "anofox-ml-tune"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Optuna-style hyperparameter search (TPE, random) for anofox-ml estimators, built on optuna/rustuna"
+# rustuna is not on crates.io yet (git dependency), so this crate can't be
+# published; switch to the crates.io release once there is one (#92).
+publish = false
+
+[dependencies]
+ndarray = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anofox-ml-core = { workspace = true }
+anofox-ml-metrics = { workspace = true }
+anofox-ml-registry = { workspace = true }
+rustuna_core = { git = "https://github.com/optuna/rustuna", rev = "d0ec7db" }
+rustuna_sampler = { git = "https://github.com/optuna/rustuna", rev = "d0ec7db" }

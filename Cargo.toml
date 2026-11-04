@@ -19,6 +19,7 @@ members = [
     "crates/anofox-ml-regression",
     "crates/anofox-ml-linear",
     "crates/anofox-ml-registry",
+    "crates/anofox-ml-tune",
     "crates/anofox-ml-python",
     "crates/anofox-ml",
 ]
