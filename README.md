@@ -273,27 +273,10 @@ resolver doesn't fork.
 
 ### Continuous performance tracking (codspeed)
 
-CI sends the criterion benchmarks to [codspeed.io](https://codspeed.io)
-on every push to `master` and every PR. codspeed uses **cachegrind to
-count CPU instructions** instead of wall-time, so the numbers are
-deterministic across noisy GH runners — a 1 % delta is a real
-algorithmic change, not a hot/cold cache or a busy hypervisor.
-
-Benches are unchanged: the `codspeed-criterion-compat` shim
-re-exports criterion's API verbatim, so `cargo bench` locally still
-works exactly as before. The shim only switches to cachegrind when
-codspeed's runner sets `CODSPEED_CARGO_WORKSPACE_ROOT`.
-
-The `codspeed` job is `continue-on-error: true`, so a missing
-`CODSPEED_TOKEN` doesn't block CI — forks and pre-setup clones just
-skip the job silently. To enable it:
-
-1. Sign in at <https://codspeed.io> with the GitHub account that owns the repo.
-2. Register the `anofox-ml` repository under your codspeed dashboard.
-3. Copy the generated upload token and add it as the
-   `CODSPEED_TOKEN` repo secret.
-
-That's it — the workflow file picks it up from env on the next push.
+The codspeed CI job is paused: its cachegrind run took 40–60 minutes per
+push. The benches still use the `codspeed-criterion-compat` shim, so
+`cargo bench` works as before and the job can be restored from git
+history (`.github/workflows/ci.yml`, before the conformal-registry PR).
 
 ### Scaling profiles
 
