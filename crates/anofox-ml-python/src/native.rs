@@ -165,6 +165,28 @@ impl PyModel {
         self.call(py, x, |m, x| m.score_samples(x))
     }
 
+    /// Conformal prediction intervals at miscoverage `alpha`: `n × 2`
+    /// (lower, upper).
+    fn predict_interval(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        alpha: f64,
+    ) -> PyResult<Py<PyAny>> {
+        self.call(py, x, |m, x| m.predict_interval(x, alpha))
+    }
+
+    /// Conformal prediction sets at miscoverage `alpha`: `n × classes`, 1
+    /// for the classes in each row's set.
+    fn predict_set(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        alpha: f64,
+    ) -> PyResult<Py<PyAny>> {
+        self.call(py, x, |m, x| m.predict_set(x, alpha))
+    }
+
     /// Per-sample result of the training fit (cluster / outlier labels).
     fn labels(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let out = self.inner.labels().map_err(to_py_err)?;
