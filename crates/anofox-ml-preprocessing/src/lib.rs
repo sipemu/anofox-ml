@@ -32,6 +32,7 @@
 pub mod areg_imputer;
 pub mod binarizer;
 pub mod cca;
+pub mod covariance;
 pub mod fast_ica;
 pub mod incremental_pca;
 pub mod iterative_imputer;
@@ -70,6 +71,10 @@ pub mod variance_threshold;
 pub use areg_imputer::{AregImputer, AregMatch, AregVariable, MultipleImputation};
 pub use binarizer::{Binarizer, FittedBinarizer};
 pub use cca::{Cca, FittedCca};
+pub use covariance::{
+    EllipticEnvelope, EmpiricalCovariance, FittedCovariance, FittedEllipticEnvelope, LedoitWolf,
+    MinCovDet, Oas, ShrunkCovariance,
+};
 pub use fast_ica::{FastIca, FittedFastIca, IcaAlgorithm, IcaFun, IcaWhiten, IcaWhitenSolver};
 pub use incremental_pca::{FittedIncrementalPca, IncrementalPca};
 pub use iterative_imputer::{

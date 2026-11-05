@@ -6,6 +6,27 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: covariance (#113, batch 4)
+
+- `anofox_ml_preprocessing::covariance`: `EmpiricalCovariance`,
+  `ShrunkCovariance`, `LedoitWolf`, `Oas`, the robust `MinCovDet`
+  (sklearn's FastMCD: random starts, concentration steps, the subset path
+  above 500 rows, the exact univariate case, consistency correction and
+  reweighting) and the outlier detector `EllipticEnvelope`. A
+  `FittedCovariance` has the location, covariance, precision (scipy's
+  `pinvh`), squared Mahalanobis distances and the Gaussian log-likelihood
+  `score`. Registry kinds and Python classes (`OAS` in Python).
+- Matches scikit-learn 1.8.0 (`gen_covariance.py`): the plain estimators to
+  1e-12; MinCovDet and EllipticEnvelope exactly on the support where
+  FastMCD reaches the optimal subset. Its random starts come from its own
+  generator, and in the univariate case the end of the shortest half that
+  enters the support depends on numpy's tie order.
+
+### Changed
+
+- `anofox-ml-linear` and `anofox-ml-preprocessing` use anofox-regression
+  0.11 too, so the workspace builds one version of it.
+
 ### New estimators: multiclass and threshold meta-estimators (#113, batch 3)
 
 - Registry kinds `OneVsRestClassifier`, `OneVsOneClassifier`,

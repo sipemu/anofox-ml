@@ -1345,6 +1345,44 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    EmpiricalCovariance {
+        config: pre::EmpiricalCovariance = Default::default(),
+        fitted: pre::FittedCovariance,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    ShrunkCovariance {
+        config: pre::ShrunkCovariance = Default::default(),
+        fitted: pre::FittedCovariance,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    LedoitWolf {
+        config: pre::LedoitWolf = Default::default(),
+        fitted: pre::FittedCovariance,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    Oas {
+        config: pre::Oas = Default::default(),
+        fitted: pre::FittedCovariance,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    MinCovDet {
+        config: pre::MinCovDet = Default::default(),
+        fitted: pre::FittedCovariance,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    EllipticEnvelope {
+        config: pre::EllipticEnvelope = Default::default(),
+        fitted: pre::FittedEllipticEnvelope,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        predict: |m, x| m.predict(x),
+        decision_function: |m, x| m.decision_function(x),
+        score_samples: |m, x| m.score_samples(x),
+    }
     GenericUnivariateSelect {
         config: pre::GenericUnivariateSelect = Default::default(),
         fitted: pre::FittedSelectKBest<f64>,
