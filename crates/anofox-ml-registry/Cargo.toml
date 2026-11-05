@@ -31,6 +31,7 @@ anofox-ml-discriminant = { workspace = true }
 anofox-ml-linear = { workspace = true }
 anofox-ml-regression = { workspace = true }
 anofox-ml-conformal = { workspace = true }
+anofox-ml-text = { workspace = true }
 
 [features]
 # Registers PerpetualRegressor / PerpetualClassifier (needs Rust 1.88).

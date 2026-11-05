@@ -2388,3 +2388,107 @@ class Perceptron(ClassifierMixin, BaseEstimator):
                 "validation_fraction": self.validation_fraction,
                 "n_iter_no_change": self.n_iter_no_change,
                 "class_weight": self._encode_class_weight(self.class_weight)}
+
+
+# ---------------------------------------------------------------------------
+# univariate selection modes and TF-IDF (#113)
+# ---------------------------------------------------------------------------
+
+
+class GenericUnivariateSelect(SupervisedTransformerMixin, BaseEstimator):
+    """Univariate selection with ``mode`` in ``"percentile"``, ``"k_best"``,
+    ``"fpr"``, ``"fdr"``, ``"fwe"`` (``score_func`` as in ``SelectKBest``;
+    the p-value modes need ``f_classif``, ``f_regression`` or ``chi2``)."""
+
+    _kind = "GenericUnivariateSelect"
+
+    def __init__(self, score_func="f_classif", *, mode="percentile", param=1e-5):
+        self.score_func = score_func
+        self.mode = mode
+        self.param = param
+
+    def _mode(self, X):
+        if self.mode == "k_best":
+            k = X.shape[1] if self.param == "all" else int(self.param)
+            return {"KBest": k}
+        tag = _choice(self.mode, {"percentile": "Percentile", "fpr": "Fpr", "fdr": "Fdr",
+                                  "fwe": "Fwe"}, "mode")
+        return {tag: float(self.param)}
+
+    def _rust_params(self, X, y):
+        return {"scoring_fn": _choice(self.score_func, _SCORE_FUNCS, "score_func"),
+                "mode": self._mode(X)}
+
+    def get_support(self, indices=False):
+        idx = np.asarray(self._fitted_state()["selected_indices"], dtype=np.int64)
+        if indices:
+            return idx
+        mask = np.zeros(self.n_features_in_, dtype=bool)
+        mask[idx] = True
+        return mask
+
+
+class SelectPercentile(GenericUnivariateSelect):
+    """Keep the best ``percentile`` percent of the features."""
+
+    def __init__(self, score_func="f_classif", *, percentile=10):
+        self.score_func = score_func
+        self.percentile = percentile
+
+    def _rust_params(self, X, y):
+        return {"scoring_fn": _choice(self.score_func, _SCORE_FUNCS, "score_func"),
+                "mode": {"Percentile": float(self.percentile)}}
+
+
+class _PValueSelect(GenericUnivariateSelect):
+    _tag = ""
+
+    def __init__(self, score_func="f_classif", *, alpha=5e-2):
+        self.score_func = score_func
+        self.alpha = alpha
+
+    def _rust_params(self, X, y):
+        return {"scoring_fn": _choice(self.score_func, _SCORE_FUNCS, "score_func"),
+                "mode": {self._tag: float(self.alpha)}}
+
+
+class SelectFpr(_PValueSelect):
+    """Keep features with p-value below ``alpha``."""
+
+    _tag = "Fpr"
+
+
+class SelectFdr(_PValueSelect):
+    """Benjamini-Hochberg selection at false discovery rate ``alpha``."""
+
+    _tag = "Fdr"
+
+
+class SelectFwe(_PValueSelect):
+    """Keep features with p-value below ``alpha / n_features``."""
+
+    _tag = "Fwe"
+
+
+class TfidfTransformer(TransformerMixin, BaseEstimator):
+    """TF-IDF reweighting of a (dense) count matrix."""
+
+    _kind = "TfidfTransformer"
+
+    def __init__(self, *, norm="l2", use_idf=True, smooth_idf=True, sublinear_tf=False):
+        self.norm = norm
+        self.use_idf = use_idf
+        self.smooth_idf = smooth_idf
+        self.sublinear_tf = sublinear_tf
+
+    def _rust_params(self, X, y):
+        return {"norm": _choice(self.norm, {"l2": "L2", "l1": "L1", None: "None"}, "norm"),
+                "use_idf": bool(self.use_idf), "smooth_idf": bool(self.smooth_idf),
+                "sublinear_tf": bool(self.sublinear_tf)}
+
+    @property
+    def idf_(self):
+        idf = self._fitted_state()["idf"]
+        if idf is None:
+            raise AttributeError("idf_ is only defined when use_idf=True")
+        return _nd(idf)

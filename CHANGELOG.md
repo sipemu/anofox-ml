@@ -6,6 +6,23 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: univariate selection modes and TF-IDF (#113, batch 2)
+
+- `GenericUnivariateSelect` in `anofox-ml-preprocessing` with
+  `SelectionMode::{KBest, Percentile, Fpr, Fdr, Fwe}` over the
+  `SelectKBest` scoring functions (sklearn's `GenericUnivariateSelect`,
+  `SelectPercentile`, `SelectFpr`, `SelectFdr` (Benjamini–Hochberg),
+  `SelectFwe`). Python: all five classes.
+- `TfidfTransformer` in `anofox-ml-text`: TF-IDF of a count matrix with
+  `norm` (L2 / L1 / none), `use_idf`, `smooth_idf` and `sublinear_tf`.
+- Both are registry kinds and match scikit-learn 1.8.0
+  (`gen_univariate.py`, `tests/golden_univariate.rs`).
+
+### Fixed
+
+- `SelectKBest` breaks ties between equal scores as sklearn does (the
+  higher feature indices win), instead of keeping the lower ones.
+
 ### New estimators: baselines and simple classifiers (#113, batch 1)
 
 - `DummyClassifier` (`MostFrequent` / `Prior` / `Stratified` / `Uniform` /
