@@ -1010,6 +1010,20 @@ registry! {
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         decision_function: |m, x| DecisionFunction::decision_function(m, x),
     }
+    LogisticRegressionCV {
+        config: reg::LogisticRegressionCV = Default::default(),
+        fitted: reg::FittedLogisticRegressionCV,
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        decision_function: |m, x| DecisionFunction::decision_function(m, x),
+    }
+    OrthogonalMatchingPursuitCV {
+        config: reg::OrthogonalMatchingPursuitCV = Default::default(),
+        fitted: reg::FittedOrthogonalMatchingPursuitCV,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+    }
     PoissonRegressor {
         config: reg::PoissonRegressor = Default::default(),
         fitted: reg::FittedPoissonRegressor,

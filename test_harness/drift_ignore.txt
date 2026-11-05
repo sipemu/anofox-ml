@@ -7,3 +7,9 @@
 # is `labels` (stable sort); `labels_public` is only compared by adjusted
 # Rand index in golden_hdbscan.rs.
 hdbscan.json:labels_public
+
+# LogisticRegressionCV fold scores come from L-BFGS fits; with neg_log_loss
+# they agree between machines only to ~1e-9 relative (BLAS-dependent
+# convergence). golden_cv_linear.rs compares them at 1e-6; the accuracy
+# scores and the chosen C are exact.
+cv_linear.json:scores

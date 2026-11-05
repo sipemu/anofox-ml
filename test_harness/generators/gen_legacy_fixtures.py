@@ -180,6 +180,10 @@ def regression_batch(cases):
     for c in cases:
         if c["name"] not in makers:  # sgd_regressor: seeded, checked loosely
             continue
+        if c["name"] == "logistic_regression":
+            # C = 1e6 leaves an intercept of ~1e-11 whose value is L-BFGS /
+            # BLAS noise; matched locally (#120), left as committed.
+            continue
         X, y = A(c["X"]), A(c["y"])
         m = makers[c["name"]](c).fit(X, y)
         c["predictions"] = m.predict(X).tolist()

@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: cross-validated linear models (#113, batch 7)
+
+- `LogisticRegressionCV` in `anofox-ml-regression`: `C` from a grid
+  (`CGrid::Count(n)` = `logspace(−4, 4, n)`, or explicit values) by
+  unshuffled stratified `cv`-fold CV, scored by accuracy (sklearn's
+  default) or negative log loss, summed over the folds, refit on all rows;
+  every other setting comes from the wrapped `LogisticRegressor`.
+- `OrthogonalMatchingPursuitCV`: the sparsity with the lowest mean
+  squared error along the OMP path `1..max_iter` (unshuffled `cv`-fold),
+  refit at that size.
+- Registry kinds and Python classes; both match scikit-learn 1.8.0
+  (`gen_cv_linear.py`: fold scores, `C_`, predictions and probabilities;
+  the chosen sparsity, coefficients and predictions).
+
 ### New estimators: kernel density and factor analysis (#113, batch 6)
 
 - `KernelDensity` in `anofox-ml-neighbors`: exact sums (sklearn's tree
