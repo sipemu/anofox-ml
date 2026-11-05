@@ -37,6 +37,7 @@ pub mod fast_ica;
 pub mod incremental_pca;
 pub mod iterative_imputer;
 pub mod kbins_discretizer;
+pub mod kernel_approximation;
 pub mod kernel_pca;
 pub mod knn_imputer;
 pub mod label_encoder;
@@ -83,6 +84,11 @@ pub use iterative_imputer::{
 };
 pub use kbins_discretizer::{
     BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
+};
+pub use kernel_approximation::{
+    johnson_lindenstrauss_min_dim, FittedKernelCenterer, FittedNystroem, FittedRandomProjection,
+    FittedRbfSampler, GaussianRandomProjection, KernelCenterer, Nystroem, NystroemKernel,
+    ProjectionComponents, RbfSampler, SparseRandomProjection,
 };
 pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
 pub use knn_imputer::{FittedKnnImputer, KnnImputeWeights, KnnImputer};

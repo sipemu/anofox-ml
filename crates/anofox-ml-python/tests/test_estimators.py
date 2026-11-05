@@ -54,6 +54,9 @@ SPECIAL = {
     "SelectFdr": dict(y=y_multi),
     "SelectFwe": dict(y=y_multi),
     "TfidfTransformer": dict(X=np.round(X_pos)),
+    "KernelCenterer": dict(X=X[:4] @ X[:4].T),
+    "GaussianRandomProjection": dict(params=dict(n_components=2)),
+    "SparseRandomProjection": dict(params=dict(n_components=2)),
 }
 
 
@@ -456,3 +459,18 @@ def test_batch4_covariance_matches_sklearn():
     renv = cv.EllipticEnvelope(random_state=0).fit(Xc)
     np.testing.assert_array_equal(env.predict(Xc), renv.predict(Xc))
     np.testing.assert_allclose(env.decision_function(Xc), renv.decision_function(Xc), rtol=1e-7)
+
+
+def test_batch5_kernel_approximation():
+    from sklearn import kernel_approximation as ka, preprocessing
+    from sklearn.metrics.pairwise import rbf_kernel
+
+    K = rbf_kernel(X, X, gamma=0.2)
+    np.testing.assert_allclose(am.KernelCenterer().fit_transform(K),
+                               preprocessing.KernelCenterer().fit_transform(K), atol=1e-12)
+    for kw in [dict(kernel="rbf", gamma=0.3), dict(kernel="poly", degree=2)]:
+        Z = am.Nystroem(n_components=len(X), random_state=0, **kw).fit_transform(X)
+        R = ka.Nystroem(n_components=len(X), random_state=0, **kw).fit_transform(X)
+        np.testing.assert_allclose(Z @ Z.T, R @ R.T, atol=1e-8)
+    Z = am.RBFSampler(gamma=0.2, n_components=5000, random_state=0).fit_transform(X)
+    assert np.abs(Z @ Z.T - K).max() < 0.1

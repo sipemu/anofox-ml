@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: kernel approximation and random projections (#113, batch 5)
+
+- `anofox_ml_preprocessing::kernel_approximation`: `Nystroem` (RBF,
+  Laplacian, polynomial, sigmoid and linear kernels), `RbfSampler`
+  (random Fourier features), `KernelCenterer`, `GaussianRandomProjection`,
+  `SparseRandomProjection` and `johnson_lindenstrauss_min_dim`. Registry
+  kinds and Python classes (`RBFSampler` in Python).
+- The random estimators draw from their own seeded generator, so their
+  features are not sklearn's numbers; tests check what they approximate
+  (the kernel, the pairwise distances). `KernelCenterer`,
+  `johnson_lindenstrauss_min_dim` and the Nyström feature Gram matrix with
+  every row as a component match scikit-learn 1.8.0
+  (`gen_kernel_approx.py`).
+
 ### New estimators: covariance (#113, batch 4)
 
 - `anofox_ml_preprocessing::covariance`: `EmpiricalCovariance`,

@@ -2649,3 +2649,112 @@ class EllipticEnvelope(OutlierMixin, BaseEstimator):
     @property
     def location_(self):
         return _nd(self._fitted_state()["mcd"]["location"])
+
+
+# ---------------------------------------------------------------------------
+# kernel approximation and random projections (#113)
+# ---------------------------------------------------------------------------
+
+
+def _projection_components(n_components, eps):
+    if n_components == "auto":
+        return {"Auto": {"eps": float(eps)}}
+    return {"Fixed": int(n_components)}
+
+
+class Nystroem(TransformerMixin, BaseEstimator):
+    """Low-rank kernel feature map from ``n_components`` random rows."""
+
+    _kind = "Nystroem"
+
+    def __init__(self, kernel="rbf", *, gamma=None, coef0=None, degree=None, n_components=100,
+                 random_state=None):
+        self.kernel = kernel
+        self.gamma = gamma
+        self.coef0 = coef0
+        self.degree = degree
+        self.n_components = n_components
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        g = None if self.gamma is None else float(self.gamma)
+        if self.kernel == "rbf":
+            kernel = {"Rbf": {"gamma": g}}
+        elif self.kernel == "laplacian":
+            kernel = {"Laplacian": {"gamma": g}}
+        elif self.kernel == "poly":
+            kernel = {"Polynomial": {"degree": float(3 if self.degree is None else self.degree),
+                                     "gamma": g,
+                                     "coef0": float(1 if self.coef0 is None else self.coef0)}}
+        elif self.kernel == "sigmoid":
+            kernel = {"Sigmoid": {"gamma": g,
+                                  "coef0": float(1 if self.coef0 is None else self.coef0)}}
+        elif self.kernel == "linear":
+            kernel = "Linear"
+        else:
+            raise ValueError(f"unsupported kernel {self.kernel!r}")
+        return {"kernel": kernel, "n_components": int(self.n_components),
+                "seed": _seed(self.random_state)}
+
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+    @property
+    def component_indices_(self):
+        return np.asarray(self._fitted_state()["component_indices"], dtype=np.int64)
+
+
+class RBFSampler(TransformerMixin, BaseEstimator):
+    """Random Fourier features for the RBF kernel."""
+
+    _kind = "RbfSampler"
+
+    def __init__(self, *, gamma=1.0, n_components=100, random_state=None):
+        self.gamma = gamma
+        self.n_components = n_components
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"gamma": None if self.gamma == "scale" else float(self.gamma),
+                "n_components": int(self.n_components), "seed": _seed(self.random_state)}
+
+
+class KernelCenterer(TransformerMixin, BaseEstimator):
+    """Centre a kernel matrix in feature space."""
+
+    _kind = "KernelCenterer"
+
+    def __init__(self):
+        pass
+
+
+class GaussianRandomProjection(TransformerMixin, BaseEstimator):
+    _kind = "GaussianRandomProjection"
+
+    def __init__(self, n_components="auto", *, eps=0.1, random_state=None):
+        self.n_components = n_components
+        self.eps = eps
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"n_components": _projection_components(self.n_components, self.eps),
+                "seed": _seed(self.random_state)}
+
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+
+class SparseRandomProjection(GaussianRandomProjection):
+    _kind = "SparseRandomProjection"
+
+    def __init__(self, n_components="auto", *, density="auto", eps=0.1, random_state=None):
+        self.n_components = n_components
+        self.density = density
+        self.eps = eps
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {**super()._rust_params(X, y),
+                "density": None if self.density == "auto" else float(self.density)}
