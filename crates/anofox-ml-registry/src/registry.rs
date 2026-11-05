@@ -1345,6 +1345,36 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    Nystroem {
+        config: pre::Nystroem = Default::default(),
+        fitted: pre::FittedNystroem,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    RbfSampler {
+        config: pre::RbfSampler = Default::default(),
+        fitted: pre::FittedRbfSampler,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    KernelCenterer {
+        config: pre::KernelCenterer = Default::default(),
+        fitted: pre::FittedKernelCenterer,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    GaussianRandomProjection {
+        config: pre::GaussianRandomProjection = Default::default(),
+        fitted: pre::FittedRandomProjection,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    SparseRandomProjection {
+        config: pre::SparseRandomProjection = Default::default(),
+        fitted: pre::FittedRandomProjection,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     EmpiricalCovariance {
         config: pre::EmpiricalCovariance = Default::default(),
         fitted: pre::FittedCovariance,

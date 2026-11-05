@@ -15,6 +15,11 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    Nystroem,
+    RBFSampler,
+    KernelCenterer,
+    GaussianRandomProjection,
+    SparseRandomProjection,
     EmpiricalCovariance,
     ShrunkCovariance,
     LedoitWolf,
@@ -159,6 +164,8 @@ __all__ = [
     "TfidfTransformer",
     "EmpiricalCovariance", "ShrunkCovariance", "LedoitWolf", "OAS", "MinCovDet",
     "EllipticEnvelope",
+    "Nystroem", "RBFSampler", "KernelCenterer", "GaussianRandomProjection",
+    "SparseRandomProjection",
     "DummyClassifier", "DummyRegressor", "NearestCentroid", "RidgeClassifier", "Perceptron",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",
