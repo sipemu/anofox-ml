@@ -6,6 +6,22 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: kernel density and factor analysis (#113, batch 6)
+
+- `KernelDensity` in `anofox-ml-neighbors`: exact sums (sklearn's tree
+  with `atol = rtol = 0`), the gaussian / tophat / epanechnikov /
+  exponential / linear / cosine kernels with sklearn's normalisations,
+  sample weights, `Scott` / `Silverman` bandwidths, `score_samples`,
+  `score` and `sample`.
+- `FactorAnalysis` in `anofox-ml-preprocessing`: sklearn's SVD-based EM
+  (exact SVD, `svd_method="lapack"`), varimax / quartimax rotation,
+  `transform`, `covariance`, `precision`, `score_samples`. Component signs
+  follow the SVD.
+- Registry kinds and Python classes; both match scikit-learn 1.8.0
+  (`gen_density_fa.py`: 96 KDE configurations to 1e-10 relative, factor
+  analysis with the same iterations, likelihoods to 1e-8 and components up
+  to sign).
+
 ### New estimators: kernel approximation and random projections (#113, batch 5)
 
 - `anofox_ml_preprocessing::kernel_approximation`: `Nystroem` (RBF,

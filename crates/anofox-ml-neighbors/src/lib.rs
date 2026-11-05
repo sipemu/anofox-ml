@@ -36,6 +36,7 @@
 pub mod distance;
 pub mod index;
 mod kdtree;
+pub mod kernel_density;
 pub mod knn_classifier;
 pub mod knn_regressor;
 pub mod lof;
@@ -44,6 +45,7 @@ pub mod radius;
 
 pub use distance::DistanceMetric;
 pub use index::{NeighborAlgorithm, NeighborIndex, RadiusNeighbors};
+pub use kernel_density::{Bandwidth, DensityKernel, FittedKernelDensity, KernelDensity};
 pub use knn_classifier::{FittedKnnClassifier, KnnClassifier, WeightFunction};
 pub use knn_regressor::{FittedKnnRegressor, KnnRegressor};
 pub use lof::{FittedLocalOutlierFactor, LocalOutlierFactor, LofAlgorithm};

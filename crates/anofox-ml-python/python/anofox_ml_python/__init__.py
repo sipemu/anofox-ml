@@ -15,6 +15,8 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    KernelDensity,
+    FactorAnalysis,
     Nystroem,
     RBFSampler,
     KernelCenterer,
@@ -166,6 +168,7 @@ __all__ = [
     "EllipticEnvelope",
     "Nystroem", "RBFSampler", "KernelCenterer", "GaussianRandomProjection",
     "SparseRandomProjection",
+    "KernelDensity", "FactorAnalysis",
     "DummyClassifier", "DummyRegressor", "NearestCentroid", "RidgeClassifier", "Perceptron",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",

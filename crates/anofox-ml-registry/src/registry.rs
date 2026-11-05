@@ -1345,6 +1345,19 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    FactorAnalysis {
+        config: pre::FactorAnalysis = Default::default(),
+        fitted: pre::FittedFactorAnalysis,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+        score_samples: |m, x| m.score_samples(x),
+    }
+    KernelDensity {
+        config: neighbors::KernelDensity = Default::default(),
+        fitted: neighbors::FittedKernelDensity,
+        fit: |c, x, y, w| c.fit_weighted(x, w),
+        score_samples: |m, x| m.score_samples(x),
+    }
     Nystroem {
         config: pre::Nystroem = Default::default(),
         fitted: pre::FittedNystroem,

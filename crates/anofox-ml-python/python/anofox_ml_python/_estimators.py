@@ -2758,3 +2758,119 @@ class SparseRandomProjection(GaussianRandomProjection):
     def _rust_params(self, X, y):
         return {**super()._rust_params(X, y),
                 "density": None if self.density == "auto" else float(self.density)}
+
+
+# ---------------------------------------------------------------------------
+# density estimation and factor analysis (#113)
+# ---------------------------------------------------------------------------
+
+
+class KernelDensity(BaseEstimator):
+    """Kernel density estimation (exact sums, euclidean distance)."""
+
+    _kind = "KernelDensity"
+
+    def __init__(self, *, bandwidth=1.0, kernel="gaussian"):
+        self.bandwidth = bandwidth
+        self.kernel = kernel
+
+    def _rust_params(self, X, y):
+        if self.bandwidth == "scott":
+            bw = "Scott"
+        elif self.bandwidth == "silverman":
+            bw = "Silverman"
+        else:
+            bw = {"Fixed": float(self.bandwidth)}
+        return {"bandwidth": bw, "kernel": _choice(
+            self.kernel, {"gaussian": "Gaussian", "tophat": "Tophat",
+                          "epanechnikov": "Epanechnikov", "exponential": "Exponential",
+                          "linear": "Linear", "cosine": "Cosine"}, "kernel")}
+
+    def fit(self, X, y=None, sample_weight=None):
+        return self._fit_model(X, None, sample_weight)
+
+    def score_samples(self, X):
+        return self._call("score_samples", X)
+
+    def score(self, X, y=None):
+        return float(np.sum(self.score_samples(X)))
+
+    @property
+    def bandwidth_(self):
+        return float(self._fitted_state()["bandwidth"])
+
+    def sample(self, n_samples=1, random_state=None):
+        """Draw from the density (gaussian and tophat kernels)."""
+        if self.kernel not in ("gaussian", "tophat"):
+            raise NotImplementedError("sampling needs the gaussian or tophat kernel")
+        state = self._fitted_state()
+        data = _nd(state["data"])
+        rng = np.random.default_rng(_seed(random_state))
+        w = state["weights"]
+        if w is None:
+            idx = rng.integers(0, len(data), n_samples)
+        else:
+            w = _nd(w)
+            idx = rng.choice(len(data), size=n_samples, p=w / w.sum())
+        h = self.bandwidth_
+        if self.kernel == "gaussian":
+            return data[idx] + rng.normal(scale=h, size=(n_samples, data.shape[1]))
+        z = rng.normal(size=(n_samples, data.shape[1]))
+        z /= np.linalg.norm(z, axis=1, keepdims=True)
+        r = h * rng.uniform(size=(n_samples, 1)) ** (1.0 / data.shape[1])
+        return data[idx] + z * r
+
+
+class FactorAnalysis(TransformerMixin, BaseEstimator):
+    """Factor analysis (exact SVD; component signs follow the SVD)."""
+
+    _kind = "FactorAnalysis"
+
+    def __init__(self, n_components=None, *, tol=1e-2, max_iter=1000, noise_variance_init=None,
+                 rotation=None):
+        self.n_components = n_components
+        self.tol = tol
+        self.max_iter = max_iter
+        self.noise_variance_init = noise_variance_init
+        self.rotation = rotation
+
+    def _rust_params(self, X, y):
+        return {"n_components": None if self.n_components is None else int(self.n_components),
+                "tol": float(self.tol), "max_iter": int(self.max_iter),
+                "noise_variance_init": None if self.noise_variance_init is None
+                else [float(v) for v in self.noise_variance_init],
+                "rotation": None if self.rotation is None else _choice(
+                    self.rotation, {"varimax": "Varimax", "quartimax": "Quartimax"}, "rotation")}
+
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+    @property
+    def noise_variance_(self):
+        return _nd(self._fitted_state()["noise_variance"])
+
+    @property
+    def mean_(self):
+        return _nd(self._fitted_state()["mean"])
+
+    @property
+    def n_iter_(self):
+        return int(self._fitted_state()["n_iter"])
+
+    @property
+    def loglike_(self):
+        return list(self._fitted_state()["loglike"])
+
+    def get_covariance(self):
+        w = self.components_
+        return w.T @ w + np.diag(self.noise_variance_)
+
+    def get_precision(self):
+        return np.linalg.inv(self.get_covariance())
+
+    def score_samples(self, X):
+        return self._call("score_samples", X)
+
+    def score(self, X, y=None):
+        return float(np.mean(self.score_samples(X)))
