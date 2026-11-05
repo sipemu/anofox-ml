@@ -6,6 +6,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimator: FeatureAgglomeration (#113, batch 8)
+
+- `FeatureAgglomeration` in `anofox-ml-cluster`: the columns are clustered
+  by `AgglomerativeClustering` (ward / complete / average / single) and
+  each cluster pooled by its mean; `labels`, `transform`,
+  `inverse_transform`. Registry kind and Python class; matches
+  scikit-learn 1.8.0 exactly (`gen_feature_agglomeration.py`).
+
 ### New estimators: semi-supervised label propagation (#113, batch 8)
 
 - `LabelPropagation` and `LabelSpreading` in `anofox-ml-neighbors`

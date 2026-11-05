@@ -52,7 +52,10 @@ pub mod spectral;
 mod util;
 
 pub use affinity_propagation::{AffinityPropagation, FittedAffinityPropagation};
-pub use agglomerative::{AgglomerativeClustering, FittedAgglomerativeClustering, Linkage};
+pub use agglomerative::{
+    AgglomerativeClustering, FeatureAgglomeration, FittedAgglomerativeClustering,
+    FittedFeatureAgglomeration, Linkage,
+};
 pub use bgmm::{BayesianGaussianMixture, FittedBayesianGaussianMixture};
 pub use birch::{Birch, FittedBirch};
 pub use dbscan::{Dbscan, FittedDbscan};

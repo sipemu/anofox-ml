@@ -525,3 +525,15 @@ def test_batch8_label_propagation_matches_sklearn():
         np.testing.assert_array_equal(ours.transduction_, ref.transduction_)
         np.testing.assert_allclose(ours.label_distributions_, ref.label_distributions_, atol=1e-10)
         np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
+
+
+def test_feature_agglomeration_matches_sklearn():
+    from sklearn import cluster
+
+    for linkage in ("ward", "average"):
+        ours = am.FeatureAgglomeration(n_clusters=2, linkage=linkage).fit(X)
+        ref = cluster.FeatureAgglomeration(n_clusters=2, linkage=linkage).fit(X)
+        np.testing.assert_array_equal(ours.labels_, ref.labels_)
+        np.testing.assert_allclose(ours.transform(X), ref.transform(X), atol=1e-12)
+        np.testing.assert_allclose(ours.inverse_transform(ours.transform(X)),
+                                   ref.inverse_transform(ref.transform(X)), atol=1e-12)

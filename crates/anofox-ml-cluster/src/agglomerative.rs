@@ -12,7 +12,7 @@
 
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
-use ndarray::{Array1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Linkage {
@@ -408,5 +408,106 @@ mod tests {
             labs.dedup();
             assert_eq!(labs.len(), 3);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FeatureAgglomeration
+// ---------------------------------------------------------------------------
+
+/// Merges similar features (sklearn's `FeatureAgglomeration`): the columns
+/// are clustered by [`AgglomerativeClustering`] and each cluster is
+/// replaced by the mean of its columns.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeatureAgglomeration {
+    pub n_clusters: usize,
+    pub linkage: Linkage,
+}
+
+impl Default for FeatureAgglomeration {
+    fn default() -> Self {
+        Self {
+            n_clusters: 2,
+            linkage: Linkage::Ward,
+        }
+    }
+}
+
+/// Fitted [`FeatureAgglomeration`]: the cluster of every input feature.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FittedFeatureAgglomeration {
+    labels: Vec<usize>,
+    n_clusters: usize,
+}
+
+impl FittedFeatureAgglomeration {
+    /// Cluster index of each input feature (sklearn's `labels_`).
+    pub fn labels(&self) -> &[usize] {
+        &self.labels
+    }
+
+    /// Expand pooled features back to the input width (every feature gets
+    /// its cluster's value).
+    pub fn inverse_transform(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.n_clusters {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} pooled features, got {}",
+                self.n_clusters,
+                x.ncols()
+            )));
+        }
+        Ok(Array2::from_shape_fn(
+            (x.nrows(), self.labels.len()),
+            |(i, j)| x[[i, self.labels[j]]],
+        ))
+    }
+}
+
+impl anofox_ml_core::FitUnsupervised<f64> for FeatureAgglomeration {
+    type Fitted = FittedFeatureAgglomeration;
+
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<FittedFeatureAgglomeration> {
+        if self.n_clusters == 0 || self.n_clusters > x.ncols() {
+            return Err(RustMlError::InvalidParameter(format!(
+                "n_clusters must be in [1, {}], got {}",
+                x.ncols(),
+                self.n_clusters
+            )));
+        }
+        let xt = x.t().to_owned();
+        let fitted = anofox_ml_core::FitUnsupervised::fit_view(
+            &AgglomerativeClustering::new(self.n_clusters).with_linkage(self.linkage),
+            xt.view(),
+        )?;
+        // Relabel in order of the sorted labels (sklearn pools by
+        // `np.unique(labels)`), which is the identity for 0..k labels.
+        let labels: Vec<usize> = fitted.labels.iter().map(|&l| l as usize).collect();
+        Ok(FittedFeatureAgglomeration {
+            labels,
+            n_clusters: self.n_clusters,
+        })
+    }
+}
+
+impl anofox_ml_core::Transform<f64> for FittedFeatureAgglomeration {
+    /// Mean of each cluster's columns (columns in cluster order).
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.labels.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.labels.len(),
+                x.ncols()
+            )));
+        }
+        let mut counts = vec![0.0; self.n_clusters];
+        for &l in &self.labels {
+            counts[l] += 1.0;
+        }
+        let mut out = Array2::zeros((x.nrows(), self.n_clusters));
+        for (j, &l) in self.labels.iter().enumerate() {
+            let mut col = out.column_mut(l);
+            col.scaled_add(1.0 / counts[l], &x.column(j));
+        }
+        Ok(out)
     }
 }
