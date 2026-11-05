@@ -690,6 +690,14 @@ impl FittedHistGradientBoostingRegressor {
         self.inner.n_estimators()
     }
 
+    /// Predictions after each iteration (sklearn's `staged_predict`).
+    pub fn staged_predict<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<impl Iterator<Item = Array1<f64>> + '_> {
+        self.inner.staged_predict(x)
+    }
+
     /// Feature importances by total split gain (normalised to sum to 1).
     pub fn feature_importances(&self) -> Array1<f64> {
         self.inner.feature_importances()
@@ -722,6 +730,23 @@ impl FittedHistGradientBoostingClassifier {
     pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
         let x: ArrayView2<f64> = x.into();
         self.inner.predict_proba(x.view())
+    }
+
+    /// Class probabilities after each iteration (sklearn's
+    /// `staged_predict_proba`).
+    pub fn staged_predict_proba<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<impl Iterator<Item = Array2<f64>> + '_> {
+        self.inner.staged_predict_proba(x)
+    }
+
+    /// Predicted classes after each iteration (sklearn's `staged_predict`).
+    pub fn staged_predict<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<impl Iterator<Item = Array1<f64>> + '_> {
+        self.inner.staged_predict(x)
     }
 }
 
@@ -1057,6 +1082,37 @@ mod tests {
         assert_ne!(fit(0.5, 1).unwrap(), fit(0.5, 2).unwrap());
         // Without subsampling the seed does not matter.
         assert_eq!(fit(1.0, 1).unwrap(), fit(1.0, 2).unwrap());
+    }
+
+    #[test]
+    fn staged_predictions_end_at_predict() {
+        let (x, y) = data();
+        let counts = y.mapv(|v| (v.max(0.0) / 3.0).round());
+        let m = HistGradientBoostingRegressor::new()
+            .with_loss(HistGradientBoostingLoss::Poisson)
+            .with_n_estimators(15)
+            .fit(&x, &counts)
+            .unwrap();
+        let stages: Vec<Array1<f64>> = m.staged_predict(&x).unwrap().collect();
+        assert_eq!(stages.len(), m.n_iter());
+        assert_eq!(stages.last().unwrap(), &m.predict(&x).unwrap());
+        assert!(stages[0].iter().all(|&v| v > 0.0));
+        assert!(m.staged_predict(&x.slice(ndarray::s![.., ..2])).is_err());
+
+        for yc in [
+            y.mapv(|v| if v > 5.0 { 1.0 } else { 0.0 }),
+            y.mapv(|v| (v.abs() as i64 % 3) as f64),
+        ] {
+            let c = HistGradientBoostingClassifier::new()
+                .with_n_estimators(12)
+                .fit(&x, &yc)
+                .unwrap();
+            let proba: Vec<Array2<f64>> = c.staged_predict_proba(&x).unwrap().collect();
+            let labels: Vec<Array1<f64>> = c.staged_predict(&x).unwrap().collect();
+            assert_eq!((proba.len(), labels.len()), (12, 12));
+            assert_eq!(proba.last().unwrap(), &c.predict_proba(&x).unwrap());
+            assert_eq!(labels.last().unwrap(), &c.predict(&x).unwrap());
+        }
     }
 
     #[test]

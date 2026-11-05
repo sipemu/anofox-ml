@@ -177,7 +177,22 @@ fn regressor_losses_match_sklearn() {
         ) {
             failures.push(format!("{name}: {msg}"));
         }
-        let pred = fitted.predict(&array2_with_nan(&case["X_test"])).unwrap();
+        let x_test = array2_with_nan(&case["X_test"]);
+        if let Some(stages) = case["staged"].as_array() {
+            let ours: Vec<Array1<f64>> = fitted.staged_predict(&x_test).unwrap().collect();
+            let w = if ours.len() == stages.len() {
+                ours.iter()
+                    .zip(stages)
+                    .map(|(a, e)| worst(a.iter().copied(), json_to_array1(e)))
+                    .fold(0.0, f64::max)
+            } else {
+                f64::INFINITY
+            };
+            if w > 1e-12 {
+                failures.push(format!("{name}: staged predictions differ by {w:e}"));
+            }
+        }
+        let pred = fitted.predict(&x_test).unwrap();
         let worst = worst(pred, expected);
         if worst > 1e-12 {
             failures.push(format!("{name}: max rel. error {worst:e}"));
@@ -236,9 +251,27 @@ fn classifier_matches_sklearn() {
         ) {
             failures.push(format!("{name}: {msg}"));
         }
-        let proba = fitted
-            .predict_proba(&array2_with_nan(&case["X_test"]))
-            .unwrap();
+        let x_test = array2_with_nan(&case["X_test"]);
+        if let Some(stages) = case["staged"].as_array() {
+            let ours: Vec<Array2<f64>> = fitted.staged_predict_proba(&x_test).unwrap().collect();
+            let w = if ours.len() == stages.len() {
+                ours.iter()
+                    .zip(stages)
+                    .map(|(a, e)| worst(a.iter().copied(), array2_with_nan(e)))
+                    .fold(0.0, f64::max)
+            } else {
+                f64::INFINITY
+            };
+            if w > 1e-12 {
+                failures.push(format!("{name}: staged probabilities differ by {w:e}"));
+            }
+            let labels: Vec<Array1<f64>> = fitted.staged_predict(&x_test).unwrap().collect();
+            let last = fitted.predict(&x_test).unwrap();
+            if labels.last() != Some(&last) {
+                failures.push(format!("{name}: last staged labels differ from predict"));
+            }
+        }
+        let proba = fitted.predict_proba(&x_test).unwrap();
         let expected = array2_with_nan(&case["predictions"]);
         let worst = worst(proba.iter().copied(), expected.iter().copied());
         if worst > 1e-12 {
