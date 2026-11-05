@@ -11,6 +11,7 @@ from .multiclass import (
     FixedThresholdClassifier,
     OneVsOneClassifier,
     OneVsRestClassifier,
+    SelfTrainingClassifier,
     TunedThresholdClassifierCV,
 )
 from ._base import BaseEstimator, NotFittedError
@@ -166,7 +167,7 @@ __all__ = [
     "BaseEstimator", "NotFittedError", "conformal", "metrics", "model_selection", "multiclass", "train_test_split",
     "TuneSearchCV",
     "OneVsRestClassifier", "OneVsOneClassifier", "FixedThresholdClassifier",
-    "TunedThresholdClassifierCV",
+    "TunedThresholdClassifierCV", "SelfTrainingClassifier",
     "GenericUnivariateSelect", "SelectPercentile", "SelectFpr", "SelectFdr", "SelectFwe",
     "TfidfTransformer",
     "EmpiricalCovariance", "ShrunkCovariance", "LedoitWolf", "OAS", "MinCovDet",

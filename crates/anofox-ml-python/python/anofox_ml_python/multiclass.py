@@ -122,3 +122,59 @@ class TunedThresholdClassifierCV(_Threshold):
     @property
     def best_score_(self):
         return float(self._fitted_state()["best_score"])
+
+
+class SelfTrainingClassifier(_Meta):
+    """Self-training: fit on the labelled rows (label ``-1`` = unlabelled),
+    pseudo-label the confident unlabelled rows (``criterion="threshold"``:
+    top probability above ``threshold``; ``"k_best"``: the ``k_best`` most
+    confident), repeat up to ``max_iter`` times, refit."""
+
+    _kind = "SelfTrainingClassifier"
+
+    def __init__(self, estimator=None, *, threshold=0.75, criterion="threshold", k_best=10,
+                 max_iter=10):
+        self.estimator = estimator
+        self.threshold = threshold
+        self.criterion = criterion
+        self.k_best = k_best
+        self.max_iter = max_iter
+
+    def fit(self, X, y):
+        y = np.asarray(y)
+        labelled = y != -1
+        self.classes_ = np.unique(y[labelled])
+        y_enc = np.full(len(y), -1.0)
+        y_enc[labelled] = np.searchsorted(self.classes_, y[labelled])
+        self._labelled_y = y_enc[labelled]
+        return self._fit_model(X, y_enc, None)
+
+    def _rust_params(self, X, y):
+        if self.criterion == "threshold":
+            criterion = {"Threshold": float(self.threshold)}
+        elif self.criterion == "k_best":
+            criterion = {"KBest": int(self.k_best)}
+        else:
+            raise ValueError(f"criterion must be 'threshold' or 'k_best', got {self.criterion!r}")
+        return {**self._base_params(X, self._labelled_y), "criterion": criterion,
+                "max_iter": None if self.max_iter is None else int(self.max_iter)}
+
+    @property
+    def transduction_(self):
+        t = np.asarray(self._fitted_state()["transduction"]["data"], dtype=float)
+        out = np.full(len(t), -1, dtype=object)
+        known = t != -1
+        out[known] = self.classes_[t[known].astype(np.int64)]
+        return out if self.classes_.dtype == object else out.astype(self.classes_.dtype)
+
+    @property
+    def labeled_iter_(self):
+        return np.asarray(self._fitted_state()["labeled_iter"]["data"], dtype=np.int64)
+
+    @property
+    def n_iter_(self):
+        return int(self._fitted_state()["n_iter"])
+
+    @property
+    def termination_condition_(self):
+        return self._fitted_state()["termination"]

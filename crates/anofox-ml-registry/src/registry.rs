@@ -747,6 +747,17 @@ registry! {
         decision_function: |m, x| m.decision_function(x),
     }
 
+    SelfTrainingClassifier {
+        config: crate::meta::SelfTrainingConfig = Default::default(),
+        fitted: crate::meta::SelfTrainingFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+    }
+
     // ------------------------------------------------------- baselines
     DummyClassifier {
         config: anofox_ml_core::DummyClassifier = Default::default(),
