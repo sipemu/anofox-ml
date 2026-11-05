@@ -447,6 +447,34 @@ def test_hist_gradient_boosting_constraints_match_sklearn():
         am.HistGradientBoostingRegressor(interaction_cst="sometimes").fit(X, y)
 
 
+def test_hist_gradient_boosting_early_stopping_matches_sklearn():
+    from sklearn.ensemble import HistGradientBoostingClassifier as SkC
+    from sklearn.ensemble import HistGradientBoostingRegressor as SkR
+
+    rs = np.random.RandomState(9)
+    X = rs.normal(size=(400, 3))
+    y = np.sin(2 * X[:, 0]) + 0.5 * X[:, 1] + rs.normal(scale=0.5, size=400)
+    kw = dict(max_iter=300, learning_rate=0.3, max_leaf_nodes=8, min_samples_leaf=10,
+              early_stopping=True, n_iter_no_change=5)
+    for extra in (dict(random_state=3), dict(validation_fraction=50, random_state=8),
+                  dict(validation_fraction=None, tol=1e-3)):
+        ours = am.HistGradientBoostingRegressor(**kw, **extra).fit(X, y)
+        ref = SkR(**kw, **extra).fit(X, y)
+        assert ours.n_iter_ == ref.n_iter_ < 300
+        np.testing.assert_allclose(ours.train_score_, ref.train_score_, rtol=1e-10)
+        np.testing.assert_allclose(ours.validation_score_, ref.validation_score_, rtol=1e-10)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
+    yc = np.digitize(y, [-0.5, 0.5])
+    ours = am.HistGradientBoostingClassifier(**kw, random_state=5).fit(X, yc)
+    ref = SkC(**kw, random_state=5).fit(X, yc)
+    assert ours.n_iter_ == ref.n_iter_
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
+    off = am.HistGradientBoostingRegressor(max_iter=20).fit(X, y)
+    assert off.n_iter_ == 20 and off.train_score_.size == 0
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(scoring="r2", early_stopping=True).fit(X, y)
+
+
 def test_hist_gradient_boosting_log_link_losses_match_sklearn():
     from sklearn.ensemble import HistGradientBoostingRegressor as SkHGB
 

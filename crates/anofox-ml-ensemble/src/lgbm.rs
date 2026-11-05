@@ -54,18 +54,29 @@ fn sklearn_thresholds(sorted: &[f64], max_bins: usize) -> Vec<f64> {
     if distinct.len() <= max_bins {
         return distinct.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
     }
-    // np.percentile(col, linspace(0, 100, max_bins + 1)[1:-1], method="midpoint")
+    // np.percentile(col, linspace(0, 100, max_bins + 1)[1:-1], method="midpoint"),
+    // in numpy's arithmetic: the level `k * (100 / max_bins) / 100`, the
+    // virtual index `(floor(i) + ceil(i)) / 2` of `i = (n - 1) q`, and
+    // numpy's interpolation `b - (b - a) / 2` between neighbours (whether
+    // `i` lands exactly on an integer decides between a value and a
+    // midpoint).
     let n = sorted.len();
+    let step = 100.0 / max_bins as f64;
     (1..max_bins)
         .map(|k| {
-            let q = k as f64 / max_bins as f64;
-            let idx = q * (n - 1) as f64;
-            let below = idx.floor();
-            let lo = sorted[below as usize];
-            let v = if idx == below {
-                lo
+            let q = k as f64 * step / 100.0;
+            let i = (n - 1) as f64 * q;
+            let virtual_index = 0.5 * (i.floor() + i.ceil());
+            let v = if virtual_index >= (n - 1) as f64 {
+                sorted[n - 1]
             } else {
-                0.5 * (lo + sorted[(below as usize + 1).min(n - 1)])
+                let below = virtual_index.floor();
+                let (a, b) = (sorted[below as usize], sorted[below as usize + 1]);
+                if virtual_index == below {
+                    a
+                } else {
+                    b - (b - a) * 0.5
+                }
             };
             v.min(f64::MAX)
         })
@@ -2205,6 +2216,75 @@ fn sample_rows(n: usize, frac: f64, rng: &mut StdRng) -> Vec<usize> {
     indices
 }
 
+/// sklearn's early stopping rule (`scoring="loss"`): stop once none of the
+/// last `n_iter_no_change` scores beats the one before them by more than
+/// `tol`; all trees are kept.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SklearnStopping {
+    pub n_iter_no_change: usize,
+    pub tol: f64,
+}
+
+/// Scores recorded by sklearn-style early stopping: the negative mean loss
+/// before the first tree and after every iteration.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EarlyStoppingScores {
+    pub train: Vec<f64>,
+    /// Empty when the training data is the validation data.
+    pub validation: Vec<f64>,
+}
+
+struct ScoreTracker {
+    rule: SklearnStopping,
+    scores: EarlyStoppingScores,
+}
+
+impl ScoreTracker {
+    fn new(rule: SklearnStopping) -> Self {
+        Self {
+            rule,
+            scores: EarlyStoppingScores::default(),
+        }
+    }
+
+    /// Record the losses after an iteration (or of the baseline); returns
+    /// sklearn's `_should_stop` on the validation scores, or on the training
+    /// scores without validation data.
+    fn record(&mut self, train_loss: f64, validation_loss: Option<f64>) -> bool {
+        self.scores.train.push(-train_loss);
+        let scores = match validation_loss {
+            Some(v) => {
+                self.scores.validation.push(-v);
+                &self.scores.validation
+            }
+            None => &self.scores.train,
+        };
+        let reference_position = self.rule.n_iter_no_change + 1;
+        if scores.len() < reference_position {
+            return false;
+        }
+        let reference = scores[scores.len() - reference_position] + self.rule.tol;
+        !scores[scores.len() - reference_position + 1..]
+            .iter()
+            .any(|&s| s > reference)
+    }
+}
+
+/// sklearn's numerically stable `log(1 + exp(x))`.
+fn sklearn_log1pexp(x: f64) -> f64 {
+    if x <= -37.0 {
+        x.exp()
+    } else if x <= -2.0 {
+        x.exp().ln_1p()
+    } else if x <= 18.0 {
+        (1.0 + x.exp()).ln()
+    } else if x <= 33.3 {
+        x + (-x).exp()
+    } else {
+        x
+    }
+}
+
 impl LgbmRegressor {
     /// Fit with additional options (sample weights, init score, eval set, early stopping).
     pub fn fit_with_eval<'a, 'b>(
@@ -2213,8 +2293,19 @@ impl LgbmRegressor {
         y: impl AsArray<'b, f64, Ix1>,
         opts: &LgbmFitOptions<'_>,
     ) -> Result<FittedLgbmRegressor> {
-        let x: ArrayView2<f64> = x.into();
-        let y: ArrayView1<f64> = y.into();
+        Ok(self.fit_scored(x.into(), y.into(), opts, None)?.0)
+    }
+
+    /// [`fit_with_eval`](Self::fit_with_eval), optionally with sklearn's
+    /// early stopping (on `opts.eval_set` if given, else on the training
+    /// data), returning its scores.
+    pub(crate) fn fit_scored(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+        stopping: Option<SklearnStopping>,
+    ) -> Result<(FittedLgbmRegressor, EarlyStoppingScores)> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -2312,6 +2403,31 @@ impl LgbmRegressor {
             .as_ref()
             .map(|(xe, _)| vec![baseline; xe.nrows()]);
 
+        let mut tracker = stopping.map(ScoreTracker::new);
+        let losses = |preds: &[f64], eval_preds: Option<&Vec<f64>>| {
+            let train = eval_loss(
+                &y_vec,
+                preds,
+                sample_weight,
+                self.objective,
+                self.huber_delta,
+            );
+            let validation = eval_y.as_ref().zip(eval_preds).map(|(ye, ep)| {
+                eval_loss(
+                    ye,
+                    ep,
+                    opts.eval_sample_weight,
+                    self.objective,
+                    self.huber_delta,
+                )
+            });
+            (train, validation)
+        };
+        if let Some(t) = tracker.as_mut() {
+            let (train, validation) = losses(&preds, eval_preds.as_ref());
+            t.record(train, validation);
+        }
+
         let mut best_eval_loss = f64::INFINITY;
         let mut best_iteration = 0usize;
         let mut best_feature_gain = feature_gain.clone();
@@ -2386,6 +2502,21 @@ impl LgbmRegressor {
                 preds[i] += self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
             }
 
+            if let Some(t) = tracker.as_mut() {
+                if let (Some(eb), Some(ep)) = (eval_binned.as_ref(), eval_preds.as_mut()) {
+                    for (i, e) in ep.iter_mut().enumerate() {
+                        *e += self.learning_rate * tree.predict_bins(row_of(eb, i));
+                    }
+                }
+                let (train, validation) = losses(&preds, eval_preds.as_ref());
+                trees.push(tree);
+                best_iteration = iter + 1;
+                if t.record(train, validation) {
+                    break;
+                }
+                continue;
+            }
+
             // Update eval predictions and check early stopping
             if let (Some(eb), Some(ye), Some(ep)) =
                 (eval_binned.as_ref(), eval_y.as_ref(), eval_preds.as_mut())
@@ -2441,7 +2572,7 @@ impl LgbmRegressor {
             feature_split_count = best_feature_split_count;
         }
 
-        Ok(FittedLgbmRegressor {
+        let fitted = FittedLgbmRegressor {
             trees,
             bins,
             baseline,
@@ -2451,7 +2582,8 @@ impl LgbmRegressor {
             feature_split_count,
             best_iteration,
             log_link: has_log_link(self.objective),
-        })
+        };
+        Ok((fitted, tracker.map(|t| t.scores).unwrap_or_default()))
     }
 }
 
@@ -2864,8 +2996,19 @@ impl LgbmClassifier {
         y: impl AsArray<'b, f64, Ix1>,
         opts: &LgbmFitOptions<'_>,
     ) -> Result<FittedLgbmClassifier> {
-        let x: ArrayView2<f64> = x.into();
-        let y: ArrayView1<f64> = y.into();
+        Ok(self.fit_scored(x.into(), y.into(), opts, None)?.0)
+    }
+
+    /// [`fit_with_eval`](Self::fit_with_eval), optionally with sklearn's
+    /// early stopping (on `opts.eval_set` if given, else on the training
+    /// data), returning its scores.
+    pub(crate) fn fit_scored(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+        stopping: Option<SklearnStopping>,
+    ) -> Result<(FittedLgbmClassifier, EarlyStoppingScores)> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -2953,6 +3096,32 @@ impl LgbmClassifier {
         };
         let eval_w = |i: usize| opts.eval_sample_weight.map_or(1.0, |w| w[i]);
         let mut es = EarlyStopState::new(self.early_stopping_rounds, opts.verbose);
+        let mut tracker = stopping.map(ScoreTracker::new);
+        // sklearn's mean losses (weighted by `w`) of raw scores.
+        let mean = |total: f64, wsum: f64| if wsum > 0.0 { total / wsum } else { total };
+        let binary_loss =
+            |raw: &[f64], is_pos: &dyn Fn(usize) -> bool, w: &dyn Fn(usize) -> f64| {
+                let (mut total, mut wsum) = (0.0, 0.0);
+                for (i, &r) in raw.iter().enumerate() {
+                    let yi = if is_pos(i) { 1.0 } else { 0.0 };
+                    total += w(i) * (sklearn_log1pexp(r) - yi * r);
+                    wsum += w(i);
+                }
+                mean(total, wsum)
+            };
+        let multi_loss =
+            |raw: &[Vec<f64>], class_of: &dyn Fn(usize) -> usize, w: &dyn Fn(usize) -> f64| {
+                let (mut total, mut wsum) = (0.0, 0.0);
+                for i in 0..raw.first().map_or(0, Vec::len) {
+                    let max_s = raw.iter().map(|s| s[i]).fold(f64::NEG_INFINITY, f64::max);
+                    let sum_exps: f64 = raw.iter().map(|s| (s[i] - max_s).exp()).sum();
+                    total += w(i) * (sum_exps.ln() + max_s - raw[class_of(i)][i]);
+                    wsum += w(i);
+                }
+                mean(total, wsum)
+            };
+        let train_class = |i: usize| classes.iter().position(|&c| c == y[i]).unwrap_or(0);
+        let train_w = |i: usize| effective_weights[i];
 
         let mut rng = StdRng::seed_from_u64(self.seed);
         let params = LgbmParams {
@@ -2984,6 +3153,17 @@ impl LgbmClassifier {
             let mut trees = Vec::with_capacity(self.n_estimators);
             let mut eval_raw: Option<Vec<f64>> =
                 eval_binned.as_ref().map(|eb| vec![baseline; eb.nrows()]);
+            let binary_losses = |raw: &[f64], eval_raw: Option<&Vec<f64>>| {
+                let train = binary_loss(raw, &|i| labels[i] == 1.0, &train_w);
+                let validation = eval_raw
+                    .zip(eval_class_idx.as_ref())
+                    .map(|(er, ci)| binary_loss(er, &|i| ci[i] == 1, &eval_w));
+                (train, validation)
+            };
+            if let Some(t) = tracker.as_mut() {
+                let (train, validation) = binary_losses(&raw, eval_raw.as_ref());
+                t.record(train, validation);
+            }
 
             for iter in 0..self.n_estimators {
                 let mut gradients: Vec<f64> = (0..n)
@@ -3040,6 +3220,20 @@ impl LgbmClassifier {
                     raw[i] += self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
                 }
 
+                if let Some(t) = tracker.as_mut() {
+                    if let (Some(eb), Some(er)) = (eval_binned.as_ref(), eval_raw.as_mut()) {
+                        for (i, e) in er.iter_mut().enumerate() {
+                            *e += self.learning_rate * tree.predict_bins(row_of(eb, i));
+                        }
+                    }
+                    let (train, validation) = binary_losses(&raw, eval_raw.as_ref());
+                    trees.push(tree);
+                    if t.record(train, validation) {
+                        break;
+                    }
+                    continue;
+                }
+
                 let mut stop = false;
                 if let (Some(eb), Some(er), Some(ci)) = (
                     eval_binned.as_ref(),
@@ -3073,7 +3267,7 @@ impl LgbmClassifier {
                 es.finish(trees.len(), &mut feature_gain, &mut feature_split_count);
             trees.truncate(keep);
 
-            Ok(FittedLgbmClassifier {
+            let fitted = FittedLgbmClassifier {
                 tree_sets: vec![trees],
                 bins,
                 baselines: vec![baseline],
@@ -3083,7 +3277,8 @@ impl LgbmClassifier {
                 feature_gain,
                 feature_split_count,
                 best_iteration,
-            })
+            };
+            Ok((fitted, tracker.map(|t| t.scores).unwrap_or_default()))
         } else {
             // Multiclass: softmax with one tree per class per round.
             let mut tree_sets: Vec<Vec<TreeNode>> =
@@ -3107,6 +3302,17 @@ impl LgbmClassifier {
             let mut eval_raw: Option<Vec<Vec<f64>>> = eval_binned
                 .as_ref()
                 .map(|eb| baselines.iter().map(|&bl| vec![bl; eb.nrows()]).collect());
+            let multi_losses = |raw: &[Vec<f64>], eval_raw: Option<&Vec<Vec<f64>>>| {
+                let train = multi_loss(raw, &train_class, &train_w);
+                let validation = eval_raw
+                    .zip(eval_class_idx.as_ref())
+                    .map(|(er, ci)| multi_loss(er, &|i| ci[i], &eval_w));
+                (train, validation)
+            };
+            if let Some(t) = tracker.as_mut() {
+                let (train, validation) = multi_losses(&raw_scores, eval_raw.as_ref());
+                t.record(train, validation);
+            }
 
             for iter in 0..self.n_estimators {
                 // Softmax probabilities.
@@ -3193,6 +3399,14 @@ impl LgbmClassifier {
                     tree_sets[c].push(tree);
                 }
 
+                if let Some(t) = tracker.as_mut() {
+                    let (train, validation) = multi_losses(&raw_scores, eval_raw.as_ref());
+                    if t.record(train, validation) {
+                        break;
+                    }
+                    continue;
+                }
+
                 // Multiclass log-loss on the eval set after this round.
                 if let (Some(er), Some(ci)) = (eval_raw.as_ref(), eval_class_idx.as_ref()) {
                     let mut total = 0.0;
@@ -3217,7 +3431,7 @@ impl LgbmClassifier {
                 ts.truncate(keep);
             }
 
-            Ok(FittedLgbmClassifier {
+            let fitted = FittedLgbmClassifier {
                 tree_sets,
                 bins,
                 baselines,
@@ -3227,7 +3441,8 @@ impl LgbmClassifier {
                 feature_gain,
                 feature_split_count,
                 best_iteration,
-            })
+            };
+            Ok((fitted, tracker.map(|t| t.scores).unwrap_or_default()))
         }
     }
 }

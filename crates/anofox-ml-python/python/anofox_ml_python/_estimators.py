@@ -333,10 +333,34 @@ def _interaction_cst(interaction_cst):
                          f"got: {interaction_cst!r}.") from None
 
 
+def _early_stopping_params(est):
+    """sklearn's early-stopping parameters of a HistGradientBoosting model."""
+    if est.scoring != "loss":
+        raise ValueError("only scoring='loss' is supported for early stopping")
+    vf = est.validation_fraction
+    if vf is None:
+        validation = None
+    elif isinstance(vf, (int, np.integer)) and not isinstance(vf, bool):
+        validation = {"Count": int(vf)}
+    else:
+        validation = {"Fraction": float(vf)}
+    rs = est.random_state
+    if rs is not None and not isinstance(rs, (int, np.integer)):
+        raise ValueError("random_state must be None or an integer")
+    return {"early_stopping": _choice(est.early_stopping, {"auto": "Auto", True: "Enabled",
+                                                           False: "Disabled"},
+                                      "early_stopping"),
+            "validation_fraction": validation,
+            "n_iter_no_change": int(est.n_iter_no_change), "tol": float(est.tol),
+            "random_state": 0 if rs is None else int(rs)}
+
+
 class _HistGradientBoosting(BaseEstimator):
     def __init__(self, learning_rate=0.1, max_iter=100, max_leaf_nodes=31, max_depth=None,
                  min_samples_leaf=20, l2_regularization=0.0, max_bins=255,
-                 categorical_features=None, monotonic_cst=None, interaction_cst=None):
+                 categorical_features=None, monotonic_cst=None, interaction_cst=None,
+                 early_stopping="auto", scoring="loss", validation_fraction=0.1,
+                 n_iter_no_change=10, tol=1e-7, random_state=None):
         self.learning_rate = learning_rate
         self.max_iter = max_iter
         self.max_leaf_nodes = max_leaf_nodes
@@ -347,9 +371,28 @@ class _HistGradientBoosting(BaseEstimator):
         self.categorical_features = categorical_features
         self.monotonic_cst = monotonic_cst
         self.interaction_cst = interaction_cst
+        self.early_stopping = early_stopping
+        self.scoring = scoring
+        self.validation_fraction = validation_fraction
+        self.n_iter_no_change = n_iter_no_change
+        self.tol = tol
+        self.random_state = random_state
+
+    @property
+    def n_iter_(self):
+        inner = self._fitted_state()["inner"]
+        return len(inner["trees"]) if "trees" in inner else len(inner["tree_sets"][0])
+
+    @property
+    def train_score_(self):
+        return np.asarray(self._fitted_state()["scores"]["train"], dtype=float)
+
+    @property
+    def validation_score_(self):
+        return np.asarray(self._fitted_state()["scores"]["validation"], dtype=float)
 
     def _rust_params(self, X, y):
-        return {"learning_rate": self.learning_rate, "n_estimators": self.max_iter,
+        return {**_early_stopping_params(self),"learning_rate": self.learning_rate, "n_estimators": self.max_iter,
                 "max_leaf_nodes": self.max_leaf_nodes, "max_depth": self.max_depth,
                 "min_samples_leaf": self.min_samples_leaf,
                 "l2_regularization": self.l2_regularization, "max_bins": self.max_bins,
@@ -373,13 +416,18 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
     def __init__(self, loss="squared_error", quantile=None, learning_rate=0.1, max_iter=100,
                  max_leaf_nodes=31, max_depth=None, min_samples_leaf=20, l2_regularization=0.0,
                  max_bins=255, categorical_features=None, monotonic_cst=None,
-                 interaction_cst=None):
+                 interaction_cst=None, early_stopping="auto", scoring="loss",
+                 validation_fraction=0.1, n_iter_no_change=10, tol=1e-7, random_state=None):
         super().__init__(learning_rate=learning_rate, max_iter=max_iter,
                          max_leaf_nodes=max_leaf_nodes, max_depth=max_depth,
                          min_samples_leaf=min_samples_leaf,
                          l2_regularization=l2_regularization, max_bins=max_bins,
                          categorical_features=categorical_features,
-                         monotonic_cst=monotonic_cst, interaction_cst=interaction_cst)
+                         monotonic_cst=monotonic_cst, interaction_cst=interaction_cst,
+                         early_stopping=early_stopping, scoring=scoring,
+                         validation_fraction=validation_fraction,
+                         n_iter_no_change=n_iter_no_change, tol=tol,
+                         random_state=random_state)
         self.loss = loss
         self.quantile = quantile
 

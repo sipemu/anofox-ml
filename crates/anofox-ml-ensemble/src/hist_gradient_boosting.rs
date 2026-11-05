@@ -9,12 +9,16 @@
 //! and leaves are Newton steps with an L2 penalty. Sample weights, feature
 //! importances and the engine's histogram subtraction come with it.
 
+pub use anofox_ml_core::numpy_random::TestSize;
+use anofox_ml_core::numpy_random::{
+    stratified_train_test_split_indices, train_test_split_indices, RandomState,
+};
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result};
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
 
 use crate::lgbm::{
-    BinningMethod, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassifier, LgbmObjective,
-    LgbmRegressor,
+    BinningMethod, EarlyStoppingScores, FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassifier,
+    LgbmFitOptions, LgbmObjective, LgbmRegressor, SklearnStopping,
 };
 
 /// Shared hyperparameters and builder methods of the two facades.
@@ -33,6 +37,11 @@ macro_rules! hist_gb_config {
                     categorical_features: Vec::new(),
                     monotonic_cst: Vec::new(),
                     interaction_cst: None,
+                    early_stopping: EarlyStopping::Auto,
+                    validation_fraction: Some(TestSize::Fraction(0.1)),
+                    n_iter_no_change: 10,
+                    tol: 1e-7,
+                    random_state: 0,
                     $($field: $value,)*
                 }
             }
@@ -88,6 +97,103 @@ macro_rules! hist_gb_config {
             pub fn with_interaction_cst(mut self, cst: InteractionConstraints) -> Self {
                 self.interaction_cst = Some(cst);
                 self
+            }
+
+            /// Early stopping (sklearn's `early_stopping`; default `Auto`:
+            /// on above 10 000 samples).
+            pub fn with_early_stopping(mut self, e: EarlyStopping) -> Self {
+                self.early_stopping = e;
+                self
+            }
+            /// Held-out share of the training data for early stopping
+            /// (sklearn's `validation_fraction`, default 10 %); `None` stops
+            /// on the training loss.
+            pub fn with_validation_fraction(mut self, v: Option<TestSize>) -> Self {
+                self.validation_fraction = v;
+                self
+            }
+            /// Iterations without an improvement of more than `tol` before
+            /// stopping (sklearn's `n_iter_no_change`, default 10).
+            pub fn with_n_iter_no_change(mut self, n: usize) -> Self {
+                self.n_iter_no_change = n;
+                self
+            }
+            /// Minimum improvement of the score (sklearn's `tol`, default
+            /// 1e-7).
+            pub fn with_tol(mut self, tol: f64) -> Self {
+                self.tol = tol;
+                self
+            }
+            /// Seed of the validation split (sklearn's integer
+            /// `random_state`; default 0, where sklearn's default `None`
+            /// draws a fresh one).
+            pub fn with_random_state(mut self, seed: u32) -> Self {
+                self.random_state = seed;
+                self
+            }
+
+            /// Fit `engine` with sklearn's early stopping when it applies:
+            /// the validation rows are split off as sklearn's
+            /// `train_test_split` does (stratified by class for the
+            /// classifier) and training runs on sklearn's training rows in
+            /// its order.
+            fn fit_engine<E: ScoredEngine>(
+                &self,
+                engine: &E,
+                x: ArrayView2<f64>,
+                y: ArrayView1<f64>,
+                sample_weight: Option<ArrayView1<f64>>,
+                stratify: bool,
+            ) -> Result<(E::Fitted, EarlyStoppingScores)> {
+                let enabled = match self.early_stopping {
+                    EarlyStopping::Auto => x.nrows() > 10_000,
+                    EarlyStopping::Enabled => true,
+                    EarlyStopping::Disabled => false,
+                };
+                let opts = LgbmFitOptions {
+                    sample_weight,
+                    ..LgbmFitOptions::default()
+                };
+                if !enabled {
+                    return engine.fit_scored(x, y, &opts, None);
+                }
+                if self.n_iter_no_change == 0 || self.tol.is_nan() || self.tol < 0.0 {
+                    return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                        "early stopping needs n_iter_no_change >= 1 and tol >= 0".into(),
+                    ));
+                }
+                let rule = SklearnStopping {
+                    n_iter_no_change: self.n_iter_no_change,
+                    tol: self.tol,
+                };
+                let Some(test_size) = self.validation_fraction else {
+                    return engine.fit_scored(x, y, &opts, Some(rule));
+                };
+                // sklearn: `_random_seed = rng.randint(np.iinfo(np.uint32).max)`.
+                let seed =
+                    RandomState::new(self.random_state).randint(u64::from(u32::MAX)) as u32;
+                let (train, val) = if stratify {
+                    let mut classes: Vec<f64> = y.to_vec();
+                    classes.sort_by(f64::total_cmp);
+                    classes.dedup();
+                    let labels: Vec<usize> = y
+                        .iter()
+                        .map(|v| classes.partition_point(|c| c < v))
+                        .collect();
+                    stratified_train_test_split_indices(&labels, test_size, seed)?
+                } else {
+                    train_test_split_indices(x.nrows(), test_size, seed)?
+                };
+                let (x_train, x_val) = (x.select(Axis(0), &train), x.select(Axis(0), &val));
+                let (y_train, y_val) = (y.select(Axis(0), &train), y.select(Axis(0), &val));
+                let sw = sample_weight.map(|w| (w.select(Axis(0), &train), w.select(Axis(0), &val)));
+                let opts = LgbmFitOptions {
+                    sample_weight: sw.as_ref().map(|(t, _)| t.view()),
+                    eval_set: Some((&x_val, &y_val)),
+                    eval_sample_weight: sw.as_ref().map(|(_, v)| v.view()),
+                    ..LgbmFitOptions::default()
+                };
+                engine.fit_scored(x_train.view(), y_train.view(), &opts, Some(rule))
             }
 
             /// Configure `engine` for `x`: validates the categorical
@@ -224,6 +330,64 @@ impl InteractionConstraints {
     }
 }
 
+/// sklearn's `early_stopping`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum EarlyStopping {
+    /// On when there are more than 10 000 samples (sklearn's `"auto"`).
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+/// Engines the facades fit with sklearn's early stopping.
+trait ScoredEngine {
+    type Fitted;
+    fn fit_scored(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+        stopping: Option<SklearnStopping>,
+    ) -> Result<(Self::Fitted, EarlyStoppingScores)>;
+}
+
+impl ScoredEngine for LgbmRegressor {
+    type Fitted = FittedLgbmRegressor;
+    fn fit_scored(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+        stopping: Option<SklearnStopping>,
+    ) -> Result<(Self::Fitted, EarlyStoppingScores)> {
+        LgbmRegressor::fit_scored(self, x, y, opts, stopping)
+    }
+}
+
+impl ScoredEngine for LgbmClassifier {
+    type Fitted = FittedLgbmClassifier;
+    fn fit_scored(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+        stopping: Option<SklearnStopping>,
+    ) -> Result<(Self::Fitted, EarlyStoppingScores)> {
+        LgbmClassifier::fit_scored(self, x, y, opts, stopping)
+    }
+}
+
+/// Deserialize a field added after binary format 1: format-1 (bincode)
+/// files end before it, which leaves the default.
+fn lenient<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    Ok(T::deserialize(d).unwrap_or_default())
+}
+
 /// Engines the facades configure with constraints.
 trait ConstrainedEngine {
     fn set_constraints(&mut self, monotone: Vec<i8>, interactions: Vec<Vec<usize>>);
@@ -284,6 +448,16 @@ pub struct HistGradientBoostingRegressor {
     #[serde(default)]
     pub interaction_cst: Option<InteractionConstraints>,
     #[serde(default)]
+    pub early_stopping: EarlyStopping,
+    #[serde(default = "default_validation_fraction")]
+    pub validation_fraction: Option<TestSize>,
+    #[serde(default = "default_n_iter_no_change")]
+    pub n_iter_no_change: usize,
+    #[serde(default = "default_tol")]
+    pub tol: f64,
+    #[serde(default)]
+    pub random_state: u32,
+    #[serde(default)]
     pub loss: HistGradientBoostingLoss,
     /// Quantile level in (0, 1) for `loss = Quantile`.
     #[serde(default)]
@@ -313,10 +487,32 @@ pub struct HistGradientBoostingClassifier {
     /// Interaction constraints.
     #[serde(default)]
     pub interaction_cst: Option<InteractionConstraints>,
+    #[serde(default)]
+    pub early_stopping: EarlyStopping,
+    #[serde(default = "default_validation_fraction")]
+    pub validation_fraction: Option<TestSize>,
+    #[serde(default = "default_n_iter_no_change")]
+    pub n_iter_no_change: usize,
+    #[serde(default = "default_tol")]
+    pub tol: f64,
+    #[serde(default)]
+    pub random_state: u32,
 }
 
 fn default_leaves() -> Option<usize> {
     Some(31)
+}
+
+fn default_validation_fraction() -> Option<TestSize> {
+    Some(TestSize::Fraction(0.1))
+}
+
+fn default_n_iter_no_change() -> usize {
+    10
+}
+
+fn default_tol() -> f64 {
+    1e-7
 }
 
 hist_gb_config!(
@@ -401,7 +597,39 @@ impl HistGradientBoostingClassifier {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedHistGradientBoostingRegressor {
     inner: FittedLgbmRegressor,
+    #[serde(default, deserialize_with = "lenient")]
+    scores: EarlyStoppingScores,
 }
+
+/// Iteration count and early-stopping scores of a fitted facade.
+macro_rules! fitted_scores {
+    ($name:ident) => {
+        impl $name {
+            /// Number of boosting iterations run (sklearn's `n_iter_`; fewer
+            /// than `n_estimators` after early stopping).
+            pub fn n_iter(&self) -> usize {
+                self.inner.n_estimators()
+            }
+
+            /// Training scores (negative mean loss) before the first and
+            /// after every iteration, with early stopping (sklearn's
+            /// `train_score_`); empty without.
+            pub fn train_score(&self) -> &[f64] {
+                &self.scores.train
+            }
+
+            /// The same on the validation data (sklearn's
+            /// `validation_score_`); empty without early stopping or
+            /// validation data.
+            pub fn validation_score(&self) -> &[f64] {
+                &self.scores.validation
+            }
+        }
+    };
+}
+
+fitted_scores!(FittedHistGradientBoostingRegressor);
+fitted_scores!(FittedHistGradientBoostingClassifier);
 
 impl FittedHistGradientBoostingRegressor {
     pub fn n_estimators(&self) -> usize {
@@ -418,6 +646,8 @@ impl FittedHistGradientBoostingRegressor {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedHistGradientBoostingClassifier {
     inner: FittedLgbmClassifier,
+    #[serde(default, deserialize_with = "lenient")]
+    scores: EarlyStoppingScores,
 }
 
 impl FittedHistGradientBoostingClassifier {
@@ -460,9 +690,8 @@ impl FitWeighted<f64> for HistGradientBoostingRegressor {
     ) -> Result<Self::Fitted> {
         let mut engine = self.engine()?;
         self.apply_constraints(x, &mut engine)?;
-        Ok(FittedHistGradientBoostingRegressor {
-            inner: engine.fit_weighted_view(x, y, sample_weight)?,
-        })
+        let (inner, scores) = self.fit_engine(&engine, x, y, sample_weight, false)?;
+        Ok(FittedHistGradientBoostingRegressor { inner, scores })
     }
 }
 
@@ -495,9 +724,8 @@ impl FitWeighted<f64> for HistGradientBoostingClassifier {
                 ));
             }
         }
-        Ok(FittedHistGradientBoostingClassifier {
-            inner: engine.fit_weighted_view(x, y, sample_weight)?,
-        })
+        let (inner, scores) = self.fit_engine(&engine, x, y, sample_weight, true)?;
+        Ok(FittedHistGradientBoostingClassifier { inner, scores })
     }
 }
 
@@ -709,6 +937,46 @@ mod tests {
     }
 
     #[test]
+    fn early_stopping_modes() {
+        let (x, y) = data();
+        // Noise, so that the validation loss stops improving.
+        let y = &y + &Array1::from_shape_fn(y.len(), |i| ((i * 7919) % 200) as f64 / 25.0 - 4.0);
+        let fit = |m: HistGradientBoostingRegressor| m.with_n_estimators(500).fit(&x, &y);
+        // `Auto` is off on 200 samples: no scores, every iteration.
+        let off = fit(HistGradientBoostingRegressor::new()).unwrap();
+        assert_eq!(off.n_iter(), 500);
+        assert!(off.train_score().is_empty() && off.validation_score().is_empty());
+        let on =
+            fit(HistGradientBoostingRegressor::new().with_early_stopping(EarlyStopping::Enabled))
+                .unwrap();
+        assert!(on.n_iter() < 500);
+        assert_eq!(on.train_score().len(), on.n_iter() + 1);
+        assert_eq!(on.validation_score().len(), on.n_iter() + 1);
+        let train_only = fit(HistGradientBoostingRegressor::new()
+            .with_early_stopping(EarlyStopping::Enabled)
+            .with_validation_fraction(None))
+        .unwrap();
+        assert!(train_only.validation_score().is_empty());
+        assert_eq!(train_only.train_score().len(), train_only.n_iter() + 1);
+        // Auto switches on above 10 000 samples.
+        let xb = Array2::from_shape_fn((10_001, 1), |(i, _)| (i % 97) as f64);
+        let yb = xb.column(0).mapv(|v| (v / 10.0).sin());
+        let big = HistGradientBoostingRegressor::new()
+            .with_n_estimators(300)
+            .fit(&xb, &yb)
+            .unwrap();
+        assert!(!big.validation_score().is_empty());
+        assert!(fit(HistGradientBoostingRegressor::new()
+            .with_early_stopping(EarlyStopping::Enabled)
+            .with_n_iter_no_change(0))
+        .is_err());
+        assert!(fit(HistGradientBoostingRegressor::new()
+            .with_early_stopping(EarlyStopping::Enabled)
+            .with_validation_fraction(Some(TestSize::Fraction(1.5))))
+        .is_err());
+    }
+
+    #[test]
     fn regressor_fits_and_matches_the_engine() {
         let (x, y) = data();
         let hgb = HistGradientBoostingRegressor::new().with_n_estimators(30);
@@ -830,6 +1098,21 @@ mod tests {
                 assert!((a - b).abs() < 1e-12, "max_bins={max_bins}: {a} vs {b}");
             }
         }
+    }
+
+    #[test]
+    fn sklearn_percentile_thresholds_land_on_exact_indices() {
+        // np.percentile(np.sqrt(np.arange(375.)), np.linspace(0, 100, 256)[1:-1],
+        // method="midpoint"): at k = 15 the index 374 * 15 / 255 = 22 is
+        // exact in numpy's arithmetic, so the threshold is a data value.
+        let v: Vec<f64> = (0..375).map(|i| f64::from(i).sqrt()).collect();
+        let t = crate::lgbm::sklearn_thresholds_for_test(&v, 255);
+        assert_eq!(t.len(), 254);
+        assert_eq!(
+            &t[13..16],
+            &[4.527355824977709, 4.636495727389635, 4.847405504439537]
+        );
+        assert!((t.iter().sum::<f64>() - 3277.3897249418715).abs() < 1e-9);
     }
 
     #[test]

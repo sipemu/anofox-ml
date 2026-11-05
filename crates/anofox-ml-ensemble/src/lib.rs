@@ -89,9 +89,9 @@ pub use gradient_boosting_regressor::{
     FittedGradientBoostingRegressor, GbLoss, GradientBoostingRegressor,
 };
 pub use hist_gradient_boosting::{
-    FittedHistGradientBoostingClassifier, FittedHistGradientBoostingRegressor,
+    EarlyStopping, FittedHistGradientBoostingClassifier, FittedHistGradientBoostingRegressor,
     HistGradientBoostingClassifier, HistGradientBoostingLoss, HistGradientBoostingRegressor,
-    InteractionConstraints,
+    InteractionConstraints, TestSize,
 };
 pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{
