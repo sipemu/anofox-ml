@@ -103,6 +103,10 @@ def test_fit_predict_pickle_clone(name):
         out = est.fit_transform(Xd)
         assert out.shape == (len(Xd), 2)
         return
+    elif hasattr(est, "mahalanobis"):  # covariance estimators
+        out = est.fit(Xd).mahalanobis(Xd)
+        assert out.shape == (len(Xd),)
+        assert est.covariance_.shape == (Xd.shape[1], Xd.shape[1])
     else:  # transformer
         supervised = isinstance(est, SupervisedTransformerMixin) or name in (
             "SelectKBest", "MutualInformationSelector", "TargetEncoder")
@@ -431,3 +435,24 @@ def test_batch2_selection_and_tfidf_match_sklearn():
             am.TfidfTransformer(**kw).fit_transform(counts),
             feature_extraction.text.TfidfTransformer(**kw).fit_transform(counts).toarray(),
             atol=1e-12)
+
+
+def test_batch4_covariance_matches_sklearn():
+    from sklearn import covariance as cv
+
+    rs = np.random.RandomState(3)
+    Xc = rs.randn(150, 3) @ rs.randn(3, 3)
+    Xc[:15] += 10.0
+    for ours, ref in [(am.EmpiricalCovariance(), cv.EmpiricalCovariance()),
+                      (am.ShrunkCovariance(shrinkage=0.2), cv.ShrunkCovariance(shrinkage=0.2)),
+                      (am.LedoitWolf(), cv.LedoitWolf()), (am.OAS(), cv.OAS()),
+                      (am.MinCovDet(random_state=0), cv.MinCovDet(random_state=0))]:
+        ours.fit(Xc)
+        ref.fit(Xc)
+        np.testing.assert_allclose(ours.covariance_, ref.covariance_, atol=1e-9)
+        np.testing.assert_allclose(ours.mahalanobis(Xc), ref.mahalanobis(Xc), rtol=1e-7)
+        np.testing.assert_allclose(ours.score(Xc), ref.score(Xc), rtol=1e-9)
+    env = am.EllipticEnvelope(random_state=0).fit(Xc)
+    renv = cv.EllipticEnvelope(random_state=0).fit(Xc)
+    np.testing.assert_array_equal(env.predict(Xc), renv.predict(Xc))
+    np.testing.assert_allclose(env.decision_function(Xc), renv.decision_function(Xc), rtol=1e-7)

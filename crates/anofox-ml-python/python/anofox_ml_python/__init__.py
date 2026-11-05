@@ -15,6 +15,12 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    EmpiricalCovariance,
+    ShrunkCovariance,
+    LedoitWolf,
+    OAS,
+    MinCovDet,
+    EllipticEnvelope,
     GenericUnivariateSelect,
     SelectPercentile,
     SelectFpr,
@@ -151,6 +157,8 @@ __all__ = [
     "TunedThresholdClassifierCV",
     "GenericUnivariateSelect", "SelectPercentile", "SelectFpr", "SelectFdr", "SelectFwe",
     "TfidfTransformer",
+    "EmpiricalCovariance", "ShrunkCovariance", "LedoitWolf", "OAS", "MinCovDet",
+    "EllipticEnvelope",
     "DummyClassifier", "DummyRegressor", "NearestCentroid", "RidgeClassifier", "Perceptron",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",

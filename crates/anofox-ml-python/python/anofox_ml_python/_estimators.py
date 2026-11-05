@@ -2492,3 +2492,160 @@ class TfidfTransformer(TransformerMixin, BaseEstimator):
         if idf is None:
             raise AttributeError("idf_ is only defined when use_idf=True")
         return _nd(idf)
+
+
+# ---------------------------------------------------------------------------
+# covariance estimation (#113)
+# ---------------------------------------------------------------------------
+
+
+class _Covariance(BaseEstimator):
+    """Shared API: ``location_``, ``covariance_``, ``precision_``,
+    ``mahalanobis(X)`` and the Gaussian log-likelihood ``score(X)``."""
+
+    def fit(self, X, y=None):
+        return self._fit_model(X, None, None)
+
+    def _state(self, key):
+        return _nd(self._fitted_state()[key])
+
+    @property
+    def location_(self):
+        return self._state("location")
+
+    @property
+    def covariance_(self):
+        return self._state("covariance")
+
+    @property
+    def precision_(self):
+        return self._state("precision")
+
+    def mahalanobis(self, X):
+        return self._call("transform", X)[:, 0]
+
+    def score(self, X, y=None):
+        X = np.asarray(X, dtype=np.float64)
+        xc = X - self.location_
+        s = xc.T @ xc / X.shape[0]
+        p = self.precision_
+        sign, logdet = np.linalg.slogdet(p)
+        logdet = logdet if sign > 0 else -np.inf
+        return float((-np.sum(s * p) + logdet - p.shape[0] * np.log(2 * np.pi)) / 2)
+
+
+class EmpiricalCovariance(_Covariance):
+    _kind = "EmpiricalCovariance"
+
+    def __init__(self, *, assume_centered=False):
+        self.assume_centered = assume_centered
+
+    def _rust_params(self, X, y):
+        return {"assume_centered": bool(self.assume_centered)}
+
+
+class ShrunkCovariance(_Covariance):
+    _kind = "ShrunkCovariance"
+
+    def __init__(self, *, assume_centered=False, shrinkage=0.1):
+        self.assume_centered = assume_centered
+        self.shrinkage = shrinkage
+
+    def _rust_params(self, X, y):
+        return {"assume_centered": bool(self.assume_centered), "shrinkage": float(self.shrinkage)}
+
+
+class LedoitWolf(_Covariance):
+    _kind = "LedoitWolf"
+
+    def __init__(self, *, assume_centered=False):
+        self.assume_centered = assume_centered
+
+    def _rust_params(self, X, y):
+        return {"assume_centered": bool(self.assume_centered)}
+
+    @property
+    def shrinkage_(self):
+        return float(self._fitted_state()["shrinkage"])
+
+
+class OAS(LedoitWolf):
+    _kind = "Oas"
+
+
+class MinCovDet(_Covariance):
+    """Robust covariance (FastMCD). Its random starts come from its own
+    generator, so on hard data the support can differ from sklearn's."""
+
+    _kind = "MinCovDet"
+
+    def __init__(self, *, assume_centered=False, support_fraction=None, random_state=None):
+        self.assume_centered = assume_centered
+        self.support_fraction = support_fraction
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"assume_centered": bool(self.assume_centered),
+                "support_fraction": None if self.support_fraction is None
+                else float(self.support_fraction),
+                "seed": _seed(self.random_state)}
+
+    @property
+    def support_(self):
+        return np.asarray(self._fitted_state()["support"], dtype=bool)
+
+    @property
+    def dist_(self):
+        return self._state("dist")
+
+    @property
+    def raw_location_(self):
+        return self._state("raw_location")
+
+    @property
+    def raw_covariance_(self):
+        return self._state("raw_covariance")
+
+    @property
+    def raw_support_(self):
+        return np.asarray(self._fitted_state()["raw_support"], dtype=bool)
+
+
+class EllipticEnvelope(OutlierMixin, BaseEstimator):
+    """Outliers under a Gaussian assumption, from a robust (MCD) fit."""
+
+    _kind = "EllipticEnvelope"
+
+    def __init__(self, *, assume_centered=False, support_fraction=None, contamination=0.1,
+                 random_state=None):
+        self.assume_centered = assume_centered
+        self.support_fraction = support_fraction
+        self.contamination = contamination
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"assume_centered": bool(self.assume_centered),
+                "support_fraction": None if self.support_fraction is None
+                else float(self.support_fraction),
+                "contamination": float(self.contamination), "seed": _seed(self.random_state)}
+
+    def predict(self, X):
+        return np.asarray(self._call("predict", X), dtype=np.int64)
+
+    def decision_function(self, X):
+        return self._call("decision_function", X)
+
+    def score_samples(self, X):
+        return self._call("score_samples", X)
+
+    @property
+    def offset_(self):
+        return float(self._fitted_state()["offset"])
+
+    @property
+    def covariance_(self):
+        return _nd(self._fitted_state()["mcd"]["covariance"])
+
+    @property
+    def location_(self):
+        return _nd(self._fitted_state()["mcd"]["location"])

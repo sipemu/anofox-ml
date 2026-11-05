@@ -167,7 +167,7 @@ name = "anofox-ml-linear"
 version = "0.3.0"
 dependencies = [
  "anofox-ml-core",
- "anofox-regression 0.10.0",
+ "anofox-regression",
  "approx",
  "faer",
  "ndarray",
@@ -246,7 +246,7 @@ version = "0.3.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-regression",
- "anofox-regression 0.10.0",
+ "anofox-regression",
  "approx",
  "faer",
  "ndarray",
@@ -303,7 +303,7 @@ dependencies = [
  "anofox-ml-core",
  "anofox-ml-metrics",
  "anofox-ml-svm",
- "anofox-regression 0.11.0",
+ "anofox-regression",
  "approx",
  "faer",
  "ndarray",
@@ -363,19 +363,6 @@ dependencies = [
  "rustuna_sampler",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "anofox-regression"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f7c93608281891b4d3ade689b5e4d539a00fbd86ba37384b49fab0f80f5ba95"
-dependencies = [
- "basin",
- "faer",
- "getrandom 0.3.4",
- "statrs",
- "thiserror 2.0.18",
 ]
 
 [[package]]
