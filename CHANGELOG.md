@@ -6,6 +6,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimator: KNeighborsTransformer (#113)
+
+- `KNeighborsTransformer` in `anofox-ml-neighbors` (distance graph with
+  `n_neighbors + 1` neighbours, or connectivity), returned dense. Registry
+  kind and Python class; matches scikit-learn 1.8.0
+  (`gen_kneighbors_transformer.py`).
+
 ### New estimator: SelfTrainingClassifier (#113, batch 8)
 
 - Registry kind `SelfTrainingClassifier` over any registered classifier

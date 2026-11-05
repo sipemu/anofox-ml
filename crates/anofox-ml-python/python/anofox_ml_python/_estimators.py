@@ -3042,3 +3042,19 @@ class FeatureAgglomeration(TransformerMixin, BaseEstimator):
         from ._base import _check_X
 
         return self._model().inverse_transform(_check_X(X))
+
+
+class KNeighborsTransformer(TransformerMixin, BaseEstimator):
+    """k-nearest-neighbour graph of ``X`` against the training rows, as a
+    dense array (sklearn returns it sparse)."""
+
+    _kind = "KNeighborsTransformer"
+
+    def __init__(self, *, mode="distance", n_neighbors=5):
+        self.mode = mode
+        self.n_neighbors = n_neighbors
+
+    def _rust_params(self, X, y):
+        return {"mode": _choice(self.mode, {"distance": "Distance",
+                                            "connectivity": "Connectivity"}, "mode"),
+                "n_neighbors": int(self.n_neighbors)}
