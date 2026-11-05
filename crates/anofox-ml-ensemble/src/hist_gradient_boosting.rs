@@ -12,7 +12,8 @@
 use anofox_ml_core::class_weight::{effective_sample_weight, ClassWeight};
 pub use anofox_ml_core::numpy_random::TestSize;
 use anofox_ml_core::numpy_random::{
-    stratified_train_test_split_indices, train_test_split_indices, RandomState,
+    resample_without_replacement, stratified_train_test_split_indices, train_test_split_indices,
+    RandomState,
 };
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Axis, Ix2};
@@ -44,6 +45,7 @@ macro_rules! hist_gb_config {
                     tol: 1e-7,
                     random_state: 0,
                     max_features: 1.0,
+                    scoring: EarlyStoppingScoring::Loss,
                     $($field: $value,)*
                 }
             }
@@ -142,6 +144,13 @@ macro_rules! hist_gb_config {
                 self
             }
 
+            /// Score monitored by early stopping (sklearn's `scoring`;
+            /// default `Loss`).
+            pub fn with_scoring(mut self, scoring: EarlyStoppingScoring) -> Self {
+                self.scoring = scoring;
+                self
+            }
+
             /// sklearn's two seeds from `random_state`: the validation split's
             /// and the feature subsampling's.
             fn seeds(&self) -> (u32, u32) {
@@ -155,15 +164,28 @@ macro_rules! hist_gb_config {
             /// `train_test_split` does (stratified by class for the
             /// classifier) and training runs on sklearn's training rows in
             /// its order.
-            fn fit_engine<E: ScoredEngine>(
+            #[allow(clippy::too_many_arguments)]
+            fn fit_engine<'w, 'v, E: ScoredEngine>(
                 &self,
                 engine: &E,
                 x: ArrayView2<f64>,
                 y: ArrayView1<f64>,
-                sample_weight: Option<ArrayView1<f64>>,
+                sample_weight: Option<ArrayView1<'w, f64>>,
                 stratify: bool,
                 seed: u32,
+                validation: Option<ValidationSet<'v>>,
             ) -> Result<(E::Fitted, EarlyStoppingScores)> {
+                if validation.is_some() && self.early_stopping == EarlyStopping::Disabled {
+                    return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                        "a validation set needs early stopping (Auto or Enabled)".into(),
+                    ));
+                }
+                if !self.scoring.applies_to(stratify) {
+                    return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                        "scoring {:?} does not apply to this estimator",
+                        self.scoring
+                    )));
+                }
                 let enabled = match self.early_stopping {
                     EarlyStopping::Auto => x.nrows() > 10_000,
                     EarlyStopping::Enabled => true,
@@ -181,22 +203,46 @@ macro_rules! hist_gb_config {
                         "early stopping needs n_iter_no_change >= 1 and tol >= 0".into(),
                     ));
                 }
-                let rule = SklearnStopping {
-                    n_iter_no_change: self.n_iter_no_change,
-                    tol: self.tol,
-                };
-                let Some(test_size) = self.validation_fraction else {
-                    return engine.fit_scored(x, y, &opts, Some(rule));
-                };
-                let (train, val) = if stratify {
+                let labels_of = |y: ArrayView1<f64>| -> Vec<usize> {
                     let mut classes: Vec<f64> = y.to_vec();
                     classes.sort_by(f64::total_cmp);
                     classes.dedup();
-                    let labels: Vec<usize> = y
-                        .iter()
-                        .map(|v| classes.partition_point(|c| c < v))
-                        .collect();
-                    stratified_train_test_split_indices(&labels, test_size, seed)?
+                    y.iter().map(|v| classes.partition_point(|c| c < v)).collect()
+                };
+                // sklearn scores scorers (not the loss) on at most 10 000
+                // training rows, resampled with the split's seed.
+                let small_train = |y_train: ArrayView1<f64>| -> Result<Option<Vec<usize>>> {
+                    const SUBSAMPLE: usize = 10_000;
+                    if self.scoring == EarlyStoppingScoring::Loss || y_train.len() <= SUBSAMPLE {
+                        return Ok(None);
+                    }
+                    let labels = stratify.then(|| labels_of(y_train));
+                    resample_without_replacement(y_train.len(), SUBSAMPLE, seed, labels.as_deref())
+                        .map(Some)
+                };
+                let rule = |y_train: ArrayView1<f64>| -> Result<SklearnStopping> {
+                    Ok(SklearnStopping {
+                        n_iter_no_change: self.n_iter_no_change,
+                        tol: self.tol,
+                        scoring: self.scoring,
+                        small_train: small_train(y_train)?,
+                    })
+                };
+                if let Some(v) = validation {
+                    let (x_val, y_val) = (v.x.to_owned(), v.y.to_owned());
+                    let opts = LgbmFitOptions {
+                        sample_weight: sample_weight.as_ref().map(|w| w.view()),
+                        eval_set: Some((&x_val, &y_val)),
+                        eval_sample_weight: v.sample_weight.as_ref().map(|w| w.view()),
+                        ..LgbmFitOptions::default()
+                    };
+                    return engine.fit_scored(x, y, &opts, Some(rule(y)?));
+                }
+                let Some(test_size) = self.validation_fraction else {
+                    return engine.fit_scored(x, y, &opts, Some(rule(y)?));
+                };
+                let (train, val) = if stratify {
+                    stratified_train_test_split_indices(&labels_of(y), test_size, seed)?
                 } else {
                     train_test_split_indices(x.nrows(), test_size, seed)?
                 };
@@ -209,7 +255,7 @@ macro_rules! hist_gb_config {
                     eval_sample_weight: sw.as_ref().map(|(_, v)| v.view()),
                     ..LgbmFitOptions::default()
                 };
-                engine.fit_scored(x_train.view(), y_train.view(), &opts, Some(rule))
+                engine.fit_scored(x_train.view(), y_train.view(), &opts, Some(rule(y_train.view())?))
             }
 
             /// Configure `engine` for `x`: validates the categorical
@@ -353,6 +399,46 @@ impl InteractionConstraints {
     }
 }
 
+/// Score monitored by early stopping (sklearn's `scoring`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum EarlyStoppingScoring {
+    /// The negative loss (`"loss"`), on all training rows.
+    #[default]
+    Loss,
+    /// The estimator's `score` (`None`): R² for the regressor, accuracy for
+    /// the classifier.
+    Default,
+    /// `"r2"` (regressor).
+    R2,
+    /// `"neg_mean_squared_error"` (regressor).
+    NegMeanSquaredError,
+    /// `"neg_mean_absolute_error"` (regressor).
+    NegMeanAbsoluteError,
+    /// `"accuracy"` (classifier).
+    Accuracy,
+    /// `"neg_log_loss"` (classifier).
+    NegLogLoss,
+}
+
+impl EarlyStoppingScoring {
+    fn applies_to(self, classifier: bool) -> bool {
+        match self {
+            Self::Loss | Self::Default => true,
+            Self::R2 | Self::NegMeanSquaredError | Self::NegMeanAbsoluteError => !classifier,
+            Self::Accuracy | Self::NegLogLoss => classifier,
+        }
+    }
+}
+
+/// An explicit validation set for early stopping (sklearn's `X_val`,
+/// `y_val`, `sample_weight_val`).
+#[derive(Debug, Clone, Copy)]
+struct ValidationSet<'a> {
+    x: ArrayView2<'a, f64>,
+    y: ArrayView1<'a, f64>,
+    sample_weight: Option<ArrayView1<'a, f64>>,
+}
+
 /// sklearn's `early_stopping`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum EarlyStopping {
@@ -492,6 +578,9 @@ pub struct HistGradientBoostingRegressor {
     /// Share of the features tried at every split.
     #[serde(default = "default_max_features")]
     pub max_features: f64,
+    /// Score monitored by early stopping.
+    #[serde(default)]
+    pub scoring: EarlyStoppingScoring,
     #[serde(default)]
     pub loss: HistGradientBoostingLoss,
     /// Quantile level in (0, 1) for `loss = Quantile`.
@@ -535,6 +624,9 @@ pub struct HistGradientBoostingClassifier {
     /// Share of the features tried at every split.
     #[serde(default = "default_max_features")]
     pub max_features: f64,
+    /// Score monitored by early stopping.
+    #[serde(default)]
+    pub scoring: EarlyStoppingScoring,
     /// Class weights (sklearn's `class_weight`).
     #[serde(default)]
     pub class_weight: Option<ClassWeight>,
@@ -767,10 +859,44 @@ impl FitWeighted<f64> for HistGradientBoostingRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.fit_validated(x, y, sample_weight, None)
+    }
+}
+
+impl HistGradientBoostingRegressor {
+    /// Fit with an explicit validation set for early stopping (sklearn's
+    /// `fit(X, y, sample_weight, X_val=, y_val=, sample_weight_val=)`); no
+    /// split is made. Early stopping must not be `Disabled` (with `Auto`
+    /// it applies only above 10 000 samples).
+    pub fn fit_with_validation<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'a, f64, ndarray::Ix1>,
+        sample_weight: Option<ArrayView1<'a, f64>>,
+        x_val: impl AsArray<'a, f64, Ix2>,
+        y_val: impl AsArray<'a, f64, ndarray::Ix1>,
+        sample_weight_val: Option<ArrayView1<'a, f64>>,
+    ) -> Result<FittedHistGradientBoostingRegressor> {
+        let validation = ValidationSet {
+            x: x_val.into(),
+            y: y_val.into(),
+            sample_weight: sample_weight_val,
+        };
+        self.fit_validated(x.into(), y.into(), sample_weight, Some(validation))
+    }
+
+    fn fit_validated(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        validation: Option<ValidationSet<'_>>,
+    ) -> Result<FittedHistGradientBoostingRegressor> {
         let mut engine = self.engine()?;
         self.apply_constraints(x, &mut engine)?;
+        let seed = self.seeds().0;
         let (inner, scores) =
-            self.fit_engine(&engine, x, y, sample_weight, false, self.seeds().0)?;
+            self.fit_engine(&engine, x, y, sample_weight, false, seed, validation)?;
         Ok(FittedHistGradientBoostingRegressor { inner, scores })
     }
 }
@@ -792,6 +918,39 @@ impl FitWeighted<f64> for HistGradientBoostingClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.fit_validated(x, y, sample_weight, None)
+    }
+}
+
+impl HistGradientBoostingClassifier {
+    /// Fit with an explicit validation set for early stopping (sklearn's
+    /// `fit(X, y, sample_weight, X_val=, y_val=, sample_weight_val=)`); no
+    /// split is made. Early stopping must not be `Disabled` (with `Auto`
+    /// it applies only above 10 000 samples).
+    pub fn fit_with_validation<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'a, f64, ndarray::Ix1>,
+        sample_weight: Option<ArrayView1<'a, f64>>,
+        x_val: impl AsArray<'a, f64, Ix2>,
+        y_val: impl AsArray<'a, f64, ndarray::Ix1>,
+        sample_weight_val: Option<ArrayView1<'a, f64>>,
+    ) -> Result<FittedHistGradientBoostingClassifier> {
+        let validation = ValidationSet {
+            x: x_val.into(),
+            y: y_val.into(),
+            sample_weight: sample_weight_val,
+        };
+        self.fit_validated(x.into(), y.into(), sample_weight, Some(validation))
+    }
+
+    fn fit_validated(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        validation: Option<ValidationSet<'_>>,
+    ) -> Result<FittedHistGradientBoostingClassifier> {
         let mut engine = self.engine()?;
         self.apply_constraints(x, &mut engine)?;
         if self.monotonic_cst.iter().any(|&c| c != 0) {
@@ -814,6 +973,7 @@ impl FitWeighted<f64> for HistGradientBoostingClassifier {
             weights.as_ref().map(|w| w.view()),
             true,
             self.seeds().0,
+            validation,
         )?;
         Ok(FittedHistGradientBoostingClassifier { inner, scores })
     }
@@ -1113,6 +1273,41 @@ mod tests {
             assert_eq!(proba.last().unwrap(), &c.predict_proba(&x).unwrap());
             assert_eq!(labels.last().unwrap(), &c.predict(&x).unwrap());
         }
+    }
+
+    #[test]
+    fn scoring_and_validation_sets_are_checked() {
+        let (x, y) = data();
+        let (xv, yv) = (x.slice(ndarray::s![..40, ..]), y.slice(ndarray::s![..40]));
+        let base = || {
+            HistGradientBoostingRegressor::new()
+                .with_n_estimators(50)
+                .with_early_stopping(EarlyStopping::Enabled)
+        };
+        let m = base()
+            .fit_with_validation(&x, &y, None, xv, yv, None)
+            .unwrap();
+        assert_eq!(m.validation_score().len(), m.n_iter() + 1);
+        assert!(base()
+            .with_early_stopping(EarlyStopping::Disabled)
+            .fit_with_validation(&x, &y, None, xv, yv, None)
+            .is_err());
+        assert!(base()
+            .with_scoring(EarlyStoppingScoring::Accuracy)
+            .fit(&x, &y)
+            .is_err());
+        let r2 = base()
+            .with_scoring(EarlyStoppingScoring::Default)
+            .fit(&x, &y)
+            .unwrap();
+        // R² of the baseline (the training mean) on the training rows is 0.
+        assert!(r2.train_score()[0].abs() < 1e-12);
+        let yc = y.mapv(|v| if v > 5.0 { 1.0 } else { 0.0 });
+        assert!(HistGradientBoostingClassifier::new()
+            .with_early_stopping(EarlyStopping::Enabled)
+            .with_scoring(EarlyStoppingScoring::R2)
+            .fit(&x, &yc)
+            .is_err());
     }
 
     #[test]
