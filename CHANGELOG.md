@@ -6,6 +6,42 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-05
+
+Conformal prediction across every surface, PerpetualBooster, quantile loss
+for histogram gradient boosting, hyperparameter search (unpublished crate),
+and persistence for every fitted model.
+
+### Highlights
+
+- **Conformal prediction** (#93): split, CV+ / jackknife+, normalised, CQR
+  and Mondrian intervals; LAC / APS / RAPS and Mondrian prediction sets.
+  Typed in `anofox-ml-conformal`, by name in the registry (any registered
+  estimator as the base model) and in Python (`anofox_ml_python.conformal`).
+- **PerpetualBooster** behind the optional `perpetual` feature.
+- **`HistGradientBoostingRegressor(loss="quantile")`** and
+  `LgbmObjective::Quantile`.
+- **Every fitted type can be saved**: the last seven regression wrappers
+  gained serde with anofox-regression 0.11 (#87).
+- **Deterministic KMeans** across thread counts (#108).
+
+### Upgrading from 0.2
+
+- `HistGradientBoostingRegressor` has two new public fields, `loss` and
+  `quantile`: code that builds it with a struct literal needs
+  `..Default::default()` (or the builders). Saved configs still load.
+- `LgbmObjective` has a new variant `Quantile { alpha }`: exhaustive
+  `match`es need an arm. `LgbmRegressor` now returns an error for the
+  classification objectives instead of panicking.
+- `DynModel` has two new methods with default implementations
+  (`predict_interval`, `predict_set`); `anofox-ml-registry` now depends on
+  `anofox-ml-conformal`.
+- Python `HistGradientBoostingRegressor` takes `loss` and `quantile` first,
+  as sklearn does; pass the other arguments by keyword.
+- `KMeans` centroids and inertia, and exact t-SNE, can differ from 0.2 in
+  the last digits (they are now summed in a fixed order).
+- anofox-regression 0.10 → 0.11 (with its `serde` feature).
+
 ### Persistence for the anofox-regression wrappers (#87)
 
 - anofox-regression 0.11 (its new `serde` feature, enabled here). The
