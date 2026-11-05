@@ -6,6 +6,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: semi-supervised label propagation (#113, batch 8)
+
+- `LabelPropagation` and `LabelSpreading` in `anofox-ml-neighbors`
+  (unlabelled rows have the label `−1`): RBF or k-nearest-neighbour
+  affinity graphs, propagation with clamped labelled rows, spreading with
+  scipy's normalised Laplacian and `alpha`; `label_distributions`,
+  `transduction`, `predict` and `predict_proba`. Registry kinds and Python
+  classes; match scikit-learn 1.8.0 exactly (`gen_semi_supervised.py`:
+  iterations, distributions to 1e-10, transduction and predictions).
+
 ### New estimators: cross-validated linear models (#113, batch 7)
 
 - `LogisticRegressionCV` in `anofox-ml-regression`: `C` from a grid

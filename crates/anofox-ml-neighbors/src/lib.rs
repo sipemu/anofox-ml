@@ -42,6 +42,7 @@ pub mod knn_regressor;
 pub mod lof;
 pub mod nearest_centroid;
 pub mod radius;
+pub mod semi_supervised;
 
 pub use distance::DistanceMetric;
 pub use index::{NeighborAlgorithm, NeighborIndex, RadiusNeighbors};
@@ -56,6 +57,7 @@ pub use radius::{
     FittedRadiusNeighborsClassifier, FittedRadiusNeighborsRegressor, RadiusNeighborsClassifier,
     RadiusNeighborsRegressor,
 };
+pub use semi_supervised::{FittedLabelPropagation, GraphKernel, LabelPropagation, LabelSpreading};
 
 /// Return `x` in standard (C-contiguous) layout: borrowed when it already is,
 /// otherwise a one-off row-major copy. Lets `row(i).as_slice()` fast paths

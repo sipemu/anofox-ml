@@ -512,3 +512,16 @@ def test_batch7_cv_linear_models_match_sklearn():
     ref = linear_model.OrthogonalMatchingPursuitCV().fit(Xo, y_reg)
     assert ours.n_nonzero_coefs_ == ref.n_nonzero_coefs_
     np.testing.assert_allclose(ours.coef_, ref.coef_, atol=1e-9)
+
+
+def test_batch8_label_propagation_matches_sklearn():
+    from sklearn import semi_supervised as ss
+
+    yl = np.array(y_multi)
+    yl[np.arange(len(yl)) % 3 != 0] = -1
+    for name, kw in [("LabelPropagation", dict(gamma=0.5)), ("LabelSpreading", dict(kernel="knn"))]:
+        ours = getattr(am, name)(**kw).fit(X, yl)
+        ref = getattr(ss, name)(**kw).fit(X, yl)
+        np.testing.assert_array_equal(ours.transduction_, ref.transduction_)
+        np.testing.assert_allclose(ours.label_distributions_, ref.label_distributions_, atol=1e-10)
+        np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
