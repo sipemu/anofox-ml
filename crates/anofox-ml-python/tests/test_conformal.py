@@ -138,3 +138,17 @@ def test_meta_estimators_match_sklearn():
     assert abs(tuned.best_score_ - rtun.best_score_) < 1e-9
     assert abs(tuned.best_threshold_ - rtun.best_threshold_) < 1e-6
     np.testing.assert_array_equal(tuned.predict(X), rtun.predict(X))
+
+
+def test_self_training_matches_sklearn():
+    from sklearn import naive_bayes, semi_supervised
+
+    ys = np.array(y_cls[:200], dtype=object)
+    yi = np.searchsorted(np.unique(ys), ys).astype(int)
+    yi[np.arange(200) % 4 != 0] = -1
+    ours = am.SelfTrainingClassifier(am.GaussianNB(), threshold=0.8).fit(X[:200], yi)
+    ref = semi_supervised.SelfTrainingClassifier(naive_bayes.GaussianNB(), threshold=0.8).fit(X[:200], yi)
+    assert ours.n_iter_ == ref.n_iter_
+    assert ours.termination_condition_ == ref.termination_condition_
+    np.testing.assert_array_equal(ours.transduction_, ref.transduction_)
+    np.testing.assert_array_equal(ours.predict(X), ref.predict(X))

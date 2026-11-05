@@ -633,3 +633,153 @@ impl TunedThresholdConfig {
         })
     }
 }
+
+// ============================================================
+// Self-training
+// ============================================================
+
+/// How a [`SelfTrainingConfig`] picks the pseudo-labels of a round.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) enum SelfTrainingCriterion {
+    /// Unlabelled rows whose top probability exceeds `threshold`.
+    Threshold(f64),
+    /// The `k` unlabelled rows with the highest top probability.
+    KBest(usize),
+}
+
+impl Default for SelfTrainingCriterion {
+    fn default() -> Self {
+        SelfTrainingCriterion::Threshold(0.75)
+    }
+}
+
+/// `SelfTrainingClassifier`: fit on the labelled rows (`y ≠ −1`), add the
+/// confident predictions on unlabelled rows as labels, repeat, then refit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct SelfTrainingConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub criterion: SelfTrainingCriterion,
+    /// Rounds of pseudo-labelling (`None`: until nothing changes).
+    pub max_iter: Option<usize>,
+}
+
+impl Default for SelfTrainingConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "LogisticRegressor".into(),
+            estimator_params: serde_json::json!({}),
+            criterion: SelfTrainingCriterion::default(),
+            max_iter: Some(10),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SelfTrainingFit {
+    model: RegistryFitted,
+    transduction: Array1<f64>,
+    labeled_iter: Array1<f64>,
+    n_iter: usize,
+    termination: String,
+}
+
+impl SelfTrainingConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<SelfTrainingFit> {
+        let n = y.len();
+        if x.nrows() != n {
+            return Err(err(format!("x has {} rows but y has {n}", x.nrows())));
+        }
+        let mut has_label: Vec<bool> = y.iter().map(|&v| v != -1.0).collect();
+        if !has_label.iter().any(|&h| h) {
+            return Err(err("no labelled rows (all labels are −1)"));
+        }
+        let mut transduction = y.to_owned();
+        let mut labeled_iter =
+            Array1::from_iter(has_label.iter().map(|&h| if h { 0.0 } else { -1.0 }));
+        let fit_on = |mask: &[bool], t: &Array1<f64>| -> Result<RegistryFitted> {
+            let rows: Vec<usize> = (0..n).filter(|&i| mask[i]).collect();
+            let mut m = crate::make(&self.estimator, &self.estimator_params)?;
+            m.fit(
+                x.select(Axis(0), &rows).view(),
+                Some(t.select(Axis(0), &rows).view()),
+                None,
+            )?;
+            Ok(RegistryFitted(m))
+        };
+        let mut n_iter = 0;
+        let mut termination = String::new();
+        while has_label.iter().any(|&h| !h) && self.max_iter.is_none_or(|m| n_iter < m) {
+            n_iter += 1;
+            let model = fit_on(&has_label, &transduction)?;
+            let unl: Vec<usize> = (0..n).filter(|&i| !has_label[i]).collect();
+            let proba = model.predict_proba(x.select(Axis(0), &unl).view())?;
+            // Class labels of the probability columns: the sorted labels
+            // the model was fitted on.
+            let mut classes: Vec<f64> = (0..n)
+                .filter(|&i| has_label[i])
+                .map(|i| transduction[i])
+                .collect();
+            classes.sort_by(f64::total_cmp);
+            classes.dedup();
+            let best: Vec<(usize, f64)> = proba
+                .rows()
+                .into_iter()
+                .map(|r| {
+                    r.iter()
+                        .enumerate()
+                        .fold(
+                            (0, f64::NEG_INFINITY),
+                            |b, (j, &v)| if v > b.1 { (j, v) } else { b },
+                        )
+                })
+                .collect();
+            let selected: Vec<usize> = match self.criterion {
+                SelfTrainingCriterion::Threshold(t) => {
+                    (0..unl.len()).filter(|&k| best[k].1 > t).collect()
+                }
+                SelfTrainingCriterion::KBest(k) => {
+                    let mut order: Vec<usize> = (0..unl.len()).collect();
+                    order.sort_by(|&a, &b| best[b].1.total_cmp(&best[a].1).then(a.cmp(&b)));
+                    order.truncate(k.min(unl.len()));
+                    order
+                }
+            };
+            for &k in &selected {
+                let i = unl[k];
+                transduction[i] = classes[best[k].0];
+                has_label[i] = true;
+                labeled_iter[i] = n_iter as f64;
+            }
+            if selected.is_empty() {
+                termination = "no_change".into();
+                break;
+            }
+        }
+        if self.max_iter == Some(n_iter) {
+            termination = "max_iter".into();
+        }
+        if has_label.iter().all(|&h| h) {
+            termination = "all_labeled".into();
+        }
+        let model = fit_on(&has_label, &transduction)?;
+        Ok(SelfTrainingFit {
+            model,
+            transduction,
+            labeled_iter,
+            n_iter,
+            termination,
+        })
+    }
+}
+
+impl SelfTrainingFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        self.model.predict(x)
+    }
+
+    pub fn predict_proba(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        self.model.predict_proba(x)
+    }
+}

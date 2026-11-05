@@ -6,6 +6,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimator: SelfTrainingClassifier (#113, batch 8)
+
+- Registry kind `SelfTrainingClassifier` over any registered classifier
+  with `predict_proba` (unlabelled rows `−1`): pseudo-labels by a
+  probability threshold or the k most confident rows per round, up to
+  `max_iter` rounds, then a refit; `transduction`, `labeled_iter`,
+  `n_iter` and the termination reason. Python class in
+  `anofox_ml_python.multiclass`. Matches scikit-learn 1.8.0 over GaussianNB
+  (`gen_self_training.py`).
+
 ### New estimator: FeatureAgglomeration (#113, batch 8)
 
 - `FeatureAgglomeration` in `anofox-ml-cluster`: the columns are clustered
