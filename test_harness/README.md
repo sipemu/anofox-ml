@@ -35,14 +35,19 @@ CI (*Golden Data Sync*) runs the same regeneration and check on every PR
 ## Fixtures without a generator
 
 These were added in 8921972 (sklearn 1.8.0 / LightGBM 4.6) without their
-generator scripts, so they cannot be regenerated or drift-checked:
+generator scripts. `generators/gen_legacy_fixtures.py` re-validates the
+deterministic ones: it recomputes every output from the committed inputs
+with the pinned sklearn (parameters as in the Rust tests that read them), so
+the drift check covers them. All matched at the time of writing (#113):
+`metrics_extra`, `metrics_round2`, `model_selection_extra`,
+`preprocessing_extra`, `preprocessing_round2` (except `power_transformer`,
+whose Yeo-Johnson lambda moves by ~1e-8 between scipy versions and is read
+by no test), `naive_bayes_extra`, `feature_selection_batch` and
+`regression_batch` (except `sgd_regressor`).
 
-`accuracy_parity`, `ensemble_batch`, `ensemble_extra`,
-`feature_selection_batch`, `hist_gradient_boosting`, `lgbm_edge_cases`,
-`lgbm_golden`, `lgbm_round2`, `metrics_extra`, `metrics_round2`,
-`model_selection_extra`, `naive_bayes_extra`, `preprocessing_extra`,
-`preprocessing_round2`, `regression_batch`, `regression_extra`,
-`svm_calibration_batch`, `svm_extra` (`.json`).
-
-Recreating their generators (LightGBM 4.6 for the `lgbm_*` files) would
-bring them under the drift check.
+Still without a generator, because they depend on seeded randomness or are
+only compared loosely (accuracy / R² thresholds): `accuracy_parity`,
+`ensemble_batch`, `hist_gradient_boosting`, `lgbm_edge_cases`,
+`lgbm_golden`, `lgbm_round2` (LightGBM 4.6), `svm_calibration_batch`,
+`svm_extra`. `ensemble_extra` and `regression_extra` were read by no test
+and have been removed.
