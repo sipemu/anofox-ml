@@ -761,6 +761,20 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
+    LabelPropagation {
+        config: neighbors::LabelPropagation = Default::default(),
+        fitted: neighbors::FittedLabelPropagation,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m, x),
+    }
+    LabelSpreading {
+        config: neighbors::LabelSpreading = Default::default(),
+        fitted: neighbors::FittedLabelPropagation,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m, x),
+    }
     NearestCentroid {
         config: neighbors::NearestCentroid = Default::default(),
         fitted: neighbors::FittedNearestCentroid,

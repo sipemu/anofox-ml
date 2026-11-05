@@ -2950,3 +2950,70 @@ class OrthogonalMatchingPursuitCV(RegressorMixin, BaseEstimator):
     @property
     def intercept_(self):
         return float(self._fitted_state()["model"]["intercept"])
+
+
+# ---------------------------------------------------------------------------
+# semi-supervised (#113)
+# ---------------------------------------------------------------------------
+
+
+class _LabelGraph(ClassifierMixin, BaseEstimator):
+    """Unlabelled rows have the label ``-1`` (sklearn's convention)."""
+
+    def fit(self, X, y):
+        y = np.asarray(y)
+        labelled = y != -1
+        self.classes_ = np.unique(y[labelled])
+        y_enc = np.full(len(y), -1.0)
+        y_enc[labelled] = np.searchsorted(self.classes_, y[labelled])
+        return self._fit_model(X, y_enc, None)
+
+    def _kernel(self):
+        if self.kernel == "rbf":
+            return {"Rbf": {"gamma": float(self.gamma)}}
+        if self.kernel == "knn":
+            return {"Knn": {"n_neighbors": int(self.n_neighbors)}}
+        raise ValueError(f"kernel must be 'rbf' or 'knn', got {self.kernel!r}")
+
+    @property
+    def label_distributions_(self):
+        return _nd(self._fitted_state()["label_distributions"])
+
+    @property
+    def transduction_(self):
+        idx = np.asarray(_nd(self._fitted_state()["transduction"]), dtype=np.int64)
+        return self.classes_[idx]
+
+    @property
+    def n_iter_(self):
+        return int(self._fitted_state()["n_iter"])
+
+
+class LabelPropagation(_LabelGraph):
+    _kind = "LabelPropagation"
+
+    def __init__(self, kernel="rbf", *, gamma=20, n_neighbors=7, max_iter=1000, tol=1e-3):
+        self.kernel = kernel
+        self.gamma = gamma
+        self.n_neighbors = n_neighbors
+        self.max_iter = max_iter
+        self.tol = tol
+
+    def _rust_params(self, X, y):
+        return {"kernel": self._kernel(), "max_iter": int(self.max_iter), "tol": float(self.tol)}
+
+
+class LabelSpreading(_LabelGraph):
+    _kind = "LabelSpreading"
+
+    def __init__(self, kernel="rbf", *, gamma=20, n_neighbors=7, alpha=0.2, max_iter=30, tol=1e-3):
+        self.kernel = kernel
+        self.gamma = gamma
+        self.n_neighbors = n_neighbors
+        self.alpha = alpha
+        self.max_iter = max_iter
+        self.tol = tol
+
+    def _rust_params(self, X, y):
+        return {"kernel": self._kernel(), "alpha": float(self.alpha),
+                "max_iter": int(self.max_iter), "tol": float(self.tol)}
