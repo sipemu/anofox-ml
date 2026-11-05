@@ -15,6 +15,7 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    FeatureAgglomeration,
     LabelPropagation,
     LabelSpreading,
     LogisticRegressionCV,
@@ -173,7 +174,7 @@ __all__ = [
     "Nystroem", "RBFSampler", "KernelCenterer", "GaussianRandomProjection",
     "SparseRandomProjection",
     "KernelDensity", "FactorAnalysis", "LogisticRegressionCV", "OrthogonalMatchingPursuitCV",
-    "LabelPropagation", "LabelSpreading",
+    "LabelPropagation", "LabelSpreading", "FeatureAgglomeration",
     "DummyClassifier", "DummyRegressor", "NearestCentroid", "RidgeClassifier", "Perceptron",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",

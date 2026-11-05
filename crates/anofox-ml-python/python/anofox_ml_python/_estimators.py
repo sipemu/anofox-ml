@@ -3017,3 +3017,28 @@ class LabelSpreading(_LabelGraph):
     def _rust_params(self, X, y):
         return {"kernel": self._kernel(), "alpha": float(self.alpha),
                 "max_iter": int(self.max_iter), "tol": float(self.tol)}
+
+
+class FeatureAgglomeration(TransformerMixin, BaseEstimator):
+    """Cluster the features (agglomerative) and pool each cluster by its mean."""
+
+    _kind = "FeatureAgglomeration"
+
+    def __init__(self, n_clusters=2, *, linkage="ward"):
+        self.n_clusters = n_clusters
+        self.linkage = linkage
+
+    def _rust_params(self, X, y):
+        return {"n_clusters": int(self.n_clusters), "linkage": _choice(
+            self.linkage, {"ward": "Ward", "complete": "Complete", "average": "Average",
+                           "single": "Single"}, "linkage")}
+
+    @property
+    def labels_(self):
+        return np.asarray(self._fitted_state()["labels"], dtype=np.int64)
+
+    def inverse_transform(self, X):
+        # The input has one column per cluster, not the training width.
+        from ._base import _check_X
+
+        return self._model().inverse_transform(_check_X(X))

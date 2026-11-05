@@ -1527,6 +1527,13 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         labels: |m| m.labels.clone(),
     }
+    FeatureAgglomeration {
+        config: cluster::FeatureAgglomeration = Default::default(),
+        fitted: cluster::FittedFeatureAgglomeration,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+        inverse_transform: |m, x| m.inverse_transform(x),
+    }
     SpectralClustering {
         config: cluster::SpectralClustering = cluster::SpectralClustering::new(8),
         fitted: cluster::FittedSpectralClustering,
