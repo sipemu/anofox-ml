@@ -19,13 +19,18 @@ def generate():
     centerer = {"K": K.tolist(), "K_test": Ky.tolist(), "fit": kc.transform(K).tolist(),
                 "test": kc.transform(Ky).tolist()}
     nys = []
-    for name, kw in [("rbf", dict(kernel="rbf", gamma=0.4)), ("rbf_default", dict(kernel="rbf")),
-                     ("laplacian", dict(kernel="laplacian", gamma=0.2)),
-                     ("poly", dict(kernel="poly", degree=2, gamma=0.5, coef0=1.0)),
-                     ("linear", dict(kernel="linear"))]:
-        m = Nystroem(n_components=20, random_state=0, **kw).fit(X)
-        Z, Zy = m.transform(X), m.transform(Y)
-        nys.append({"name": name, "params": kw, "X": X.tolist(), "X_test": Y.tolist(),
+    # The polynomial and linear kernels get enough features for a full-rank
+    # K_BB: near-zero eigenvalues would amplify machine-level noise.
+    X6, Y6 = rng.normal(size=(20, 6)), rng.normal(size=(6, 6))
+    X25, Y25 = rng.normal(size=(20, 25)), rng.normal(size=(6, 25))
+    for name, kw, XX, YY in [("rbf", dict(kernel="rbf", gamma=0.4), X, Y),
+                             ("rbf_default", dict(kernel="rbf"), X, Y),
+                             ("laplacian", dict(kernel="laplacian", gamma=0.2), X, Y),
+                             ("poly", dict(kernel="poly", degree=2, gamma=0.5, coef0=1.0), X6, Y6),
+                             ("linear", dict(kernel="linear"), X25, Y25)]:
+        m = Nystroem(n_components=20, random_state=0, **kw).fit(XX)
+        Z, Zy = m.transform(XX), m.transform(YY)
+        nys.append({"name": name, "params": kw, "X": XX.tolist(), "X_test": YY.tolist(),
                     "gram": (Z @ Z.T).tolist(), "gram_test": (Zy @ Z.T).tolist()})
     jl = [{"n": n, "eps": e, "dim": int(johnson_lindenstrauss_min_dim(n, eps=e))}
           for n in (10, 1000, 1_000_000) for e in (0.1, 0.3, 0.5, 0.9)]
