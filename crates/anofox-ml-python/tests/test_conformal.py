@@ -115,3 +115,26 @@ def test_sklearn_clone_and_params():
     clone = sklearn.base.clone(model)
     assert clone.get_params()["cv"] == 3
     assert clone.get_params()["estimator"].alpha == 2.0
+
+
+def test_meta_estimators_match_sklearn():
+    from sklearn import model_selection as ms, multiclass as mc, naive_bayes
+
+    for ours, ref in [
+        (am.OneVsRestClassifier(am.GaussianNB()), mc.OneVsRestClassifier(naive_bayes.GaussianNB())),
+        (am.OneVsOneClassifier(am.GaussianNB()), mc.OneVsOneClassifier(naive_bayes.GaussianNB())),
+    ]:
+        np.testing.assert_array_equal(ours.fit(X, y_cls).predict(X), ref.fit(X, y_cls).predict(X))
+    ovr = am.OneVsRestClassifier(am.GaussianNB()).fit(X, y_cls)
+    ref = mc.OneVsRestClassifier(naive_bayes.GaussianNB()).fit(X, y_cls)
+    np.testing.assert_allclose(ovr.predict_proba(X), ref.predict_proba(X), atol=1e-10)
+    yb = np.where(y_cls == "a", "pos", "neg")
+    fixed = am.FixedThresholdClassifier(am.GaussianNB(), threshold=0.3, pos_label="pos").fit(X, yb)
+    rfix = ms.FixedThresholdClassifier(naive_bayes.GaussianNB(), threshold=0.3,
+                                       pos_label="pos").fit(X, yb)
+    np.testing.assert_array_equal(fixed.predict(X), rfix.predict(X))
+    tuned = am.TunedThresholdClassifierCV(am.GaussianNB()).fit(X, yb)
+    rtun = ms.TunedThresholdClassifierCV(naive_bayes.GaussianNB()).fit(X, yb)
+    assert abs(tuned.best_score_ - rtun.best_score_) < 1e-9
+    assert abs(tuned.best_threshold_ - rtun.best_threshold_) < 1e-6
+    np.testing.assert_array_equal(tuned.predict(X), rtun.predict(X))

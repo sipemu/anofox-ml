@@ -6,6 +6,23 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: multiclass and threshold meta-estimators (#113, batch 3)
+
+- Registry kinds `OneVsRestClassifier`, `OneVsOneClassifier`,
+  `FixedThresholdClassifier` and `TunedThresholdClassifierCV` over any
+  registered classifier (`estimator` + `estimator_params`). As in sklearn,
+  a binary model's score is its `decision_function` when it has one, else
+  `predict_proba[:, 1]`; the threshold classifiers prefer `predict_proba`
+  (`response_method`). One-vs-one combines votes with sklearn's confidence
+  tie-break; the tuned threshold maximises the mean CV score of
+  balanced accuracy / accuracy / F1 / precision / recall over 100
+  candidate thresholds.
+- Python: `anofox_ml_python.multiclass` (also at the top level).
+- `stratified_k_fold_ordered`: sklearn's default, unshuffled
+  `StratifiedKFold` (what `cv=k` means for a classifier).
+- All four match scikit-learn 1.8.0 over LogisticRegression and GaussianNB
+  (`gen_meta.py`, `anofox-ml-registry/tests/golden_meta.rs`).
+
 ### New estimators: univariate selection modes and TF-IDF (#113, batch 2)
 
 - `GenericUnivariateSelect` in `anofox-ml-preprocessing` with
