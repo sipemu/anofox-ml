@@ -772,6 +772,12 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
+    KNeighborsTransformer {
+        config: neighbors::KNeighborsTransformer = Default::default(),
+        fitted: neighbors::FittedKNeighborsTransformer,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     LabelPropagation {
         config: neighbors::LabelPropagation = Default::default(),
         fitted: neighbors::FittedLabelPropagation,

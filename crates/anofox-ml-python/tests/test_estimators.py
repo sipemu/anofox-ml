@@ -537,3 +537,14 @@ def test_feature_agglomeration_matches_sklearn():
         np.testing.assert_allclose(ours.transform(X), ref.transform(X), atol=1e-12)
         np.testing.assert_allclose(ours.inverse_transform(ours.transform(X)),
                                    ref.inverse_transform(ref.transform(X)), atol=1e-12)
+
+
+def test_kneighbors_transformer_matches_sklearn():
+    from sklearn import neighbors
+
+    Xt = X[:10] + 0.05
+    for mode in ("distance", "connectivity"):
+        ours = am.KNeighborsTransformer(mode=mode, n_neighbors=4).fit(X)
+        ref = neighbors.KNeighborsTransformer(mode=mode, n_neighbors=4).fit(X)
+        np.testing.assert_allclose(ours.transform(X), ref.transform(X).toarray(), atol=1e-12)
+        np.testing.assert_allclose(ours.transform(Xt), ref.transform(Xt).toarray(), atol=1e-12)
