@@ -1300,6 +1300,18 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    GenericUnivariateSelect {
+        config: pre::GenericUnivariateSelect = Default::default(),
+        fitted: pre::FittedSelectKBest<f64>,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    TfidfTransformer {
+        config: anofox_ml_text::TfidfTransformer = Default::default(),
+        fitted: anofox_ml_text::FittedTfidfTransformer,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     MutualInformationSelector {
         config: pre::MutualInformationSelector = pre::MutualInformationSelector::new(10),
         fitted: pre::FittedMutualInformationSelector<f64>,

@@ -64,6 +64,7 @@ pub mod spline_transformer;
 pub mod standard_scaler;
 pub mod target_encoder;
 pub mod truncated_svd;
+pub mod univariate_select;
 pub mod variance_threshold;
 
 pub use areg_imputer::{AregImputer, AregMatch, AregVariable, MultipleImputation};
@@ -115,4 +116,5 @@ pub use spline_transformer::{
 pub use standard_scaler::{FittedStandardScaler, StandardScaler};
 pub use target_encoder::{FittedTargetEncoder, TargetEncoder, TargetSmooth, TargetType};
 pub use truncated_svd::{FittedTruncatedSvd, TruncatedSvd};
+pub use univariate_select::{GenericUnivariateSelect, SelectionMode};
 pub use variance_threshold::{FittedVarianceThreshold, VarianceThreshold};

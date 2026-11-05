@@ -13,6 +13,7 @@ import pytest
 
 import anofox_ml_python as am
 from anofox_ml_python import _estimators
+from anofox_ml_python._base import SupervisedTransformerMixin
 
 rng = np.random.RandomState(0)
 X = rng.randn(80, 4)
@@ -47,6 +48,12 @@ SPECIAL = {
     "SpectralClustering": dict(params=dict(n_clusters=3, random_state=0)),
     "TSNE": dict(params=dict(perplexity=10.0, max_iter=250, random_state=0)),
     "TargetEncoder": dict(X=np.round(X_pos), params=dict(random_state=0)),
+    "GenericUnivariateSelect": dict(y=y_multi, params=dict(mode="k_best", param=2)),
+    "SelectPercentile": dict(y=y_multi, params=dict(percentile=50)),
+    "SelectFpr": dict(y=y_multi),
+    "SelectFdr": dict(y=y_multi),
+    "SelectFwe": dict(y=y_multi),
+    "TfidfTransformer": dict(X=np.round(X_pos)),
 }
 
 
@@ -97,10 +104,9 @@ def test_fit_predict_pickle_clone(name):
         assert out.shape == (len(Xd), 2)
         return
     else:  # transformer
-        out = est.fit_transform(Xd, yd) if name in ("SelectKBest",
-                                                     "MutualInformationSelector",
-                                                     "TargetEncoder") \
-            else est.fit_transform(Xd)
+        supervised = isinstance(est, SupervisedTransformerMixin) or name in (
+            "SelectKBest", "MutualInformationSelector", "TargetEncoder")
+        out = est.fit_transform(Xd, yd) if supervised else est.fit_transform(Xd)
         assert out.shape[0] == len(Xd)
 
     # pickling keeps the fitted model and the hyperparameters
@@ -402,3 +408,26 @@ def test_batch1_baselines_match_sklearn():
         ours = am.Perceptron(shuffle=False).fit(X, yy)
         ref = linear_model.Perceptron(shuffle=False).fit(X, yy)
         np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
+
+
+def test_batch2_selection_and_tfidf_match_sklearn():
+    from sklearn import feature_extraction, feature_selection as fs
+
+    for ours, ref in [
+        (am.SelectPercentile(percentile=50), fs.SelectPercentile(percentile=50)),
+        (am.SelectFpr(alpha=0.01), fs.SelectFpr(alpha=0.01)),
+        (am.SelectFdr(alpha=0.05), fs.SelectFdr(alpha=0.05)),
+        (am.SelectFwe(alpha=0.05), fs.SelectFwe(alpha=0.05)),
+        (am.GenericUnivariateSelect(mode="k_best", param=2),
+         fs.GenericUnivariateSelect(mode="k_best", param=2)),
+    ]:
+        ours.fit(X, y_multi)
+        ref.fit(X, y_multi)
+        np.testing.assert_array_equal(ours.get_support(), ref.get_support())
+        np.testing.assert_allclose(ours.transform(X), ref.transform(X))
+    counts = np.round(X_pos * 2)
+    for kw in [{}, {"norm": "l1", "sublinear_tf": True}, {"use_idf": False}]:
+        np.testing.assert_allclose(
+            am.TfidfTransformer(**kw).fit_transform(counts),
+            feature_extraction.text.TfidfTransformer(**kw).fit_transform(counts).toarray(),
+            atol=1e-12)

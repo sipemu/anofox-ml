@@ -18,6 +18,9 @@
 //! `HashingVectorizer` uses sklearn's signed 32-bit MurmurHash3 (seed 0), so
 //! column indices and signs are identical to sklearn's.
 
+pub mod tfidf_transformer;
+pub use tfidf_transformer::{FittedTfidfTransformer, TfidfNorm, TfidfTransformer};
+
 use anofox_ml_core::{CsrMatrix, Result, RustMlError};
 use ndarray::Array2;
 use std::collections::{HashMap, HashSet};

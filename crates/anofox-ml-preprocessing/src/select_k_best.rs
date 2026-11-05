@@ -8,7 +8,7 @@ use std::collections::HashMap;
 ///
 /// Each variant defines a different univariate statistical test for
 /// ranking features.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum ScoringFunction {
     /// ANOVA F-value for classification (one-way between-groups F-test).
     ///
@@ -128,7 +128,39 @@ impl SelectKBest {
             }
         }
 
-        let (scores, pvalues) = match &self.scoring_fn {
+        let (scores, pvalues) = univariate_scores(&self.scoring_fn, x, y)?;
+
+        // Top-k by score as sklearn: the last k of a stable ascending sort
+        // (NaN lowest), so on ties the higher feature indices win.
+        let mut feature_scores: Vec<(usize, F)> = scores.iter().copied().enumerate().collect();
+        feature_scores
+            .sort_by(|a, b| crate::quantile::total_cmp_nan_low(&b.1, &a.1).then(b.0.cmp(&a.0)));
+
+        let mut selected_indices: Vec<usize> = feature_scores
+            .iter()
+            .take(self.k)
+            .map(|&(idx, _)| idx)
+            .collect();
+        // Sort indices for stable column ordering in transform.
+        selected_indices.sort_unstable();
+
+        Ok(FittedSelectKBest {
+            scores,
+            pvalues,
+            selected_indices,
+            n_features_in: n_features,
+        })
+    }
+}
+
+/// Per-feature scores and (for the F-tests and χ²) p-values.
+pub(crate) fn univariate_scores<F: Float>(
+    scoring_fn: &ScoringFunction,
+    x: ArrayView2<F>,
+    y: ArrayView1<F>,
+) -> Result<(Array1<F>, Option<Array1<F>>)> {
+    {
+        Ok(match scoring_fn {
             ScoringFunction::FClassif => {
                 let (s, p) = compute_f_classif(x, y)?;
                 (s, Some(p))
@@ -150,26 +182,6 @@ impl SelectKBest {
                 None,
             ),
             ScoringFunction::Variance => (compute_variance(x), None),
-        };
-
-        // Select top-k features by score (descending).
-        let mut feature_scores: Vec<(usize, F)> = scores.iter().copied().enumerate().collect();
-        feature_scores
-            .sort_by(|a, b| crate::quantile::total_cmp_nan_low(&b.1, &a.1).then(a.0.cmp(&b.0)));
-
-        let mut selected_indices: Vec<usize> = feature_scores
-            .iter()
-            .take(self.k)
-            .map(|&(idx, _)| idx)
-            .collect();
-        // Sort indices for stable column ordering in transform.
-        selected_indices.sort_unstable();
-
-        Ok(FittedSelectKBest {
-            scores,
-            pvalues,
-            selected_indices,
-            n_features_in: n_features,
         })
     }
 }
@@ -191,6 +203,20 @@ pub struct FittedSelectKBest<F: Float> {
 }
 
 impl<F: Float> FittedSelectKBest<F> {
+    pub(crate) fn from_parts(
+        scores: Array1<F>,
+        pvalues: Option<Array1<F>>,
+        selected_indices: Vec<usize>,
+        n_features_in: usize,
+    ) -> Self {
+        Self {
+            scores,
+            pvalues,
+            selected_indices,
+            n_features_in,
+        }
+    }
+
     /// Per-feature scores computed during fitting.
     pub fn scores(&self) -> &Array1<F> {
         &self.scores
