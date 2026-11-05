@@ -9,6 +9,11 @@ and the heavy work runs in Rust with the GIL released.
 from . import conformal, metrics, model_selection
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    DummyClassifier,
+    DummyRegressor,
+    NearestCentroid,
+    RidgeClassifier,
+    Perceptron,
     DecisionTreeClassifier,
     DecisionTreeRegressor,
     RandomForestClassifier,
@@ -130,6 +135,7 @@ TSne = TSNE
 __all__ = [
     "BaseEstimator", "NotFittedError", "conformal", "metrics", "model_selection", "train_test_split",
     "TuneSearchCV",
+    "DummyClassifier", "DummyRegressor", "NearestCentroid", "RidgeClassifier", "Perceptron",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",
     "RandomForestClassifier",

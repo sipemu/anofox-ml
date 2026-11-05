@@ -375,3 +375,30 @@ def test_hist_gradient_boosting_quantile_loss():
         am.HistGradientBoostingRegressor(loss="quantile").fit(Xq, yq)
     with pytest.raises(ValueError):
         am.HistGradientBoostingRegressor(loss="poisson").fit(Xq, yq)
+
+
+def test_batch1_baselines_match_sklearn():
+    from sklearn import dummy, linear_model, neighbors
+
+    for strategy, kw in [("prior", {}), ("most_frequent", {}), ("constant", {"constant": "yes"})]:
+        ours = am.DummyClassifier(strategy=strategy, **kw).fit(X, y_bin)
+        ref = dummy.DummyClassifier(strategy=strategy, **kw).fit(X, y_bin)
+        np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X))
+    for strategy, kw in [("mean", {}), ("median", {}), ("quantile", {"quantile": 0.2})]:
+        np.testing.assert_allclose(
+            am.DummyRegressor(strategy=strategy, **kw).fit(X, y_reg).predict(X),
+            dummy.DummyRegressor(strategy=strategy, **kw).fit(X, y_reg).predict(X))
+    for kw in [{}, {"shrink_threshold": 0.3}, {"priors": "empirical"}]:
+        ours = am.NearestCentroid(**kw).fit(X, y_multi)
+        ref = neighbors.NearestCentroid(**kw).fit(X, y_multi)
+        np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), atol=1e-10)
+    for yy in (y_bin, y_multi):
+        ours = am.RidgeClassifier(alpha=2.0).fit(X, yy)
+        ref = linear_model.RidgeClassifier(alpha=2.0).fit(X, yy)
+        np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
+        np.testing.assert_allclose(ours.decision_function(X), ref.decision_function(X), atol=1e-8)
+        ours = am.Perceptron(shuffle=False).fit(X, yy)
+        ref = linear_model.Perceptron(shuffle=False).fit(X, yy)
+        np.testing.assert_array_equal(ours.predict(X), ref.predict(X))

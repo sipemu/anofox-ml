@@ -269,7 +269,23 @@ where
             let row = x.row(i);
             let z = weights.intercept + row.dot(&weights.coef);
             let (l, dloss) = loss(z, y[i]);
+            // sklearn 1.8 stops on the objective: the loss plus the penalty
+            // of the current weights (`0.5 ‖w‖²` for the L2 part, as weight
+            // decay optimises it).
             sum_loss += l;
+            if cfg.penalty != Penalty::None
+                && stopping.tol.is_some()
+                && stopping.validation.is_none()
+            {
+                let mut pen = 0.0;
+                if use_l2 {
+                    pen += (1.0 - l1_ratio) * 0.5 * weights.coef.dot(&weights.coef);
+                }
+                if use_l1 {
+                    pen += l1_ratio * weights.coef.iter().map(|w| w.abs()).sum::<f64>();
+                }
+                sum_loss += cfg.alpha * pen;
+            }
 
             if use_l2 {
                 // Do not flip signs when eta * alpha is too large.

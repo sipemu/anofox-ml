@@ -2254,3 +2254,137 @@ class ClassicalMDS(_Embedding):
     def _rust_params(self, X, y):
         return {"n_components": self.n_components,
                 "metric": _choice(self.metric, _METRIC, "metric")}
+
+
+# ---------------------------------------------------------------------------
+# baselines and simple classifiers (#113)
+# ---------------------------------------------------------------------------
+
+
+class DummyClassifier(ClassifierMixin, BaseEstimator):
+    """Baseline that ignores the features (sklearn's ``DummyClassifier``)."""
+
+    _kind = "DummyClassifier"
+
+    def __init__(self, strategy="prior", random_state=None, constant=None):
+        self.strategy = strategy
+        self.random_state = random_state
+        self.constant = constant
+
+    def _rust_params(self, X, y):
+        if self.strategy == "constant":
+            if self.constant is None:
+                raise ValueError("strategy='constant' needs `constant`")
+            idx = np.flatnonzero(self.classes_ == self.constant)
+            if idx.size == 0:
+                raise ValueError(
+                    f"constant {self.constant!r} is not one of the training labels "
+                    f"{self.classes_.tolist()}"
+                )
+            strategy = {"Constant": float(idx[0])}
+        else:
+            strategy = _choice(self.strategy, {"most_frequent": "MostFrequent", "prior": "Prior",
+                                               "stratified": "Stratified",
+                                               "uniform": "Uniform"}, "strategy")
+        return {"strategy": strategy, "seed": _seed(self.random_state)}
+
+
+class DummyRegressor(RegressorMixin, BaseEstimator):
+    """Baseline that predicts a constant (sklearn's ``DummyRegressor``)."""
+
+    _kind = "DummyRegressor"
+
+    def __init__(self, strategy="mean", constant=None, quantile=None):
+        self.strategy = strategy
+        self.constant = constant
+        self.quantile = quantile
+
+    def _rust_params(self, X, y):
+        if self.strategy == "quantile":
+            if self.quantile is None:
+                raise ValueError("strategy='quantile' needs `quantile`")
+            strategy = {"Quantile": float(self.quantile)}
+        elif self.strategy == "constant":
+            if self.constant is None:
+                raise TypeError("strategy='constant' needs `constant`")
+            strategy = {"Constant": float(self.constant)}
+        else:
+            strategy = _choice(self.strategy, {"mean": "Mean", "median": "Median"}, "strategy")
+        return {"strategy": strategy}
+
+
+class NearestCentroid(ClassifierMixin, BaseEstimator):
+    """Nearest centroid classifier, with shrunken centroids and priors."""
+
+    _kind = "NearestCentroid"
+
+    def __init__(self, metric="euclidean", *, shrink_threshold=None, priors="uniform"):
+        self.metric = metric
+        self.shrink_threshold = shrink_threshold
+        self.priors = priors
+
+    def _rust_params(self, X, y):
+        if isinstance(self.priors, str):
+            priors = _choice(self.priors, {"uniform": "Uniform", "empirical": "Empirical"}, "priors")
+        else:
+            priors = {"Given": [float(p) for p in self.priors]}
+        return {"metric": _choice(self.metric, {"euclidean": "Euclidean",
+                                                "manhattan": "Manhattan"}, "metric"),
+                "shrink_threshold": None if self.shrink_threshold is None
+                else float(self.shrink_threshold),
+                "priors": priors}
+
+
+class RidgeClassifier(ClassifierMixin, BaseEstimator):
+    """Ridge regression on ±1-encoded labels (sklearn's ``RidgeClassifier``)."""
+
+    _kind = "RidgeClassifier"
+
+    def __init__(self, alpha=1.0, *, fit_intercept=True, class_weight=None):
+        self.alpha = alpha
+        self.fit_intercept = fit_intercept
+        self.class_weight = class_weight
+
+    def _rust_params(self, X, y):
+        return {"alpha": float(self.alpha), "fit_intercept": bool(self.fit_intercept),
+                "class_weight": self._encode_class_weight(self.class_weight)}
+
+    @property
+    def coef_(self):
+        return _nd(self._fitted_state()["coef"])
+
+    @property
+    def intercept_(self):
+        return _nd(self._fitted_state()["intercept"])
+
+
+class Perceptron(ClassifierMixin, BaseEstimator):
+    """The perceptron: SGD with the perceptron loss and a constant
+    learning rate (sklearn's ``Perceptron``)."""
+
+    _kind = "Perceptron"
+
+    def __init__(self, *, penalty=None, alpha=0.0001, l1_ratio=0.15, max_iter=1000, tol=1e-3,
+                 shuffle=True, eta0=1.0, random_state=0, early_stopping=False,
+                 validation_fraction=0.1, n_iter_no_change=5, class_weight=None):
+        self.penalty = penalty
+        self.alpha = alpha
+        self.l1_ratio = l1_ratio
+        self.max_iter = max_iter
+        self.tol = tol
+        self.shuffle = shuffle
+        self.eta0 = eta0
+        self.random_state = random_state
+        self.early_stopping = early_stopping
+        self.validation_fraction = validation_fraction
+        self.n_iter_no_change = n_iter_no_change
+        self.class_weight = class_weight
+
+    def _rust_params(self, X, y):
+        return {"penalty": _choice(self.penalty, _PENALTY, "penalty"), "alpha": self.alpha,
+                "l1_ratio": self.l1_ratio, "max_iter": self.max_iter, "tol": self.tol,
+                "shuffle": self.shuffle, "eta0": self.eta0, "seed": _seed(self.random_state),
+                "early_stopping": self.early_stopping,
+                "validation_fraction": self.validation_fraction,
+                "n_iter_no_change": self.n_iter_no_change,
+                "class_weight": self._encode_class_weight(self.class_weight)}

@@ -29,6 +29,7 @@ pub mod ols;
 pub mod omp;
 pub mod quantile;
 pub mod ridge;
+pub mod ridge_classifier;
 pub mod ridge_cv;
 pub mod robust;
 pub mod summary;
@@ -54,6 +55,7 @@ pub use ols::{FittedOlsRegressor, OlsRegressor};
 pub use omp::{FittedOrthogonalMatchingPursuit, OrthogonalMatchingPursuit};
 pub use quantile::{FittedQuantileRegressor, QuantileRegressor};
 pub use ridge::{FittedRidgeRegressor, RidgeRegressor};
+pub use ridge_classifier::{FittedRidgeClassifier, RidgeClassifier};
 pub use ridge_cv::{FittedRidgeCrossValidated, RidgeCrossValidated};
 pub use robust::{
     FittedRansacRegressor, FittedTheilSenRegressor, RansacRegressor, TheilSenRegressor,
