@@ -7,6 +7,7 @@
 mod common;
 
 use anofox_ml::prelude::*;
+use anofox_ml_core::class_weight::ClassWeight;
 use anofox_ml_ensemble::{
     EarlyStopping, HistGradientBoostingLoss, InteractionConstraints, TestSize,
 };
@@ -55,6 +56,9 @@ macro_rules! early_stopping {
         }
         if let Some(r) = p["random_state"].as_u64() {
             m = m.with_random_state(r as u32);
+        }
+        if let Some(f) = p["max_features"].as_f64() {
+            m = m.with_max_features(f);
         }
         m
     }};
@@ -204,6 +208,17 @@ fn classifier_matches_sklearn() {
             model = model.with_interaction_cst(c);
         }
         model = early_stopping!(model, params);
+        model = model.with_class_weight(match &params["class_weight"] {
+            Value::Null => None,
+            Value::String(s) if s == "balanced" => Some(ClassWeight::Balanced),
+            Value::Array(pairs) => Some(ClassWeight::Manual(
+                pairs
+                    .iter()
+                    .map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
+                    .collect(),
+            )),
+            other => panic!("unknown class_weight {other}"),
+        });
         let sw: Option<Array1<f64>> =
             (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
         let fitted = model

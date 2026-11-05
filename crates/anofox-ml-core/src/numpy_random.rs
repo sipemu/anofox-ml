@@ -1,5 +1,6 @@
-//! numpy's legacy `RandomState` (MT19937) and the scikit-learn splits built
-//! on it, reproduced draw for draw.
+//! numpy's legacy `RandomState` (MT19937), its `Generator` (PCG64 seeded
+//! through `SeedSequence`) and the scikit-learn splits built on them,
+//! reproduced draw for draw.
 //!
 //! Estimators that must match scikit-learn exactly where it draws random
 //! numbers (e.g. the validation split of HistGradientBoosting's early
@@ -99,6 +100,121 @@ impl RandomState {
             .take(size)
             .map(|i| values[i])
             .collect()
+    }
+}
+
+/// numpy's `SeedSequence(seed).generate_state(n_words)` (32-bit words) for
+/// a seed below 2^32 and no spawn key.
+fn seed_sequence_state(seed: u32, n_words: usize) -> Vec<u32> {
+    const INIT_A: u32 = 0x43b0_d7e5;
+    const MULT_A: u32 = 0x931e_8875;
+    const INIT_B: u32 = 0x8b51_f9dd;
+    const MULT_B: u32 = 0x58f3_8ded;
+    const MIX_MULT_L: u32 = 0xca01_f9dd;
+    const MIX_MULT_R: u32 = 0x4973_f715;
+    let mut hash_const = INIT_A;
+    let mut hashmix = |value: u32| {
+        let mut v = value ^ hash_const;
+        hash_const = hash_const.wrapping_mul(MULT_A);
+        v = v.wrapping_mul(hash_const);
+        v ^ (v >> 16)
+    };
+    let mix = |x: u32, y: u32| {
+        let r = MIX_MULT_L
+            .wrapping_mul(x)
+            .wrapping_sub(MIX_MULT_R.wrapping_mul(y));
+        r ^ (r >> 16)
+    };
+    // Pool of 4 words from the single entropy word.
+    let mut pool = [0u32; 4];
+    for (i, p) in pool.iter_mut().enumerate() {
+        *p = hashmix(if i == 0 { seed } else { 0 });
+    }
+    for src in 0..4 {
+        for dst in 0..4 {
+            if src != dst {
+                let h = hashmix(pool[src]);
+                pool[dst] = mix(pool[dst], h);
+            }
+        }
+    }
+    let mut hash_const = INIT_B;
+    (0..n_words)
+        .map(|i| {
+            let mut v = pool[i % 4] ^ hash_const;
+            hash_const = hash_const.wrapping_mul(MULT_B);
+            v = v.wrapping_mul(hash_const);
+            v ^ (v >> 16)
+        })
+        .collect()
+}
+
+/// numpy's `np.random.default_rng(seed)`: PCG64 (XSL-RR) seeded through
+/// `SeedSequence`, with numpy's buffered 32-bit draws.
+#[derive(Debug, Clone)]
+pub struct Generator {
+    state: u128,
+    inc: u128,
+    buffered: Option<u32>,
+}
+
+impl Generator {
+    const MULTIPLIER: u128 = 0x2360_ed05_1fc6_5da4_4385_df64_9fcc_f645;
+
+    /// `default_rng(seed)` for a seed below 2^32.
+    pub fn new(seed: u32) -> Self {
+        let w = seed_sequence_state(seed, 8);
+        let word = |k: usize| u64::from(w[2 * k]) | (u64::from(w[2 * k + 1]) << 32);
+        let init_state = (u128::from(word(0)) << 64) | u128::from(word(1));
+        let init_seq = (u128::from(word(2)) << 64) | u128::from(word(3));
+        let mut g = Self {
+            state: 0,
+            inc: (init_seq << 1) | 1,
+            buffered: None,
+        };
+        g.step();
+        g.state = g.state.wrapping_add(init_state);
+        g.step();
+        g
+    }
+
+    fn step(&mut self) {
+        self.state = self
+            .state
+            .wrapping_mul(Self::MULTIPLIER)
+            .wrapping_add(self.inc);
+    }
+
+    /// The next raw 64-bit output (`bit_generator.random_raw()`).
+    pub fn next_u64(&mut self) -> u64 {
+        self.step();
+        let (hi, lo) = ((self.state >> 64) as u64, self.state as u64);
+        (hi ^ lo).rotate_right((hi >> 58) as u32)
+    }
+
+    /// The next 32-bit output: halves of a 64-bit draw, low half first.
+    pub fn next_u32(&mut self) -> u32 {
+        if let Some(v) = self.buffered.take() {
+            return v;
+        }
+        let v = self.next_u64();
+        self.buffered = Some((v >> 32) as u32);
+        v as u32
+    }
+
+    /// `shuffle(values)` (Fisher–Yates from the end, masked rejection).
+    pub fn shuffle<T>(&mut self, values: &mut [T]) {
+        for i in (1..values.len()).rev() {
+            let max = i as u32;
+            let mask = u32::MAX >> max.leading_zeros();
+            let j = loop {
+                let v = self.next_u32() & mask;
+                if v <= max {
+                    break v;
+                }
+            };
+            values.swap(i, j as usize);
+        }
     }
 }
 
@@ -245,6 +361,34 @@ mod tests {
             vec![8, 1, 5, 0, 7, 2, 9, 4, 3, 6]
         );
         assert_eq!(RandomState::new(42).randint(u32::MAX as u64), 1_608_637_542);
+    }
+
+    #[test]
+    fn generator_matches_numpy() {
+        // numpy 2.5: default_rng(seed).bit_generator.random_raw(k) and
+        // shuffles of boolean masks.
+        let mut g = Generator::new(12345);
+        assert_eq!(
+            [g.next_u64(), g.next_u64(), g.next_u64()],
+            [
+                4_193_609_425_186_963_869,
+                5_843_160_025_838_961_886,
+                14_708_796_524_633_321_433
+            ]
+        );
+        let mut g = Generator::new(0);
+        assert_eq!(
+            [g.next_u64(), g.next_u64()],
+            [11_749_869_230_777_074_271, 4_976_686_463_289_251_617]
+        );
+        let mut g = Generator::new(4_000_000_000);
+        let mut set = |n: usize, k: usize| {
+            let mut m: Vec<bool> = (0..n).map(|i| i < k).collect();
+            g.shuffle(&mut m);
+            (0..n).filter(|&i| m[i]).collect::<Vec<_>>()
+        };
+        assert_eq!(set(10, 4), vec![4, 7, 8, 9]);
+        assert_eq!(set(7, 3), vec![1, 2, 6]);
     }
 
     #[test]

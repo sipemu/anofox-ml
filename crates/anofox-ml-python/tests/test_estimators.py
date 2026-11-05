@@ -475,6 +475,32 @@ def test_hist_gradient_boosting_early_stopping_matches_sklearn():
         am.HistGradientBoostingRegressor(scoring="r2", early_stopping=True).fit(X, y)
 
 
+def test_hist_gradient_boosting_max_features_class_weight_match_sklearn():
+    from sklearn.ensemble import HistGradientBoostingClassifier as SkC
+    from sklearn.ensemble import HistGradientBoostingRegressor as SkR
+
+    rs = np.random.RandomState(10)
+    X = rs.normal(size=(300, 5))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2] + rs.normal(scale=0.3, size=300)
+    kw = dict(max_iter=20, max_leaf_nodes=8, min_samples_leaf=10)
+    ours = am.HistGradientBoostingRegressor(max_features=0.4, random_state=3, **kw).fit(X, y)
+    ref = SkR(max_features=0.4, random_state=3, early_stopping=False, **kw).fit(X, y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
+    codes = np.digitize(y, [0.0, 1.5])
+    names = np.array(["a", "b", "c"])[codes]
+    # sklearn applies a class_weight dict to the encoded labels, so the dict
+    # case uses labels 0..2 (where both agree).
+    for labels, extra in ((names, dict(class_weight="balanced")),
+                          (codes, dict(class_weight={0: 3.0, 2: 0.5})),
+                          (names, dict(class_weight="balanced", max_features=0.6,
+                                       random_state=7))):
+        ours = am.HistGradientBoostingClassifier(**kw, **extra).fit(X, labels)
+        ref = SkC(early_stopping=False, **kw, **extra).fit(X, labels)
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(max_features=0.0).fit(X, y)
+
+
 def test_hist_gradient_boosting_log_link_losses_match_sklearn():
     from sklearn.ensemble import HistGradientBoostingRegressor as SkHGB
 

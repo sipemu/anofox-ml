@@ -360,7 +360,7 @@ class _HistGradientBoosting(BaseEstimator):
                  min_samples_leaf=20, l2_regularization=0.0, max_bins=255,
                  categorical_features=None, monotonic_cst=None, interaction_cst=None,
                  early_stopping="auto", scoring="loss", validation_fraction=0.1,
-                 n_iter_no_change=10, tol=1e-7, random_state=None):
+                 n_iter_no_change=10, tol=1e-7, random_state=None, max_features=1.0):
         self.learning_rate = learning_rate
         self.max_iter = max_iter
         self.max_leaf_nodes = max_leaf_nodes
@@ -377,6 +377,7 @@ class _HistGradientBoosting(BaseEstimator):
         self.n_iter_no_change = n_iter_no_change
         self.tol = tol
         self.random_state = random_state
+        self.max_features = max_features
 
     @property
     def n_iter_(self):
@@ -392,7 +393,7 @@ class _HistGradientBoosting(BaseEstimator):
         return np.asarray(self._fitted_state()["scores"]["validation"], dtype=float)
 
     def _rust_params(self, X, y):
-        return {**_early_stopping_params(self),"learning_rate": self.learning_rate, "n_estimators": self.max_iter,
+        return {**_early_stopping_params(self), "max_features": float(self.max_features),"learning_rate": self.learning_rate, "n_estimators": self.max_iter,
                 "max_leaf_nodes": self.max_leaf_nodes, "max_depth": self.max_depth,
                 "min_samples_leaf": self.min_samples_leaf,
                 "l2_regularization": self.l2_regularization, "max_bins": self.max_bins,
@@ -406,6 +407,28 @@ class _HistGradientBoosting(BaseEstimator):
 class HistGradientBoostingClassifier(ClassifierMixin, _HistGradientBoosting):
     _kind = "HistGradientBoostingClassifier"
 
+    def __init__(self, learning_rate=0.1, max_iter=100, max_leaf_nodes=31, max_depth=None,
+                 min_samples_leaf=20, l2_regularization=0.0, max_features=1.0, max_bins=255,
+                 categorical_features=None, monotonic_cst=None, interaction_cst=None,
+                 early_stopping="auto", scoring="loss", validation_fraction=0.1,
+                 n_iter_no_change=10, tol=1e-7, random_state=None, class_weight=None):
+        super().__init__(learning_rate=learning_rate, max_iter=max_iter,
+                         max_leaf_nodes=max_leaf_nodes, max_depth=max_depth,
+                         min_samples_leaf=min_samples_leaf,
+                         l2_regularization=l2_regularization, max_bins=max_bins,
+                         categorical_features=categorical_features,
+                         monotonic_cst=monotonic_cst, interaction_cst=interaction_cst,
+                         early_stopping=early_stopping, scoring=scoring,
+                         validation_fraction=validation_fraction,
+                         n_iter_no_change=n_iter_no_change, tol=tol,
+                         random_state=random_state, max_features=max_features)
+        self.class_weight = class_weight
+
+    def _rust_params(self, X, y):
+        params = super()._rust_params(X, y)
+        params["class_weight"] = self._encode_class_weight(self.class_weight)
+        return params
+
 
 class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
     _kind = "HistGradientBoostingRegressor"
@@ -417,7 +440,8 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
                  max_leaf_nodes=31, max_depth=None, min_samples_leaf=20, l2_regularization=0.0,
                  max_bins=255, categorical_features=None, monotonic_cst=None,
                  interaction_cst=None, early_stopping="auto", scoring="loss",
-                 validation_fraction=0.1, n_iter_no_change=10, tol=1e-7, random_state=None):
+                 validation_fraction=0.1, n_iter_no_change=10, tol=1e-7, random_state=None,
+                 max_features=1.0):
         super().__init__(learning_rate=learning_rate, max_iter=max_iter,
                          max_leaf_nodes=max_leaf_nodes, max_depth=max_depth,
                          min_samples_leaf=min_samples_leaf,
@@ -427,7 +451,7 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
                          early_stopping=early_stopping, scoring=scoring,
                          validation_fraction=validation_fraction,
                          n_iter_no_change=n_iter_no_change, tol=tol,
-                         random_state=random_state)
+                         random_state=random_state, max_features=max_features)
         self.loss = loss
         self.quantile = quantile
 
