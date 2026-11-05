@@ -106,10 +106,15 @@ pub enum HistGradientBoostingLoss {
     /// Pinball loss at level `quantile`; leaves are refit to residual
     /// quantiles.
     Quantile,
+    /// Half Poisson deviance with a log link; targets must be non-negative
+    /// with a positive sum.
+    Poisson,
+    /// Half Gamma deviance with a log link; targets must be positive.
+    Gamma,
 }
 
 /// Histogram-based gradient boosting regressor (squared error, absolute
-/// error or quantile loss).
+/// error, quantile, Poisson or Gamma loss).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HistGradientBoostingRegressor {
     pub n_estimators: usize,
@@ -181,13 +186,17 @@ impl HistGradientBoostingRegressor {
                     )))
                 }
             },
+            HistGradientBoostingLoss::Poisson => LgbmObjective::Poisson,
+            HistGradientBoostingLoss::Gamma => LgbmObjective::Gamma,
         })
     }
 
     fn engine(&self) -> Result<LgbmRegressor> {
         self.validate()?;
-        Ok(LgbmRegressor::new()
+        let mut engine = LgbmRegressor::new()
             .with_objective(self.objective()?)
+            // sklearn's Poisson hessian is exactly exp(raw).
+            .with_poisson_max_delta_step(0.0)
             .with_n_estimators(self.n_estimators)
             .with_learning_rate(self.learning_rate)
             .with_num_leaves(self.num_leaves())
@@ -195,7 +204,9 @@ impl HistGradientBoostingRegressor {
             .with_min_child_samples(self.min_samples_leaf)
             .with_reg_lambda(self.l2_regularization)
             .with_max_bins(self.max_bins)
-            .with_binning(BinningMethod::Sklearn))
+            .with_binning(BinningMethod::Sklearn);
+        engine.sklearn_compat = true;
+        Ok(engine)
     }
 }
 
@@ -214,6 +225,7 @@ impl HistGradientBoostingClassifier {
         // sklearn's multinomial hessian is p(1 - p), without LightGBM's
         // K / (K - 1) factor.
         engine.softmax_hessian_factor = false;
+        engine.sklearn_compat = true;
         Ok(engine)
     }
 }
@@ -384,6 +396,38 @@ mod tests {
     }
 
     #[test]
+    fn log_link_losses_predict_positive_means_and_validate_targets() {
+        let (x, y) = data();
+        let counts = y.mapv(|v| (v.max(0.0) / 3.0).round());
+        let positive = y.mapv(|v| v.abs() + 0.5);
+        for (loss, target) in [
+            (HistGradientBoostingLoss::Poisson, &counts),
+            (HistGradientBoostingLoss::Gamma, &positive),
+        ] {
+            let p = HistGradientBoostingRegressor::new()
+                .with_loss(loss)
+                .with_n_estimators(30)
+                .fit(&x, target)
+                .unwrap()
+                .predict(&x)
+                .unwrap();
+            assert!(p.iter().all(|&v| v > 0.0), "{loss:?}");
+            // The log-link baseline keeps the mean of the predictions close
+            // to the mean target.
+            let rel = (p.mean().unwrap() - target.mean().unwrap()).abs() / target.mean().unwrap();
+            assert!(rel < 0.05, "{loss:?}: {rel}");
+        }
+        let fit = |loss, y: &Array1<f64>| {
+            HistGradientBoostingRegressor::new()
+                .with_loss(loss)
+                .fit(&x, y)
+        };
+        assert!(fit(HistGradientBoostingLoss::Poisson, &(&counts - 1.0)).is_err());
+        assert!(fit(HistGradientBoostingLoss::Poisson, &Array1::zeros(y.len())).is_err());
+        assert!(fit(HistGradientBoostingLoss::Gamma, &counts).is_err());
+    }
+
+    #[test]
     fn regressor_fits_and_matches_the_engine() {
         let (x, y) = data();
         let hgb = HistGradientBoostingRegressor::new().with_n_estimators(30);
@@ -456,8 +500,9 @@ mod tests {
     fn regressor_matches_sklearn_binning() {
         // sklearn 1.8 HistGradientBoostingRegressor(max_iter=20,
         // min_samples_leaf=5[, max_bins=16]).fit(X, y).predict(X[rows]).
-        // max_bins=16 takes the percentile path of sklearn's binning. sklearn
-        // keeps gradients in float32, hence the 1e-6 tolerance.
+        // max_bins=16 takes the percentile path of sklearn's binning. The
+        // facade rounds gradients to float32 as sklearn does, so the
+        // predictions agree to rounding.
         let x = Array2::from_shape_fn((120, 3), |(i, j)| {
             let t = i as f64;
             match j {
@@ -501,7 +546,7 @@ mod tests {
                 .unwrap();
             let p = m.predict(&x.select(ndarray::Axis(0), &rows)).unwrap();
             for (a, b) in p.iter().zip(expected) {
-                assert!((a - b).abs() < 1e-6, "max_bins={max_bins}: {a} vs {b}");
+                assert!((a - b).abs() < 1e-12, "max_bins={max_bins}: {a} vs {b}");
             }
         }
     }

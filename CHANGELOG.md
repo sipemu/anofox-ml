@@ -6,6 +6,30 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### HistGradientBoosting: Poisson and Gamma losses, exact sklearn parity (#127)
+
+- `HistGradientBoostingLoss::{Poisson, Gamma}` (sklearn's `loss="poisson"` /
+  `"gamma"`, log link; predictions are `exp` of the raw score). The engine
+  gains `LgbmObjective::{Poisson, Gamma}` with LightGBM's
+  `poisson_max_delta_step` (default 0.7; the facade uses sklearn's exact
+  hessian). Targets are validated (Poisson: non-negative with a positive
+  sum; Gamma: positive). Python: `loss="poisson"` / `"gamma"`.
+- The HistGradientBoosting facades now reproduce sklearn bit for bit (to
+  ~1e-16) for every regression loss, weighted or not: float32 gradients
+  and hessians, sklearn's split scan order and gain arithmetic (ties
+  between mirrored splits are common with the L1 / quantile losses),
+  sklearn's routing of missing values unseen in training, its weighted
+  percentile (`inverted_cdf`) and numpy's interpolation for the leaf
+  refits. Previously absolute error and quantile drifted from sklearn by
+  10–30 % after a dozen iterations. Fits made with these losses change
+  accordingly; LightGBM-mode (`Lgbm*`) fits are unchanged.
+- New golden generator `gen_hist_gb_parity.py` (all five losses, with and
+  without sample weights, NaNs in a feature); the engine's Poisson / Gamma
+  objectives are checked against LightGBM 4.6.
+- Known gap (LightGBM mode): LightGBM estimates leaf counts from hessians
+  for `min_child_samples`; the engine counts rows, so objectives with
+  uneven hessians (Gamma) can split differently from LightGBM.
+
 ### New estimator: KNeighborsTransformer (#113)
 
 - `KNeighborsTransformer` in `anofox-ml-neighbors` (distance graph with

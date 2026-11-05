@@ -320,3 +320,34 @@ fn isotonic() {
         |m| Predict::predict(m, &x1).unwrap().to_vec(),
     );
 }
+
+#[test]
+fn hist_gradient_boosting_regressor() {
+    let (x, y, _) = data();
+    case_since(
+        2,
+        "hist_gradient_boosting_regressor",
+        || Fit::fit(&HistGradientBoostingRegressor::new(), &x, &y).unwrap(),
+        |m| Predict::predict(m, &x).unwrap().to_vec(),
+    );
+}
+
+#[test]
+fn hist_gradient_boosting_poisson() {
+    let (x, y, _) = data();
+    let counts = y.mapv(|v| (v + 4.0).max(0.0).round());
+    case_since(
+        2,
+        "hist_gradient_boosting_poisson",
+        || {
+            Fit::fit(
+                &HistGradientBoostingRegressor::new()
+                    .with_loss(anofox_ml::ensemble::HistGradientBoostingLoss::Poisson),
+                &x,
+                &counts,
+            )
+            .unwrap()
+        },
+        |m| Predict::predict(m, &x).unwrap().to_vec(),
+    );
+}

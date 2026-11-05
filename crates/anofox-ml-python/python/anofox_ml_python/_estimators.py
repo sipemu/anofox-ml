@@ -324,7 +324,7 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
     _kind = "HistGradientBoostingRegressor"
 
     _LOSSES = {"squared_error": "SquaredError", "absolute_error": "AbsoluteError",
-               "quantile": "Quantile"}
+               "quantile": "Quantile", "poisson": "Poisson", "gamma": "Gamma"}
 
     def __init__(self, loss="squared_error", quantile=None, learning_rate=0.1, max_iter=100,
                  max_leaf_nodes=31, max_depth=None, min_samples_leaf=20, l2_regularization=0.0,

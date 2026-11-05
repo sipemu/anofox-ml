@@ -391,7 +391,22 @@ def test_hist_gradient_boosting_quantile_loss():
     with pytest.raises(ValueError):
         am.HistGradientBoostingRegressor(loss="quantile").fit(Xq, yq)
     with pytest.raises(ValueError):
-        am.HistGradientBoostingRegressor(loss="poisson").fit(Xq, yq)
+        am.HistGradientBoostingRegressor(loss="huber").fit(Xq, yq)
+
+
+def test_hist_gradient_boosting_log_link_losses_match_sklearn():
+    from sklearn.ensemble import HistGradientBoostingRegressor as SkHGB
+
+    rs = np.random.RandomState(4)
+    X = rs.normal(size=(300, 3))
+    mu = np.exp(0.5 * X[:, 0] - 0.3 * X[:, 1])
+    for loss, y in [("poisson", rs.poisson(mu).astype(float)), ("gamma", rs.gamma(2.0, mu / 2.0))]:
+        kw = dict(loss=loss, max_iter=30, max_leaf_nodes=8, min_samples_leaf=10)
+        ours = am.HistGradientBoostingRegressor(**kw).fit(X, y).predict(X)
+        ref = SkHGB(early_stopping=False, **kw).fit(X, y).predict(X)
+        np.testing.assert_allclose(ours, ref, rtol=1e-10)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(loss="gamma").fit(X, X[:, 0])
 
 
 def test_batch1_baselines_match_sklearn():
