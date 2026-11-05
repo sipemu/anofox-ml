@@ -6,6 +6,30 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators: baselines and simple classifiers (#113, batch 1)
+
+- `DummyClassifier` (`MostFrequent` / `Prior` / `Stratified` / `Uniform` /
+  `Constant`) and `DummyRegressor` (`Mean` / `Median` / `Quantile` /
+  `Constant`) in `anofox-ml-core`, with sample weights (sklearn's lower
+  weighted percentile).
+- `NearestCentroid` in `anofox-ml-neighbors`: euclidean / manhattan
+  (median) centroids, shrunken centroids (`shrink_threshold`), uniform /
+  empirical / given priors, `predict_proba` and `decision_function`.
+- `RidgeClassifier` in `anofox-ml-regression`: ±1-encoded ridge, binary
+  and multiclass, `class_weight` and sample weights.
+- `Perceptron` in `anofox-ml-linear` (SGD with the perceptron loss and a
+  constant learning rate, sklearn's defaults).
+- All five are registry kinds and Python classes, and match scikit-learn
+  1.8.0 (`test_harness/generators/gen_baselines.py`,
+  `tests/golden_baselines.rs`).
+
+### Fixed
+
+- `SgdClassifier` / `SgdRegressor` stop on the epoch objective (loss plus
+  penalty) as scikit-learn 1.8 does, not on the loss alone. With a
+  non-negligible `alpha` the number of epochs, and so the coefficients,
+  now match sklearn.
+
 ## [0.3.0] - 2026-11-05
 
 Conformal prediction across every surface, PerpetualBooster, quantile loss

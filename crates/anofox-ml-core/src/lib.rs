@@ -31,6 +31,7 @@
 
 pub mod class_weight;
 pub mod column_transformer;
+pub mod dummy;
 pub mod error;
 pub mod feature_union;
 pub mod float;
@@ -52,6 +53,10 @@ pub use class_weight::{
     check_sample_weight, compute_sample_weight, effective_sample_weight, ClassWeight,
 };
 pub use column_transformer::{ColumnSelector, ColumnTransformer, Remainder};
+pub use dummy::{
+    DummyClassifier, DummyClassifierStrategy, DummyRegressor, DummyRegressorStrategy,
+    FittedDummyClassifier, FittedDummyRegressor,
+};
 pub use error::{Result, RustMlError};
 pub use feature_union::{FeatureUnion, FittedFeatureUnion};
 pub use float::{as_f64, from_f64, Float};
