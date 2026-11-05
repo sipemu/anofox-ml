@@ -15,6 +15,8 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    LogisticRegressionCV,
+    OrthogonalMatchingPursuitCV,
     KernelDensity,
     FactorAnalysis,
     Nystroem,
@@ -168,7 +170,7 @@ __all__ = [
     "EllipticEnvelope",
     "Nystroem", "RBFSampler", "KernelCenterer", "GaussianRandomProjection",
     "SparseRandomProjection",
-    "KernelDensity", "FactorAnalysis",
+    "KernelDensity", "FactorAnalysis", "LogisticRegressionCV", "OrthogonalMatchingPursuitCV",
     "DummyClassifier", "DummyRegressor", "NearestCentroid", "RidgeClassifier", "Perceptron",
     "DecisionTreeClassifier",
     "DecisionTreeRegressor",

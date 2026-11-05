@@ -2874,3 +2874,79 @@ class FactorAnalysis(TransformerMixin, BaseEstimator):
 
     def score(self, X, y=None):
         return float(np.mean(self.score_samples(X)))
+
+
+# ---------------------------------------------------------------------------
+# cross-validated linear models (#113)
+# ---------------------------------------------------------------------------
+
+
+class LogisticRegressionCV(ClassifierMixin, BaseEstimator):
+    """Logistic regression with ``C`` chosen by unshuffled stratified
+    ``cv``-fold CV over ``Cs`` (an int: ``logspace(-4, 4, Cs)``), scored by
+    accuracy (``scoring=None``) or ``"neg_log_loss"``, refit on all rows."""
+
+    _kind = "LogisticRegressionCV"
+
+    def __init__(self, *, Cs=10, cv=5, scoring=None, l1_ratio=0.0, fit_intercept=True,
+                 tol=1e-8, max_iter=1000, class_weight=None):
+        self.Cs = Cs
+        self.cv = cv
+        self.scoring = scoring
+        self.l1_ratio = l1_ratio
+        self.fit_intercept = fit_intercept
+        self.tol = tol
+        self.max_iter = max_iter
+        self.class_weight = class_weight
+
+    def _rust_params(self, X, y):
+        if isinstance(self.Cs, (int, np.integer)):
+            cs = {"Count": int(self.Cs)}
+        else:
+            cs = {"Values": [float(c) for c in self.Cs]}
+        return {"l1_ratio": float(self.l1_ratio), "with_intercept": self.fit_intercept,
+                "tol": self.tol, "max_iter": self.max_iter,
+                "class_weight": self._encode_class_weight(self.class_weight),
+                "cs": cs, "cv": int(self.cv),
+                "scoring": _choice(self.scoring, {None: "Accuracy", "accuracy": "Accuracy",
+                                                  "neg_log_loss": "NegLogLoss"}, "scoring")}
+
+    @property
+    def C_(self):
+        return float(self._fitted_state()["c"])
+
+    @property
+    def Cs_(self):
+        return np.asarray(self._fitted_state()["cs"], dtype=float)
+
+    @property
+    def scores_(self):
+        return _nd(self._fitted_state()["scores"])
+
+
+class OrthogonalMatchingPursuitCV(RegressorMixin, BaseEstimator):
+    """OMP with the number of non-zero coefficients chosen by unshuffled
+    ``cv``-fold CV."""
+
+    _kind = "OrthogonalMatchingPursuitCV"
+
+    def __init__(self, *, max_iter=None, cv=5, fit_intercept=True):
+        self.max_iter = max_iter
+        self.cv = cv
+        self.fit_intercept = fit_intercept
+
+    def _rust_params(self, X, y):
+        return {"max_iter": None if self.max_iter is None else int(self.max_iter),
+                "cv": int(self.cv), "fit_intercept": bool(self.fit_intercept)}
+
+    @property
+    def n_nonzero_coefs_(self):
+        return int(self._fitted_state()["n_nonzero_coefs"])
+
+    @property
+    def coef_(self):
+        return _nd(self._fitted_state()["model"]["coef"])
+
+    @property
+    def intercept_(self):
+        return float(self._fitted_state()["model"]["intercept"])

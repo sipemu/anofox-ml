@@ -494,3 +494,21 @@ def test_batch6_density_and_factor_analysis_match_sklearn():
         np.testing.assert_allclose(ours.get_covariance(), ref.get_covariance(), atol=1e-8)
         np.testing.assert_allclose(ours.score_samples(X), ref.score_samples(X), rtol=1e-8)
         np.testing.assert_allclose(np.abs(ours.components_), np.abs(ref.components_), atol=1e-7)
+
+
+def test_batch7_cv_linear_models_match_sklearn():
+    import warnings
+    from sklearn import linear_model
+
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    for yy in (y_bin, y_multi):
+        ours = am.LogisticRegressionCV(tol=1e-10, max_iter=100000).fit(X, yy)
+        ref = linear_model.LogisticRegressionCV(tol=1e-10, max_iter=100000, l1_ratios=(0.0,),
+                                                use_legacy_attributes=False).fit(X, yy)
+        assert abs(ours.C_ - float(np.ravel(ref.C_)[0])) < 1e-12
+        np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
+    Xo = np.hstack([X, X ** 2, np.sin(X)])
+    ours = am.OrthogonalMatchingPursuitCV().fit(Xo, y_reg)
+    ref = linear_model.OrthogonalMatchingPursuitCV().fit(Xo, y_reg)
+    assert ours.n_nonzero_coefs_ == ref.n_nonzero_coefs_
+    np.testing.assert_allclose(ours.coef_, ref.coef_, atol=1e-9)
