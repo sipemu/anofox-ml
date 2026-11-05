@@ -345,6 +345,52 @@ pub fn stratified_k_fold<'a, 'b, F: Float>(
     Ok(splits_from_assignment(&test_fold, k))
 }
 
+/// Stratified K-fold without shuffling: sklearn's default
+/// `StratifiedKFold(n_splits=k)` (what `cv=k` means for a classifier).
+///
+/// The fold sizes per class come from dealing the class-sorted labels
+/// round-robin over the folds (as in [`stratified_k_fold`]); the samples of
+/// each class then fill their folds in their original order (classes in
+/// order of first appearance). Index lists are ascending.
+///
+/// # Errors
+///
+/// `InvalidParameter` if `k < 2`, `k > n`, or `k` exceeds the size of every
+/// class (sklearn's error).
+pub fn stratified_k_fold_ordered<'a, F: Float>(
+    y: impl AsArray<'a, F, Ix1>,
+    k: usize,
+) -> Result<Vec<CvSplit>> {
+    let y: ArrayView1<F> = y.into();
+    let n = y.len();
+    if n == 0 {
+        return Err(RustMlError::EmptyInput("input is empty".into()));
+    }
+    check_k(k, n)?;
+    let classes = group_by_class(y);
+    if classes.iter().all(|m| m.len() < k) {
+        return Err(RustMlError::InvalidParameter(format!(
+            "n_splits = {k} cannot be greater than the number of members in each class"
+        )));
+    }
+    let mut allocation = vec![vec![0usize; classes.len()]; k];
+    let mut pos = 0usize;
+    for (c, members) in classes.iter().enumerate() {
+        for _ in 0..members.len() {
+            allocation[pos % k][c] += 1;
+            pos += 1;
+        }
+    }
+    let mut test_fold = vec![0usize; n];
+    for (c, members) in classes.iter().enumerate() {
+        let fold_ids = (0..k).flat_map(|f| std::iter::repeat_n(f, allocation[f][c]));
+        for (&i, f) in members.iter().zip(fold_ids) {
+            test_fold[i] = f;
+        }
+    }
+    Ok(splits_from_assignment(&test_fold, k))
+}
+
 /// Shuffled (non-stratified) K-fold splitting, like sklearn's
 /// `KFold(shuffle=True, random_state=seed)`.
 ///

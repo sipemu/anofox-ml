@@ -702,6 +702,51 @@ registry! {
         decision_function: |m, x| Ok::<_, anofox_ml_core::RustMlError>(m.decision_function(x)),
     }
 
+    // -------------------------------------------------- meta-estimators
+    OneVsRestClassifier {
+        config: crate::meta::OneVsRestConfig = Default::default(),
+        fitted: crate::meta::OneVsRestFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        decision_function: |m, x| m.decision_function(x),
+    }
+    OneVsOneClassifier {
+        config: crate::meta::OneVsOneConfig = Default::default(),
+        fitted: crate::meta::OneVsOneFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        decision_function: |m, x| m.decision_function(x),
+    }
+    FixedThresholdClassifier {
+        config: crate::meta::FixedThresholdConfig = Default::default(),
+        fitted: crate::meta::ThresholdFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        decision_function: |m, x| m.decision_function(x),
+    }
+    TunedThresholdClassifierCV {
+        config: crate::meta::TunedThresholdConfig = Default::default(),
+        fitted: crate::meta::ThresholdFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        decision_function: |m, x| m.decision_function(x),
+    }
+
     // ------------------------------------------------------- baselines
     DummyClassifier {
         config: anofox_ml_core::DummyClassifier = Default::default(),

@@ -29,6 +29,7 @@
 //! ```
 
 mod estimator;
+mod meta;
 mod model;
 mod registry;
 

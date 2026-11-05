@@ -97,9 +97,10 @@ pub use utils::{
     grid_search_cv_with_splits_par, k_fold, learning_curve, learning_curve_with_splits,
     leave_one_out, leave_p_out, looks_like_class_labels, randomized_search_cv,
     randomized_search_cv_with_splits, repeated_k_fold, repeated_stratified_k_fold, shuffle_split,
-    shuffled_k_fold, stratified_k_fold, stratified_shuffle_split, time_series_split,
-    train_test_split, validation_curve, validation_curve_with_splits, CrossValidateResult, CvSplit,
-    GridSearchResult, LearningCurveResult, ScorerFn, ValidationCurveResult, WeightedScorerFn,
+    shuffled_k_fold, stratified_k_fold, stratified_k_fold_ordered, stratified_shuffle_split,
+    time_series_split, train_test_split, validation_curve, validation_curve_with_splits,
+    CrossValidateResult, CvSplit, GridSearchResult, LearningCurveResult, ScorerFn,
+    ValidationCurveResult, WeightedScorerFn,
 };
 pub use validation::{
     bootstrap_splits, bootstrap_splits_stratified, bootstrap_validate, nested_cross_validate,
