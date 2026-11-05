@@ -106,6 +106,10 @@ def test_fit_predict_pickle_clone(name):
         out = est.fit_transform(Xd)
         assert out.shape == (len(Xd), 2)
         return
+    elif name == "KernelDensity":
+        out = est.fit(Xd).score_samples(Xd)
+        assert out.shape == (len(Xd),)
+        assert est.sample(5, random_state=0).shape == (5, Xd.shape[1])
     elif hasattr(est, "mahalanobis"):  # covariance estimators
         out = est.fit(Xd).mahalanobis(Xd)
         assert out.shape == (len(Xd),)
@@ -474,3 +478,19 @@ def test_batch5_kernel_approximation():
         np.testing.assert_allclose(Z @ Z.T, R @ R.T, atol=1e-8)
     Z = am.RBFSampler(gamma=0.2, n_components=5000, random_state=0).fit_transform(X)
     assert np.abs(Z @ Z.T - K).max() < 0.1
+
+
+def test_batch6_density_and_factor_analysis_match_sklearn():
+    from sklearn import decomposition, neighbors
+
+    for kw in [dict(kernel="gaussian", bandwidth=0.7), dict(kernel="epanechnikov", bandwidth=2.0),
+               dict(kernel="exponential", bandwidth="scott")]:
+        np.testing.assert_allclose(am.KernelDensity(**kw).fit(X).score_samples(X),
+                                   neighbors.KernelDensity(**kw).fit(X).score_samples(X),
+                                   rtol=1e-10)
+    for kw in [dict(n_components=2), dict(n_components=2, rotation="varimax")]:
+        ours = am.FactorAnalysis(**kw).fit(X)
+        ref = decomposition.FactorAnalysis(svd_method="lapack", **kw).fit(X)
+        np.testing.assert_allclose(ours.get_covariance(), ref.get_covariance(), atol=1e-8)
+        np.testing.assert_allclose(ours.score_samples(X), ref.score_samples(X), rtol=1e-8)
+        np.testing.assert_allclose(np.abs(ours.components_), np.abs(ref.components_), atol=1e-7)
