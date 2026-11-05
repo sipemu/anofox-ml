@@ -1,5 +1,5 @@
-//! HistGradientBoosting losses and categorical features against sklearn
-//! 1.8.0 (#127).
+//! HistGradientBoosting losses, categorical features and constraints
+//! against sklearn 1.8.0 (#127).
 //! Generator: `test_harness/generators/gen_hist_gb_parity.py`. The facade
 //! reproduces sklearn's float32 gradients, split order and gain arithmetic,
 //! so predictions agree to rounding.
@@ -7,7 +7,7 @@
 mod common;
 
 use anofox_ml::prelude::*;
-use anofox_ml_ensemble::HistGradientBoostingLoss;
+use anofox_ml_ensemble::{HistGradientBoostingLoss, InteractionConstraints};
 use common::{json_to_array1, load_golden_data};
 use ndarray::{Array1, Array2};
 use serde_json::Value;
@@ -25,7 +25,7 @@ fn array2_with_nan(val: &Value) -> Array2<f64> {
 }
 
 fn model(params: &Value) -> HistGradientBoostingRegressor {
-    let loss = match params["loss"].as_str().unwrap() {
+    let loss = match params["loss"].as_str().unwrap_or("squared_error") {
         "squared_error" => HistGradientBoostingLoss::SquaredError,
         "absolute_error" => HistGradientBoostingLoss::AbsoluteError,
         "quantile" => HistGradientBoostingLoss::Quantile,
@@ -43,7 +43,40 @@ fn model(params: &Value) -> HistGradientBoostingRegressor {
     if let Some(q) = params["quantile"].as_f64() {
         m = m.with_quantile(q);
     }
-    m.with_categorical_features(categorical(params))
+    let (mono, inter) = constraints(params);
+    m = m
+        .with_categorical_features(categorical(params))
+        .with_monotonic_cst(mono);
+    match inter {
+        Some(c) => m.with_interaction_cst(c),
+        None => m,
+    }
+}
+
+fn constraints(params: &Value) -> (Vec<i8>, Option<InteractionConstraints>) {
+    let mono = params["monotonic_cst"]
+        .as_array()
+        .map(|a| a.iter().map(|v| v.as_i64().unwrap() as i8).collect())
+        .unwrap_or_default();
+    let inter = match &params["interaction_cst"] {
+        Value::Null => None,
+        Value::String(s) if s == "pairwise" => Some(InteractionConstraints::Pairwise),
+        Value::String(s) if s == "no_interactions" => Some(InteractionConstraints::NoInteractions),
+        Value::Array(groups) => Some(InteractionConstraints::Groups(
+            groups
+                .iter()
+                .map(|g| {
+                    g.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_u64().unwrap() as usize)
+                        .collect()
+                })
+                .collect(),
+        )),
+        other => panic!("unknown interaction_cst {other}"),
+    };
+    (mono, inter)
 }
 
 fn categorical(params: &Value) -> Vec<usize> {
@@ -87,7 +120,7 @@ fn regressor_losses_match_sklearn() {
 }
 
 #[test]
-fn classifier_categorical_matches_sklearn() {
+fn classifier_matches_sklearn() {
     let mut failures = Vec::new();
     for case in load_golden_data("hist_gb_parity.json") {
         if case["kind"] != "classifier" {
@@ -95,14 +128,26 @@ fn classifier_categorical_matches_sklearn() {
         }
         let name = case["name"].as_str().unwrap();
         let params = &case["params"];
-        let fitted = HistGradientBoostingClassifier::new()
+        let (mono, inter) = constraints(params);
+        let mut model = HistGradientBoostingClassifier::new()
             .with_n_estimators(params["max_iter"].as_u64().unwrap() as usize)
             .with_learning_rate(params["learning_rate"].as_f64().unwrap())
             .with_max_leaf_nodes(Some(params["max_leaf_nodes"].as_u64().unwrap() as usize))
             .with_min_samples_leaf(params["min_samples_leaf"].as_u64().unwrap() as usize)
             .with_l2_regularization(params["l2_regularization"].as_f64().unwrap())
             .with_categorical_features(categorical(params))
-            .fit(&array2_with_nan(&case["X"]), &json_to_array1(&case["y"]))
+            .with_monotonic_cst(mono);
+        if let Some(c) = inter {
+            model = model.with_interaction_cst(c);
+        }
+        let sw: Option<Array1<f64>> =
+            (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
+        let fitted = model
+            .fit_weighted(
+                &array2_with_nan(&case["X"]),
+                &json_to_array1(&case["y"]),
+                sw.as_ref(),
+            )
             .unwrap();
         let proba = fitted
             .predict_proba(&array2_with_nan(&case["X_test"]))

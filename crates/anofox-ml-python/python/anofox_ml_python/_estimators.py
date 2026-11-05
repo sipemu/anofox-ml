@@ -318,10 +318,25 @@ def _categorical_indices(categorical_features, n_features):
     return [int(i) for i in cf.ravel()]
 
 
+def _interaction_cst(interaction_cst):
+    """sklearn's ``interaction_cst`` as the Rust ``InteractionConstraints``."""
+    if interaction_cst is None:
+        return None
+    if isinstance(interaction_cst, str):
+        return _choice(interaction_cst, {"pairwise": "Pairwise",
+                                         "no_interactions": "NoInteractions"},
+                       "interaction_cst")
+    try:
+        return {"Groups": [[int(i) for i in group] for group in interaction_cst]}
+    except TypeError:
+        raise ValueError("Interaction constraints must be a sequence of tuples or lists, "
+                         f"got: {interaction_cst!r}.") from None
+
+
 class _HistGradientBoosting(BaseEstimator):
     def __init__(self, learning_rate=0.1, max_iter=100, max_leaf_nodes=31, max_depth=None,
                  min_samples_leaf=20, l2_regularization=0.0, max_bins=255,
-                 categorical_features=None):
+                 categorical_features=None, monotonic_cst=None, interaction_cst=None):
         self.learning_rate = learning_rate
         self.max_iter = max_iter
         self.max_leaf_nodes = max_leaf_nodes
@@ -330,6 +345,8 @@ class _HistGradientBoosting(BaseEstimator):
         self.l2_regularization = l2_regularization
         self.max_bins = max_bins
         self.categorical_features = categorical_features
+        self.monotonic_cst = monotonic_cst
+        self.interaction_cst = interaction_cst
 
     def _rust_params(self, X, y):
         return {"learning_rate": self.learning_rate, "n_estimators": self.max_iter,
@@ -337,7 +354,10 @@ class _HistGradientBoosting(BaseEstimator):
                 "min_samples_leaf": self.min_samples_leaf,
                 "l2_regularization": self.l2_regularization, "max_bins": self.max_bins,
                 "categorical_features": _categorical_indices(self.categorical_features,
-                                                             np.shape(X)[1])}
+                                                             np.shape(X)[1]),
+                "monotonic_cst": ([] if self.monotonic_cst is None
+                                  else [int(c) for c in np.ravel(self.monotonic_cst)]),
+                "interaction_cst": _interaction_cst(self.interaction_cst)}
 
 
 class HistGradientBoostingClassifier(ClassifierMixin, _HistGradientBoosting):
@@ -352,12 +372,14 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
 
     def __init__(self, loss="squared_error", quantile=None, learning_rate=0.1, max_iter=100,
                  max_leaf_nodes=31, max_depth=None, min_samples_leaf=20, l2_regularization=0.0,
-                 max_bins=255, categorical_features=None):
+                 max_bins=255, categorical_features=None, monotonic_cst=None,
+                 interaction_cst=None):
         super().__init__(learning_rate=learning_rate, max_iter=max_iter,
                          max_leaf_nodes=max_leaf_nodes, max_depth=max_depth,
                          min_samples_leaf=min_samples_leaf,
                          l2_regularization=l2_regularization, max_bins=max_bins,
-                         categorical_features=categorical_features)
+                         categorical_features=categorical_features,
+                         monotonic_cst=monotonic_cst, interaction_cst=interaction_cst)
         self.loss = loss
         self.quantile = quantile
 

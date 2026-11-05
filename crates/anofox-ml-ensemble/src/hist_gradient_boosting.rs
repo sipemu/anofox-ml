@@ -31,6 +31,8 @@ macro_rules! hist_gb_config {
                     l2_regularization: 0.0,
                     max_bins: 255,
                     categorical_features: Vec::new(),
+                    monotonic_cst: Vec::new(),
+                    interaction_cst: None,
                     $($field: $value,)*
                 }
             }
@@ -72,6 +74,55 @@ macro_rules! hist_gb_config {
             pub fn with_categorical_features(mut self, features: Vec<usize>) -> Self {
                 self.categorical_features = features;
                 self
+            }
+
+            /// Per-feature monotonic constraint (sklearn's `monotonic_cst`):
+            /// `1` increasing, `-1` decreasing, `0` none; one entry per
+            /// feature (empty = none). Not allowed on categorical features
+            /// (nor, for the classifier, with more than two classes).
+            pub fn with_monotonic_cst(mut self, cst: Vec<i8>) -> Self {
+                self.monotonic_cst = cst;
+                self
+            }
+            /// Interaction constraints (sklearn's `interaction_cst`).
+            pub fn with_interaction_cst(mut self, cst: InteractionConstraints) -> Self {
+                self.interaction_cst = Some(cst);
+                self
+            }
+
+            /// Configure `engine` for `x`: validates the categorical
+            /// features and constraints against it as sklearn does.
+            fn apply_constraints<E: ConstrainedEngine>(
+                &self,
+                x: ArrayView2<f64>,
+                engine: &mut E,
+            ) -> Result<()> {
+                self.validate_categorical(x)?;
+                let p = x.ncols();
+                if !self.monotonic_cst.is_empty() {
+                    if self.monotonic_cst.len() != p {
+                        return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                            "monotonic_cst has {} entries but X has {p} features",
+                            self.monotonic_cst.len()
+                        )));
+                    }
+                    if self.monotonic_cst.iter().any(|c| !(-1..=1).contains(c)) {
+                        return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                            "monotonic_cst entries must be -1, 0 or 1".into(),
+                        ));
+                    }
+                    if self.categorical_features.iter().any(|&j| self.monotonic_cst[j] != 0) {
+                        return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                            "categorical features cannot have monotonic constraints".into(),
+                        ));
+                    }
+                }
+                let groups = match &self.interaction_cst {
+                    None => Vec::new(),
+                    Some(cst) => cst.groups(p)?,
+                };
+                engine.set_constraints(self.monotonic_cst.clone(), groups);
+                Ok(())
             }
 
             /// sklearn's checks of `categorical_features` against `x`.
@@ -129,6 +180,69 @@ macro_rules! hist_gb_config {
     };
 }
 
+/// sklearn's `interaction_cst`: which features may appear together in a
+/// branch of a tree.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum InteractionConstraints {
+    /// Groups of feature indices; a branch only splits on features of a
+    /// group that contains every feature split on above it. Features in no
+    /// group form one more group.
+    Groups(Vec<Vec<usize>>),
+    /// Every pair of features is a group (`"pairwise"`).
+    Pairwise,
+    /// Every feature is a group of its own (`"no_interactions"`).
+    NoInteractions,
+}
+
+impl InteractionConstraints {
+    /// The groups for `p` features, deduplicated and with the unlisted
+    /// features as a last group (sklearn's `_check_interaction_cst`).
+    fn groups(&self, p: usize) -> Result<Vec<Vec<usize>>> {
+        let mut groups: Vec<Vec<usize>> = match self {
+            Self::Groups(g) => g.clone(),
+            Self::Pairwise => (0..p)
+                .flat_map(|i| (i + 1..p).map(move |j| vec![i, j]))
+                .collect(),
+            Self::NoInteractions => (0..p).map(|i| vec![i]).collect(),
+        };
+        if let Some(&bad) = groups.iter().flatten().find(|&&j| j >= p) {
+            return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                "interaction constraint index {bad} out of range for {p} features"
+            )));
+        }
+        for g in &mut groups {
+            g.sort_unstable();
+            g.dedup();
+        }
+        let rest: Vec<usize> = (0..p)
+            .filter(|j| !groups.iter().any(|g| g.contains(j)))
+            .collect();
+        if !rest.is_empty() {
+            groups.push(rest);
+        }
+        Ok(groups)
+    }
+}
+
+/// Engines the facades configure with constraints.
+trait ConstrainedEngine {
+    fn set_constraints(&mut self, monotone: Vec<i8>, interactions: Vec<Vec<usize>>);
+}
+
+impl ConstrainedEngine for LgbmRegressor {
+    fn set_constraints(&mut self, monotone: Vec<i8>, interactions: Vec<Vec<usize>>) {
+        self.monotone_constraints = monotone;
+        self.interaction_cst = interactions;
+    }
+}
+
+impl ConstrainedEngine for LgbmClassifier {
+    fn set_constraints(&mut self, monotone: Vec<i8>, interactions: Vec<Vec<usize>>) {
+        self.monotone_constraints = monotone;
+        self.interaction_cst = interactions;
+    }
+}
+
 /// Loss of a [`HistGradientBoostingRegressor`] (sklearn's `loss`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum HistGradientBoostingLoss {
@@ -163,6 +277,12 @@ pub struct HistGradientBoostingRegressor {
     /// Column indices of categorical features.
     #[serde(default)]
     pub categorical_features: Vec<usize>,
+    /// Per-feature monotonic constraints (empty = none).
+    #[serde(default)]
+    pub monotonic_cst: Vec<i8>,
+    /// Interaction constraints.
+    #[serde(default)]
+    pub interaction_cst: Option<InteractionConstraints>,
     #[serde(default)]
     pub loss: HistGradientBoostingLoss,
     /// Quantile level in (0, 1) for `loss = Quantile`.
@@ -187,6 +307,12 @@ pub struct HistGradientBoostingClassifier {
     /// Column indices of categorical features.
     #[serde(default)]
     pub categorical_features: Vec<usize>,
+    /// Per-feature monotonic constraints (empty = none).
+    #[serde(default)]
+    pub monotonic_cst: Vec<i8>,
+    /// Interaction constraints.
+    #[serde(default)]
+    pub interaction_cst: Option<InteractionConstraints>,
 }
 
 fn default_leaves() -> Option<usize> {
@@ -332,9 +458,10 @@ impl FitWeighted<f64> for HistGradientBoostingRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
-        self.validate_categorical(x)?;
+        let mut engine = self.engine()?;
+        self.apply_constraints(x, &mut engine)?;
         Ok(FittedHistGradientBoostingRegressor {
-            inner: self.engine()?.fit_weighted_view(x, y, sample_weight)?,
+            inner: engine.fit_weighted_view(x, y, sample_weight)?,
         })
     }
 }
@@ -356,9 +483,20 @@ impl FitWeighted<f64> for HistGradientBoostingClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
-        self.validate_categorical(x)?;
+        let mut engine = self.engine()?;
+        self.apply_constraints(x, &mut engine)?;
+        if self.monotonic_cst.iter().any(|&c| c != 0) {
+            let mut classes: Vec<f64> = y.to_vec();
+            classes.sort_by(f64::total_cmp);
+            classes.dedup();
+            if classes.len() > 2 {
+                return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                    "monotonic constraints are not supported for multiclass classification".into(),
+                ));
+            }
+        }
         Ok(FittedHistGradientBoostingClassifier {
-            inner: self.engine()?.fit_weighted_view(x, y, sample_weight)?,
+            inner: engine.fit_weighted_view(x, y, sample_weight)?,
         })
     }
 }
@@ -513,6 +651,61 @@ mod tests {
         assert!(fit(vec![2], 255).is_err());
         assert!(fit(vec![1], 6).is_err());
         assert!(fit(vec![1], 7).is_ok());
+    }
+
+    #[test]
+    fn constraints_are_enforced_and_validated() {
+        let (x, _) = data();
+        // A target that decreases in feature 0 where the constraint says up.
+        let y = x.column(0).mapv(|v| -(v - 5.0).powi(2)) + x.column(1);
+        let m = HistGradientBoostingRegressor::new()
+            .with_n_estimators(30)
+            .with_monotonic_cst(vec![1, 0, 0])
+            .fit(&x, &y)
+            .unwrap();
+        let grid =
+            Array2::from_shape_fn((50, 3), |(i, j)| if j == 0 { i as f64 / 5.0 } else { 3.0 });
+        let p = m.predict(&grid).unwrap();
+        assert!(p.windows(2).into_iter().all(|w| w[1] >= w[0]));
+
+        // No interactions: every tree splits on a single feature, so the
+        // model is additive.
+        let m = HistGradientBoostingRegressor::new()
+            .with_n_estimators(30)
+            .with_interaction_cst(InteractionConstraints::NoInteractions)
+            .fit(&x, &y)
+            .unwrap();
+        let at = |a: f64, b: f64| m.predict(&array![[a, b, 1.0]]).unwrap()[0];
+        let interaction = at(2.0, 3.0) - at(2.0, 7.0) - at(8.0, 3.0) + at(8.0, 7.0);
+        assert!(interaction.abs() < 1e-9, "{interaction}");
+
+        let err = |m: HistGradientBoostingRegressor| m.fit(&x, &y).is_err();
+        let base = || HistGradientBoostingRegressor::new().with_n_estimators(2);
+        assert!(err(base().with_monotonic_cst(vec![1, 0])));
+        assert!(err(base().with_monotonic_cst(vec![2, 0, 0])));
+        assert!(err(base()
+            .with_monotonic_cst(vec![1, 0, 0])
+            .with_categorical_features(vec![0])));
+        assert!(err(base().with_interaction_cst(
+            InteractionConstraints::Groups(vec![vec![0, 3]])
+        )));
+        let multiclass = y.mapv(|v| (v.abs() as i64 % 3) as f64);
+        assert!(HistGradientBoostingClassifier::new()
+            .with_monotonic_cst(vec![1, 0, 0])
+            .fit(&x, &multiclass)
+            .is_err());
+    }
+
+    #[test]
+    fn interaction_groups_add_the_unlisted_features() {
+        let g = InteractionConstraints::Groups(vec![vec![2, 0, 2]])
+            .groups(4)
+            .unwrap();
+        assert_eq!(g, vec![vec![0, 2], vec![1, 3]]);
+        assert_eq!(
+            InteractionConstraints::Pairwise.groups(3).unwrap(),
+            vec![vec![0, 1], vec![0, 2], vec![1, 2]]
+        );
     }
 
     #[test]
