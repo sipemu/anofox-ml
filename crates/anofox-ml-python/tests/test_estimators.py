@@ -822,15 +822,18 @@ def test_catboost_matches_catboost():
     Xc[r.rand(300) < 0.05, 1] = np.nan
     yc = np.sin(Xc[:, 0]) + np.nan_to_num(Xc[:, 1]) + 0.2 * r.randn(300)
     ref = cb.CatBoostRegressor(**kw, **off).fit(Xc, yc)
-    ours = am.CatBoostRegressor(has_time=off.get("has_time", False), **kw).fit(Xc, yc)
+    ours = am.CatBoostRegressor(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw).fit(Xc, yc)
     np.testing.assert_allclose(ours.predict(Xc), ref.predict(Xc), rtol=1e-12, atol=1e-12)
     off_ordered = dict(off, boosting_type="Ordered")
     ref = cb.CatBoostRegressor(**kw, **off_ordered).fit(Xc, yc)
-    ours = am.CatBoostRegressor(has_time=off.get("has_time", False), **kw, boosting_type="Ordered").fit(Xc, yc)
+    ours = am.CatBoostRegressor(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw, boosting_type="Ordered").fit(Xc, yc)
     np.testing.assert_allclose(ours.predict(Xc), ref.predict(Xc), rtol=1e-12, atol=1e-12)
     labels = np.where(yc > 0, "pos", "neg")
     ref = cb.CatBoostClassifier(**kw, score_function="L2", **off).fit(Xc, labels)
-    ours = am.CatBoostClassifier(has_time=off.get("has_time", False), **kw, score_function="L2").fit(Xc, labels)
+    ours = am.CatBoostClassifier(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw, score_function="L2").fit(Xc, labels)
     np.testing.assert_allclose(ours.predict_proba(Xc), ref.predict_proba(Xc), rtol=1e-12,
                                atol=1e-12)
     np.testing.assert_array_equal(ours.predict(Xc), ref.predict(Xc).ravel())
@@ -853,14 +856,16 @@ def test_catboost_categorical_features_match_catboost():
     X[:, 0], X[:, 1], X[:, 2] = num, city, flag
     kw = dict(iterations=30, learning_rate=0.2, depth=4, cat_features=[1, 2])
     ref = cb.CatBoostClassifier(**kw, **off).fit(X, y)
-    ours = am.CatBoostClassifier(has_time=off.get("has_time", False), **kw).fit(X, y)
+    ours = am.CatBoostClassifier(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw).fit(X, y)
     X_new = X[:50].copy()
     X_new[0, 1] = "madrid"  # unseen
     np.testing.assert_allclose(ours.predict_proba(X_new), ref.predict_proba(X_new),
                                rtol=1e-12, atol=1e-12)
     yr = num + np.array([effect[c] for c in city]) + 0.3 * r.randn(n)
     ref = cb.CatBoostRegressor(**kw, **off).fit(X, yr)
-    ours = am.CatBoostRegressor(has_time=off.get("has_time", False), **kw).fit(X, yr)
+    ours = am.CatBoostRegressor(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw).fit(X, yr)
     np.testing.assert_allclose(ours.predict(X_new), ref.predict(X_new), rtol=1e-12, atol=1e-12)
 
 
@@ -878,7 +883,8 @@ def test_catboost_multiclass_matches_catboost():
     kw = dict(iterations=25, learning_rate=0.3, depth=4, cat_features=[2])
     for boosting in ("Plain", "Ordered"):
         ref = cb.CatBoostClassifier(**kw, boosting_type=boosting, **off).fit(X, y)
-        ours = am.CatBoostClassifier(has_time=off.get("has_time", False), **kw, boosting_type=boosting).fit(X, y)
+        ours = am.CatBoostClassifier(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw, boosting_type=boosting).fit(X, y)
         np.testing.assert_array_equal(ours.classes_, ref.classes_)
         np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
                                    atol=1e-12)
@@ -903,7 +909,8 @@ def test_catboost_ctr_combinations_match_catboost():
     kw = dict(iterations=40, learning_rate=0.2, depth=5, cat_features=[1, 2, 3],
               max_ctr_complexity=3)
     ref = cb.CatBoostClassifier(**kw, **off).fit(X, y)
-    ours = am.CatBoostClassifier(has_time=off.get("has_time", False), **kw).fit(X, y)
+    ours = am.CatBoostClassifier(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw).fit(X, y)
     np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
                                atol=1e-12)
 
@@ -920,7 +927,8 @@ def test_catboost_leaf_estimation_iterations_match_catboost():
                dict(iterations=30, learning_rate=0.2, depth=4, leaf_estimation_iterations=5,
                     boosting_type="Ordered")):
         ref = cb.CatBoostClassifier(**kw, **off).fit(X, y)
-        ours = am.CatBoostClassifier(has_time=off.get("has_time", False), **kw).fit(X, y)
+        ours = am.CatBoostClassifier(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw).fit(X, y)
         np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
                                    atol=1e-12)
 
@@ -938,5 +946,25 @@ def test_catboost_permutations_match_catboost():
     for kw in (dict(boosting_type="Plain", random_seed=3), dict(boosting_type="Ordered")):
         kw.update(iterations=30, learning_rate=0.2, depth=4, cat_features=[2])
         ref = cb.CatBoostRegressor(**kw, **off).fit(X, y)
-        ours = am.CatBoostRegressor(has_time=off.get("has_time", False), **kw).fit(X, y)
+        ours = am.CatBoostRegressor(has_time=off.get("has_time", False),
+                              random_strength=off.get("random_strength", 1.0), **kw).fit(X, y)
         np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-12)
+
+
+def test_catboost_score_noise_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    off = dict(bootstrap_type="No", thread_count=1, verbose=0, allow_writing_files=False)
+    r = np.random.RandomState(13)
+    n = 500
+    X = np.empty((n, 4), dtype=object)
+    X[:, 0], X[:, 1] = r.randn(n), r.randn(n)
+    X[:, 2] = r.choice(list("abcdefg"), size=n)
+    X[:, 3] = r.choice(list("uvwxyz"), size=n)
+    y = (X[:, 0].astype(float) + ((X[:, 2] == "a") ^ (X[:, 3] == "u")) + r.logistic(size=n)
+         > 0.5).astype(int)
+    kw = dict(iterations=40, learning_rate=0.2, depth=5, cat_features=[2, 3],
+              max_ctr_complexity=3, random_strength=1.0)
+    ref = cb.CatBoostClassifier(**kw, **off).fit(X, y)
+    ours = am.CatBoostClassifier(**kw).fit(X, y)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
+                               atol=1e-12)
