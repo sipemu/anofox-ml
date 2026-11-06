@@ -254,6 +254,30 @@ def generate():
     add_cat("noise_combo_seed11", dict(combo, depth=6, random_seed=11, **noise), y_cat_reg,
             kind="regressor")
     add_cat("noise_leaf10_combo", dict(combo, leaf_estimation_iterations=10, **noise), y_cat)
+
+    # Bootstrap (CatBoost's default MVS with subsample 0.8; Bayesian for
+    # MultiClass), drawn per tree: it weights and picks the scored rows.
+    def boot(**kw):
+        return dict(noise, **kw)
+    add("boot_mvs_rmse", "regressor", dict(base, **boot(bootstrap_type="MVS")), X, y_reg)
+    add("boot_mvs_logloss", "classifier", dict(base, **boot(bootstrap_type="MVS")), X, y_bin)
+    add("boot_mvs_ordered", "regressor", dict(ordered, **boot(bootstrap_type="MVS")), X, y_reg)
+    add("boot_mvs_half_reg", "regressor",
+        dict(base, **boot(bootstrap_type="MVS", subsample=0.5, mvs_reg=0.1)), X, y_reg)
+    add("boot_bayesian", "regressor", dict(base, **boot(bootstrap_type="Bayesian")), X, y_reg)
+    add("boot_bayesian_t3", "classifier",
+        dict(base, **boot(bootstrap_type="Bayesian", bagging_temperature=3.0)), X, y_bin)
+    add("boot_bernoulli", "regressor",
+        dict(base, **boot(bootstrap_type="Bernoulli", subsample=0.7)), X, y_reg)
+    add("boot_bernoulli_ordered", "classifier",
+        dict(ordered, **boot(bootstrap_type="Bernoulli")), X, y_bin)
+    add("boot_mc_default", "classifier", dict(mc, **boot(bootstrap_type="Bayesian")), X,
+        y_mc.astype(float))
+    add("boot_weighted", "regressor", dict(base, **boot(bootstrap_type="MVS")), X, y_reg,
+        sw=weights)
+    add_cat("boot_combo", dict(combo, **boot(bootstrap_type="MVS")), y_cat)
+    add_cat("boot_ordered_combo", dict(combo, boosting_type="Ordered",
+                                       **boot(bootstrap_type="MVS")), y_cat)
     return out
 
 

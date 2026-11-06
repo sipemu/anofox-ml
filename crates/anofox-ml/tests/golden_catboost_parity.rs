@@ -6,8 +6,8 @@ mod common;
 use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
-    CatBoostBacktracking, CatBoostBoostingType, CatBoostClassifier, CatBoostLeafEstimation,
-    CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap, CatBoostClassifier,
+    CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -85,6 +85,21 @@ macro_rules! configure {
         // The generator's common settings (not stored) include `has_time`.
         m = m.with_has_time(p["has_time"].as_bool().unwrap_or(true));
         m = m.with_random_strength(p["random_strength"].as_f64().unwrap_or(0.0));
+        m = m.with_bootstrap_type(match p["bootstrap_type"].as_str().unwrap_or("No") {
+            "Bayesian" => CatBoostBootstrap::Bayesian,
+            "Bernoulli" => CatBoostBootstrap::Bernoulli,
+            "MVS" => CatBoostBootstrap::Mvs,
+            _ => CatBoostBootstrap::No,
+        });
+        if let Some(v) = p["subsample"].as_f64() {
+            m = m.with_subsample(v);
+        }
+        if let Some(v) = p["bagging_temperature"].as_f64() {
+            m = m.with_bagging_temperature(v);
+        }
+        if let Some(v) = p["mvs_reg"].as_f64() {
+            m = m.with_mvs_reg(v);
+        }
         if let Some(n) = p["random_seed"].as_u64() {
             m = m.with_random_seed(n);
         }
