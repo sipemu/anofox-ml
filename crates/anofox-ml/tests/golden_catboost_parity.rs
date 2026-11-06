@@ -82,6 +82,9 @@ macro_rules! configure {
         if let Some(f) = p["fold_len_multiplier"].as_f64() {
             m = m.with_fold_len_multiplier(f);
         }
+        if let Some(n) = p["max_ctr_complexity"].as_u64() {
+            m = m.with_max_ctr_complexity(n as usize);
+        }
         if let Some(n) = p["one_hot_max_size"].as_u64() {
             m = m.with_one_hot_max_size(n as usize);
         }
