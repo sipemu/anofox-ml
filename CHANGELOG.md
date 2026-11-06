@@ -6,6 +6,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LGBM engine: DART (#127)
+
+- `BoostingType::Dart` with `DartParams` (`drop_rate`, `max_drop`,
+  `skip_drop`, `uniform_drop`, `xgboost_dart_mode`, `drop_seed`; LightGBM's
+  names and defaults) via `with_dart(...)` on `LgbmRegressor` /
+  `LgbmClassifier`: LightGBM's `dart.hpp` with its LCG for the dropping,
+  weight-proportional or uniform drops, both normalisations, and the
+  initial score carried by the first tree. Matches LightGBM 4.7.0 bit for
+  bit (regression objectives incl. L1 refits, binary, multiclass). Not
+  combined with early stopping or `init_score` (as in LightGBM, where DART
+  has no early stopping). Python: `boosting_type="dart"` and the DART
+  parameters on `LGBMRegressor` / `LGBMClassifier`.
+
 ### LGBM engine: LightGBM 4.7 parity (#127)
 
 - `LgbmRegressor` / `LgbmClassifier` now reproduce LightGBM 4.7.0 to
