@@ -1079,6 +1079,41 @@ fn weighted_target_average(target: &[f64], weights: &[f64]) -> f32 {
     (sum / sum_w) as f32
 }
 
+/// The class (0 / 1) of every regression target for the `Borders` CTRs:
+/// CatBoost's single MinEntropy target border (`SelectBorders` with one
+/// border): the split of the sorted distinct targets minimizing
+/// `Σ w·ln(w + 1e-8)` over the two sides, at the float32 midpoint.
+fn target_classes(target: &[f64]) -> Vec<u8> {
+    let mut values: Vec<f32> = target.iter().map(|&t| t as f32).collect();
+    values.sort_by(f32::total_cmp);
+    let mut distinct: Vec<(f32, f64)> = Vec::new();
+    for v in values {
+        match distinct.last_mut() {
+            Some((last, c)) if *last == v => *c += 1.0,
+            _ => distinct.push((v, 1.0)),
+        }
+    }
+    let total: f64 = distinct.iter().map(|d| d.1).sum();
+    let penalty = |w: f64| w * (w + 1e-8).ln();
+    let mut best: Option<(f64, usize)> = None;
+    let mut left = 0.0;
+    for k in 1..distinct.len() {
+        left += distinct[k - 1].1;
+        let cost = penalty(left) + penalty(total - left);
+        if best.is_none_or(|(c, _)| cost < c) {
+            best = Some((cost, k));
+        }
+    }
+    let border = match best {
+        Some((_, k)) => (distinct[k - 1].0 + distinct[k].0) * 0.5f32,
+        None => distinct.first().map_or(0.0, |d| d.0),
+    };
+    target
+        .iter()
+        .map(|&t| u8::from((t as f32) > border))
+        .collect()
+}
+
 /// CatBoost stores targets and weights as float32.
 fn f32_values(v: ArrayView1<f64>) -> Vec<f64> {
     v.iter().map(|&t| f64::from(t as f32)).collect()
@@ -1270,21 +1305,13 @@ impl FitWeighted<f64> for CatBoostRegressor {
         } else {
             0.0
         };
+        let classes_of = target_classes(&target);
         let cat = CategoricalParams {
             features: &self.cat_features,
             one_hot_max_size: self.one_hot_max_size,
-            classes: None,
+            classes: Some(&classes_of),
         };
-        let (q, ctrs) = quantize(x, self.border_count, cat).map_err(|e| match e {
-            RustMlError::InvalidParameter(m) if m.contains("binary target") => {
-                RustMlError::InvalidParameter(
-                    "CatBoostRegressor: categorical features with more than one_hot_max_size \
-                     categories (CTRs) are not supported yet"
-                        .into(),
-                )
-            }
-            other => other,
-        })?;
+        let (q, ctrs) = quantize(x, self.border_count, cat)?;
         let trees = boost(&q, &target, &weights, bias, Loss::Rmse, p);
         Ok(FittedCatBoostRegressor {
             trees,

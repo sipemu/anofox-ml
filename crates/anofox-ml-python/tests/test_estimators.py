@@ -858,5 +858,7 @@ def test_catboost_categorical_features_match_catboost():
     X_new[0, 1] = "madrid"  # unseen
     np.testing.assert_allclose(ours.predict_proba(X_new), ref.predict_proba(X_new),
                                rtol=1e-12, atol=1e-12)
-    with pytest.raises(ValueError):
-        am.CatBoostRegressor(iterations=5, cat_features=[1]).fit(X, y.astype(float))
+    yr = num + np.array([effect[c] for c in city]) + 0.3 * r.randn(n)
+    ref = cb.CatBoostRegressor(**kw, **off).fit(X, yr)
+    ours = am.CatBoostRegressor(**kw).fit(X, yr)
+    np.testing.assert_allclose(ours.predict(X_new), ref.predict(X_new), rtol=1e-12, atol=1e-12)

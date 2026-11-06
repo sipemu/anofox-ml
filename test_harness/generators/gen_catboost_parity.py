@@ -138,6 +138,11 @@ def generate():
     add_cat("cat_logloss_no_onehot", dict(cat, one_hot_max_size=1), y_cat)
     add_cat("cat_only", dict(cat, cat_features=[1, 3, 4]), y_cat)
     add_cat("ordered_cat_logloss", dict(cat, boosting_type="Ordered"), y_cat)
+    y_cat_reg = eta * 0.5 + effect + rng.normal(scale=0.3, size=n)
+    add_cat("cat_rmse", cat, y_cat_reg, kind="regressor")
+    add_cat("cat_rmse_ordered_l2", dict(cat, boosting_type="Ordered", score_function="L2"),
+            y_cat_reg, kind="regressor")
+    add_cat("cat_rmse_weighted", cat, y_cat_reg, kind="regressor", sw=weights)
     return out
 
 
