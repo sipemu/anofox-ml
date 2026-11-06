@@ -470,8 +470,15 @@ class _Lgbm(BaseEstimator):
     def __init__(self, boosting_type="gbdt", num_leaves=31, max_depth=-1, learning_rate=0.1,
                  n_estimators=100, min_split_gain=0.0, min_child_weight=1e-3,
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
-                 max_bin=255, random_state=None):
+                 max_bin=255, random_state=None, drop_rate=0.1, max_drop=50, skip_drop=0.5,
+                 uniform_drop=False, xgboost_dart_mode=False, drop_seed=4):
         self.boosting_type = boosting_type
+        self.drop_rate = drop_rate
+        self.max_drop = max_drop
+        self.skip_drop = skip_drop
+        self.uniform_drop = uniform_drop
+        self.xgboost_dart_mode = xgboost_dart_mode
+        self.drop_seed = drop_seed
         self.num_leaves = num_leaves
         self.max_depth = max_depth
         self.learning_rate = learning_rate
@@ -486,8 +493,14 @@ class _Lgbm(BaseEstimator):
         self.random_state = random_state
 
     def _rust_params(self, X, y):
-        return {"boosting_type": _choice(self.boosting_type, {"gbdt": "Gbdt", "goss": "Goss"},
+        return {"boosting_type": _choice(self.boosting_type,
+                                         {"gbdt": "Gbdt", "goss": "Goss", "dart": "Dart"},
                                          "boosting_type"),
+                "dart": {"drop_rate": float(self.drop_rate), "max_drop": int(self.max_drop),
+                         "skip_drop": float(self.skip_drop),
+                         "uniform_drop": bool(self.uniform_drop),
+                         "xgboost_dart_mode": bool(self.xgboost_dart_mode),
+                         "drop_seed": int(self.drop_seed)},
                 "num_leaves": self.num_leaves,
                 "max_depth": None if self.max_depth is None or self.max_depth < 0
                 else self.max_depth,
@@ -506,10 +519,13 @@ class LGBMClassifier(ClassifierMixin, _Lgbm):
     def __init__(self, boosting_type="gbdt", num_leaves=31, max_depth=-1, learning_rate=0.1,
                  n_estimators=100, min_split_gain=0.0, min_child_weight=1e-3,
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
-                 max_bin=255, class_weight=None, random_state=None):
+                 max_bin=255, class_weight=None, random_state=None, drop_rate=0.1, max_drop=50,
+                 skip_drop=0.5, uniform_drop=False, xgboost_dart_mode=False, drop_seed=4):
         super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
                          min_split_gain, min_child_weight, min_child_samples,
-                         colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state)
+                         colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
+                         drop_rate, max_drop, skip_drop, uniform_drop, xgboost_dart_mode,
+                         drop_seed)
         self.class_weight = class_weight
 
     def _rust_params(self, X, y):

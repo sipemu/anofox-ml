@@ -83,6 +83,19 @@ def generate():
     add("multiclass", "classifier", dict(base), y_multi)
     add("multiclass_weighted", "classifier", dict(base, min_child_samples=5), y_multi,
         sw=weights)
+    # DART (its dropping uses LightGBM's own LCG, seeded by drop_seed).
+    dart = dict(base, boosting_type="dart", n_estimators=30)
+    add("dart_regression", "regressor", dart, y_reg)
+    add("dart_heavy", "regressor", dict(dart, drop_rate=0.4, skip_drop=0.1, drop_seed=7), y_reg)
+    add("dart_uniform", "regressor", dict(dart, uniform_drop=True, drop_rate=0.3), y_reg)
+    add("dart_xgboost", "regressor", dict(dart, xgboost_dart_mode=True, drop_rate=0.3), y_reg)
+    add("dart_max_drop", "regressor", dict(dart, max_drop=2, drop_rate=0.5, skip_drop=0.0), y_reg)
+    add("dart_l1_weighted", "regressor", dict(dart, objective="regression_l1", drop_rate=0.3),
+        targets["regression_l1"], sw=weights)
+    add("dart_poisson", "regressor", dict(dart, objective="poisson", drop_rate=0.3),
+        targets["poisson"])
+    add("dart_binary", "classifier", dict(dart, drop_rate=0.3), y_bin)
+    add("dart_multiclass", "classifier", dict(dart, drop_rate=0.3), y_multi)
     return out
 
 

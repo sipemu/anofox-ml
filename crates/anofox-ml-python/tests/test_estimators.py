@@ -513,6 +513,24 @@ def test_hist_gradient_boosting_max_features_class_weight_match_sklearn():
         am.HistGradientBoostingRegressor(max_features=0.0).fit(X, y)
 
 
+def test_lgbm_dart_matches_lightgbm():
+    lgb = pytest.importorskip("lightgbm")
+    rs = np.random.RandomState(12)
+    X = rs.normal(size=(300, 3))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] + rs.normal(scale=0.3, size=300)
+    kw = dict(boosting_type="dart", n_estimators=30, learning_rate=0.2, num_leaves=8,
+              drop_rate=0.3, skip_drop=0.2, drop_seed=9)
+    ref = lgb.LGBMRegressor(**kw, deterministic=True, force_row_wise=True, verbose=-1,
+                            n_jobs=1).fit(X, y)
+    ours = am.LGBMRegressor(**kw).fit(X, y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-8)
+    yc = (y > 0).astype(int)
+    ref = lgb.LGBMClassifier(**kw, deterministic=True, force_row_wise=True, verbose=-1,
+                             n_jobs=1).fit(X, yc)
+    ours = am.LGBMClassifier(**kw).fit(X, yc)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-8)
+
+
 def test_hist_gradient_boosting_log_link_losses_match_sklearn():
     from sklearn.ensemble import HistGradientBoostingRegressor as SkHGB
 

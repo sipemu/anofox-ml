@@ -4,7 +4,7 @@
 mod common;
 
 use anofox_ml::prelude::*;
-use anofox_ml_ensemble::{LgbmClassWeight, LgbmFitOptions, LgbmObjective};
+use anofox_ml_ensemble::{DartParams, LgbmClassWeight, LgbmFitOptions, LgbmObjective};
 use common::{json_to_array1, load_golden_data};
 use ndarray::{Array1, Array2};
 use serde_json::Value;
@@ -49,6 +49,19 @@ macro_rules! configure {
         }
         if let Some(v) = p["reg_alpha"].as_f64() {
             m = m.with_reg_alpha(v);
+        }
+        if p["boosting_type"] == "dart" {
+            let d = DartParams::default();
+            m = m.with_dart(DartParams {
+                drop_rate: p["drop_rate"].as_f64().unwrap_or(d.drop_rate),
+                max_drop: p["max_drop"].as_i64().unwrap_or(d.max_drop),
+                skip_drop: p["skip_drop"].as_f64().unwrap_or(d.skip_drop),
+                uniform_drop: p["uniform_drop"].as_bool().unwrap_or(d.uniform_drop),
+                xgboost_dart_mode: p["xgboost_dart_mode"]
+                    .as_bool()
+                    .unwrap_or(d.xgboost_dart_mode),
+                drop_seed: p["drop_seed"].as_u64().map_or(d.drop_seed, |v| v as u32),
+            });
         }
         if let Some(c) = p["monotone_constraints"].as_array() {
             m = m.with_monotone_constraints(c.iter().map(|v| v.as_i64().unwrap() as i8).collect());

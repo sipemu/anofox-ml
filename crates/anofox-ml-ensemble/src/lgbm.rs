@@ -12,7 +12,7 @@
 //! - **Custom objectives** (user-provided gradient/hessian)
 //! - **Feature importance** (split count and total gain)
 //!
-//! Not included: EFB, DART, distributed training.
+//! Not included: EFB, distributed training.
 
 use crate::hist_gradient_boosting::EarlyStoppingScoring;
 use anofox_ml_core::numpy_random::Generator;
@@ -1329,6 +1329,28 @@ fn goes_left(
 }
 
 impl TreeNode {
+    /// Multiply every leaf value by `f` (LightGBM's `Tree::Shrinkage`).
+    fn scale(&mut self, f: f64) {
+        match self {
+            TreeNode::Leaf { value } => *value *= f,
+            TreeNode::Internal { left, right, .. } => {
+                left.scale(f);
+                right.scale(f);
+            }
+        }
+    }
+
+    /// Add `b` to every leaf value (LightGBM's `Tree::AddBias`).
+    fn add_bias(&mut self, b: f64) {
+        match self {
+            TreeNode::Leaf { value } => *value += b,
+            TreeNode::Internal { left, right, .. } => {
+                left.add_bias(b);
+                right.add_bias(b);
+            }
+        }
+    }
+
     /// Prediction for one binned row.
     fn predict_bins(&self, bins: &[u8]) -> f64 {
         let mut node = self;
@@ -1739,6 +1761,154 @@ pub enum BoostingType {
     Gbdt,
     /// Gradient-based One-Side Sampling.
     Goss,
+    /// Dropouts meet Multiple Additive Regression Trees (LightGBM's
+    /// `boosting_type="dart"`, parameters in `dart`).
+    Dart,
+}
+
+/// LightGBM's DART parameters (names and defaults of LightGBM).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DartParams {
+    /// Share of the earlier trees dropped per iteration (default 0.1).
+    pub drop_rate: f64,
+    /// At most this many trees dropped per iteration; `<= 0` = no limit
+    /// (default 50).
+    pub max_drop: i64,
+    /// Probability of dropping nothing in an iteration (default 0.5).
+    pub skip_drop: f64,
+    /// Drop every tree with the same probability instead of in proportion
+    /// to its weight (default false).
+    pub uniform_drop: bool,
+    /// XGBoost's normalisation (default false).
+    pub xgboost_dart_mode: bool,
+    /// Seed of the dropping (default 4).
+    pub drop_seed: u32,
+}
+
+impl Default for DartParams {
+    fn default() -> Self {
+        Self {
+            drop_rate: 0.1,
+            max_drop: 50,
+            skip_drop: 0.5,
+            uniform_drop: false,
+            xgboost_dart_mode: false,
+            drop_seed: 4,
+        }
+    }
+}
+
+/// LightGBM's `Random` (utils/random.h): the LCG behind DART's dropping.
+#[derive(Debug, Clone)]
+struct LgbmRandom(u32);
+
+impl LgbmRandom {
+    /// `NextFloat`: a float in [0, 1).
+    fn next_float(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(214_013).wrapping_add(2_531_011);
+        ((self.0 >> 16) & 0x7fff) as f32 / 32768.0
+    }
+}
+
+/// DART's book-keeping (LightGBM's `dart.hpp`). Tree leaves carry their
+/// current weight, scaled in LightGBM's order of operations.
+struct DartState {
+    p: DartParams,
+    learning_rate: f64,
+    rng: LgbmRandom,
+    tree_weight: Vec<f64>,
+    sum_weight: f64,
+}
+
+impl DartState {
+    fn new(p: DartParams, learning_rate: f64) -> Self {
+        Self {
+            p,
+            learning_rate,
+            rng: LgbmRandom(p.drop_seed),
+            tree_weight: Vec::new(),
+            sum_weight: 0.0,
+        }
+    }
+
+    /// `DroppingTrees` over the `n_iters` earlier iterations: the dropped
+    /// iterations and the shrinkage of the next tree.
+    fn drop_trees(&mut self, n_iters: usize) -> (Vec<usize>, f64) {
+        let mut drops = Vec::new();
+        let max_drop = usize::try_from(self.p.max_drop).ok().filter(|&m| m > 0);
+        let is_skip = f64::from(self.rng.next_float()) < self.p.skip_drop;
+        if !is_skip {
+            let mut drop_rate = self.p.drop_rate;
+            if !self.p.uniform_drop {
+                let inv_average_weight = self.tree_weight.len() as f64 / self.sum_weight;
+                if let Some(m) = max_drop {
+                    drop_rate = drop_rate.min(m as f64 * inv_average_weight / self.sum_weight);
+                }
+                for i in 0..n_iters {
+                    let r = f64::from(self.rng.next_float());
+                    if r < drop_rate * self.tree_weight[i] * inv_average_weight {
+                        drops.push(i);
+                        if max_drop.is_some_and(|m| drops.len() >= m) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                if let Some(m) = max_drop {
+                    drop_rate = drop_rate.min(m as f64 / n_iters as f64);
+                }
+                for i in 0..n_iters {
+                    if f64::from(self.rng.next_float()) < drop_rate {
+                        drops.push(i);
+                        if max_drop.is_some_and(|m| drops.len() >= m) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let k = drops.len() as f64;
+        let shrinkage = if !self.p.xgboost_dart_mode {
+            self.learning_rate / (1.0 + k)
+        } else if drops.is_empty() {
+            self.learning_rate
+        } else {
+            self.learning_rate / (self.learning_rate + k)
+        };
+        (drops, shrinkage)
+    }
+
+    /// `Normalize`: the factors the dropped trees are scaled by (for the
+    /// validation scores, then for the training scores), updating the
+    /// tree weights.
+    fn normalize(&mut self, drops: &[usize], shrinkage: f64) -> (f64, f64) {
+        let k = drops.len() as f64;
+        let (lr, xgb) = (self.learning_rate, self.p.xgboost_dart_mode);
+        if !self.p.uniform_drop {
+            for &i in drops {
+                if xgb {
+                    self.sum_weight -= self.tree_weight[i] * (1.0 / (k + lr));
+                    self.tree_weight[i] *= k / (k + lr);
+                } else {
+                    self.sum_weight -= self.tree_weight[i] * (1.0 / (k + 1.0));
+                    self.tree_weight[i] *= k / (k + 1.0);
+                }
+            }
+        }
+        if xgb {
+            (shrinkage, -k / lr)
+        } else {
+            (1.0 / (k + 1.0), -k)
+        }
+    }
+
+    /// After a new tree: record its weight (non-uniform dropping).
+    fn push(&mut self, shrinkage: f64) {
+        if !self.p.uniform_drop {
+            self.tree_weight.push(shrinkage);
+            self.sum_weight += shrinkage;
+        }
+    }
 }
 
 impl Default for BoostingType {
@@ -1872,6 +2042,9 @@ pub struct LgbmRegressor {
     #[serde(default)]
     pub binning: BinningMethod,
     pub boosting_type: BoostingType,
+    /// DART parameters (with `boosting_type = Dart`).
+    #[serde(default)]
+    pub dart: DartParams,
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
     pub objective: LgbmObjective,
@@ -1928,6 +2101,7 @@ impl LgbmRegressor {
             min_data_in_bin: 3,
             binning: BinningMethod::LightGbm,
             boosting_type: BoostingType::Gbdt,
+            dart: DartParams::default(),
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
             objective: LgbmObjective::Regression,
@@ -2006,6 +2180,12 @@ impl LgbmRegressor {
     }
     pub fn with_boosting_type(mut self, b: BoostingType) -> Self {
         self.boosting_type = b;
+        self
+    }
+    /// DART (sets `boosting_type = Dart`).
+    pub fn with_dart(mut self, p: DartParams) -> Self {
+        self.boosting_type = BoostingType::Dart;
+        self.dart = p;
         self
     }
     pub fn with_goss_rates(mut self, top: f64, other: f64) -> Self {
@@ -2875,7 +3055,30 @@ impl LgbmRegressor {
         let mut best_feature_split_count = feature_split_count.clone();
         let mut stale_rounds = 0usize;
 
+        if self.boosting_type == BoostingType::Dart
+            && (opts.init_score.is_some()
+                || tracker.is_some()
+                || self.early_stopping_rounds.is_some())
+        {
+            return Err(RustMlError::InvalidParameter(
+                "DART supports neither init_score nor early stopping".into(),
+            ));
+        }
+        let mut dart = (self.boosting_type == BoostingType::Dart)
+            .then(|| DartState::new(self.dart, self.learning_rate));
+
         for iter in 0..self.n_estimators {
+            // DART: drop earlier trees before the gradients are computed.
+            let dart_step = dart.as_mut().map(|d| {
+                let (drops, shrinkage) = d.drop_trees(trees.len());
+                for &k in &drops {
+                    trees[k].scale(-1.0);
+                    for (i, p) in preds.iter_mut().enumerate() {
+                        *p += trees[k].predict_bins(row_of(&binned_rows, i));
+                    }
+                }
+                (drops, shrinkage)
+            });
             let (mut gradients, mut hessians) = compute_regression_gradients(&y_vec, &preds, self);
 
             // Apply sample weights (multiply into gradients and hessians)
@@ -2891,7 +3094,7 @@ impl LgbmRegressor {
 
             // Row selection: GBDT = bagging, GOSS = top-k + sampled rest w/ amplification
             let row_indices: Vec<usize> = match self.boosting_type {
-                BoostingType::Gbdt => sample_rows(n, self.subsample, &mut rng),
+                BoostingType::Gbdt | BoostingType::Dart => sample_rows(n, self.subsample, &mut rng),
                 BoostingType::Goss => {
                     let all: Vec<usize> = (0..n).collect();
                     let (selected, amp_weights) = goss_sample(
@@ -2936,6 +3139,30 @@ impl LgbmRegressor {
                     alpha,
                     self.sklearn_compat,
                 );
+            }
+
+            if let (Some(d), Some((drops, shrinkage))) = (dart.as_mut(), dart_step) {
+                // The tree's leaves carry its weight; the first tree also
+                // carries the initial score (LightGBM's `AddBias`).
+                tree.scale(shrinkage);
+                for (i, p) in preds.iter_mut().enumerate() {
+                    *p += tree.predict_bins(row_of(&binned_rows, i));
+                }
+                if iter == 0 && baseline.abs() > LGBM_EPSILON {
+                    tree.add_bias(baseline);
+                }
+                let (f_valid, f_train) = d.normalize(&drops, shrinkage);
+                for &k in &drops {
+                    trees[k].scale(f_valid);
+                    trees[k].scale(f_train);
+                    for (i, p) in preds.iter_mut().enumerate() {
+                        *p += trees[k].predict_bins(row_of(&binned_rows, i));
+                    }
+                }
+                d.push(shrinkage);
+                trees.push(tree);
+                best_iteration = iter + 1;
+                continue;
             }
 
             // Update predictions (on ALL rows, not just sampled)
@@ -3013,11 +3240,17 @@ impl LgbmRegressor {
             feature_split_count = best_feature_split_count;
         }
 
+        // DART's leaves carry the tree weights and the initial score.
+        let (baseline, learning_rate) = if dart.is_some() {
+            (0.0, 1.0)
+        } else {
+            (baseline, self.learning_rate)
+        };
         let fitted = FittedLgbmRegressor {
             trees,
             bins,
             baseline,
-            learning_rate: self.learning_rate,
+            learning_rate,
             n_features: p,
             feature_gain,
             feature_split_count,
@@ -3193,6 +3426,9 @@ pub struct LgbmClassifier {
     #[serde(default)]
     pub binning: BinningMethod,
     pub boosting_type: BoostingType,
+    /// DART parameters (with `boosting_type = Dart`).
+    #[serde(default)]
+    pub dart: DartParams,
     pub goss_top_rate: f64,
     pub goss_other_rate: f64,
     pub categorical_features: Vec<usize>,
@@ -3246,6 +3482,7 @@ impl LgbmClassifier {
             min_data_in_bin: 3,
             binning: BinningMethod::LightGbm,
             boosting_type: BoostingType::Gbdt,
+            dart: DartParams::default(),
             goss_top_rate: 0.2,
             goss_other_rate: 0.1,
             categorical_features: Vec::new(),
@@ -3318,6 +3555,12 @@ impl LgbmClassifier {
     }
     pub fn with_boosting_type(mut self, b: BoostingType) -> Self {
         self.boosting_type = b;
+        self
+    }
+    /// DART (sets `boosting_type = Dart`).
+    pub fn with_dart(mut self, p: DartParams) -> Self {
+        self.boosting_type = BoostingType::Dart;
+        self.dart = p;
         self
     }
     pub fn with_categorical_features(mut self, feats: Vec<usize>) -> Self {
@@ -3623,6 +3866,17 @@ impl LgbmClassifier {
         let train_w = |i: usize| effective_weights[i];
 
         let mut rng = StdRng::seed_from_u64(self.seed);
+        if self.boosting_type == BoostingType::Dart
+            && (opts.init_score.is_some()
+                || tracker.is_some()
+                || self.early_stopping_rounds.is_some())
+        {
+            return Err(RustMlError::InvalidParameter(
+                "DART supports neither init_score nor early stopping".into(),
+            ));
+        }
+        let mut dart = (self.boosting_type == BoostingType::Dart)
+            .then(|| DartState::new(self.dart, self.learning_rate));
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
         let params = LgbmParams {
@@ -3651,7 +3905,7 @@ impl LgbmClassifier {
             } else {
                 vec![baseline; n]
             };
-            let mut trees = Vec::with_capacity(self.n_estimators);
+            let mut trees: Vec<TreeNode> = Vec::with_capacity(self.n_estimators);
             let mut eval_raw: Option<Vec<f64>> =
                 eval_binned.as_ref().map(|eb| vec![baseline; eb.nrows()]);
             let binary_losses = |raw: &[f64], eval_raw: Option<&Vec<f64>>| {
@@ -3687,6 +3941,17 @@ impl LgbmClassifier {
             }
 
             for iter in 0..self.n_estimators {
+                // DART: drop earlier trees before the gradients are computed.
+                let dart_step = dart.as_mut().map(|d| {
+                    let (drops, shrinkage) = d.drop_trees(trees.len());
+                    for &k in &drops {
+                        trees[k].scale(-1.0);
+                        for (i, r) in raw.iter_mut().enumerate() {
+                            *r += trees[k].predict_bins(row_of(&binned_rows, i));
+                        }
+                    }
+                    (drops, shrinkage)
+                });
                 let mut gradients: Vec<f64> = (0..n)
                     .map(|i| {
                         let pr = 1.0 / (1.0 + (-raw[i]).exp());
@@ -3704,7 +3969,9 @@ impl LgbmClassifier {
                 round_to_f32(&mut hessians);
 
                 let row_indices: Vec<usize> = match self.boosting_type {
-                    BoostingType::Gbdt => sample_rows(n, self.subsample, &mut rng),
+                    BoostingType::Gbdt | BoostingType::Dart => {
+                        sample_rows(n, self.subsample, &mut rng)
+                    }
                     BoostingType::Goss => {
                         let all: Vec<usize> = (0..n).collect();
                         let (selected, amp) = goss_sample(
@@ -3736,6 +4003,27 @@ impl LgbmClassifier {
                     &mut feature_rng,
                 );
 
+                if let (Some(d), Some((drops, shrinkage))) = (dart.as_mut(), dart_step) {
+                    let mut tree = tree;
+                    tree.scale(shrinkage);
+                    for (i, r) in raw.iter_mut().enumerate() {
+                        *r += tree.predict_bins(row_of(&binned_rows, i));
+                    }
+                    if iter == 0 && baseline.abs() > LGBM_EPSILON {
+                        tree.add_bias(baseline);
+                    }
+                    let (f_valid, f_train) = d.normalize(&drops, shrinkage);
+                    for &k in &drops {
+                        trees[k].scale(f_valid);
+                        trees[k].scale(f_train);
+                        for (i, r) in raw.iter_mut().enumerate() {
+                            *r += trees[k].predict_bins(row_of(&binned_rows, i));
+                        }
+                    }
+                    d.push(shrinkage);
+                    trees.push(tree);
+                    continue;
+                }
                 for i in 0..n {
                     raw[i] += self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
                 }
@@ -3787,12 +4075,18 @@ impl LgbmClassifier {
                 es.finish(trees.len(), &mut feature_gain, &mut feature_split_count);
             trees.truncate(keep);
 
+            // DART's leaves carry the tree weights and the initial score.
+            let (baseline, learning_rate) = if dart.is_some() {
+                (0.0, 1.0)
+            } else {
+                (baseline, self.learning_rate)
+            };
             let fitted = FittedLgbmClassifier {
                 tree_sets: vec![trees],
                 bins,
                 baselines: vec![baseline],
                 classes,
-                learning_rate: self.learning_rate,
+                learning_rate,
                 n_features: p,
                 feature_gain,
                 feature_split_count,
@@ -3848,6 +4142,19 @@ impl LgbmClassifier {
             }
 
             for iter in 0..self.n_estimators {
+                // DART: drop earlier trees (of every class) first.
+                let dart_step = dart.as_mut().map(|d| {
+                    let (drops, shrinkage) = d.drop_trees(tree_sets[0].len());
+                    for &k in &drops {
+                        for (ts, rs) in tree_sets.iter_mut().zip(raw_scores.iter_mut()) {
+                            ts[k].scale(-1.0);
+                            for (i, r) in rs.iter_mut().enumerate() {
+                                *r += ts[k].predict_bins(row_of(&binned_rows, i));
+                            }
+                        }
+                    }
+                    (drops, shrinkage)
+                });
                 // Softmax probabilities.
                 let mut probas = vec![vec![0.0; n_classes]; n];
                 for i in 0..n {
@@ -3886,7 +4193,9 @@ impl LgbmClassifier {
                     round_to_f32(&mut hessians);
 
                     let row_indices: Vec<usize> = match self.boosting_type {
-                        BoostingType::Gbdt => sample_rows(n, self.subsample, &mut rng),
+                        BoostingType::Gbdt | BoostingType::Dart => {
+                            sample_rows(n, self.subsample, &mut rng)
+                        }
                         BoostingType::Goss => {
                             let all: Vec<usize> = (0..n).collect();
                             let (selected, amp) = goss_sample(
@@ -3918,9 +4227,20 @@ impl LgbmClassifier {
                         &mut feature_rng,
                     );
 
-                    for i in 0..n {
-                        raw_scores[c][i] +=
-                            self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
+                    let mut tree = tree;
+                    if let Some((_, shrinkage)) = &dart_step {
+                        tree.scale(*shrinkage);
+                        for (i, r) in raw_scores[c].iter_mut().enumerate() {
+                            *r += tree.predict_bins(row_of(&binned_rows, i));
+                        }
+                        if iter == 0 && baselines[c].abs() > LGBM_EPSILON {
+                            tree.add_bias(baselines[c]);
+                        }
+                    } else {
+                        for i in 0..n {
+                            raw_scores[c][i] +=
+                                self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
+                        }
                     }
                     if let (Some(eb), Some(er)) = (eval_binned.as_ref(), eval_raw.as_mut()) {
                         for i in 0..eb.nrows() {
@@ -3929,6 +4249,21 @@ impl LgbmClassifier {
                     }
 
                     tree_sets[c].push(tree);
+                }
+
+                if let (Some(d), Some((drops, shrinkage))) = (dart.as_mut(), dart_step) {
+                    let (f_valid, f_train) = d.normalize(&drops, shrinkage);
+                    for &k in &drops {
+                        for (ts, rs) in tree_sets.iter_mut().zip(raw_scores.iter_mut()) {
+                            ts[k].scale(f_valid);
+                            ts[k].scale(f_train);
+                            for (i, r) in rs.iter_mut().enumerate() {
+                                *r += ts[k].predict_bins(row_of(&binned_rows, i));
+                            }
+                        }
+                    }
+                    d.push(shrinkage);
+                    continue;
                 }
 
                 if let Some(t) = tracker.as_mut() {
@@ -3963,12 +4298,17 @@ impl LgbmClassifier {
                 ts.truncate(keep);
             }
 
+            let (baselines, learning_rate) = if dart.is_some() {
+                (vec![0.0; baselines.len()], 1.0)
+            } else {
+                (baselines, self.learning_rate)
+            };
             let fitted = FittedLgbmClassifier {
                 tree_sets,
                 bins,
                 baselines,
                 classes,
-                learning_rate: self.learning_rate,
+                learning_rate,
                 n_features: p,
                 feature_gain,
                 feature_split_count,
@@ -4171,6 +4511,38 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
+
+    #[test]
+    fn dart_rejects_early_stopping_and_init_scores() {
+        let x = Array2::from_shape_fn((60, 2), |(i, j)| ((i * (j + 3)) % 17) as f64);
+        let y = x.column(0).to_owned();
+        let dart = LgbmRegressor::new().with_dart(DartParams::default());
+        let init = Array1::zeros(60);
+        let opts = LgbmFitOptions {
+            init_score: Some(init.view()),
+            ..LgbmFitOptions::default()
+        };
+        assert!(dart.fit_with_eval(&x, &y, &opts).is_err());
+        assert!(dart
+            .clone()
+            .with_early_stopping(Some(5))
+            .fit(&x, &y)
+            .is_err());
+        // Without drops (skip_drop = 1) DART is GBDT.
+        let no_drop = LgbmRegressor::new().with_dart(DartParams {
+            skip_drop: 1.0,
+            ..DartParams::default()
+        });
+        let a = no_drop.fit(&x, &y).unwrap().predict(&x).unwrap();
+        let b = LgbmRegressor::new()
+            .fit(&x, &y)
+            .unwrap()
+            .predict(&x)
+            .unwrap();
+        for (u, v) in a.iter().zip(&b) {
+            assert!((u - v).abs() < 1e-9, "{u} vs {v}");
+        }
+    }
 
     #[test]
     fn test_lgbm_regressor_basic() {
