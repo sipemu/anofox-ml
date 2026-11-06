@@ -471,9 +471,11 @@ class _Lgbm(BaseEstimator):
                  n_estimators=100, min_split_gain=0.0, min_child_weight=1e-3,
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
                  max_bin=255, random_state=None, drop_rate=0.1, max_drop=50, skip_drop=0.5,
-                 uniform_drop=False, xgboost_dart_mode=False, drop_seed=4, enable_bundle=True):
+                 uniform_drop=False, xgboost_dart_mode=False, drop_seed=4, enable_bundle=True,
+                 n_jobs=None):
         self.boosting_type = boosting_type
         self.enable_bundle = enable_bundle
+        self.n_jobs = n_jobs
         self.drop_rate = drop_rate
         self.max_drop = max_drop
         self.skip_drop = skip_drop
@@ -512,6 +514,8 @@ class _Lgbm(BaseEstimator):
                 "colsample_bytree": self.colsample_bytree, "reg_alpha": self.reg_alpha,
                 "reg_lambda": self.reg_lambda, "max_bins": self.max_bin,
                 "enable_bundle": bool(self.enable_bundle),
+                # LightGBM's n_jobs: None or <= 0 is the default (physical cores).
+                "n_jobs": None if self.n_jobs is None or self.n_jobs <= 0 else int(self.n_jobs),
                 "seed": _seed(self.random_state)}
 
 
@@ -523,12 +527,12 @@ class LGBMClassifier(ClassifierMixin, _Lgbm):
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
                  max_bin=255, class_weight=None, random_state=None, drop_rate=0.1, max_drop=50,
                  skip_drop=0.5, uniform_drop=False, xgboost_dart_mode=False, drop_seed=4,
-                 enable_bundle=True):
+                 enable_bundle=True, n_jobs=None):
         super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
                          min_split_gain, min_child_weight, min_child_samples,
                          colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
                          drop_rate, max_drop, skip_drop, uniform_drop, xgboost_dart_mode,
-                         drop_seed, enable_bundle)
+                         drop_seed, enable_bundle, n_jobs)
         self.class_weight = class_weight
 
     def _rust_params(self, X, y):

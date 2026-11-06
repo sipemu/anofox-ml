@@ -211,6 +211,38 @@ datasets and parameters.
 | **GaussianNB** | predict 5000×20 | 0.31 | 0.23 | **1.3x** |
 | **KNN** | fit 1000×50 | 0.31 | 0.29 | **1.1x** |
 
+### Gradient boosting against scikit-learn and LightGBM (#127)
+
+`benchmarks/boosting_benchmark.py`, median of 3 fits, 100 trees, 31 leaves,
+learning rate 0.1, every library on its default threads; anofox-ml through
+its Python binding. Laptop i9-13900H (6 P + 8 E cores, 20 threads),
+scikit-learn 1.8.0, LightGBM 4.7.0. The equal scores show the same models
+(LGBM and HistGB reproduce LightGBM and sklearn).
+
+| Model | Data | Reference | fit (s) anofox / ref | predict (s) anofox / ref |
+|---|---|---|--:|--:|
+| LGBM | regression 10 000×20 | LightGBM | **0.24** / 0.57 | **0.010** / 0.015 |
+| LGBM | binary 10 000×20 | LightGBM | **0.22** / 0.38 | **0.009** / 0.010 |
+| LGBM | regression 100 000×50 | LightGBM | 0.95 / **0.89** | **0.046** / 0.072 |
+| LGBM | binary 100 000×50 | LightGBM | 1.05 / **0.71** | **0.041** / 0.068 |
+| LGBM | one-hot 100 000×210 | LightGBM | 1.26 / **0.66** | 0.146 / **0.078** |
+| HistGB | regression 10 000×20 | sklearn | **0.31** / 0.35 | 0.011 / **0.007** |
+| HistGB | binary 10 000×20 | sklearn | 0.32 / **0.29** | 0.010 / **0.007** |
+| HistGB | regression 100 000×50 | sklearn | 1.33 / **0.60** | **0.046** / 0.077 |
+| HistGB | binary 100 000×50 | sklearn | 1.37 / **0.69** | **0.044** / 0.080 |
+| HistGB | one-hot 100 000×210 | sklearn | 3.01 / **1.90** | **0.129** / 0.297 |
+| GradientBoosting | regression 10 000×20 | sklearn | **1.15** / 4.82 | **0.006** / 0.011 |
+
+Before the #127 speed work, LGBM fitted 100 000×50 in 3.6 s and predicted
+it in 0.50 s. HistGB is slower than LGBM at 100 000 rows because its
+sklearn numerics keep sequential sums and counts (for bit-exact sklearn
+parity). On this hybrid CPU, all 20 logical threads are slower than the
+physical cores, which `n_jobs=None` uses.
+
+```bash
+python benchmarks/boosting_benchmark.py   # needs the anofox_ml_python wheel, lightgbm, scikit-learn
+```
+
 ### Phase 2: extended supervised sweep (harness in place; numbers TBD)
 
 Implemented in `crates/anofox-ml/benches/benchmarks.rs` + the matching
