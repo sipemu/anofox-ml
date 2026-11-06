@@ -629,6 +629,47 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
     _kind = "LgbmRegressor"
 
 
+class _CatBoost(BaseEstimator):
+    """CatBoost-style boosting on oblivious trees; parameters follow
+    ``catboost.CatBoost`` (``learning_rate=None`` is 0.03)."""
+
+    def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
+                 border_count=254, score_function="Cosine", leaf_estimation_method="Newton",
+                 boost_from_average=None):
+        self.iterations = iterations
+        self.learning_rate = learning_rate
+        self.depth = depth
+        self.l2_leaf_reg = l2_leaf_reg
+        self.border_count = border_count
+        self.score_function = score_function
+        self.leaf_estimation_method = leaf_estimation_method
+        self.boost_from_average = boost_from_average
+
+    def _rust_params(self, X, y):
+        params = {
+            "iterations": int(self.iterations),
+            "learning_rate": 0.03 if self.learning_rate is None else float(self.learning_rate),
+            "depth": int(self.depth), "l2_leaf_reg": float(self.l2_leaf_reg),
+            "border_count": int(self.border_count),
+            "score_function": _choice(self.score_function, {"Cosine": "Cosine", "L2": "L2"},
+                                      "score_function"),
+            "leaf_estimation_method": _choice(self.leaf_estimation_method,
+                                              {"Newton": "Newton", "Gradient": "Gradient"},
+                                              "leaf_estimation_method"),
+        }
+        if self.boost_from_average is not None:
+            params["boost_from_average"] = bool(self.boost_from_average)
+        return params
+
+
+class CatBoostRegressor(RegressorMixin, _CatBoost):
+    _kind = "CatBoostRegressor"
+
+
+class CatBoostClassifier(ClassifierMixin, _CatBoost):
+    _kind = "CatBoostClassifier"
+
+
 class IsolationForest(OutlierMixin, BaseEstimator):
     _kind = "IsolationForest"
 

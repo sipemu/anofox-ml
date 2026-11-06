@@ -810,3 +810,23 @@ def test_hist_gradient_boosting_warm_start_matches_sklearn():
     with pytest.raises(ValueError):
         am.HistGradientBoostingRegressor(max_iter=4, warm_start=True, early_stopping=True,
                                          ).fit(X, y_reg).set_params(max_iter=8).fit(X, y_reg)
+
+
+def test_catboost_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    off = dict(random_strength=0, bootstrap_type="No", boosting_type="Plain", has_time=True,
+               thread_count=1, verbose=0, allow_writing_files=False)
+    kw = dict(iterations=25, learning_rate=0.2, depth=4)
+    r = np.random.RandomState(9)
+    Xc = r.randn(300, 4)
+    Xc[r.rand(300) < 0.05, 1] = np.nan
+    yc = np.sin(Xc[:, 0]) + np.nan_to_num(Xc[:, 1]) + 0.2 * r.randn(300)
+    ref = cb.CatBoostRegressor(**kw, **off).fit(Xc, yc)
+    ours = am.CatBoostRegressor(**kw).fit(Xc, yc)
+    np.testing.assert_allclose(ours.predict(Xc), ref.predict(Xc), rtol=1e-12, atol=1e-12)
+    labels = np.where(yc > 0, "pos", "neg")
+    ref = cb.CatBoostClassifier(**kw, score_function="L2", **off).fit(Xc, labels)
+    ours = am.CatBoostClassifier(**kw, score_function="L2").fit(Xc, labels)
+    np.testing.assert_allclose(ours.predict_proba(Xc), ref.predict_proba(Xc), rtol=1e-12,
+                               atol=1e-12)
+    np.testing.assert_array_equal(ours.predict(Xc), ref.predict(Xc).ravel())

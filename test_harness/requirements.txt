@@ -2,3 +2,4 @@ scikit-learn==1.8.0
 numpy>=1.24,<3
 mapie==1.6.0
 lightgbm==4.7.0
+catboost==1.2.10

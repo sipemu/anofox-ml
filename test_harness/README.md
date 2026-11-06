@@ -9,7 +9,8 @@ fixtures; Rust tests load them and compare.
 | `crates/anofox-ml-conformal/tests/golden_data/mapie.json` | `generators/gen_conformal.py` | `crates/anofox-ml-conformal/tests/golden_mapie.rs` |
 
 Versions are pinned in `requirements.txt` (scikit-learn 1.8.0, MAPIE 1.6.0,
-LightGBM 4.7.0 for `gen_lgbm_parity.py` / `lgbm_parity.json`);
+LightGBM 4.7.0 for `gen_lgbm_parity.py` / `lgbm_parity.json`, CatBoost
+1.2.10 for `gen_catboost_parity.py` / `catboost_parity.json`);
 per-estimator notes are in `validation/sklearn_parity/` and
 `validation/mapie_parity/`.
 
