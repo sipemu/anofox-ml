@@ -48,6 +48,223 @@ pub enum BinningMethod {
     Sklearn,
 }
 
+/// LightGBM's zero threshold (`kZeroThreshold`, the float `1e-35f`):
+/// smaller magnitudes count as zero.
+const LGBM_ZERO_THRESHOLD: f64 = 1e-35_f32 as f64;
+
+/// LightGBM's `kEpsilon` (the float `1e-15f`).
+const LGBM_EPSILON: f64 = 1e-15_f32 as f64;
+
+/// `std::nextafter(x, +inf)` (LightGBM's `GetDoubleUpperBound`).
+fn next_up(x: f64) -> f64 {
+    if x.is_nan() || x == f64::INFINITY {
+        x
+    } else if x == 0.0 {
+        f64::from_bits(1)
+    } else if x > 0.0 {
+        f64::from_bits(x.to_bits() + 1)
+    } else {
+        f64::from_bits(x.to_bits() - 1)
+    }
+}
+
+/// LightGBM's `GreedyFindBin`: bin upper bounds (the last is `+inf`) for
+/// sorted distinct values with their counts.
+fn lgbm_greedy_find_bin(
+    values: &[f64],
+    counts: &[usize],
+    max_bin: usize,
+    total_cnt: usize,
+    min_data_in_bin: usize,
+) -> Vec<f64> {
+    let n = values.len();
+    let mut bounds = Vec::new();
+    let push = |bounds: &mut Vec<f64>, v: f64| {
+        // CheckDoubleEqualOrdered: skip a bound within one ulp of the last.
+        if bounds.last().is_none_or(|&b: &f64| v > next_up(b)) {
+            bounds.push(v);
+        }
+    };
+    if n <= max_bin {
+        let mut cur = 0;
+        for i in 0..n.saturating_sub(1) {
+            cur += counts[i];
+            if cur >= min_data_in_bin {
+                let v = next_up((values[i] + values[i + 1]) / 2.0);
+                if bounds.last().is_none_or(|&b: &f64| v > next_up(b)) {
+                    bounds.push(v);
+                    cur = 0;
+                }
+            }
+        }
+        bounds.push(f64::INFINITY);
+        return bounds;
+    }
+    let mut max_bin = max_bin;
+    if let Some(limit) = total_cnt.checked_div(min_data_in_bin) {
+        max_bin = max_bin.min(limit).max(1);
+    }
+    let mut mean_bin_size = total_cnt as f64 / max_bin as f64;
+    let mut rest_bin_cnt = max_bin as i64;
+    let mut rest_sample_cnt = total_cnt as i64;
+    let is_big: Vec<bool> = counts.iter().map(|&c| c as f64 >= mean_bin_size).collect();
+    for (k, &big) in is_big.iter().enumerate() {
+        if big {
+            rest_bin_cnt -= 1;
+            rest_sample_cnt -= counts[k] as i64;
+        }
+    }
+    mean_bin_size = rest_sample_cnt as f64 / rest_bin_cnt as f64;
+    let mut upper = vec![f64::INFINITY; max_bin];
+    let mut lower = vec![f64::INFINITY; max_bin];
+    let mut bin_cnt = 0;
+    lower[0] = values[0];
+    let mut cur = 0usize;
+    for i in 0..n - 1 {
+        if !is_big[i] {
+            rest_sample_cnt -= counts[i] as i64;
+        }
+        cur += counts[i];
+        if is_big[i]
+            || cur as f64 >= mean_bin_size
+            || (is_big[i + 1] && cur as f64 >= (mean_bin_size * 0.5).max(1.0))
+        {
+            upper[bin_cnt] = values[i];
+            bin_cnt += 1;
+            lower[bin_cnt] = values[i + 1];
+            if bin_cnt >= max_bin - 1 {
+                break;
+            }
+            cur = 0;
+            if !is_big[i] {
+                rest_bin_cnt -= 1;
+                mean_bin_size = rest_sample_cnt as f64 / rest_bin_cnt as f64;
+            }
+        }
+    }
+    bin_cnt += 1;
+    for i in 0..bin_cnt - 1 {
+        push(&mut bounds, next_up((upper[i] + lower[i + 1]) / 2.0));
+    }
+    bounds.push(f64::INFINITY);
+    bounds
+}
+
+/// LightGBM's `FindBinWithZeroAsOneBin`: negative and positive values are
+/// binned separately around a bin for (near-)zero.
+fn lgbm_zero_as_one_bin(
+    values: &[f64],
+    counts: &[usize],
+    max_bin: usize,
+    total_cnt: usize,
+    min_data_in_bin: usize,
+) -> Vec<f64> {
+    let (mut left_cnt_data, mut cnt_zero, mut right_cnt_data) = (0, 0, 0);
+    for (&v, &c) in values.iter().zip(counts) {
+        if v <= -LGBM_ZERO_THRESHOLD {
+            left_cnt_data += c;
+        } else if v > LGBM_ZERO_THRESHOLD {
+            right_cnt_data += c;
+        } else {
+            cnt_zero += c;
+        }
+    }
+    let left_cnt = values
+        .iter()
+        .position(|&v| v > -LGBM_ZERO_THRESHOLD)
+        .unwrap_or(values.len());
+    let mut bounds = Vec::new();
+    if left_cnt > 0 && max_bin > 1 {
+        let left_max_bin = ((left_cnt_data as f64 / (total_cnt - cnt_zero) as f64)
+            * (max_bin - 1) as f64) as usize;
+        bounds = lgbm_greedy_find_bin(
+            &values[..left_cnt],
+            &counts[..left_cnt],
+            left_max_bin.max(1),
+            left_cnt_data,
+            min_data_in_bin,
+        );
+        if let Some(last) = bounds.last_mut() {
+            *last = -LGBM_ZERO_THRESHOLD;
+        }
+    }
+    let right_start = (left_cnt..values.len()).find(|&i| values[i] > LGBM_ZERO_THRESHOLD);
+    let right_max_bin = max_bin as i64 - 1 - bounds.len() as i64;
+    match right_start {
+        Some(rs) if right_max_bin > 0 => {
+            let right = lgbm_greedy_find_bin(
+                &values[rs..],
+                &counts[rs..],
+                right_max_bin as usize,
+                right_cnt_data,
+                min_data_in_bin,
+            );
+            bounds.push(LGBM_ZERO_THRESHOLD);
+            bounds.extend(right);
+        }
+        _ => bounds.push(f64::INFINITY),
+    }
+    bounds
+}
+
+/// LightGBM's numerical `BinMapper::FindBin` on a dense column: bin edges
+/// (the upper bounds without the final `+inf` and the NaN bin). As with
+/// dense input to LightGBM, (near-)zeros are counted rather than sampled
+/// and re-inserted as one distinct value at their place.
+fn lightgbm_bin_edges(col: ArrayView1<f64>, max_bin: usize, min_data_in_bin: usize) -> Vec<f64> {
+    let total = col.len();
+    let na_cnt = col.iter().filter(|v| v.is_nan()).count();
+    let mut values: Vec<f64> = col
+        .iter()
+        .copied()
+        .filter(|v| !v.is_nan() && v.abs() > LGBM_ZERO_THRESHOLD)
+        .collect();
+    let zero_cnt = total - values.len() - na_cnt;
+    values.sort_by(f64::total_cmp);
+
+    let (mut distinct, mut counts): (Vec<f64>, Vec<usize>) = (Vec::new(), Vec::new());
+    if values.is_empty() || (values[0] > 0.0 && zero_cnt > 0) {
+        distinct.push(0.0);
+        counts.push(zero_cnt);
+    }
+    if let Some(&first) = values.first() {
+        distinct.push(first);
+        counts.push(1);
+    }
+    for w in values.windows(2) {
+        let (prev, v) = (w[0], w[1]);
+        if v > next_up(prev) {
+            if prev < 0.0 && v > 0.0 {
+                distinct.push(0.0);
+                counts.push(zero_cnt);
+            }
+            distinct.push(v);
+            counts.push(1);
+        } else {
+            // Within an ulp: keep the larger value.
+            *distinct.last_mut().unwrap() = v;
+            *counts.last_mut().unwrap() += 1;
+        }
+    }
+    if values.last().is_some_and(|&v| v < 0.0) && zero_cnt > 0 {
+        distinct.push(0.0);
+        counts.push(zero_cnt);
+    }
+    let mut bounds = if na_cnt == 0 {
+        lgbm_zero_as_one_bin(&distinct, &counts, max_bin, total, min_data_in_bin)
+    } else {
+        lgbm_zero_as_one_bin(
+            &distinct,
+            &counts,
+            max_bin - 1,
+            total - na_cnt,
+            min_data_in_bin,
+        )
+    };
+    bounds.pop(); // +inf
+    bounds
+}
+
 /// sklearn's `_find_binning_thresholds` for one column (non-NaN values,
 /// sorted).
 fn sklearn_thresholds(sorted: &[f64], max_bins: usize) -> Vec<f64> {
@@ -159,64 +376,7 @@ fn compute_bins(
                 edges = sklearn_thresholds(&raw, max_bins);
             }
         } else {
-            // Greedy binning matching LightGBM: collect distinct values with
-            // sample counts, then greedily fill bins so each has at least
-            // `min_data_in_bin` samples.  Bin boundaries are placed at the
-            // midpoint between the last value of one group and the first of
-            // the next.
-            let mut raw: Vec<f64> = (0..n).map(|i| x[[i, j]]).filter(|v| !v.is_nan()).collect();
-            raw.sort_by(f64::total_cmp);
-
-            // Distinct values with counts.
-            let mut distinct: Vec<(f64, usize)> = Vec::new();
-            if !raw.is_empty() {
-                let mut cur = raw[0];
-                let mut cnt = 1usize;
-                for &v in &raw[1..] {
-                    if v == cur {
-                        cnt += 1;
-                    } else {
-                        distinct.push((cur, cnt));
-                        cur = v;
-                        cnt = 1;
-                    }
-                }
-                distinct.push((cur, cnt));
-            }
-
-            if distinct.len() > 1 {
-                let max_n_bins = max_bins - 1; // reserve one for missing
-                let min_per = min_data_in_bin.max(1);
-
-                // group_ends[k] = exclusive end-index into `distinct` for group k.
-                let mut group_ends: Vec<usize> = Vec::new();
-                let mut cur_count = 0usize;
-                for (idx, &(_, count)) in distinct.iter().enumerate() {
-                    cur_count += count;
-                    if cur_count >= min_per {
-                        group_ends.push(idx + 1);
-                        cur_count = 0;
-                        if group_ends.len() >= max_n_bins {
-                            break;
-                        }
-                    }
-                }
-                // Remaining values go into the last group.
-                if cur_count > 0 || group_ends.is_empty() {
-                    group_ends.push(distinct.len());
-                } else if let Some(last) = group_ends.last_mut() {
-                    // Make sure the last group extends to the end.
-                    *last = distinct.len();
-                }
-
-                // Edges are midpoints between consecutive groups.
-                for k in 0..group_ends.len() - 1 {
-                    let last_in_k = distinct[group_ends[k] - 1].0;
-                    let first_in_next = distinct[group_ends[k]].0;
-                    edges.push(0.5 * (last_in_k + first_in_next));
-                }
-            }
-            // If 0 or 1 distinct value → no edges, everything goes to bin 0.
+            edges = lightgbm_bin_edges(x.column(j), max_bins, min_data_in_bin);
         }
 
         for i in 0..n {
@@ -398,6 +558,20 @@ struct Histogram {
 }
 
 impl Histogram {
+    /// A copy with the counts LightGBM would estimate from the hessians,
+    /// `round(hess · cnt_factor)`.
+    fn with_estimated_counts(&self, cnt_factor: f64) -> Self {
+        let est = |h: f64| (h * cnt_factor + 0.5) as u32;
+        Self {
+            grad_sum: self.grad_sum.clone(),
+            hess_sum: self.hess_sum.clone(),
+            count: self.hess_sum.iter().map(|&h| est(h)).collect(),
+            missing_grad: self.missing_grad,
+            missing_hess: self.missing_hess,
+            missing_count: est(self.missing_hess),
+        }
+    }
+
     fn new(n_bins: usize) -> Self {
         Self {
             grad_sum: vec![0.0; n_bins],
@@ -830,10 +1004,13 @@ fn find_best_split(
     // clamped to `bounds` and gains evaluated for the clamped outputs.
     let constrained = monotone_constraints.iter().any(|&m| m != 0);
     let (lo, hi) = bounds;
-    let parent_gain = if constrained {
+    // LightGBM's gain shift is the unconstrained gain of the node.
+    let parent_gain = if params.sklearn_compat && constrained {
         leaf_gain_given_output(total_grad, total_hess, l1, l2, parent_value)
-    } else {
+    } else if params.sklearn_compat {
         leaf_gain(total_grad, total_hess, l1, l2)
+    } else {
+        leaf_gain(total_grad, total_hess + 2.0 * LGBM_EPSILON, l1, l2)
     };
     // sklearn's loss of the current node, `G * value` with the node's
     // (bounded) value.
@@ -863,7 +1040,17 @@ fn find_best_split(
         let mut keep = mask.into_iter();
         positions.retain(|_| keep.next().unwrap_or(false));
     }
+    // LightGBM keeps no counts in its histograms: it estimates them from the
+    // hessians, `round(hess · n / (H + 2 kEpsilon))`.
+    let cnt_factor = total_count as f64 / (total_hess + 2.0 * LGBM_EPSILON);
     for (feat, hist) in positions.iter().map(|&k| (feature_indices[k], &hists[k])) {
+        let estimated;
+        let hist = if params.sklearn_compat {
+            hist
+        } else {
+            estimated = hist.with_estimated_counts(cnt_factor);
+            &estimated
+        };
         if all_bins[feat].is_categorical {
             let n_categories = all_bins[feat].edges.len();
             let candidate = if params.sklearn_compat {
@@ -905,70 +1092,69 @@ fn find_best_split(
 
         // Gain of sending `left` left (`right = totals - left`); keeps the
         // candidate if it is strictly better than the best so far.
-        let mut consider =
-            |(left_grad, left_hess, left_count): (f64, f64, usize), bin: u8, missing_left: bool| {
-                if left_count < min_child_samples || left_hess < min_child_weight {
-                    return;
-                }
-                let right_count = total_count - left_count;
-                let right_grad = total_grad - left_grad;
-                let right_hess = total_hess - left_hess;
-                if right_count < min_child_samples || right_hess < min_child_weight {
-                    return;
-                }
+        let mut consider = |(left_grad, left_hess, left_count): (f64, f64, usize),
+                            (right_grad, right_hess, right_count): (f64, f64, usize),
+                            bin: u8,
+                            missing_left: bool| {
+            if left_count < min_child_samples || left_hess < min_child_weight {
+                return;
+            }
+            if right_count < min_child_samples || right_hess < min_child_weight {
+                return;
+            }
 
-                let mut left_val = leaf_value(left_grad, left_hess, l1, l2);
-                let mut right_val = leaf_value(right_grad, right_hess, l1, l2);
-                let gain = if params.sklearn_compat {
-                    // sklearn's `_split_gain`, in its order of operations: with
-                    // integer gradient sums (L1, quantile) mirrored splits tie
-                    // mathematically and the rounding decides. Halved to the
-                    // scale of the other branches (exact).
-                    left_val = sklearn_node_value(left_grad, left_hess, l2, bounds);
-                    right_val = sklearn_node_value(right_grad, right_hess, l2, bounds);
-                    match monotone_of(feat, all_bins, monotone_constraints) {
-                        1 if left_val > right_val => return,
-                        -1 if left_val < right_val => return,
-                        _ => {}
-                    }
-                    let mut gain = sklearn_node_loss;
-                    gain -= left_grad * left_val;
-                    gain -= right_grad * right_val;
-                    0.5 * gain
-                } else if constrained {
-                    left_val = left_val.clamp(lo, hi);
-                    right_val = right_val.clamp(lo, hi);
-                    // Monotone constraint check: feature with monotone=+1
-                    // requires left_value <= right_value (predictions
-                    // increase as bin increases), -1 the opposite.
-                    match monotone_of(feat, all_bins, monotone_constraints) {
-                        1 if left_val > right_val => return,
-                        -1 if left_val < right_val => return,
-                        _ => {}
-                    }
-                    let left_g = leaf_gain_given_output(left_grad, left_hess, l1, l2, left_val);
-                    let right_g = leaf_gain_given_output(right_grad, right_hess, l1, l2, right_val);
-                    0.5 * (left_g + right_g - parent_gain)
-                } else {
-                    let left_g = leaf_gain(left_grad, left_hess, l1, l2);
-                    let right_g = leaf_gain(right_grad, right_hess, l1, l2);
-                    0.5 * (left_g + right_g - parent_gain)
-                };
-
-                if gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain) {
-                    best = Some(BestSplit {
-                        feature: feat,
-                        bin_threshold: bin,
-                        gain,
-                        left_value: left_val,
-                        right_value: right_val,
-                        left_count,
-                        right_count,
-                        missing_left,
-                        categorical_order: None,
-                    });
+            let mut left_val = leaf_value(left_grad, left_hess, l1, l2);
+            let mut right_val = leaf_value(right_grad, right_hess, l1, l2);
+            let gain = if params.sklearn_compat {
+                // sklearn's `_split_gain`, in its order of operations: with
+                // integer gradient sums (L1, quantile) mirrored splits tie
+                // mathematically and the rounding decides. Halved to the
+                // scale of the other branches (exact).
+                left_val = sklearn_node_value(left_grad, left_hess, l2, bounds);
+                right_val = sklearn_node_value(right_grad, right_hess, l2, bounds);
+                match monotone_of(feat, all_bins, monotone_constraints) {
+                    1 if left_val > right_val => return,
+                    -1 if left_val < right_val => return,
+                    _ => {}
                 }
+                let mut gain = sklearn_node_loss;
+                gain -= left_grad * left_val;
+                gain -= right_grad * right_val;
+                0.5 * gain
+            } else if constrained {
+                left_val = left_val.clamp(lo, hi);
+                right_val = right_val.clamp(lo, hi);
+                // Monotone constraint check: feature with monotone=+1
+                // requires left_value <= right_value (predictions
+                // increase as bin increases), -1 the opposite.
+                match monotone_of(feat, all_bins, monotone_constraints) {
+                    1 if left_val > right_val => return,
+                    -1 if left_val < right_val => return,
+                    _ => {}
+                }
+                let left_g = leaf_gain_given_output(left_grad, left_hess, l1, l2, left_val);
+                let right_g = leaf_gain_given_output(right_grad, right_hess, l1, l2, right_val);
+                0.5 * (left_g + right_g - parent_gain)
+            } else {
+                let left_g = leaf_gain(left_grad, left_hess, l1, l2);
+                let right_g = leaf_gain(right_grad, right_hess, l1, l2);
+                0.5 * (left_g + right_g - parent_gain)
             };
+
+            if gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain) {
+                best = Some(BestSplit {
+                    feature: feat,
+                    bin_threshold: bin,
+                    gain,
+                    left_value: left_val,
+                    right_value: right_val,
+                    left_count,
+                    right_count,
+                    missing_left,
+                    categorical_order: None,
+                });
+            }
+        };
         // Left sums of the bins up to `bin`, plus the missing values when
         // they go left.
         let mut scan_ascending = |missing_left: bool, thresholds: &[u8]| {
@@ -986,7 +1172,12 @@ fn find_best_split(
                 left.0 += hist.grad_sum[b];
                 left.1 += hist.hess_sum[b];
                 left.2 += hist.count[b] as usize;
-                consider(left, bin, missing_left);
+                let right = (
+                    total_grad - left.0,
+                    total_hess - left.1,
+                    total_count - left.2,
+                );
+                consider(left, right, bin, missing_left);
             }
         };
 
@@ -1014,22 +1205,70 @@ fn find_best_split(
                         total_hess - right.1,
                         total_count - right.2,
                     );
-                    consider(left, bin as u8, true);
+                    consider(left, right, bin as u8, true);
                 }
             }
         } else {
-            // LightGBM: both missing directions, the bins ascending.
-            scan_ascending(true, &scan_order);
-            scan_ascending(false, &scan_order);
+            // LightGBM's `FindBestThresholdSequentially`: the right child
+            // accumulated from the top bin down (missing values left), then,
+            // for features with missing values, the left child from the
+            // bottom up (missing values right). The hessian sums start at
+            // `kEpsilon`, the node's at `2 kEpsilon`, and the counts are
+            // the estimates of `hist` (see above).
+            let _ = (&scan_order, &mut scan_ascending);
+            let n_bins = n_value_bins(&all_bins[feat]);
+            let has_nan = params.has_missing[feat];
+            let sum_hess = total_hess + 2.0 * LGBM_EPSILON;
+            let other = |(g, h, c): (f64, f64, usize)| {
+                (total_grad - g, sum_hess - h, total_count.saturating_sub(c))
+            };
+            // LightGBM's `num_bin` counts the missing bin.
+            if has_nan && n_bins < 2 {
+                // Only the missing values on the right.
+                let right = (
+                    hist.missing_grad,
+                    LGBM_EPSILON + hist.missing_hess,
+                    hist.missing_count as usize,
+                );
+                if right.2 <= total_count {
+                    consider(other(right), right, 0, false);
+                }
+            } else {
+                let mut right = (0.0, LGBM_EPSILON, 0usize);
+                for b in (1..n_bins).rev() {
+                    right.0 += hist.grad_sum[b];
+                    right.1 += hist.hess_sum[b];
+                    right.2 += hist.count[b] as usize;
+                    if right.2 > total_count {
+                        break;
+                    }
+                    consider(other(right), right, (b - 1) as u8, true);
+                }
+                if has_nan {
+                    let mut left = (0.0, LGBM_EPSILON, 0usize);
+                    for b in 0..n_bins {
+                        left.0 += hist.grad_sum[b];
+                        left.1 += hist.hess_sum[b];
+                        left.2 += hist.count[b] as usize;
+                        if left.2 > total_count {
+                            break;
+                        }
+                        consider(left, other(left), b as u8, false);
+                    }
+                }
+            }
         }
     }
 
-    // sklearn sends missing values the training data did not have to the
-    // child with more samples.
-    if params.sklearn_compat {
-        if let Some(split) = best.as_mut() {
-            if !params.has_missing[split.feature] {
+    // Missing values the training data did not have: sklearn sends them to
+    // the child with more samples, LightGBM treats them as 0.
+    if let Some(split) = best.as_mut() {
+        if !params.has_missing[split.feature] {
+            if params.sklearn_compat {
                 split.missing_left = split.left_count > split.right_count;
+            } else if split.categorical_order.is_none() {
+                split.missing_left =
+                    numeric_bin(0.0, &all_bins[split.feature].edges) <= split.bin_threshold;
             }
         }
     }
@@ -1815,7 +2054,13 @@ impl LgbmRegressor {
             max_depth: self.max_depth,
             min_child_samples: self.min_child_samples,
             min_child_weight: self.min_child_weight,
-            min_split_gain: self.min_split_gain,
+            // LightGBM compares its (unhalved) gain with min_split_gain; the
+            // engine's gains are halved.
+            min_split_gain: if self.sklearn_compat {
+                self.min_split_gain
+            } else {
+                0.5 * self.min_split_gain
+            },
             reg_alpha: self.reg_alpha,
             reg_lambda: self.reg_lambda,
             monotone_constraints: self.monotone_constraints.clone(),
@@ -2056,11 +2301,16 @@ fn percentile(values: &mut [f64], alpha: f64) -> f64 {
     if n <= 1 {
         return values.first().copied().unwrap_or(0.0);
     }
-    values.sort_by(f64::total_cmp);
-    let pos = (n - 1) as f64 * alpha;
-    let lo = pos.floor() as usize;
-    let hi = (lo + 1).min(n - 1);
-    values[lo] + (values[hi] - values[lo]) * (pos - lo as f64)
+    // LightGBM's `PercentileFun`: interpolated from the descending order.
+    values.sort_by(|a, b| b.total_cmp(a));
+    let float_pos = (n - 1) as f64 * (1.0 - alpha);
+    let pos = float_pos as usize + 1;
+    if pos >= n {
+        return values[n - 1];
+    }
+    let bias = float_pos - (pos - 1) as f64;
+    let (v1, v2) = (values[pos - 1], values[pos]);
+    v1 - (v1 - v2) * bias
 }
 
 /// Weighted `alpha`-percentile (LightGBM 4.7's `WeightedPercentileFun`):
@@ -2472,6 +2722,15 @@ impl LgbmRegressor {
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
     ) -> Result<(FittedLgbmRegressor, EarlyStoppingScores)> {
+        // LightGBM keeps the quantile level as a float32.
+        if let LgbmObjective::Quantile { alpha } = self.objective {
+            let alpha32 = f64::from(alpha as f32);
+            if !self.sklearn_compat && alpha32 != alpha {
+                let mut m = self.clone();
+                m.objective = LgbmObjective::Quantile { alpha: alpha32 };
+                return m.fit_scored(x, y, opts, stopping);
+            }
+        }
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
@@ -2513,7 +2772,15 @@ impl LgbmRegressor {
 
         let n = x.nrows();
         let p = x.ncols();
-        let y_vec: Vec<f64> = y.to_vec();
+        // LightGBM stores labels and weights as float32 (`label_t`).
+        let lgbm_f32 = |v: f64| {
+            if self.sklearn_compat {
+                v
+            } else {
+                f64::from(v as f32)
+            }
+        };
+        let y_vec: Vec<f64> = y.iter().map(|&v| lgbm_f32(v)).collect();
         let (binned_x, bins) = compute_bins(
             x,
             self.max_bins,
@@ -2527,11 +2794,12 @@ impl LgbmRegressor {
 
         // sklearn treats any given weights as weights (its weighted
         // percentiles differ from the unweighted ones even for unit weights).
-        let sample_weight = if self.sklearn_compat {
-            opts.sample_weight
+        let weights: Option<Array1<f64>> = if self.sklearn_compat {
+            opts.sample_weight.map(|w| w.to_owned())
         } else {
-            effective_sample_weight(opts.sample_weight)
+            effective_sample_weight(opts.sample_weight).map(|w| w.mapv(lgbm_f32))
         };
+        let sample_weight = weights.as_ref().map(|w| w.view());
 
         // Baseline / init_score
         let (baseline, mut preds): (f64, Vec<f64>) = if let Some(init) = opts.init_score {
@@ -2553,7 +2821,7 @@ impl LgbmRegressor {
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
         let params = LgbmParams {
-            has_missing: columns_with_missing(x, self.sklearn_compat),
+            has_missing: columns_with_missing(x, true),
             ..self.params()
         };
 
@@ -2617,10 +2885,9 @@ impl LgbmRegressor {
                     hessians[i] *= sw[i];
                 }
             }
-            if self.sklearn_compat {
-                round_to_f32(&mut gradients);
-                round_to_f32(&mut hessians);
-            }
+            // sklearn and LightGBM both keep gradients in float32.
+            round_to_f32(&mut gradients);
+            round_to_f32(&mut hessians);
 
             // Row selection: GBDT = bagging, GOSS = top-k + sampled rest w/ amplification
             let row_indices: Vec<usize> = match self.boosting_type {
@@ -3086,7 +3353,13 @@ impl LgbmClassifier {
             max_depth: self.max_depth,
             min_child_samples: self.min_child_samples,
             min_child_weight: self.min_child_weight,
-            min_split_gain: self.min_split_gain,
+            // LightGBM compares its (unhalved) gain with min_split_gain; the
+            // engine's gains are halved.
+            min_split_gain: if self.sklearn_compat {
+                self.min_split_gain
+            } else {
+                0.5 * self.min_split_gain
+            },
             reg_alpha: self.reg_alpha,
             reg_lambda: self.reg_lambda,
             monotone_constraints: self.monotone_constraints.clone(),
@@ -3286,8 +3559,16 @@ impl LgbmClassifier {
 
         // Combine class_weight + sample_weight into a single effective weight per row.
         let class_weights = self.compute_class_weights(y)?;
+        // LightGBM stores weights as float32 (`label_t`).
         let effective_weights: Vec<f64> = (0..n)
             .map(|i| class_weights[i] * opts.sample_weight.map_or(1.0, |sw| sw[i]))
+            .map(|w| {
+                if self.sklearn_compat {
+                    w
+                } else {
+                    f64::from(w as f32)
+                }
+            })
             .collect();
 
         // Eval set: binned with the TRAINING bin edges, labels mapped to
@@ -3345,7 +3626,7 @@ impl LgbmClassifier {
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
         let params = LgbmParams {
-            has_missing: columns_with_missing(x, self.sklearn_compat),
+            has_missing: columns_with_missing(x, true),
             ..self.params()
         };
         let mut feature_gain = vec![0.0f64; p];
@@ -3419,10 +3700,8 @@ impl LgbmClassifier {
                     })
                     .collect();
 
-                if self.sklearn_compat {
-                    round_to_f32(&mut gradients);
-                    round_to_f32(&mut hessians);
-                }
+                round_to_f32(&mut gradients);
+                round_to_f32(&mut hessians);
 
                 let row_indices: Vec<usize> = match self.boosting_type {
                     BoostingType::Gbdt => sample_rows(n, self.subsample, &mut rng),
@@ -3603,10 +3882,8 @@ impl LgbmClassifier {
                         })
                         .collect();
 
-                    if self.sklearn_compat {
-                        round_to_f32(&mut gradients);
-                        round_to_f32(&mut hessians);
-                    }
+                    round_to_f32(&mut gradients);
+                    round_to_f32(&mut hessians);
 
                     let row_indices: Vec<usize> = match self.boosting_type {
                         BoostingType::Gbdt => sample_rows(n, self.subsample, &mut rng),
