@@ -830,3 +830,29 @@ def test_catboost_matches_catboost():
     np.testing.assert_allclose(ours.predict_proba(Xc), ref.predict_proba(Xc), rtol=1e-12,
                                atol=1e-12)
     np.testing.assert_array_equal(ours.predict(Xc), ref.predict(Xc).ravel())
+
+
+def test_catboost_categorical_features_match_catboost():
+    cb = pytest.importorskip("catboost")
+    off = dict(random_strength=0, bootstrap_type="No", boosting_type="Plain", has_time=True,
+               thread_count=1, verbose=0, allow_writing_files=False, max_ctr_complexity=1)
+    r = np.random.RandomState(4)
+    n = 400
+    city = r.choice(["berlin", "paris", "rome", "oslo", "lima", "kyiv", "baku"], size=n)
+    flag = r.choice(["yes", "no"], size=n)
+    num = r.randn(n)
+    effect = {"berlin": 1.0, "paris": 0.5, "rome": -0.5, "oslo": -1.0, "lima": 0.2,
+              "kyiv": 0.8, "baku": -0.3}
+    y = (num + np.array([effect[c] for c in city]) + (flag == "yes") + r.logistic(size=n) * 0.5
+         > 0.5).astype(int)
+    X = np.empty((n, 3), dtype=object)
+    X[:, 0], X[:, 1], X[:, 2] = num, city, flag
+    kw = dict(iterations=30, learning_rate=0.2, depth=4, cat_features=[1, 2])
+    ref = cb.CatBoostClassifier(**kw, **off).fit(X, y)
+    ours = am.CatBoostClassifier(**kw).fit(X, y)
+    X_new = X[:50].copy()
+    X_new[0, 1] = "madrid"  # unseen
+    np.testing.assert_allclose(ours.predict_proba(X_new), ref.predict_proba(X_new),
+                               rtol=1e-12, atol=1e-12)
+    with pytest.raises(ValueError):
+        am.CatBoostRegressor(iterations=5, cat_features=[1]).fit(X, y.astype(float))

@@ -87,6 +87,43 @@ def generate():
     add("logloss_l2", "classifier", dict(base, score_function="L2"), X, y_bin)
     add("logloss_weighted", "classifier", base, X, y_bin, sw=weights)
     add("logloss_average", "classifier", dict(base, boost_from_average=True), X, y_bin)
+
+    # Categorical features (integer codes): ordered target statistics
+    # (CTRs) without feature combinations (`max_ctr_complexity=1`), and
+    # one-hot splits for at most `one_hot_max_size` categories.
+    c_many = rng.integers(0, 12, size=n)
+    c_few = rng.integers(0, 4, size=n)
+    c_bin = rng.integers(0, 2, size=n)
+    effect = np.linspace(-1.2, 1.2, 12)[c_many] + 0.5 * (c_few == 2) - 0.4 * c_bin
+    y_cat = (eta * 0.5 + effect + rng.logistic(size=n) * 0.7 > 0).astype(float)
+    Xc = np.column_stack([X[:, 0], c_many, X[:, 1], c_few, c_bin]).astype(float)
+    cat_cols = [1, 3, 4]
+    cat = dict(base, cat_features=cat_cols, max_ctr_complexity=1)
+
+    def add_cat(name, params, y, kind="classifier", sw=None):
+        cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
+        Xo = Xc.astype(object)
+        for c in cat_cols:
+            Xo[:, c] = Xc[:, c].astype(int)
+        m = cls(**params).fit(Xo, y, sample_weight=sw)
+        X_test = np.vstack([Xc[::4], [[0.1, 99, 0.2, 1, 0]]])  # an unseen category
+        Xt = X_test.astype(object)
+        for c in cat_cols:
+            Xt[:, c] = X_test[:, c].astype(int)
+        pred = m.predict(Xt) if kind == "regressor" else m.predict_proba(Xt)
+        out["models"].append({
+            "name": name, "kind": kind,
+            "params": {k: v for k, v in params.items() if k not in COMMON},
+            "X": nulls(Xc), "y": y.tolist(),
+            "sample_weight": None if sw is None else sw.tolist(),
+            "X_test": nulls(X_test), "predictions": pred.tolist(),
+        })
+
+    add_cat("cat_logloss", cat, y_cat)
+    add_cat("cat_logloss_l2", dict(cat, score_function="L2", depth=6), y_cat)
+    add_cat("cat_logloss_weighted", cat, y_cat, sw=weights)
+    add_cat("cat_logloss_no_onehot", dict(cat, one_hot_max_size=1), y_cat)
+    add_cat("cat_only", dict(cat, cat_features=[1, 3, 4]), y_cat)
     return out
 
 

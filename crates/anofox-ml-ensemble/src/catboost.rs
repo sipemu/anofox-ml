@@ -223,23 +223,132 @@ fn bucket(v: f64, borders: &[f32]) -> u8 {
 // Oblivious trees
 // ============================================================
 
-/// A symmetric tree: level `d` sends a row to the right (bit `d` of the
-/// leaf index) when `x[feature] > border`.
+/// One level of a symmetric tree: rows going right set bit `d` of their
+/// leaf index.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+enum TreeSplit {
+    /// `x[feature] > border` (in float32).
+    Float { feature: usize, border: f32 },
+    /// The categorical `x[feature]` is the category `value` (one-hot).
+    OneHot { feature: usize, value: u64 },
+    /// The quantized CTR number `ctr` of the row's category exceeds
+    /// `bucket`.
+    Ctr { ctr: usize, bucket: u8 },
+}
+
+/// A symmetric tree: `2^d` leaf values for `d` splits.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ObliviousTree {
-    splits: Vec<(usize, f32)>,
+    splits: Vec<TreeSplit>,
     leaf_values: Vec<f64>,
 }
 
 impl ObliviousTree {
-    fn leaf(&self, row: ArrayView1<f64>) -> usize {
+    fn leaf(&self, row: ArrayView1<f64>, ctrs: &CtrModel) -> usize {
         self.splits
             .iter()
             .enumerate()
-            .map(|(d, &(f, border))| usize::from((row[f] as f32) > border) << d)
+            .map(|(d, split)| {
+                let right = match *split {
+                    TreeSplit::Float { feature, border } => (row[feature] as f32) > border,
+                    TreeSplit::OneHot { feature, value } => category(row[feature]) == value,
+                    TreeSplit::Ctr { ctr, bucket } => ctrs.bucket(ctr, row) > bucket,
+                };
+                usize::from(right) << d
+            })
             .sum()
     }
 }
+
+// ============================================================
+// Categorical features: ordered target statistics (CTRs)
+// ============================================================
+
+/// Borders of the quantized CTR values (CatBoost's `CtrBorderCount`).
+const CTR_BORDER_COUNT: i32 = 15;
+
+/// A category's key (the value's bits; categories are numeric codes).
+#[inline]
+fn category(v: f64) -> u64 {
+    if v.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        (v + 0.0).to_bits() // -0 and 0 are one category
+    }
+}
+
+/// CatBoost's default CTRs of a categorical feature: `Borders` (the rate of
+/// the positive class) with the priors 0, 0.5 and 1, and `Counter` (the
+/// category's frequency) with the prior 0.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+enum CtrKind {
+    Borders { prior: f32 },
+    Counter { prior: f32 },
+}
+
+const DEFAULT_CTRS: [CtrKind; 4] = [
+    CtrKind::Borders { prior: 0.0 },
+    CtrKind::Borders { prior: 0.5 },
+    CtrKind::Borders { prior: 1.0 },
+    CtrKind::Counter { prior: 0.0 },
+];
+
+/// CatBoost's `CalcCTR` (in float32): `(count + prior) / (total + 1)`,
+/// shifted and scaled into `[0, 1]` (`CalcNormalization`) and truncated to
+/// one of `CTR_BORDER_COUNT + 1` buckets.
+#[inline]
+fn calc_ctr(count_in_class: u32, total: u32, prior: f32) -> u8 {
+    let (shift, norm) = (-(0.0f32.min(prior)), 1.0f32.max(prior) - 0.0f32.min(prior));
+    let ctr = (count_in_class as f32 + prior) / ((total as i64 + 1) as f32);
+    ((ctr + shift) / norm * CTR_BORDER_COUNT as f32) as u8
+}
+
+/// A CTR of a categorical feature.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Ctr {
+    feature: usize,
+    kind: CtrKind,
+}
+
+/// Final counts of a categorical feature over the training rows (what a
+/// prediction's CTRs are computed from).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct CategoryCounts {
+    /// Per category: rows of the negative and the positive class.
+    classes: std::collections::BTreeMap<u64, [u32; 2]>,
+    /// The largest category count (the `Counter` denominator).
+    max_count: u32,
+}
+
+/// The CTRs of a fitted model and the counts behind them.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct CtrModel {
+    ctrs: Vec<Ctr>,
+    /// Per categorical feature with CTRs: its counts.
+    counts: std::collections::BTreeMap<usize, CategoryCounts>,
+}
+
+impl CtrModel {
+    /// The quantized CTR `ctr` of a row (from the training counts; an
+    /// unseen category has none).
+    fn bucket(&self, ctr: usize, row: ArrayView1<f64>) -> u8 {
+        let Ctr { feature, kind } = self.ctrs[ctr];
+        let counts = &self.counts[&feature];
+        let [neg, pos] = counts
+            .classes
+            .get(&category(row[feature]))
+            .copied()
+            .unwrap_or([0, 0]);
+        match kind {
+            CtrKind::Borders { prior } => calc_ctr(pos, neg + pos, prior),
+            CtrKind::Counter { prior } => calc_ctr(neg + pos, counts.max_count, prior),
+        }
+    }
+}
+
+// ============================================================
+// Training
+// ============================================================
 
 /// How a tree's splits are scored (CatBoost's `score_function`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -291,6 +400,7 @@ struct TrainParams {
     l2_leaf_reg: f64,
     score_function: CatBoostScoreFunction,
     leaf_estimation: CatBoostLeafEstimation,
+    model_size_reg: f64,
 }
 
 /// `sum · 1/(count + λ)` for a non-empty side, else 0 (CatBoost's
@@ -301,30 +411,206 @@ fn average(sum: f64, count: f64, l2: f64) -> f64 {
     sum * inv
 }
 
-/// The quantized training data.
-struct Quantized {
-    borders: Vec<Vec<f32>>,
-    /// Per feature: the bucket of every row.
-    buckets: Vec<Vec<u8>>,
+/// What a split candidate column splits on.
+enum ColumnSplit {
+    Float { feature: usize, borders: Vec<f32> },
+    OneHot { feature: usize, values: Vec<u64> },
+    Ctr { ctr: usize },
 }
 
-fn quantize(x: ArrayView2<f64>, border_count: usize) -> Quantized {
+/// One split candidate: the bucket of every row.
+struct Column {
+    split: ColumnSplit,
+    buckets: Vec<u8>,
+    n_buckets: usize,
+    /// CTRs: the (feature, is `Counter`) key of their type and the
+    /// feature's category count, for CatBoost's model size penalty.
+    ctr_key: Option<((usize, bool), usize)>,
+}
+
+impl Column {
+    fn one_hot(&self) -> bool {
+        matches!(self.split, ColumnSplit::OneHot { .. })
+    }
+
+    /// Whether a row of bucket `b` goes right at the split `s`.
+    #[inline]
+    fn goes_right(&self, b: u8, s: usize) -> bool {
+        if self.one_hot() {
+            b as usize == s
+        } else {
+            b as usize > s
+        }
+    }
+
+    fn tree_split(&self, s: usize) -> TreeSplit {
+        match &self.split {
+            ColumnSplit::Float { feature, borders } => TreeSplit::Float {
+                feature: *feature,
+                border: borders[s],
+            },
+            ColumnSplit::OneHot { feature, values } => TreeSplit::OneHot {
+                feature: *feature,
+                value: values[s],
+            },
+            ColumnSplit::Ctr { ctr } => TreeSplit::Ctr {
+                ctr: *ctr,
+                bucket: s as u8,
+            },
+        }
+    }
+}
+
+/// The quantized training data: the split candidates in CatBoost's order
+/// (numeric features, then one-hot categorical features, then the CTRs of
+/// the other categorical features).
+struct Quantized {
+    columns: Vec<Column>,
+    /// Per numeric feature: its borders (empty for categorical ones).
+    borders: Vec<Vec<f32>>,
+}
+
+/// How categorical features are used.
+#[derive(Clone, Copy)]
+struct CategoricalParams<'a> {
+    features: &'a [usize],
+    one_hot_max_size: usize,
+    /// The target class (0 / 1) of every row, for the `Borders` CTRs.
+    classes: Option<&'a [u8]>,
+}
+
+fn quantize(
+    x: ArrayView2<f64>,
+    border_count: usize,
+    cat: CategoricalParams<'_>,
+) -> Result<(Quantized, CtrModel)> {
     use rayon::prelude::*;
-    let (borders, buckets) = (0..x.ncols())
+    let p = x.ncols();
+    if let Some(&f) = cat.features.iter().find(|&&f| f >= p) {
+        return Err(RustMlError::InvalidParameter(format!(
+            "cat_features: feature {f} out of range for {p} features"
+        )));
+    }
+    let is_cat = |f: usize| cat.features.contains(&f);
+    let float: Vec<(Vec<f32>, Vec<u8>)> = (0..p)
         .into_par_iter()
         .map(|f| {
+            if is_cat(f) {
+                return (Vec::new(), Vec::new());
+            }
             let col = x.column(f);
             let borders = feature_borders(col, border_count);
             let buckets = col.iter().map(|&v| bucket(v, &borders)).collect();
             (borders, buckets)
         })
-        .unzip();
-    Quantized { borders, buckets }
+        .collect();
+    let mut columns = Vec::new();
+    let mut borders = Vec::with_capacity(p);
+    for (f, (b, buckets)) in float.into_iter().enumerate() {
+        if !is_cat(f) && !b.is_empty() {
+            columns.push(Column {
+                split: ColumnSplit::Float {
+                    feature: f,
+                    borders: b.clone(),
+                },
+                buckets,
+                n_buckets: b.len() + 1,
+                ctr_key: None,
+            });
+        }
+        borders.push(b);
+    }
+
+    let mut cat_features: Vec<usize> = cat.features.to_vec();
+    cat_features.sort_unstable();
+    cat_features.dedup();
+    // Categories in the order of their first appearance (CatBoost's
+    // perfect hash).
+    let mut ctr_features = Vec::new();
+    for &f in &cat_features {
+        let mut index = std::collections::HashMap::new();
+        let mut values = Vec::new();
+        let ids: Vec<u32> = x
+            .column(f)
+            .iter()
+            .map(|&v| {
+                let key = category(v);
+                *index.entry(key).or_insert_with(|| {
+                    values.push(key);
+                    values.len() as u32 - 1
+                })
+            })
+            .collect();
+        if values.len() <= cat.one_hot_max_size {
+            if values.len() >= 2 {
+                columns.push(Column {
+                    n_buckets: values.len(),
+                    split: ColumnSplit::OneHot { feature: f, values },
+                    buckets: ids.iter().map(|&i| i as u8).collect(),
+                    ctr_key: None,
+                });
+            }
+        } else {
+            ctr_features.push((f, ids, values));
+        }
+    }
+
+    let mut model = CtrModel::default();
+    if !ctr_features.is_empty() {
+        let classes = cat.classes.ok_or_else(|| {
+            RustMlError::InvalidParameter(
+                "categorical features with CTRs need a binary target".into(),
+            )
+        })?;
+        for (f, ids, values) in ctr_features {
+            let k = values.len();
+            // Online (ordered) class counts: each row sees the rows before it.
+            let mut running = vec![[0u32; 2]; k];
+            let mut online: Vec<[u32; 2]> = Vec::with_capacity(ids.len());
+            for (&id, &c) in ids.iter().zip(classes) {
+                online.push(running[id as usize]);
+                running[id as usize][c as usize] += 1;
+            }
+            let totals: Vec<u32> = running.iter().map(|c| c[0] + c[1]).collect();
+            let max_count = totals.iter().copied().max().unwrap_or(0);
+            for kind in DEFAULT_CTRS {
+                let buckets = match kind {
+                    CtrKind::Borders { prior } => online
+                        .iter()
+                        .map(|&[neg, pos]| calc_ctr(pos, neg + pos, prior))
+                        .collect(),
+                    CtrKind::Counter { prior } => ids
+                        .iter()
+                        .map(|&id| calc_ctr(totals[id as usize], max_count, prior))
+                        .collect(),
+                };
+                let counter = matches!(kind, CtrKind::Counter { .. });
+                columns.push(Column {
+                    split: ColumnSplit::Ctr {
+                        ctr: model.ctrs.len(),
+                    },
+                    buckets,
+                    n_buckets: CTR_BORDER_COUNT as usize + 1,
+                    ctr_key: Some(((f, counter), k)),
+                });
+                model.ctrs.push(Ctr { feature: f, kind });
+            }
+            model.counts.insert(
+                f,
+                CategoryCounts {
+                    classes: values.into_iter().zip(running).collect(),
+                    max_count,
+                },
+            );
+        }
+    }
+    Ok((Quantized { columns, borders }, model))
 }
 
 /// Grow one oblivious tree on the weighted first derivatives `wder`
-/// (`w · der1`) and weights `w`; returns the splits as (feature, border
+/// (`w · der1`) and weights `w`; returns the splits as (column, split
 /// index) and every row's leaf.
+#[allow(clippy::too_many_arguments)]
 fn grow_tree(
     q: &Quantized,
     wder: &[f64],
@@ -332,32 +618,59 @@ fn grow_tree(
     depth: usize,
     scaled_l2: f64,
     score_function: CatBoostScoreFunction,
+    model_size_reg: f64,
+    used_ctrs: &mut std::collections::HashSet<(usize, bool)>,
 ) -> (Vec<(usize, usize)>, Vec<u32>) {
     use rayon::prelude::*;
     let n = wder.len();
+    // CatBoost's `GetCatFeatureWeight`: a CTR type not yet in the model
+    // scores `(1 + categories / max categories)^-model_size_reg` times less.
+    let max_categories = q
+        .columns
+        .iter()
+        .filter_map(|c| c.ctr_key.map(|(_, k)| k))
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let mut splits: Vec<(usize, usize)> = Vec::new();
     let mut leaf_of = vec![0u32; n];
     for d in 0..depth {
         let leaves = 1usize << d;
-        // Best (score, border) per feature, the first best border winning.
-        let per_feature: Vec<Option<(f64, usize)>> = q
-            .buckets
+        // Best (score, split) per column, the first best split winning.
+        let per_column: Vec<Option<(f64, usize)>> = q
+            .columns
             .par_iter()
-            .zip(&q.borders)
-            .map(|(col, borders)| {
-                let nb = borders.len() + 1;
+            .map(|column| {
+                let nb = column.n_buckets;
+                let one_hot = column.one_hot();
+                let n_splits = if one_hot { nb } else { nb - 1 };
                 if nb < 2 {
                     return None;
                 }
                 let mut hist = vec![(0.0f64, 0.0f64); leaves * nb];
                 for i in 0..n {
-                    let h = &mut hist[leaf_of[i] as usize * nb + col[i] as usize];
+                    let h = &mut hist[leaf_of[i] as usize * nb + column.buckets[i] as usize];
                     h.0 += wder[i];
                     h.1 += w[i];
                 }
-                let splits = nb - 1;
-                let mut num = vec![0.0f64; splits];
-                let mut den = vec![1e-100f64; splits];
+                let mut num = vec![0.0f64; n_splits];
+                let mut den = vec![1e-100f64; n_splits];
+                let mut add = |s: usize, t: (f64, f64), f: (f64, f64)| {
+                    let (at, af) = (average(t.0, t.1, scaled_l2), average(f.0, f.1, scaled_l2));
+                    match score_function {
+                        // CatBoost's SSE kernel: `prev + (false + true)`.
+                        CatBoostScoreFunction::Cosine => {
+                            num[s] += af * f.0 + at * t.0;
+                            den[s] += af * af * f.1 + at * at * t.1;
+                        }
+                        // `AddLeaf(true)` then `AddLeaf(false)`.
+                        CatBoostScoreFunction::L2 => {
+                            num[s] += at * t.0;
+                            num[s] += af * f.0;
+                        }
+                    }
+                };
+                // CatBoost's `CalcScoresForLeaf`.
                 for leaf in 0..leaves {
                     let buckets = &hist[leaf * nb..(leaf + 1) * nb];
                     let mut all = (0.0, 0.0);
@@ -365,24 +678,23 @@ fn grow_tree(
                         all.0 += b.0;
                         all.1 += b.1;
                     }
-                    let (mut t, mut f) = (all, (0.0f64, 0.0f64));
-                    for (s, b) in buckets[..splits].iter().enumerate() {
-                        f.0 += b.0;
-                        f.1 += b.1;
-                        t.0 -= b.0;
-                        t.1 -= b.1;
-                        let (at, af) = (average(t.0, t.1, scaled_l2), average(f.0, f.1, scaled_l2));
-                        match score_function {
-                            // CatBoost's SSE kernel: `prev + (false + true)`.
-                            CatBoostScoreFunction::Cosine => {
-                                num[s] += af * f.0 + at * t.0;
-                                den[s] += af * af * f.1 + at * at * t.1;
-                            }
-                            // `AddLeaf(true)` then `AddLeaf(false)`.
-                            CatBoostScoreFunction::L2 => {
-                                num[s] += at * t.0;
-                                num[s] += af * f.0;
-                            }
+                    if one_hot {
+                        let mut f = all;
+                        for (s, &b) in buckets.iter().enumerate() {
+                            f.0 -= b.0;
+                            f.1 -= b.1;
+                            add(s, b, f);
+                            f.0 += b.0;
+                            f.1 += b.1;
+                        }
+                    } else {
+                        let (mut t, mut f) = (all, (0.0f64, 0.0f64));
+                        for (s, b) in buckets[..n_splits].iter().enumerate() {
+                            f.0 += b.0;
+                            f.1 += b.1;
+                            t.0 -= b.0;
+                            t.1 -= b.1;
+                            add(s, t, f);
                         }
                     }
                 }
@@ -391,7 +703,7 @@ fn grow_tree(
                     CatBoostScoreFunction::L2 => num[s],
                 };
                 let mut best: Option<(f64, usize)> = None;
-                for s in 0..splits {
+                for s in 0..n_splits {
                     let sc = score(s);
                     if best.is_none_or(|(b, _)| sc > b) {
                         best = Some((sc, s));
@@ -401,21 +713,29 @@ fn grow_tree(
             })
             .collect();
         let mut best: Option<(f64, usize, usize)> = None;
-        for (f, cand) in per_feature.into_iter().enumerate() {
-            if let Some((sc, s)) = cand {
+        for (c, cand) in per_column.into_iter().enumerate() {
+            if let Some((mut sc, s)) = cand {
+                if let Some((key, k)) = q.columns[c].ctr_key {
+                    if !used_ctrs.contains(&key) {
+                        sc *= (1.0 + k as f64 / max_categories as f64).powf(-model_size_reg);
+                    }
+                }
                 if best.is_none_or(|(b, _, _)| sc > b) {
-                    best = Some((sc, f, s));
+                    best = Some((sc, c, s));
                 }
             }
         }
-        let Some((_, feature, border)) = best else {
+        let Some((_, c, s)) = best else {
             break;
         };
-        let col = &q.buckets[feature];
+        let column = &q.columns[c];
         for i in 0..n {
-            leaf_of[i] |= u32::from(col[i] as usize > border) << d;
+            leaf_of[i] |= u32::from(column.goes_right(column.buckets[i], s)) << d;
         }
-        splits.push((feature, border));
+        splits.push((c, s));
+        if let Some((key, _)) = column.ctr_key {
+            used_ctrs.insert(key);
+        }
 
         // A split with no pair of non-empty sibling leaves is dropped and
         // growth stops (CatBoost's `GetRedundantSplitIdx`).
@@ -435,7 +755,10 @@ fn grow_tree(
                 *l = splits
                     .iter()
                     .enumerate()
-                    .map(|(d, &(f, b))| u32::from(q.buckets[f][i] as usize > b) << d)
+                    .map(|(d, &(c, s))| {
+                        let column = &q.columns[c];
+                        u32::from(column.goes_right(column.buckets[i], s)) << d
+                    })
                     .sum();
             }
             break;
@@ -458,6 +781,7 @@ fn boost(
     let scaled_l2 = p.l2_leaf_reg * (sum_w / n as f64);
     let mut approx = vec![bias; n];
     let mut trees = Vec::with_capacity(p.iterations);
+    let mut used_ctrs = std::collections::HashSet::new();
     for _ in 0..p.iterations {
         let ders: Vec<(f64, f64)> = target
             .iter()
@@ -465,7 +789,16 @@ fn boost(
             .map(|(&t, &a)| loss.ders(t, a))
             .collect();
         let wder: Vec<f64> = ders.iter().zip(weights).map(|(d, &w)| w * d.0).collect();
-        let (splits, leaf_of) = grow_tree(q, &wder, weights, p.depth, scaled_l2, p.score_function);
+        let (splits, leaf_of) = grow_tree(
+            q,
+            &wder,
+            weights,
+            p.depth,
+            scaled_l2,
+            p.score_function,
+            p.model_size_reg,
+            &mut used_ctrs,
+        );
         let n_leaves = 1usize << splits.len();
         let mut sums = vec![(0.0f64, 0.0f64, 0.0f64); n_leaves];
         for i in 0..n {
@@ -488,7 +821,10 @@ fn boost(
             approx[i] += leaf_values[leaf_of[i] as usize];
         }
         trees.push(ObliviousTree {
-            splits: splits.iter().map(|&(f, b)| (f, q.borders[f][b])).collect(),
+            splits: splits
+                .iter()
+                .map(|&(c, s)| q.columns[c].tree_split(s))
+                .collect(),
             leaf_values,
         });
     }
@@ -496,7 +832,12 @@ fn boost(
 }
 
 /// Raw scores `bias + Σ leaf values` of the rows of `x`.
-fn raw_scores(trees: &[ObliviousTree], bias: f64, x: ArrayView2<f64>) -> Array1<f64> {
+fn raw_scores(
+    trees: &[ObliviousTree],
+    ctrs: &CtrModel,
+    bias: f64,
+    x: ArrayView2<f64>,
+) -> Array1<f64> {
     use rayon::prelude::*;
     let mut out = vec![bias; x.nrows()];
     out.par_iter_mut()
@@ -505,7 +846,7 @@ fn raw_scores(trees: &[ObliviousTree], bias: f64, x: ArrayView2<f64>) -> Array1<
         .for_each(|(i, s)| {
             let row = x.row(i);
             for t in trees {
-                *s += t.leaf_values[t.leaf(row)];
+                *s += t.leaf_values[t.leaf(row, ctrs)];
             }
         });
     Array1::from(out)
@@ -610,6 +951,17 @@ macro_rules! catboost_config {
             pub leaf_estimation_method: CatBoostLeafEstimation,
             /// Start from the loss-optimal constant instead of 0.
             pub boost_from_average: bool,
+            /// Categorical features (their values are category codes).
+            /// Those with at most `one_hot_max_size` categories are split
+            /// one-hot, the others through CatBoost's ordered target
+            /// statistics (CTRs) without feature combinations
+            /// (`max_ctr_complexity=1`).
+            pub cat_features: Vec<usize>,
+            /// Default 2.
+            pub one_hot_max_size: usize,
+            /// Penalty on CTRs new to the model (CatBoost's
+            /// `model_size_reg`, default 0.5).
+            pub model_size_reg: f64,
         }
 
         impl Default for $name {
@@ -623,6 +975,9 @@ macro_rules! catboost_config {
                     score_function: CatBoostScoreFunction::Cosine,
                     leaf_estimation_method: CatBoostLeafEstimation::Newton,
                     boost_from_average: $bfa,
+                    cat_features: Vec::new(),
+                    one_hot_max_size: 2,
+                    model_size_reg: 0.5,
                 }
             }
         }
@@ -663,6 +1018,18 @@ macro_rules! catboost_config {
                 self.boost_from_average = b;
                 self
             }
+            pub fn with_cat_features(mut self, features: Vec<usize>) -> Self {
+                self.cat_features = features;
+                self
+            }
+            pub fn with_one_hot_max_size(mut self, n: usize) -> Self {
+                self.one_hot_max_size = n;
+                self
+            }
+            pub fn with_model_size_reg(mut self, r: f64) -> Self {
+                self.model_size_reg = r;
+                self
+            }
 
             /// CatBoost keeps the learning rate and the L2 regularization
             /// as float32.
@@ -674,6 +1041,7 @@ macro_rules! catboost_config {
                     l2_leaf_reg: f64::from(self.l2_leaf_reg as f32),
                     score_function: self.score_function,
                     leaf_estimation: self.leaf_estimation_method,
+                    model_size_reg: self.model_size_reg,
                 }
             }
         }
@@ -695,6 +1063,8 @@ catboost_config!(
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedCatBoostRegressor {
     trees: Vec<ObliviousTree>,
+    #[serde(default)]
+    ctrs: CtrModel,
     bias: f64,
     borders: Vec<Vec<f32>>,
     n_features: usize,
@@ -728,10 +1098,25 @@ impl FitWeighted<f64> for CatBoostRegressor {
         } else {
             0.0
         };
-        let q = quantize(x, self.border_count);
+        let cat = CategoricalParams {
+            features: &self.cat_features,
+            one_hot_max_size: self.one_hot_max_size,
+            classes: None,
+        };
+        let (q, ctrs) = quantize(x, self.border_count, cat).map_err(|e| match e {
+            RustMlError::InvalidParameter(m) if m.contains("binary target") => {
+                RustMlError::InvalidParameter(
+                    "CatBoostRegressor: categorical features with more than one_hot_max_size \
+                     categories (CTRs) are not supported yet"
+                        .into(),
+                )
+            }
+            other => other,
+        })?;
         let trees = boost(&q, &target, &weights, bias, Loss::Rmse, p);
         Ok(FittedCatBoostRegressor {
             trees,
+            ctrs,
             bias,
             borders: q.borders,
             n_features: x.ncols(),
@@ -750,7 +1135,7 @@ impl Fit<f64> for CatBoostRegressor {
 impl Predict<f64> for FittedCatBoostRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         check_features(x, self.n_features)?;
-        Ok(raw_scores(&self.trees, self.bias, x))
+        Ok(raw_scores(&self.trees, &self.ctrs, self.bias, x))
     }
 }
 
@@ -758,6 +1143,8 @@ impl Predict<f64> for FittedCatBoostRegressor {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedCatBoostClassifier {
     trees: Vec<ObliviousTree>,
+    #[serde(default)]
+    ctrs: CtrModel,
     bias: f64,
     borders: Vec<Vec<f32>>,
     classes: Vec<f64>,
@@ -776,7 +1163,7 @@ impl FittedCatBoostClassifier {
     pub fn decision_function<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
         let x: ArrayView2<f64> = x.into();
         check_features(x, self.n_features)?;
-        Ok(raw_scores(&self.trees, self.bias, x))
+        Ok(raw_scores(&self.trees, &self.ctrs, self.bias, x))
     }
 
     /// Probabilities of the two classes (columns in `classes()` order).
@@ -820,10 +1207,17 @@ impl FitWeighted<f64> for CatBoostClassifier {
         } else {
             0.0
         };
-        let q = quantize(x, self.border_count);
+        let classes_of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
+        let cat = CategoricalParams {
+            features: &self.cat_features,
+            one_hot_max_size: self.one_hot_max_size,
+            classes: Some(&classes_of),
+        };
+        let (q, ctrs) = quantize(x, self.border_count, cat)?;
         let trees = boost(&q, &target, &weights, bias, Loss::Logloss, p);
         Ok(FittedCatBoostClassifier {
             trees,
+            ctrs,
             bias,
             borders: q.borders,
             classes,
@@ -856,7 +1250,12 @@ impl Predict<f64> for FittedCatBoostClassifier {
 /// Quantization borders (for the parity tests).
 #[doc(hidden)]
 pub fn catboost_borders(x: ArrayView2<f64>, border_count: usize) -> Vec<Vec<f32>> {
-    quantize(x, border_count).borders
+    let cat = CategoricalParams {
+        features: &[],
+        one_hot_max_size: 0,
+        classes: None,
+    };
+    quantize(x, border_count, cat).unwrap().0.borders
 }
 
 #[cfg(test)]
@@ -880,9 +1279,14 @@ mod tests {
     #[test]
     fn missing_values_get_the_lowest_bucket() {
         let x = Array2::from_shape_vec((4, 1), vec![f64::NAN, 1.0, 2.0, 3.0]).unwrap();
-        let q = quantize(x.view(), 254);
+        let cat = CategoricalParams {
+            features: &[],
+            one_hot_max_size: 0,
+            classes: None,
+        };
+        let (q, _) = quantize(x.view(), 254, cat).unwrap();
         assert_eq!(q.borders[0][0], -f32::MAX);
-        assert_eq!(q.buckets[0], vec![0, 1, 2, 3]);
+        assert_eq!(q.columns[0].buckets, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -931,6 +1335,36 @@ mod tests {
         assert!(acc > 0.9, "{acc}");
         let three = labels.mapv(|v| v.min(0.0)) + Array1::from_shape_fn(200, |i| (i % 3) as f64);
         assert!(CatBoostClassifier::new().fit(&x, &three).is_err());
+    }
+
+    #[test]
+    fn ctrs_are_ordered_and_quantized_as_catboost() {
+        // (good + prior) / (total + 1) in 15ths, truncated.
+        assert_eq!(calc_ctr(0, 0, 0.5), 7);
+        assert_eq!(calc_ctr(3, 4, 0.0), 9);
+        assert_eq!(calc_ctr(4, 4, 1.0), 15);
+        // Online counts: each row sees only the rows before it.
+        let x = Array2::from_shape_vec((5, 1), vec![7.0, 7.0, 7.0, 3.0, 3.0]).unwrap();
+        let classes = [1u8, 1, 0, 0, 1];
+        let cat = CategoricalParams {
+            features: &[0],
+            one_hot_max_size: 1,
+            classes: Some(&classes),
+        };
+        let (q, model) = quantize(x.view(), 254, cat).unwrap();
+        // Borders with prior 0: 0/1, 1/2, 2/3, 0/1, 0/2.
+        assert_eq!(q.columns[0].buckets, vec![0, 7, 10, 0, 0]);
+        // Counter: counts 3 and 2 over (max 3) + 1.
+        assert_eq!(q.columns[3].buckets, vec![11, 11, 11, 7, 7]);
+        assert_eq!(model.counts[&0].classes[&category(7.0)], [1, 2]);
+        // Few categories: one-hot, no CTRs.
+        let cat = CategoricalParams {
+            features: &[0],
+            one_hot_max_size: 2,
+            classes: Some(&classes),
+        };
+        let (q, model) = quantize(x.view(), 254, cat).unwrap();
+        assert!(q.columns[0].one_hot() && model.ctrs.is_empty());
     }
 
     #[test]

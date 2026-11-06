@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: categorical features (#127 §5)
+
+- `cat_features` on `CatBoostClassifier`: categorical features with at
+  most `one_hot_max_size` (2) categories are split one-hot, the others
+  through CatBoost's ordered target statistics, its default CTRs
+  `Borders` (priors 0, 0.5, 1) and `Counter`: online counts of the rows
+  before each row on the training data, the final counts for predictions,
+  quantized into 15ths as CatBoost's `CalcCTR`, with the `model_size_reg`
+  penalty (0.5) on CTRs new to the model. Matches catboost 1.2.10 to 3e-16
+  (`max_ctr_complexity=1`; feature combinations are not supported).
+  Python: `cat_features` with any category values (unseen ones allowed).
+  `CatBoostRegressor` takes one-hot categorical features; its CTRs (which
+  need CatBoost's target binarization) are not supported yet.
+
 ### CatBoost-style boosting: oblivious trees (#127 §5)
 
 - `CatBoostRegressor` (RMSE) and `CatBoostClassifier` (Logloss, two
