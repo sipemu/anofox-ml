@@ -173,6 +173,25 @@ def generate():
     add_cat("cat_mc_no_onehot", dict(cat_mc, one_hot_max_size=1, score_function="L2"), y_cat_mc)
     add_cat("cat_mc_weighted", cat_mc, y_cat_mc, sw=weights)
     add_cat("cat_mc_ordered", dict(cat_mc, boosting_type="Ordered"), y_cat_mc)
+
+    # CTRs of feature combinations (`max_ctr_complexity` > 1): the tree's
+    # float and one-hot split conditions and its CTR projections, each
+    # extended by a categorical feature.
+    combo = dict(cat, max_ctr_complexity=4)
+    add_cat("combo_logloss", combo, y_cat)
+    add_cat("combo_logloss_2", dict(combo, max_ctr_complexity=2), y_cat)
+    add_cat("combo_logloss_l2_depth6", dict(combo, score_function="L2", depth=6), y_cat)
+    add_cat("combo_rmse", combo, y_cat_reg, kind="regressor")
+    add_cat("combo_mc", dict(combo, loss_function="MultiClass", depth=6, score_function="L2",
+                             iterations=60), y_cat_mc)
+    add_cat("combo_ordered", dict(combo, boosting_type="Ordered"), y_cat)
+    add_cat("combo_weighted", dict(combo, depth=6), y_cat, sw=weights)
+    # 200 iterations: `max_ctr_complexity` defaults to 4 (1 below). Logloss
+    # then also defaults to 10 leaf estimation iterations, which we do not
+    # have, so that one is pinned.
+    default_combo = {k: v for k, v in cat.items() if k != "max_ctr_complexity"}
+    add_cat("combo_default_200", dict(default_combo, iterations=200, learning_rate=0.05,
+                                      leaf_estimation_iterations=1), y_cat)
     return out
 
 

@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: CTR feature combinations (#127 §5)
+
+- `max_ctr_complexity` on `CatBoostRegressor` / `CatBoostClassifier`
+  (CatBoost's default: 4, or 1 below 200 iterations): CTRs of feature
+  combinations, as CatBoost's `AddTreeCtrs` builds them per tree level. The
+  conditions of the tree's float and one-hot splits, and the projection of
+  each of its CTR splits, are extended by every categorical feature with
+  CTRs. The model-size penalty takes its maximum over the level's CTR
+  candidates. A projection's CTR columns are cached across trees, and a
+  fitted model keeps only the CTRs its splits use. Matches catboost 1.2.10
+  to 6e-16 on 8 golden cases. They include cat × cat, cat × float
+  conditions (up to 3), cat × one-hot, multiclass, ordered and weighted
+  fits.
+
 ### CatBoost-style boosting: multiclass (#127 §5)
 
 - `CatBoostClassifier` fits more than two classes with CatBoost's

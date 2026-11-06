@@ -885,3 +885,24 @@ def test_catboost_multiclass_matches_catboost():
         np.testing.assert_array_equal(ours.predict(X), ref.predict(X).ravel())
         raw = ref.predict(X, prediction_type="RawFormulaVal")
         np.testing.assert_allclose(ours.decision_function(X), raw, rtol=1e-12, atol=1e-12)
+
+
+def test_catboost_ctr_combinations_match_catboost():
+    cb = pytest.importorskip("catboost")
+    off = dict(random_strength=0, bootstrap_type="No", has_time=True, thread_count=1,
+               verbose=0, allow_writing_files=False)
+    r = np.random.RandomState(21)
+    n = 500
+    X = np.empty((n, 4), dtype=object)
+    X[:, 0] = r.randn(n)
+    X[:, 1] = r.choice(["a", "b", "c", "d", "e", "f"], size=n)
+    X[:, 2] = r.choice(["x", "y", "z", "w"], size=n)
+    X[:, 3] = r.choice(["on", "off"], size=n)
+    eta = X[:, 0].astype(float) + ((X[:, 1] == "a") ^ (X[:, 2] == "x")) + (X[:, 3] == "on")
+    y = (eta + r.logistic(size=n) * 0.5 > 1.0).astype(int)
+    kw = dict(iterations=40, learning_rate=0.2, depth=5, cat_features=[1, 2, 3],
+              max_ctr_complexity=3)
+    ref = cb.CatBoostClassifier(**kw, **off).fit(X, y)
+    ours = am.CatBoostClassifier(**kw).fit(X, y)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
+                               atol=1e-12)
