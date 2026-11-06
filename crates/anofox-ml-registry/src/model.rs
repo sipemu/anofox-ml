@@ -52,6 +52,10 @@ pub trait DynModel: Send + Sync {
     ) -> Result<()>;
     fn to_bytes(&self) -> Result<Vec<u8>>;
     fn fitted_json(&self) -> Result<String>;
+    /// Merge JSON overrides into the configuration (unknown keys are an
+    /// error). A fitted state is kept: it is what `warm_start` continues,
+    /// and new parameters take effect at the next fit.
+    fn set_params(&mut self, params: &serde_json::Value) -> Result<()>;
 
     fn predict(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "predict"))
@@ -92,6 +96,52 @@ pub trait DynModel: Send + Sync {
     fn predict_set(&self, _x: ArrayView2<f64>, _alpha: f64) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_set"))
     }
+    /// Per-feature importances of the fitted model (trees, forests,
+    /// boosting, bagging).
+    fn feature_importances(&self) -> Result<Out> {
+        Err(unsupported(self.kind(), "feature_importances"))
+    }
+    /// Predictions after each boosting stage: an `n × stages` array whose
+    /// column `k` is the prediction of the first `k + 1` stages (sklearn's
+    /// `staged_predict`; classes for classifiers).
+    fn staged_predict(&self, _x: ArrayView2<f64>) -> Result<Out> {
+        Err(unsupported(self.kind(), "staged_predict"))
+    }
+    /// Continue training the fitted model on `(x, y)` up to the configured
+    /// number of stages (sklearn's `warm_start=True` refit; raise
+    /// `n_estimators` with [`DynModel::set_params`] first). On error the
+    /// fitted model is unchanged.
+    fn warm_start(
+        &mut self,
+        _x: ArrayView2<f64>,
+        _y: Option<ArrayView1<f64>>,
+        _sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "warm_start"))
+    }
+    /// Fit with an explicit validation set for early stopping (sklearn's
+    /// HistGradientBoosting `fit(X, y, sample_weight, X_val=, y_val=,
+    /// sample_weight_val=)`).
+    fn fit_with_validation<'a>(
+        &mut self,
+        _x: ArrayView2<'a, f64>,
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
+        _x_val: ArrayView2<'a, f64>,
+        _y_val: Option<ArrayView1<'a, f64>>,
+        _sample_weight_val: Option<ArrayView1<'a, f64>>,
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "fit_with_validation"))
+    }
+}
+
+/// Stack per-stage predictions as the columns of an `n × stages` array.
+pub(crate) fn stages_to_columns(stages: impl Iterator<Item = Array1<f64>>) -> Result<Array2<f64>> {
+    let stages: Vec<Array1<f64>> = stages.collect();
+    let n = stages.first().map_or(0, |s| s.len());
+    Ok(Array2::from_shape_fn((n, stages.len()), |(i, k)| {
+        stages[k][i]
+    }))
 }
 
 /// Build a config from its default plus the JSON overrides in `params`.
@@ -193,7 +243,11 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// estimator's kind. Prediction methods receive the fitted model `m` and
 /// `x` and return `Result<Array1 | Array2>`; `predict_interval` /
 /// `predict_set` also receive `alpha` (`|m, x, alpha|`); `labels` /
-/// `embedding` receive only `m`.
+/// `embedding` / `feature_importances` receive only `m` and return the
+/// array; `warm_start` receives `|c, prev, x, y, w|` (a copy of the fitted
+/// model as `prev`) and returns the new fitted model;
+/// `fit_with_validation` receives `|c, x, y, w, x_val, y_val, w_val|`.
+/// Every entry gets `set_params`.
 macro_rules! registry {
     ($(
         $(#[$meta:meta])*
@@ -201,7 +255,7 @@ macro_rules! registry {
             config: $cfg:ty = $default:expr,
             fitted: $fitted:ty,
             fit: |$c:ident, $x:ident, $y:ident, $w:ident| $fit:expr,
-            $( $cap:ident : |$m:ident $(, $cx:ident $(, $ca:ident)?)?| $body:expr ),* $(,)?
+            $( $cap:ident : |$m:ident $(, $cx:ident $(, $ca:ident $(, $cy:ident, $cw:ident $(, $cvx:ident, $cvy:ident)?)?)?)?| $body:expr ),* $(,)?
         }
     )*) => {
         $(
@@ -250,7 +304,15 @@ macro_rules! registry {
                     serde_json::to_string(f)
                         .map_err(|e| anofox_ml_core::RustMlError::Serialization(e.to_string()))
                 }
-                $( registry!(@cap $kind, $cap, $m $(, $cx $(, $ca)?)?, $body); )*
+                fn set_params(&mut self, params: &serde_json::Value) -> anofox_ml_core::Result<()> {
+                    let current = serde_json::to_value(&self.0.config)
+                        .and_then(serde_json::from_value::<$cfg>)
+                        .map_err(|e| anofox_ml_core::RustMlError::Serialization(e.to_string()))?;
+                    self.0.config =
+                        $crate::model::config_from_params(stringify!($kind), current, params)?;
+                    Ok(())
+                }
+                $( registry!(@cap $kind, $cap, $m $(, $cx $(, $ca $(, $cy, $cw $(, $cvx, $cvy)?)?)?)?, $body); )*
             }
         )*
 
@@ -325,6 +387,51 @@ macro_rules! registry {
         fn labels(&self) -> anofox_ml_core::Result<$crate::model::Out> {
             let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
             Ok($crate::model::Out::from($body))
+        }
+    };
+    (@cap $kind:ident, feature_importances, $m:ident, $body:expr) => {
+        fn feature_importances(&self) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body))
+        }
+    };
+    (@cap $kind:ident, warm_start, $c:ident, $prev:ident, $x:ident, $y:ident, $w:ident, $body:expr) => {
+        #[allow(unused_variables)]
+        fn warm_start(
+            &mut self,
+            $x: ndarray::ArrayView2<f64>,
+            $y: Option<ndarray::ArrayView1<f64>>,
+            $w: Option<ndarray::ArrayView1<f64>>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $prev = self
+                .0
+                .fitted
+                .clone()
+                .ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    (@cap $kind:ident, fit_with_validation, $c:ident, $x:ident, $y:ident, $w:ident,
+     $xv:ident, $yv:ident, $wv:ident, $body:expr) => {
+        #[allow(unused_variables)]
+        fn fit_with_validation<'a>(
+            &mut self,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
+            $xv: ndarray::ArrayView2<'a, f64>,
+            $yv: Option<ndarray::ArrayView1<'a, f64>>,
+            $wv: Option<ndarray::ArrayView1<'a, f64>>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
         }
     };
     (@cap $kind:ident, embedding, $m:ident, $body:expr) => {

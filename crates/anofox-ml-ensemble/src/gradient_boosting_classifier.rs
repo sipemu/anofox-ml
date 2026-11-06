@@ -508,7 +508,83 @@ impl GradientBoostingClassifier {
 impl<F: Float> Predict<F> for FittedGradientBoostingClassifier<F> {
     fn predict_view(&self, x: ArrayView2<F>) -> Result<Array1<F>> {
         let raw = self.raw_predictions(x)?;
-        let preds = if self.classes.len() == 2 {
+        Ok(self.labels_of_raw(raw.view()))
+    }
+}
+
+impl<F: Float> FittedGradientBoostingClassifier<F> {
+    /// Raw scores after each round (sklearn's `staged_decision_function`);
+    /// the last equals [`Self::decision_function`].
+    pub fn staged_decision_function<'a>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+    ) -> Result<impl Iterator<Item = Array2<F>> + '_> {
+        let x: ArrayView2<F> = x.into();
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+        // tree_preds[m][k]: the class-k tree of round m.
+        let tree_preds = (0..self.n_estimators())
+            .map(|m| {
+                self.tree_sets
+                    .iter()
+                    .map(|ts| ts[m].predict(x))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut raw = Array2::<F>::zeros((x.nrows(), self.tree_sets.len()));
+        for (k, &v) in self.initial_values.iter().enumerate() {
+            raw.column_mut(k).fill(v);
+        }
+        Ok(tree_preds.into_iter().map(move |round| {
+            for (k, p) in round.iter().enumerate() {
+                raw.column_mut(k).scaled_add(self.learning_rate, p);
+            }
+            raw.clone()
+        }))
+    }
+
+    /// Class probabilities after each round (sklearn's
+    /// `staged_predict_proba`).
+    pub fn staged_predict_proba<'a>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+    ) -> Result<impl Iterator<Item = Array2<F>> + '_> {
+        let binary = self.classes.len() == 2;
+        Ok(self.staged_decision_function(x)?.map(move |raw| {
+            if binary {
+                let mut proba = Array2::<F>::zeros((raw.nrows(), 2));
+                for i in 0..raw.nrows() {
+                    let p1 = sigmoid(raw[[i, 0]]);
+                    proba[[i, 0]] = F::one() - p1;
+                    proba[[i, 1]] = p1;
+                }
+                proba
+            } else {
+                let mut proba = Array2::<F>::zeros(raw.raw_dim());
+                compute_probs(raw.view(), &mut proba);
+                proba
+            }
+        }))
+    }
+
+    /// Predicted classes after each round (sklearn's `staged_predict`).
+    pub fn staged_predict<'a>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+    ) -> Result<impl Iterator<Item = Array1<F>> + '_> {
+        Ok(self
+            .staged_decision_function(x)?
+            .map(move |raw| self.labels_of_raw(raw.view())))
+    }
+
+    /// Classes of raw scores (as [`Predict::predict`]).
+    fn labels_of_raw(&self, raw: ArrayView2<F>) -> Array1<F> {
+        if self.classes.len() == 2 {
             raw.column(0)
                 .iter()
                 .map(|&r| {
@@ -524,12 +600,9 @@ impl<F: Float> Predict<F> for FittedGradientBoostingClassifier<F> {
                 .into_iter()
                 .map(|row| self.classes[argmax_first(row.iter().copied())])
                 .collect()
-        };
-        Ok(preds)
+        }
     }
-}
 
-impl<F: Float> FittedGradientBoostingClassifier<F> {
     /// Number of boosting rounds.
     pub fn n_estimators(&self) -> usize {
         self.tree_sets.first().map_or(0, |ts| ts.len())
@@ -1153,6 +1226,33 @@ mod tests {
             correct_normal >= correct_tiny,
             "normal lr ({correct_normal} correct) should be >= tiny lr ({correct_tiny} correct)"
         );
+    }
+
+    #[test]
+    fn test_staged_predictions_end_at_the_final_ones() {
+        let x = Array2::from_shape_fn((60, 3), |(i, j)| ((i * (j + 2)) as f64 * 0.37).sin());
+        for n_classes in [2usize, 3] {
+            let y = Array1::from_shape_fn(60, |i| {
+                ((x[[i, 0]] + 1.0) * n_classes as f64 / 2.0)
+                    .floor()
+                    .min(n_classes as f64 - 1.0)
+            });
+            let f: FittedGradientBoostingClassifier<f64> = GradientBoostingClassifier::new()
+                .with_n_estimators(7)
+                .with_max_depth(Some(2))
+                .fit(&x, &y)
+                .unwrap();
+            let raw: Vec<_> = f.staged_decision_function(&x).unwrap().collect();
+            let proba: Vec<_> = f.staged_predict_proba(&x).unwrap().collect();
+            let labels: Vec<_> = f.staged_predict(&x).unwrap().collect();
+            assert_eq!((raw.len(), proba.len(), labels.len()), (7, 7, 7));
+            assert_eq!(raw[6], f.decision_function(&x).unwrap());
+            assert_eq!(proba[6], f.predict_proba(&x).unwrap());
+            assert_eq!(labels[6], f.predict(&x).unwrap());
+            assert!(f
+                .staged_predict(Array2::<f64>::zeros((2, 2)).view())
+                .is_err());
+        }
     }
 
     #[test]

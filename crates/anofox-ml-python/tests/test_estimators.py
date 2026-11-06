@@ -715,3 +715,79 @@ def test_kneighbors_transformer_matches_sklearn():
         ref = neighbors.KNeighborsTransformer(mode=mode, n_neighbors=4).fit(X)
         np.testing.assert_allclose(ours.transform(X), ref.transform(X).toarray(), atol=1e-12)
         np.testing.assert_allclose(ours.transform(Xt), ref.transform(Xt).toarray(), atol=1e-12)
+
+
+def test_feature_importances_on_tree_and_boosting_estimators():
+    for est in (am.DecisionTreeRegressor(), am.RandomForestRegressor(n_estimators=5),
+                am.GradientBoostingRegressor(n_estimators=10),
+                am.HistGradientBoostingRegressor(max_iter=10),
+                am.LGBMRegressor(n_estimators=10, min_child_samples=5)):
+        imp = est.fit(X, y_reg).feature_importances_
+        assert imp.shape == (4,)
+        assert abs(imp.sum() - 1.0) < 1e-9
+        # The informative features carry the importance.
+        assert imp[[0, 1]].sum() > imp[[2, 3]].sum(), type(est).__name__
+    assert not hasattr(am.LinearRegression().fit(X, y_reg), "feature_importances_")
+    with pytest.raises(AttributeError):
+        am.GradientBoostingRegressor().feature_importances_
+
+
+def test_staged_predict_ends_at_predict_and_matches_sklearn():
+    from sklearn.ensemble import HistGradientBoostingClassifier as SkHgb
+
+    for est, y in ((am.GradientBoostingRegressor(n_estimators=8), y_reg),
+                   (am.GradientBoostingClassifier(n_estimators=8), y_bin),
+                   (am.HistGradientBoostingRegressor(max_iter=8), y_reg),
+                   (am.LGBMClassifier(n_estimators=8, min_child_samples=5), y_multi)):
+        est.fit(X, y)
+        stages = list(est.staged_predict(X))
+        assert len(stages) == 8
+        np.testing.assert_array_equal(stages[-1], est.predict(X))
+    ours = am.HistGradientBoostingClassifier(max_iter=6, min_samples_leaf=5).fit(X, y_bin)
+    ref = SkHgb(max_iter=6, min_samples_leaf=5, early_stopping=False).fit(X, y_bin)
+    for a, b in zip(ours.staged_predict(X), ref.staged_predict(X)):
+        np.testing.assert_array_equal(a, b)
+    assert not hasattr(am.RandomForestRegressor(), "staged_predict")
+
+
+def test_gradient_boosting_warm_start_adds_stages():
+    for cls, y in ((am.GradientBoostingRegressor, y_reg),
+                   (am.GradientBoostingClassifier, y_bin)):
+        warm = cls(n_estimators=5, subsample=0.7, random_state=3, warm_start=True).fit(X, y)
+        warm.set_params(n_estimators=12).fit(X, y)
+        once = cls(n_estimators=12, subsample=0.7, random_state=3).fit(X, y)
+        assert len(list(warm.staged_predict(X))) == 12
+        np.testing.assert_array_equal(warm.predict(X), once.predict(X))
+        with pytest.raises(ValueError):
+            warm.set_params(n_estimators=4).fit(X, y)
+        # warm_start=False refits from scratch.
+        cold = cls(n_estimators=5, random_state=3).fit(X, y)
+        cold.set_params(n_estimators=7).fit(X, y)
+        assert len(list(cold.staged_predict(X))) == 7
+
+
+def test_hist_gradient_boosting_explicit_validation_set_matches_sklearn():
+    from sklearn.ensemble import HistGradientBoostingClassifier as SkC
+    from sklearn.ensemble import HistGradientBoostingRegressor as SkR
+
+    r = np.random.RandomState(5)
+    Xt, Xv = r.randn(300, 4), r.randn(100, 4)
+    f = lambda A: A[:, 0] - 0.5 * A[:, 1]  # noqa: E731
+    yt, yv = f(Xt) + r.randn(300), f(Xv) + r.randn(100)
+    kw = dict(max_iter=200, early_stopping=True, n_iter_no_change=3, min_samples_leaf=5)
+    ours = am.HistGradientBoostingRegressor(**kw).fit(Xt, yt, X_val=Xv, y_val=yv)
+    ref = SkR(**kw).fit(Xt, yt, X_val=Xv, y_val=yv)
+    assert ours.n_iter_ == ref.n_iter_ < 200
+    np.testing.assert_allclose(ours.predict(Xv), ref.predict(Xv), rtol=1e-12, atol=1e-12)
+    labels = np.where(yt > 0, "a", "b")
+    labels_v = np.where(yv > 0, "a", "b")
+    ours = am.HistGradientBoostingClassifier(**kw).fit(Xt, labels, X_val=Xv, y_val=labels_v)
+    ref = SkC(**kw).fit(Xt, labels, X_val=Xv, y_val=labels_v)
+    assert ours.n_iter_ == ref.n_iter_
+    np.testing.assert_allclose(ours.predict_proba(Xv), ref.predict_proba(Xv), rtol=1e-12,
+                               atol=1e-12)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingClassifier(**kw).fit(Xt, labels, X_val=Xv,
+                                                    y_val=np.full(100, "c"))
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(**kw).fit(Xt, yt, X_val=Xv)

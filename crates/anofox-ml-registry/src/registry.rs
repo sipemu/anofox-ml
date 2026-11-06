@@ -26,7 +26,7 @@ use anofox_ml_trees as trees;
 use anofox_ml_conformal as conformal;
 
 use crate::estimator::{RegistryEstimator, RegistryFitted};
-use crate::model::{need_y, no_weight, registry};
+use crate::model::{need_y, no_weight, registry, stages_to_columns};
 
 /// Compact fitted form of a linear model whose full fitted type holds
 /// non-serializable solver state: enough to predict and to pickle.
@@ -577,12 +577,14 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        feature_importances: |m| m.feature_importances(),
     }
     DecisionTreeRegressor {
         config: trees::DecisionTreeRegressor = Default::default(),
         fitted: trees::FittedDecisionTreeRegressor<f64>,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
     }
 
     // -------------------------------------------------------- ensemble
@@ -592,24 +594,29 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        feature_importances: |m| m.feature_importances(),
     }
     RandomForestRegressor {
         config: ensemble::RandomForestRegressor = Default::default(),
         fitted: ensemble::FittedRandomForestRegressor<f64>,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
     }
     ExtraTreesClassifier {
         config: ensemble::ExtraTreesClassifier = Default::default(),
         fitted: ensemble::FittedExtraTreesClassifier<f64>,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        feature_importances: |m| m.feature_importances(),
     }
     ExtraTreesRegressor {
         config: ensemble::ExtraTreesRegressor = Default::default(),
         fitted: ensemble::FittedExtraTreesRegressor<f64>,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
     }
     GradientBoostingClassifier {
         config: ensemble::GradientBoostingClassifier = Default::default(),
@@ -618,12 +625,18 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         decision_function: |m, x| m.decision_function(x),
+        feature_importances: |m| m.feature_importances(),
+        staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
+        warm_start: |c, prev, x, y, w| c.fit_warm_start(prev, x, need_y(K, y)?, w),
     }
     GradientBoostingRegressor {
         config: ensemble::GradientBoostingRegressor = Default::default(),
         fitted: ensemble::FittedGradientBoostingRegressor<f64>,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
+        staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
+        warm_start: |c, prev, x, y, w| c.fit_warm_start(prev, x, need_y(K, y)?, w),
     }
     AdaBoostClassifier {
         config: ensemble::AdaBoostClassifier = Default::default(),
@@ -645,25 +658,37 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        feature_importances: |m| m.feature_importances(),
     }
     BaggingRegressor {
         config: ensemble::BaggingRegressor = Default::default(),
         fitted: ensemble::FittedBaggingRegressor<f64>,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
     }
     HistGradientBoostingClassifier {
         config: ensemble::HistGradientBoostingClassifier = Default::default(),
         fitted: ensemble::FittedHistGradientBoostingClassifier,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
+        fit_with_validation: |c, x, y, w, xv, yv, wv| {
+            c.fit_with_validation(x, need_y(K, y)?, w, xv, need_y(K, yv)?, wv)
+        },
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
+        feature_importances: |m| m.feature_importances(),
+        staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
     }
     HistGradientBoostingRegressor {
         config: ensemble::HistGradientBoostingRegressor = Default::default(),
         fitted: ensemble::FittedHistGradientBoostingRegressor,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
+        fit_with_validation: |c, x, y, w, xv, yv, wv| {
+            c.fit_with_validation(x, need_y(K, y)?, w, xv, need_y(K, yv)?, wv)
+        },
         predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
+        staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
     }
     LgbmClassifier {
         config: ensemble::LgbmClassifier = Default::default(),
@@ -671,12 +696,16 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
+        feature_importances: |m| m.feature_importances(),
+        staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
     }
     LgbmRegressor {
         config: ensemble::LgbmRegressor = Default::default(),
         fitted: ensemble::FittedLgbmRegressor,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
+        staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
     }
     #[cfg(feature = "perpetual")]
     PerpetualRegressor {

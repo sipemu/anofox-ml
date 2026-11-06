@@ -6,6 +6,26 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Registry / Python: boosting surface (#127 §4, #125)
+
+- `DynModel` gains `feature_importances()` (decision trees, random forests,
+  extra trees, gradient boosting, bagging, HistGradientBoosting, LGBM),
+  `staged_predict(x)` (an `n × stages` array; gradient boosting,
+  HistGradientBoosting, LGBM), `set_params(json)` (merges overrides and keeps
+  the fitted state), `warm_start(x, y, w)` (gradient boosting: adds stages up
+  to `n_estimators`, unchanged on error) and `fit_with_validation(...)`
+  (HistGradientBoosting's explicit validation set); each is listed in
+  `capabilities()`. `ExtraTreesClassifier` now lists `predict_proba`.
+- `FittedGradientBoostingRegressor::staged_predict` and
+  `FittedGradientBoostingClassifier::staged_decision_function` /
+  `staged_predict_proba` / `staged_predict` (the last stage equals the
+  final prediction exactly).
+- Python: `feature_importances_` (only on estimators that have it),
+  `staged_predict` on the gradient boosting, HistGradientBoosting and LGBM
+  estimators, `warm_start=` on `GradientBoosting*`, and
+  `HistGradientBoosting*.fit(..., X_val=, y_val=, sample_weight_val=)`, which
+  matches sklearn 1.8 to 1e-12.
+
 ### LGBM / HistGradientBoosting: speed (#127)
 
 - Profiled on 100k × 50 and rebuilt the hot paths. The models stay bit for

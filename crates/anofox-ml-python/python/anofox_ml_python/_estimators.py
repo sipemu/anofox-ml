@@ -6,6 +6,8 @@ supports them; ``random_state`` replaces the Rust ``seed``.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from ._base import (
@@ -14,8 +16,11 @@ from ._base import (
     ClusterMixin,
     OutlierMixin,
     RegressorMixin,
+    StagedPredictMixin,
     SupervisedTransformerMixin,
     TransformerMixin,
+    _check_1d,
+    _check_X,
     _nd,
     _rust_defaults,
     _seed,
@@ -210,9 +215,10 @@ class ExtraTreesRegressor(RegressorMixin, BaseEstimator):
                 "seed": _seed(self.random_state)}
 
 
-class _GradientBoosting(BaseEstimator):
+class _GradientBoosting(StagedPredictMixin, BaseEstimator):
     def __init__(self, n_estimators=100, learning_rate=0.1, max_depth=3, min_samples_split=2,
-                 min_samples_leaf=1, subsample=1.0, random_state=None):
+                 min_samples_leaf=1, subsample=1.0, random_state=None, warm_start=False):
+        self.warm_start = warm_start
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
         self.max_depth = max_depth
@@ -226,6 +232,26 @@ class _GradientBoosting(BaseEstimator):
                 "max_depth": self.max_depth, "min_samples_split": self.min_samples_split,
                 "min_samples_leaf": self.min_samples_leaf, "subsample": self.subsample,
                 "seed": _seed(self.random_state)}
+
+    def _fit_model(self, X, y=None, sample_weight=None):
+        model = self.__dict__.get("_model_")
+        if not self.warm_start or model is None:
+            return super()._fit_model(X, y, sample_weight)
+        # sklearn's warm_start: keep the fitted stages (and their seed) and
+        # add more up to n_estimators.
+        X = _check_X(X)
+        if X.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but {type(self).__name__} was fitted "
+                f"with {self.n_features_in_}."
+            )
+        if sample_weight is not None:
+            sample_weight = _check_1d(sample_weight, "sample_weight")
+        params = self._rust_params(X, y)
+        params.pop("seed")
+        model.set_params_json(json.dumps(params))
+        model.warm_start(X, y, sample_weight)
+        return self
 
 
 class GradientBoostingClassifier(ClassifierMixin, _GradientBoosting):
@@ -357,7 +383,7 @@ def _early_stopping_params(est):
             "random_state": 0 if rs is None else int(rs), "scoring": scoring}
 
 
-class _HistGradientBoosting(BaseEstimator):
+class _HistGradientBoosting(StagedPredictMixin, BaseEstimator):
     def __init__(self, learning_rate=0.1, max_iter=100, max_leaf_nodes=31, max_depth=None,
                  min_samples_leaf=20, l2_regularization=0.0, max_bins=255,
                  categorical_features=None, monotonic_cst=None, interaction_cst=None,
@@ -380,6 +406,20 @@ class _HistGradientBoosting(BaseEstimator):
         self.tol = tol
         self.random_state = random_state
         self.max_features = max_features
+
+    def _fit_validation(self, X, y, sample_weight, X_val, y_val, sample_weight_val):
+        """sklearn's ``fit(..., X_val=, y_val=, sample_weight_val=)``."""
+        X, X_val = _check_X(X), _check_X(X_val)
+        if X_val.shape[1] != X.shape[1]:
+            raise ValueError("X_val must have the features of X")
+        w = None if sample_weight is None else _check_1d(sample_weight, "sample_weight")
+        wv = (None if sample_weight_val is None
+              else _check_1d(sample_weight_val, "sample_weight_val"))
+        model = self._new_model(X, y)
+        model.fit_with_validation(X, _check_1d(y), w, X_val, _check_1d(y_val, "y_val"), wv)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
 
     @property
     def n_iter_(self):
@@ -431,6 +471,21 @@ class HistGradientBoostingClassifier(ClassifierMixin, _HistGradientBoosting):
         params["class_weight"] = self._encode_class_weight(self.class_weight)
         return params
 
+    def fit(self, X, y, sample_weight=None, *, X_val=None, y_val=None,
+            sample_weight_val=None):
+        if X_val is None and y_val is None:
+            return super().fit(X, y, sample_weight)
+        if X_val is None or y_val is None:
+            raise ValueError("X_val and y_val must be given together")
+        y, y_val = np.ravel(np.asarray(y)), np.ravel(np.asarray(y_val))
+        self.classes_, y_enc = np.unique(y, return_inverse=True)
+        idx = np.searchsorted(self.classes_, y_val)
+        if np.any(idx >= len(self.classes_)) or np.any(
+                self.classes_[np.minimum(idx, len(self.classes_) - 1)] != y_val):
+            raise ValueError("y_val has classes that are not in y")
+        return self._fit_validation(X, y_enc.astype(np.float64), sample_weight, X_val,
+                                    idx.astype(np.float64), sample_weight_val)
+
 
 class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
     _kind = "HistGradientBoostingRegressor"
@@ -463,8 +518,16 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
         params["quantile"] = None if self.quantile is None else float(self.quantile)
         return params
 
+    def fit(self, X, y, sample_weight=None, *, X_val=None, y_val=None,
+            sample_weight_val=None):
+        if X_val is None and y_val is None:
+            return super().fit(X, y, sample_weight)
+        if X_val is None or y_val is None:
+            raise ValueError("X_val and y_val must be given together")
+        return self._fit_validation(X, y, sample_weight, X_val, y_val, sample_weight_val)
 
-class _Lgbm(BaseEstimator):
+
+class _Lgbm(StagedPredictMixin, BaseEstimator):
     """LightGBM-style boosting; parameters follow ``lightgbm.LGBMModel``."""
 
     def __init__(self, boosting_type="gbdt", num_leaves=31, max_depth=-1, learning_rate=0.1,
