@@ -639,7 +639,12 @@ class _CatBoost(BaseEstimator):
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
                  max_ctr_complexity=None, leaf_estimation_iterations=None,
                  leaf_estimation_backtracking="AnyImprovement", has_time=False, random_seed=0,
-                 random_strength=1.0):
+                 random_strength=1.0, bootstrap_type=None, subsample=None,
+                 bagging_temperature=1.0, mvs_reg=None):
+        self.bootstrap_type = bootstrap_type
+        self.subsample = subsample
+        self.bagging_temperature = bagging_temperature
+        self.mvs_reg = mvs_reg
         self.random_strength = random_strength
         self.has_time = has_time
         self.random_seed = random_seed
@@ -686,6 +691,16 @@ class _CatBoost(BaseEstimator):
         params["has_time"] = bool(self.has_time)
         params["random_seed"] = int(self.random_seed)
         params["random_strength"] = float(self.random_strength)
+        if self.bootstrap_type is not None:
+            params["bootstrap_type"] = _choice(
+                self.bootstrap_type,
+                {"No": "No", "Bayesian": "Bayesian", "Bernoulli": "Bernoulli", "MVS": "MVS"},
+                "bootstrap_type")
+        if self.subsample is not None:
+            params["subsample"] = float(self.subsample)
+        params["bagging_temperature"] = float(self.bagging_temperature)
+        if self.mvs_reg is not None:
+            params["mvs_reg"] = float(self.mvs_reg)
         if self.leaf_estimation_iterations is not None:
             params["leaf_estimation_iterations"] = int(self.leaf_estimation_iterations)
         params["leaf_estimation_backtracking"] = _choice(

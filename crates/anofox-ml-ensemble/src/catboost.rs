@@ -11,11 +11,11 @@
 //! per class, with CatBoost's full-Hessian Newton step). Categorical
 //! features are split one-hot or through ordered target statistics (CTRs)
 //! of single features and of feature combinations. With CatBoost's
-//! bootstrap switched off (`bootstrap_type='No'`) the models agree with
-//! CatBoost's, permutations and score noise (`random_strength`) included:
-//! CatBoost's generator (`random_seed`) is reproduced draw for draw, from the
-//! initial shuffle of the rows and the folds' permutations to the fold picked
-//! per tree and the noise of every split's score.
+//! defaults the models agree with CatBoost's (with `thread_count=1`): its
+//! generator (`random_seed`) is reproduced draw for draw, from the initial
+//! shuffle of the rows and the folds' permutations to the fold picked per
+//! tree, the bootstrap (MVS, Bayesian, Bernoulli) and the noise of every
+//! split's score (`random_strength`).
 //!
 //! Leaves take CatBoost's default number of Newton (or Gradient) steps,
 //! with its backtracking: a step is halved until the objective improves,
@@ -630,6 +630,21 @@ pub enum CatBoostLeafEstimation {
     Gradient,
 }
 
+/// CatBoost's `bootstrap_type`: how the rows a tree is scored on are drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostBootstrap {
+    /// All rows, weight 1.
+    No,
+    /// Weights `(-ln u)^bagging_temperature`.
+    Bayesian,
+    /// A `subsample` share of the rows.
+    Bernoulli,
+    /// Minimal variance sampling: rows kept by the size of their gradient,
+    /// reweighted (CatBoost's default for one approximation).
+    #[serde(rename = "MVS")]
+    Mvs,
+}
+
 /// Whether a leaf estimation step is halved until the loss improves
 /// (CatBoost's `leaf_estimation_backtracking`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -1005,6 +1020,10 @@ struct TrainParams {
     has_time: bool,
     /// The scale of the split scores' noise (float32, as in CatBoost).
     random_strength: f64,
+    bootstrap: CatBoostBootstrap,
+    subsample: f64,
+    bagging_temperature: f64,
+    mvs_reg: Option<f64>,
     permutation_count: usize,
 }
 
@@ -1418,6 +1437,8 @@ fn feature_draws(columns: &[Column], two_valued: &[bool]) -> (usize, usize) {
 struct ScorePart<'a> {
     /// `w · der1` of the rows `0..tail`, `k` per row.
     wder: &'a [f64],
+    /// The same times the bootstrap weights (the scored rows' derivatives).
+    swder: &'a [f64],
     body: usize,
     tail: usize,
     scaled_l2: f64,
@@ -1727,6 +1748,7 @@ fn grow_tree(
     cache: &mut CombinationCache,
     rng: &mut CatRng,
     score_std: f64,
+    sample: &Sample,
 ) -> (Vec<(ColumnRef, usize)>, Vec<u32>) {
     use rayon::prelude::*;
     let n = w.len();
@@ -1776,6 +1798,9 @@ fn grow_tree(
                 let mut hist = vec![BucketStats::default(); parts.len() * k * leaves * nb];
                 for (pi, part) in parts.iter().enumerate() {
                     for i in 0..part.tail {
+                        if !sample.taken[i] {
+                            continue;
+                        }
                         let cell = leaf_of[i] as usize * nb + column.buckets[i] as usize;
                         for d in 0..k {
                             let h = &mut hist[(pi * k + d) * leaves * nb + cell];
@@ -1783,8 +1808,8 @@ fn grow_tree(
                                 h.sd += part.wder[i * k + d];
                                 h.count += w[i];
                             } else {
-                                h.swd += part.wder[i * k + d];
-                                h.sw += w[i];
+                                h.swd += part.swder[i * k + d];
+                                h.sw += sample.weights[i];
                             }
                         }
                     }
@@ -2235,6 +2260,194 @@ impl Quantized {
     }
 }
 
+/// The rows a tree is scored on (CatBoost's bootstrap, per tree): every
+/// row's bootstrap weight, its weight for the scores (times its sample
+/// weight, in float32) and whether it is taken.
+struct Sample {
+    boot: Vec<f64>,
+    weights: Vec<f64>,
+    taken: Vec<bool>,
+}
+
+/// libc++'s `std::partition` (the bidirectional algorithm): the elements
+/// with `pred` first; returns their count.
+fn libcxx_partition(v: &mut [f64], pred: impl Fn(f64) -> bool) -> usize {
+    let (mut first, mut last) = (0, v.len());
+    loop {
+        loop {
+            if first == last {
+                return first;
+            }
+            if !pred(v[first]) {
+                break;
+            }
+            first += 1;
+        }
+        loop {
+            last -= 1;
+            if first == last {
+                return first;
+            }
+            if pred(v[last]) {
+                break;
+            }
+        }
+        v.swap(first, last);
+        first += 1;
+    }
+}
+
+/// CatBoost's `TMvsSampler::CalculateThreshold`.
+fn mvs_threshold(v: &mut [f64], mut small: f64, mut large: usize, size: f64) -> f64 {
+    let threshold = v[0];
+    let mid_begin = libcxx_partition(v, |c| c < threshold);
+    let mid_end = mid_begin + libcxx_partition(&mut v[mid_begin..], |c| c <= threshold);
+    let small_update: f64 = v[..mid_begin].iter().fold(0.0, |a, &b| a + b);
+    let large_update = v.len() - mid_end;
+    let middle = mid_end - mid_begin;
+    let sum_middle = middle as f64 * threshold;
+    let estimated = (small + small_update) / threshold + (large + large_update + middle) as f64;
+    if estimated > size {
+        if mid_end != v.len() {
+            small += sum_middle + small_update;
+            mvs_threshold(&mut v[mid_end..], small, large, size)
+        } else {
+            (small + small_update + sum_middle) / (size - large as f64)
+        }
+    } else if mid_begin != 0 {
+        large += large_update + middle;
+        mvs_threshold(&mut v[..mid_begin], small, large, size)
+    } else {
+        small / (size - large as f64 - middle as f64 - large_update as f64)
+    }
+}
+
+/// CatBoost's `Bootstrap` of a tree on a fold (`sampling_frequency=PerTree`):
+/// the bootstrap weights, the scores' weights (`CalcWeightedData`) and the
+/// taken rows (`TCalcScoreFold::Sample`).
+#[allow(clippy::too_many_arguments)]
+fn bootstrap(
+    rng: &mut CatRng,
+    ders: &[Ders],
+    tails: &[(usize, usize, f64)],
+    learn_weights: &[f64],
+    previous: Option<&[f64]>,
+    k: usize,
+    p: &TrainParams,
+) -> Sample {
+    let n = learn_weights.len();
+    let mut boot = vec![1.0f64; n];
+    let mut taken = vec![true; n];
+    match p.bootstrap {
+        CatBoostBootstrap::No => {}
+        CatBoostBootstrap::Bayesian => {
+            let t = p.bagging_temperature as f32;
+            if t != 0.0 {
+                let seed = rng.gen();
+                for (block, rows) in boot.chunks_mut(1000).enumerate() {
+                    let mut local = CatRng::new(seed.wrapping_add(block as u64));
+                    local.advance(10);
+                    for b in rows {
+                        let w = -fast_logf((local.real1() + 1e-100) as f32);
+                        *b = f64::from(w.powf(t));
+                    }
+                }
+            }
+        }
+        CatBoostBootstrap::Bernoulli => {}
+        CatBoostBootstrap::Mvs => {
+            let rate = p.subsample as f32;
+            if rate != 1.0 {
+                // The derivatives: of the fold (plain), or each row's from
+                // the prefix it is a tail row of (ordered).
+                let mut der = vec![0.0; n * k];
+                for (t, (d, &(body, tail, _))) in ders.iter().zip(tails).enumerate() {
+                    let from = if t == 0 { 0 } else { body };
+                    der[from * k..tail * k].copy_from_slice(&d.der[from * k..tail * k]);
+                }
+                let row = |i: usize| -> f64 {
+                    (0..k)
+                        .map(|dim| der[i * k + dim] * der[i * k + dim])
+                        .fold(0.0, |a, b| a + b)
+                };
+                let lambda = match (p.mvs_reg, previous) {
+                    (Some(l), _) => f64::from(l as f32),
+                    (None, Some(leaves)) => {
+                        let n_leaves = leaves.len() / k;
+                        let sum: f64 = (0..n_leaves)
+                            .map(|l| {
+                                (0..k)
+                                    .map(|d| leaves[l * k + d] * leaves[l * k + d])
+                                    .fold(0.0, |a, b| a + b)
+                                    .sqrt()
+                            })
+                            .fold(0.0, |a, b| a + b);
+                        let mean = sum / n_leaves as f64;
+                        mean * mean
+                    }
+                    (None, None) => {
+                        // `CalculateMeanGradValue`: 128 blocks.
+                        let block = n.div_ceil(128).max(1);
+                        let sums: Vec<f64> = (0..n)
+                            .collect::<Vec<_>>()
+                            .chunks(block)
+                            .map(|rows| rows.iter().fold(0.0, |a, &i| a + row(i).sqrt()))
+                            .collect();
+                        let mean = sums.iter().fold(0.0, |a, b| a + b) / n as f64;
+                        mean * mean
+                    }
+                };
+                let seed = rng.gen();
+                for (block, start) in (0..n).step_by(8192).enumerate() {
+                    let end = (start + 8192).min(n);
+                    let mut local = CatRng::new(seed.wrapping_add(block as u64));
+                    local.advance(10);
+                    let mut candidates: Vec<f64> = (start..end)
+                        .map(|i| {
+                            let mut c = lambda;
+                            for dim in 0..k {
+                                c += der[i * k + dim] * der[i * k + dim];
+                            }
+                            c.sqrt()
+                        })
+                        .collect();
+                    let size = f64::from(rate) * (end - start) as f64;
+                    let threshold = mvs_threshold(&mut candidates, 0.0, 0, size);
+                    for i in start..end {
+                        let g = (row(i) + lambda).sqrt();
+                        let prob = if g > threshold { 1.0 } else { g / threshold };
+                        boot[i] = if prob > f64::EPSILON {
+                            let r = local.real1();
+                            f64::from(((1.0 / prob) * f64::from(u8::from(r < prob))) as f32)
+                        } else {
+                            0.0
+                        };
+                        taken[i] = (boot[i] as f32) > f32::EPSILON;
+                    }
+                }
+            }
+        }
+    }
+    // `CalcWeightedData`: the scores' weights in float32.
+    let weights: Vec<f64> = boot
+        .iter()
+        .zip(learn_weights)
+        .map(|(&b, &w)| f64::from(b as f32 * w as f32))
+        .collect();
+    // `SetSampledControl`: Bernoulli draws a row at a time.
+    if p.bootstrap == CatBoostBootstrap::Bernoulli && p.subsample as f32 != 1.0 {
+        let rate = f64::from(p.subsample as f32);
+        for t in taken.iter_mut() {
+            *t = rng.real1() < rate;
+        }
+    }
+    Sample {
+        boot,
+        weights,
+        taken,
+    }
+}
+
 /// The scale of the score noise of a tree (CatBoost's `CalcScoreStDev`
 /// with `NormalWithModelSizeDecrease`): `random_strength` times the root
 /// mean square of the weighted derivatives (ordered boosting: of the tail
@@ -2432,12 +2645,28 @@ fn boost(
             .zip(&fold.approx)
             .map(|(&(_, t, _), a)| loss.all_ders(&fold.target, a, &fold.weights, t))
             .collect();
+        let previous = trees
+            .last()
+            .map(|t: &ObliviousTree| t.leaf_values.as_slice());
+        let sample = bootstrap(&mut rng, &ders, &fold.tails, &fold.weights, previous, k, &p);
+        let sampled: Vec<Vec<f64>> = ders
+            .iter()
+            .map(|d| {
+                d.der
+                    .iter()
+                    .enumerate()
+                    .map(|(j, v)| v * sample.boot[j / k])
+                    .collect()
+            })
+            .collect();
         let parts: Vec<ScorePart<'_>> = fold
             .tails
             .iter()
             .zip(&ders)
-            .map(|(&(body, tail, bw), d)| ScorePart {
+            .zip(&sampled)
+            .map(|((&(body, tail, bw), d), sd)| ScorePart {
                 wder: &d.der,
+                swder: sd,
                 body: if p.ordered { body } else { 0 },
                 tail,
                 scaled_l2: p.l2_leaf_reg * (bw / body as f64),
@@ -2456,6 +2685,7 @@ fn boost(
             &mut fold.cache,
             &mut rng,
             score_std(&ders, &fold.tails, p.ordered, n, iteration, &p),
+            &sample,
         );
         rng.gen(); // the folds' seeds
         let n_leaves = 1usize << splits.len();
@@ -2710,6 +2940,17 @@ macro_rules! catboost_config {
             /// root mean square of the derivatives times this, fading with
             /// the model's length.
             pub random_strength: f64,
+            /// CatBoost's `bootstrap_type`. Default (`None`): MVS, or
+            /// Bayesian for more than two classes.
+            pub bootstrap_type: Option<CatBoostBootstrap>,
+            /// The share of rows (`subsample`). Default (`None`): 0.8 for
+            /// MVS, 0.66 for Bernoulli, 1 below 100 rows.
+            pub subsample: Option<f64>,
+            /// Bayesian bootstrap's temperature (default 1).
+            pub bagging_temperature: f64,
+            /// MVS's regularization; default (`None`): from the last tree's
+            /// leaves (the first tree: from the gradients).
+            pub mvs_reg: Option<f64>,
         }
 
         impl Default for $name {
@@ -2735,6 +2976,10 @@ macro_rules! catboost_config {
                     permutation_count: 4,
                     random_seed: 0,
                     random_strength: 1.0,
+                    bootstrap_type: None,
+                    subsample: None,
+                    bagging_temperature: 1.0,
+                    mvs_reg: None,
                 }
             }
         }
@@ -2820,6 +3065,39 @@ macro_rules! catboost_config {
                 self.permutation_count = n;
                 self
             }
+            pub fn with_bootstrap_type(mut self, b: CatBoostBootstrap) -> Self {
+                self.bootstrap_type = Some(b);
+                self
+            }
+            pub fn with_subsample(mut self, s: f64) -> Self {
+                self.subsample = Some(s);
+                self
+            }
+            pub fn with_bagging_temperature(mut self, t: f64) -> Self {
+                self.bagging_temperature = t;
+                self
+            }
+            pub fn with_mvs_reg(mut self, r: f64) -> Self {
+                self.mvs_reg = Some(r);
+                self
+            }
+
+            /// CatBoost's bootstrap defaults for `loss` and `n` rows.
+            fn sampling(&self, loss: Loss, n: usize) -> (CatBoostBootstrap, f64) {
+                let kind = self.bootstrap_type.unwrap_or(match loss {
+                    Loss::MultiClass(_) => CatBoostBootstrap::Bayesian,
+                    _ => CatBoostBootstrap::Mvs,
+                });
+                let rate = self.subsample.unwrap_or(if n < 100 {
+                    1.0
+                } else if kind == CatBoostBootstrap::Mvs {
+                    0.8
+                } else {
+                    0.66
+                });
+                (kind, rate)
+            }
+
             pub fn with_random_strength(mut self, r: f64) -> Self {
                 self.random_strength = r;
                 self
@@ -2880,6 +3158,10 @@ macro_rules! catboost_config {
                         == CatBoostBacktracking::AnyImprovement,
                     has_time: self.has_time,
                     random_strength: f64::from(self.random_strength as f32),
+                    bootstrap: CatBoostBootstrap::No,
+                    subsample: 1.0,
+                    bagging_temperature: self.bagging_temperature,
+                    mvs_reg: self.mvs_reg,
                     permutation_count: self.permutation_count,
                 }
             }
@@ -2968,8 +3250,11 @@ impl FitWeighted<f64> for CatBoostRegressor {
             max_ctr_complexity: self.max_ctr_complexity(),
         };
         let q = quantize(x, self.border_count, cat)?;
+        let (bootstrap, subsample) = self.sampling(Loss::Rmse, x.nrows());
         let p = TrainParams {
             leaf_iterations: self.leaf_iterations(Loss::Rmse, x.ncols()),
+            bootstrap,
+            subsample,
             ..p
         };
         let (trees, ctrs) = boost(&q, &target, &weights, &[bias], Loss::Rmse, p, rng);
@@ -3136,8 +3421,11 @@ impl FitWeighted<f64> for CatBoostClassifier {
             max_ctr_complexity: self.max_ctr_complexity(),
         };
         let q = quantize(x, self.border_count, cat)?;
+        let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         let p = TrainParams {
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
+            bootstrap,
+            subsample,
             ..p
         };
         let (trees, ctrs) = boost(&q, &target, &weights, &bias, loss, p, rng);

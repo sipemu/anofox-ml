@@ -6,6 +6,30 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: bootstrap (#127 §5)
+
+- `bootstrap_type` (CatBoost's defaults: MVS, or Bayesian for MultiClass),
+  `subsample` (0.8 for MVS, 0.66 for Bernoulli, 1 below 100 rows),
+  `bagging_temperature` and `mvs_reg` on `CatBoostRegressor` /
+  `CatBoostClassifier`. Bootstrap is drawn per tree, as CatBoost does it:
+  - **Bayesian:** weights `powf(-FastLogf(u), t)` in blocks of 1000 rows.
+  - **MVS** (`TMvsSampler`): λ from the last tree's leaves (the first tree:
+    from the mean gradient in 128 blocks), the threshold found by libc++'s
+    `std::partition` recursion per block of 8192 rows, rows kept with
+    probability `min(1, g / threshold)` and weight `1 / p`.
+  - **Bernoulli:** one draw per row.
+- The weights only reach the scores (`CalcWeightedData`, float32); the leaf
+  values use the sample weights as before.
+- **Breaking:** with all of this (#144–#149) the CatBoost-style estimators now
+  default to CatBoost's own defaults: `has_time=false`,
+  `random_strength=1`, MVS bootstrap, CatBoost's `max_ctr_complexity` and
+  `leaf_estimation_iterations`. Pass `has_time=true`, `random_strength=0`
+  and `bootstrap_type=No` for the deterministic behaviour of earlier
+  versions.
+- Matches catboost 1.2.10 to 7e-16 on 12 golden cases. A 20k-row fit with
+  **all CatBoost defaults** (300 trees; MVS, score noise, permutations, CTR
+  combinations, 10 leaf steps) matches to 1.3e-15, plain and ordered.
+
 ### CatBoost-style boosting: score noise (#127 §5)
 
 - `random_strength` (CatBoost's default 1, `NormalWithModelSizeDecrease`) on
