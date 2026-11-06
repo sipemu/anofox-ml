@@ -388,10 +388,10 @@ fn weighted_multiclass_baseline_matches_lightgbm() {
 #[test]
 fn log_link_objectives_match_lightgbm() {
     // LightGBM 4.6 with objective="poisson" (default poisson_max_delta_step
-    // 0.7) / "gamma" on y + 1, unweighted and weighted. Gamma runs with
-    // min_child_samples=1: LightGBM estimates leaf counts from the hessians
-    // (count ~ n * H_leaf / H_total), which the engine does not, so with
-    // Gamma's uneven hessians the count limit binds differently.
+    // 0.7) / "gamma" on y + 1, unweighted and weighted. (Gamma runs with
+    // min_child_samples=1, from before the engine estimated leaf counts
+    // from the hessians as LightGBM does; `golden_lgbm_parity.rs` covers
+    // Gamma at LightGBM's default 20.)
     let (x, y) = data_num();
     let y = y + 1.0;
     let w = weights_num();

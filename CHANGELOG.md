@@ -6,6 +6,29 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LGBM engine: LightGBM 4.7 parity (#127)
+
+- `LgbmRegressor` / `LgbmClassifier` now reproduce LightGBM 4.7.0 to
+  rounding (most cases bit for bit) for every objective, with weights,
+  NaNs, categorical features, monotone constraints, L1 / L2 penalties and
+  the default `min_child_samples=20`:
+  - binning is LightGBM's `FindBin`: zero as its own bin
+    (`FindBinWithZeroAsOneBin`, the `±1e-35f` bounds), `GreedyFindBin`,
+    `nextafter` bounds, a missing-value bin taken from the budget;
+  - split search counts are estimated from the hessians
+    (`round(hess · n / (H + 2 kEpsilon))`), the right child is scanned from
+    the top bin down (missing values left), then, for features with missing
+    values, the left child from the bottom up; `kEpsilon` in the hessian
+    sums; the gain shift is the unconstrained node gain; `min_split_gain`
+    is compared with LightGBM's (unhalved) gain;
+  - float32 labels, weights, gradients and quantile level; LightGBM's
+    `PercentileFun` for the L1 / quantile refits;
+  - missing values in features without any in training are treated as 0.
+  LGBM fits change accordingly (closing the hessian-count gap noted with
+  the Poisson / Gamma objectives).
+- New generator `gen_lgbm_parity.py` (pinned `lightgbm==4.7.0`) and
+  `golden_lgbm_parity.rs` (21 cases, tolerance 1e-8).
+
 ### HistGradientBoosting: early-stopping scorers and explicit validation sets (#127)
 
 - `with_scoring(EarlyStoppingScoring::{Loss, Default, R2,
