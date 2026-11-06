@@ -24,7 +24,7 @@ A scikit-learn-inspired machine learning library for Rust, built on ndarray.
 | **GLMs** | `PoissonRegressor`, `BinomialRegressor`, `TweedieRegressor`, `GammaRegressor` | `sklearn.linear_model` GLM family |
 | **Discriminant analysis** | `LinearDiscriminantAnalysis` (+`transform`), `QuadraticDiscriminantAnalysis` | `sklearn.discriminant_analysis` |
 | **Trees** | `DecisionTreeClassifier` (+`predict_proba`), `DecisionTreeRegressor` | `sklearn.tree` |
-| **Ensemble** | `RandomForest{Classifier,Regressor}`, `ExtraTrees{Classifier,Regressor}`, `GradientBoosting{Classifier,Regressor}`, `HistGradientBoosting{Classifier,Regressor}`, `LgbmClassifier`, `LgbmRegressor`, `Bagging{Classifier,Regressor}`, `AdaBoost{Classifier,Regressor}`, `Voting{Classifier,Regressor}`, `Stacking{Classifier,Regressor}` (+`push_proba`), `CalibratedClassifierCV`, `IsolationForest` (rayon-parallel); `Perpetual{Classifier,Regressor}` with the optional `perpetual` feature | `sklearn.ensemble`, `lightgbm`, `perpetual` |
+| **Ensemble** | `RandomForest{Classifier,Regressor}`, `ExtraTrees{Classifier,Regressor}`, `GradientBoosting{Classifier,Regressor}`, `HistGradientBoosting{Classifier,Regressor}`, `LgbmClassifier`, `LgbmRegressor`, `CatBoost{Classifier,Regressor}`, `Bagging{Classifier,Regressor}`, `AdaBoost{Classifier,Regressor}`, `Voting{Classifier,Regressor}`, `Stacking{Classifier,Regressor}` (+`push_proba`), `CalibratedClassifierCV`, `IsolationForest` (rayon-parallel); `Perpetual{Classifier,Regressor}` with the optional `perpetual` feature | `sklearn.ensemble`, `lightgbm`, `catboost`, `perpetual` |
 | **Clustering** | `KMeans`, `MiniBatchKMeans`, `Dbscan`, `Hdbscan`, `Optics`, `Birch`, `AgglomerativeClustering` (Ward/single/complete/average), `SpectralClustering`, `MeanShift`, `AffinityPropagation`, `GaussianMixture`, `BayesianGaussianMixture` | `sklearn.cluster`, `sklearn.mixture` |
 | **Naive Bayes** | `GaussianNB`, `MultinomialNB`, `BernoulliNB` (all with `predict_proba`) | `sklearn.naive_bayes` |
 | **SVM** | `Svc`, `Svr`, `NuSvc`, `NuSvr`, `LinearSvc`, `LinearSvr`, `OneClassSvm` | `sklearn.svm` |
@@ -43,7 +43,7 @@ Add anofox-ml to your project:
 
 ```toml
 [dependencies]
-anofox-ml = "0.2"
+anofox-ml = "0.4"
 ndarray = "0.16"
 ```
 
@@ -157,6 +157,42 @@ The pinned sklearn version (1.8.0) is enforced by
 `./test_harness/regenerate_all.sh` followed by a full `cargo test --workspace`
 to confirm tolerances still hold.
 
+### LightGBM and CatBoost parity
+
+The boosting engines are validated against their reference libraries as
+well (#127):
+
+- `LgbmClassifier` / `LgbmRegressor` match **LightGBM 4.7.0**
+  (`lgbm_parity.json`), including DART and exclusive feature bundling.
+- `CatBoostClassifier` / `CatBoostRegressor` match **catboost 1.2.10**
+  (`catboost_parity.json`, 104 golden cases, mostly to ~1e-16). That covers
+  oblivious trees, ordered and plain boosting, RMSE / Logloss / MultiClass,
+  categorical features through ordered CTRs (with feature combinations) and
+  one-hot splits, and multi-step leaf estimation with backtracking. CatBoost's
+  randomness is reproduced draw for draw: its generator, the permutations,
+  MVS / Bayesian / Bernoulli bootstrap and the score noise. The estimators
+  therefore default to CatBoost's own defaults, and a fit with
+  `random_seed=s` gives CatBoost's model for that seed.
+
+```rust
+use anofox_ml::prelude::*;
+use anofox_ml::ensemble::CatBoostClassifier;
+
+// x: f64 matrix with category codes in columns 3 and 4.
+let model = CatBoostClassifier::new()
+    .with_iterations(500)
+    .with_cat_features(vec![3, 4])
+    .fit(&x, &y)?;
+let proba = model.predict_proba(&x)?;
+```
+
+Exact agreement needs CatBoost's `thread_count=1`, because CatBoost sums
+some statistics per thread. CatBoost also computes some statistics with
+subtraction and keeps Logloss approximations as `exp(a)`; both differ from
+ours only in the last bits and can rarely break a near-tie between two
+splits differently. The generators live in
+`test_harness/generators/gen_lgbm_parity.py` and `gen_catboost_parity.py`.
+
 ## Algorithms
 
 See the feature table above for the full list. New since the original release:
@@ -242,6 +278,14 @@ physical cores, which `n_jobs=None` uses.
 ```bash
 python benchmarks/boosting_benchmark.py   # needs the anofox_ml_python wheel, lightgbm, scikit-learn
 ```
+
+The CatBoost-style estimators were checked on the same laptop against
+catboost 1.2.10 with `thread_count=1`. The fit used 20 000 rows (5 numeric
+and 3 categorical features with 50 levels), 300 trees of depth 6, and
+CatBoost's defaults: MVS, score noise, permutations, CTR combinations and
+10 leaf steps. The models agree to 1e-15. anofox-ml took 24.7 s (plain) and
+22.8 s (ordered) against catboost's 8.9 s and 8.8 s; speed work on this
+engine is still open.
 
 ### Phase 2: extended supervised sweep (harness in place; numbers TBD)
 
@@ -362,11 +406,11 @@ Releases publish through GitHub Actions, triggered by a published GitHub
 release. To cut a release:
 
 ```bash
-# 1. Bump workspace.package.version in Cargo.toml (e.g. 0.1.0 → 0.2.0)
+# 1. Bump workspace.package.version in Cargo.toml (e.g. 0.3.0 → 0.4.0)
 # 2. Bump workspace.dependencies.anofox-ml-* `version = "..."` entries to match
 # 3. Commit, tag, push
-git commit -am "Release v0.2.0"
-git tag v0.2.0
+git commit -am "Release v0.4.0"
+git tag v0.4.0
 git push && git push --tags
 
 # 4. Create a GitHub release pointing at the tag.

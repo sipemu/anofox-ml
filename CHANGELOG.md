@@ -6,6 +6,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-06
+
+Gradient boosting (#127): HistGradientBoosting parity with scikit-learn 1.8,
+LightGBM 4.7 parity of the LGBM engine (with DART and EFB), faster boosting,
+a wider registry surface, and the CatBoost-style estimators. These match
+catboost 1.2.10 down to its random generator and default to its defaults
+(see the breaking note under bootstrap).
+
 ### CatBoost-style boosting: bootstrap (#127 §5)
 
 - `bootstrap_type` (CatBoost's defaults: MVS, or Bayesian for MultiClass),
