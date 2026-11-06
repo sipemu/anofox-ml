@@ -678,6 +678,7 @@ registry! {
         predict_proba: |m, x| m.predict_proba(x),
         feature_importances: |m| m.feature_importances(),
         staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
+        warm_start: |c, prev, x, y, w| c.fit_warm_start(&prev, x, need_y(K, y)?, w),
     }
     HistGradientBoostingRegressor {
         config: ensemble::HistGradientBoostingRegressor = Default::default(),
@@ -689,6 +690,7 @@ registry! {
         predict: |m, x| m.predict(x),
         feature_importances: |m| m.feature_importances(),
         staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
+        warm_start: |c, prev, x, y, w| c.fit_warm_start(&prev, x, need_y(K, y)?, w),
     }
     LgbmClassifier {
         config: ensemble::LgbmClassifier = Default::default(),
@@ -698,6 +700,13 @@ registry! {
         predict_proba: |m, x| m.predict_proba(x),
         feature_importances: |m| m.feature_importances(),
         staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
+        warm_start: |c, prev, x, y, w| {
+            let opts = ensemble::LgbmFitOptions {
+                sample_weight: w,
+                ..Default::default()
+            };
+            c.fit_warm_start(&prev, x, need_y(K, y)?, &opts)
+        },
     }
     LgbmRegressor {
         config: ensemble::LgbmRegressor = Default::default(),
@@ -706,6 +715,13 @@ registry! {
         predict: |m, x| m.predict(x),
         feature_importances: |m| m.feature_importances(),
         staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
+        warm_start: |c, prev, x, y, w| {
+            let opts = ensemble::LgbmFitOptions {
+                sample_weight: w,
+                ..Default::default()
+            };
+            c.fit_warm_start(&prev, x, need_y(K, y)?, &opts)
+        },
     }
     #[cfg(feature = "perpetual")]
     PerpetualRegressor {

@@ -566,6 +566,43 @@ mod boosting_surface_tests {
     }
 
     #[test]
+    fn lgbm_and_hist_gradient_boosting_warm_start() {
+        let (x, y, labels) = data();
+        for (kind, target, base) in [
+            (
+                "LgbmRegressor",
+                &y,
+                json!({ "min_child_samples": 5, "subsample": 0.8 }),
+            ),
+            ("LgbmClassifier", &labels, json!({ "min_child_samples": 5 })),
+            (
+                "HistGradientBoostingRegressor",
+                &y,
+                json!({ "early_stopping": "Disabled" }),
+            ),
+            (
+                "HistGradientBoostingClassifier",
+                &labels,
+                json!({ "early_stopping": "Disabled" }),
+            ),
+        ] {
+            let mut m = super::make(kind, &base).unwrap();
+            m.set_params(&json!({ "n_estimators": 3 })).unwrap();
+            m.fit(x.view(), Some(target.view()), None).unwrap();
+            m.set_params(&json!({ "n_estimators": 8 })).unwrap();
+            m.warm_start(x.view(), Some(target.view()), None).unwrap();
+            let mut once = super::make(kind, &base).unwrap();
+            once.set_params(&json!({ "n_estimators": 8 })).unwrap();
+            once.fit(x.view(), Some(target.view()), None).unwrap();
+            assert_eq!(
+                a2(m.staged_predict(x.view()).unwrap()),
+                a2(once.staged_predict(x.view()).unwrap()),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
     fn set_params_merges_and_validates() {
         let mut m = super::make("LgbmRegressor", &json!({ "n_estimators": 7 })).unwrap();
         m.set_params(&json!({ "learning_rate": 0.3 })).unwrap();

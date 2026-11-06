@@ -388,7 +388,9 @@ class _HistGradientBoosting(StagedPredictMixin, BaseEstimator):
                  min_samples_leaf=20, l2_regularization=0.0, max_bins=255,
                  categorical_features=None, monotonic_cst=None, interaction_cst=None,
                  early_stopping="auto", scoring="loss", validation_fraction=0.1,
-                 n_iter_no_change=10, tol=1e-7, random_state=None, max_features=1.0):
+                 n_iter_no_change=10, tol=1e-7, random_state=None, max_features=1.0,
+                 warm_start=False):
+        self.warm_start = warm_start
         self.learning_rate = learning_rate
         self.max_iter = max_iter
         self.max_leaf_nodes = max_leaf_nodes
@@ -406,6 +408,23 @@ class _HistGradientBoosting(StagedPredictMixin, BaseEstimator):
         self.tol = tol
         self.random_state = random_state
         self.max_features = max_features
+
+    def _fit_model(self, X, y=None, sample_weight=None):
+        model = self.__dict__.get("_model_")
+        if not self.warm_start or model is None:
+            return super()._fit_model(X, y, sample_weight)
+        # sklearn's warm_start: more iterations on the fitted bins and trees.
+        X = _check_X(X)
+        if X.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but {type(self).__name__} was fitted "
+                f"with {self.n_features_in_}."
+            )
+        if sample_weight is not None:
+            sample_weight = _check_1d(sample_weight, "sample_weight")
+        model.set_params_json(json.dumps(self._rust_params(X, y)))
+        model.warm_start(X, y, sample_weight)
+        return self
 
     def _fit_validation(self, X, y, sample_weight, X_val, y_val, sample_weight_val):
         """sklearn's ``fit(..., X_val=, y_val=, sample_weight_val=)``."""
@@ -453,7 +472,7 @@ class HistGradientBoostingClassifier(ClassifierMixin, _HistGradientBoosting):
                  min_samples_leaf=20, l2_regularization=0.0, max_features=1.0, max_bins=255,
                  categorical_features=None, monotonic_cst=None, interaction_cst=None,
                  early_stopping="auto", scoring="loss", validation_fraction=0.1,
-                 n_iter_no_change=10, tol=1e-7, random_state=None, class_weight=None):
+                 n_iter_no_change=10, tol=1e-7, random_state=None, class_weight=None, warm_start=False):
         super().__init__(learning_rate=learning_rate, max_iter=max_iter,
                          max_leaf_nodes=max_leaf_nodes, max_depth=max_depth,
                          min_samples_leaf=min_samples_leaf,
@@ -463,7 +482,8 @@ class HistGradientBoostingClassifier(ClassifierMixin, _HistGradientBoosting):
                          early_stopping=early_stopping, scoring=scoring,
                          validation_fraction=validation_fraction,
                          n_iter_no_change=n_iter_no_change, tol=tol,
-                         random_state=random_state, max_features=max_features)
+                         random_state=random_state, max_features=max_features,
+                         warm_start=warm_start)
         self.class_weight = class_weight
 
     def _rust_params(self, X, y):
@@ -498,7 +518,7 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
                  max_bins=255, categorical_features=None, monotonic_cst=None,
                  interaction_cst=None, early_stopping="auto", scoring="loss",
                  validation_fraction=0.1, n_iter_no_change=10, tol=1e-7, random_state=None,
-                 max_features=1.0):
+                 max_features=1.0, warm_start=False):
         super().__init__(learning_rate=learning_rate, max_iter=max_iter,
                          max_leaf_nodes=max_leaf_nodes, max_depth=max_depth,
                          min_samples_leaf=min_samples_leaf,
@@ -508,7 +528,8 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
                          early_stopping=early_stopping, scoring=scoring,
                          validation_fraction=validation_fraction,
                          n_iter_no_change=n_iter_no_change, tol=tol,
-                         random_state=random_state, max_features=max_features)
+                         random_state=random_state, max_features=max_features,
+                         warm_start=warm_start)
         self.loss = loss
         self.quantile = quantile
 

@@ -111,11 +111,11 @@ pub trait DynModel: Send + Sync {
     /// number of stages (sklearn's `warm_start=True` refit; raise
     /// `n_estimators` with [`DynModel::set_params`] first). On error the
     /// fitted model is unchanged.
-    fn warm_start(
+    fn warm_start<'a>(
         &mut self,
-        _x: ArrayView2<f64>,
-        _y: Option<ArrayView1<f64>>,
-        _sample_weight: Option<ArrayView1<f64>>,
+        _x: ArrayView2<'a, f64>,
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
     ) -> Result<()> {
         Err(unsupported(self.kind(), "warm_start"))
     }
@@ -397,11 +397,11 @@ macro_rules! registry {
     };
     (@cap $kind:ident, warm_start, $c:ident, $prev:ident, $x:ident, $y:ident, $w:ident, $body:expr) => {
         #[allow(unused_variables)]
-        fn warm_start(
+        fn warm_start<'a>(
             &mut self,
-            $x: ndarray::ArrayView2<f64>,
-            $y: Option<ndarray::ArrayView1<f64>>,
-            $w: Option<ndarray::ArrayView1<f64>>,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
         ) -> anofox_ml_core::Result<()> {
             #[allow(non_snake_case, dead_code)]
             const K: &str = stringify!($kind);

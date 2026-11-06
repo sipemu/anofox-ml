@@ -168,6 +168,7 @@ macro_rules! hist_gb_config {
             fn fit_engine<'w, 'v, E: ScoredEngine>(
                 &self,
                 engine: &E,
+                prev: Option<&E::Fitted>,
                 x: ArrayView2<f64>,
                 y: ArrayView1<f64>,
                 sample_weight: Option<ArrayView1<'w, f64>>,
@@ -195,6 +196,18 @@ macro_rules! hist_gb_config {
                     sample_weight,
                     ..LgbmFitOptions::default()
                 };
+                // sklearn's warm_start: more iterations on the fitted bins
+                // and trees (its early stopping cannot be continued here).
+                if let Some(prev) = prev {
+                    if enabled {
+                        return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                            "warm start: early stopping cannot be continued; disable it"
+                                .into(),
+                        ));
+                    }
+                    let fitted = engine.fit_warm(prev, x, y, &opts)?;
+                    return Ok((fitted, EarlyStoppingScores::default()));
+                }
                 if !enabled {
                     return engine.fit_scored(x, y, &opts, None);
                 }
@@ -459,6 +472,14 @@ trait ScoredEngine {
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
     ) -> Result<(Self::Fitted, EarlyStoppingScores)>;
+    /// Continue `prev` (the engine's `fit_warm_start`).
+    fn fit_warm(
+        &self,
+        prev: &Self::Fitted,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+    ) -> Result<Self::Fitted>;
 }
 
 impl ScoredEngine for LgbmRegressor {
@@ -472,6 +493,15 @@ impl ScoredEngine for LgbmRegressor {
     ) -> Result<(Self::Fitted, EarlyStoppingScores)> {
         LgbmRegressor::fit_scored(self, x, y, opts, stopping)
     }
+    fn fit_warm(
+        &self,
+        prev: &Self::Fitted,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+    ) -> Result<Self::Fitted> {
+        self.fit_warm_start(prev, x, y, opts)
+    }
 }
 
 impl ScoredEngine for LgbmClassifier {
@@ -484,6 +514,15 @@ impl ScoredEngine for LgbmClassifier {
         stopping: Option<SklearnStopping>,
     ) -> Result<(Self::Fitted, EarlyStoppingScores)> {
         LgbmClassifier::fit_scored(self, x, y, opts, stopping)
+    }
+    fn fit_warm(
+        &self,
+        prev: &Self::Fitted,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+    ) -> Result<Self::Fitted> {
+        self.fit_warm_start(prev, x, y, opts)
     }
 }
 
@@ -859,7 +898,7 @@ impl FitWeighted<f64> for HistGradientBoostingRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
-        self.fit_validated(x, y, sample_weight, None)
+        self.fit_validated(x, y, sample_weight, None, None)
     }
 }
 
@@ -882,7 +921,22 @@ impl HistGradientBoostingRegressor {
             y: y_val.into(),
             sample_weight: sample_weight_val,
         };
-        self.fit_validated(x.into(), y.into(), sample_weight, Some(validation))
+        self.fit_validated(x.into(), y.into(), sample_weight, Some(validation), None)
+    }
+
+    /// sklearn's `warm_start=True` refit: continue `prev` on `(x, y)` up to
+    /// `n_estimators` iterations, on its bins (see
+    /// [`LgbmRegressor::fit_warm_start`]). On the same data it equals a
+    /// single fit. Early stopping (on with `Auto` above 10 000 samples) and
+    /// `max_features < 1` are errors.
+    pub fn fit_warm_start<'a>(
+        &self,
+        prev: &FittedHistGradientBoostingRegressor,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'a, f64, ndarray::Ix1>,
+        sample_weight: Option<ArrayView1<'a, f64>>,
+    ) -> Result<FittedHistGradientBoostingRegressor> {
+        self.fit_validated(x.into(), y.into(), sample_weight, None, Some(prev))
     }
 
     fn fit_validated(
@@ -891,12 +945,14 @@ impl HistGradientBoostingRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
         validation: Option<ValidationSet<'_>>,
+        prev: Option<&FittedHistGradientBoostingRegressor>,
     ) -> Result<FittedHistGradientBoostingRegressor> {
         let mut engine = self.engine()?;
         self.apply_constraints(x, &mut engine)?;
         let seed = self.seeds().0;
+        let prev = prev.map(|p| &p.inner);
         let (inner, scores) =
-            self.fit_engine(&engine, x, y, sample_weight, false, seed, validation)?;
+            self.fit_engine(&engine, prev, x, y, sample_weight, false, seed, validation)?;
         Ok(FittedHistGradientBoostingRegressor { inner, scores })
     }
 }
@@ -918,7 +974,7 @@ impl FitWeighted<f64> for HistGradientBoostingClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
-        self.fit_validated(x, y, sample_weight, None)
+        self.fit_validated(x, y, sample_weight, None, None)
     }
 }
 
@@ -941,7 +997,20 @@ impl HistGradientBoostingClassifier {
             y: y_val.into(),
             sample_weight: sample_weight_val,
         };
-        self.fit_validated(x.into(), y.into(), sample_weight, Some(validation))
+        self.fit_validated(x.into(), y.into(), sample_weight, Some(validation), None)
+    }
+
+    /// sklearn's `warm_start=True` refit (see
+    /// [`HistGradientBoostingRegressor::fit_warm_start`]); the classes must
+    /// be those of `prev`.
+    pub fn fit_warm_start<'a>(
+        &self,
+        prev: &FittedHistGradientBoostingClassifier,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'a, f64, ndarray::Ix1>,
+        sample_weight: Option<ArrayView1<'a, f64>>,
+    ) -> Result<FittedHistGradientBoostingClassifier> {
+        self.fit_validated(x.into(), y.into(), sample_weight, None, Some(prev))
     }
 
     fn fit_validated(
@@ -950,6 +1019,7 @@ impl HistGradientBoostingClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
         validation: Option<ValidationSet<'_>>,
+        prev: Option<&FittedHistGradientBoostingClassifier>,
     ) -> Result<FittedHistGradientBoostingClassifier> {
         let mut engine = self.engine()?;
         self.apply_constraints(x, &mut engine)?;
@@ -968,6 +1038,7 @@ impl HistGradientBoostingClassifier {
         let weights = effective_sample_weight(y, sample_weight, self.class_weight.as_ref())?;
         let (inner, scores) = self.fit_engine(
             &engine,
+            prev.map(|p| &p.inner),
             x,
             y,
             weights.as_ref().map(|w| w.view()),
@@ -1010,6 +1081,43 @@ mod tests {
         let x = Array2::from_shape_fn((n, 3), |(i, j)| ((i * (j + 2) * 37) % 101) as f64 / 10.0);
         let y = x.column(0).mapv(|v| v * 2.0) - x.column(1);
         (x, y)
+    }
+
+    #[test]
+    fn warm_start_equals_a_single_fit() {
+        let (x, y) = data();
+        let reg = |n| {
+            HistGradientBoostingRegressor::new()
+                .with_n_estimators(n)
+                .with_min_samples_leaf(3)
+                .with_early_stopping(EarlyStopping::Disabled)
+        };
+        let part = reg(4).fit(&x, &y).unwrap();
+        let warm = reg(10).fit_warm_start(&part, &x, &y, None).unwrap();
+        let once = reg(10).fit(&x, &y).unwrap();
+        assert_eq!(warm.n_estimators(), 10);
+        assert_eq!(warm.predict(&x).unwrap(), once.predict(&x).unwrap());
+        let enabled = reg(10).with_early_stopping(EarlyStopping::Enabled);
+        assert!(enabled.fit_warm_start(&part, &x, &y, None).is_err());
+        assert!(reg(10)
+            .with_max_features(0.5)
+            .fit_warm_start(&part, &x, &y, None)
+            .is_err());
+
+        let labels = y.mapv(|v| f64::from(v > y.mean().unwrap()));
+        let clf = |n| {
+            HistGradientBoostingClassifier::new()
+                .with_n_estimators(n)
+                .with_min_samples_leaf(3)
+                .with_early_stopping(EarlyStopping::Disabled)
+        };
+        let part = clf(3).fit(&x, &labels).unwrap();
+        let warm = clf(8).fit_warm_start(&part, &x, &labels, None).unwrap();
+        let once = clf(8).fit(&x, &labels).unwrap();
+        assert_eq!(
+            warm.predict_proba(&x).unwrap(),
+            once.predict_proba(&x).unwrap()
+        );
     }
 
     #[test]

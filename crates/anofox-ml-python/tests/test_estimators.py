@@ -791,3 +791,22 @@ def test_hist_gradient_boosting_explicit_validation_set_matches_sklearn():
                                                     y_val=np.full(100, "c"))
     with pytest.raises(ValueError):
         am.HistGradientBoostingRegressor(**kw).fit(Xt, yt, X_val=Xv)
+
+
+def test_hist_gradient_boosting_warm_start_matches_sklearn():
+    from sklearn.ensemble import HistGradientBoostingClassifier as SkC
+    from sklearn.ensemble import HistGradientBoostingRegressor as SkR
+
+    for ours_cls, ref_cls, y in ((am.HistGradientBoostingRegressor, SkR, y_reg),
+                                 (am.HistGradientBoostingClassifier, SkC, y_multi)):
+        ours = ours_cls(max_iter=4, min_samples_leaf=5, warm_start=True).fit(X, y)
+        ref = ref_cls(max_iter=4, min_samples_leaf=5, warm_start=True).fit(X, y)
+        ours.set_params(max_iter=11).fit(X, y)
+        ref.set_params(max_iter=11).fit(X, y)
+        assert ours.n_iter_ == ref.n_iter_ == 11
+        out = ours.predict_proba(X) if hasattr(ref, "predict_proba") else ours.predict(X)
+        exp = ref.predict_proba(X) if hasattr(ref, "predict_proba") else ref.predict(X)
+        np.testing.assert_allclose(out, exp, rtol=1e-12, atol=1e-12)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(max_iter=4, warm_start=True, early_stopping=True,
+                                         ).fit(X, y_reg).set_params(max_iter=8).fit(X, y_reg)

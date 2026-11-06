@@ -16,6 +16,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   to `n_estimators`, unchanged on error) and `fit_with_validation(...)`
   (HistGradientBoosting's explicit validation set); each is listed in
   `capabilities()`. `ExtraTreesClassifier` now lists `predict_proba`.
+- Continued training for the LightGBM engine: `LgbmRegressor` /
+  `LgbmClassifier::fit_warm_start(&prev, x, y, opts)` and
+  `HistGradientBoosting*::fit_warm_start(&prev, x, y, w)` keep the fitted
+  bins and trees, rebuild the training scores and replay the bagging draws,
+  so on the same data the result equals a single fit with `n_estimators`
+  stages (tested bit for bit). GOSS, DART, early stopping, `init_score`,
+  `max_features < 1` and a changed learning rate are errors. Registry
+  `warm_start` for these kinds; Python `warm_start=` on
+  `HistGradientBoosting*`, matching sklearn 1.8's warm start to 1e-12.
 - `FittedGradientBoostingRegressor::staged_predict` and
   `FittedGradientBoostingClassifier::staged_decision_function` /
   `staged_predict_proba` / `staged_predict` (the last stage equals the
