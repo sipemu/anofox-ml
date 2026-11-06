@@ -432,6 +432,12 @@ struct BestSplit {
 /// Compute the leaf value with L1 + L2 regularization.
 /// Uses the proximal operator for the L1 term: soft-threshold then divide by (H + L2).
 #[inline]
+/// sklearn's node value `-G / (H + l2 + 1e-15)`, clipped to `bounds`
+/// (`compute_node_value`; no L1 penalty).
+fn sklearn_node_value(grad_sum: f64, hess_sum: f64, l2: f64, (lo, hi): OutputBounds) -> f64 {
+    (-grad_sum / (hess_sum + l2 + 1e-15)).clamp(lo, hi)
+}
+
 fn leaf_value(grad_sum: f64, hess_sum: f64, l1: f64, l2: f64) -> f64 {
     if grad_sum.abs() <= l1 {
         0.0
@@ -657,6 +663,13 @@ fn best_categorical_split(
 /// With monotone constraints, child outputs are clamped to the node's
 /// `bounds`, the gain is computed for the clamped outputs, and splits whose
 /// outputs violate the constraint direction are rejected.
+///
+/// In sklearn mode (`params.sklearn_compat`) numeric candidates are scanned
+/// in sklearn's order (missing values right with the bins ascending, then
+/// missing values left with the bins descending), gains use sklearn's
+/// `_split_gain` arithmetic, and missing values the training data did not
+/// have go to the larger child. A candidate replaces the best one only when
+/// strictly better, so all of this decides ties exactly as sklearn does.
 #[allow(clippy::too_many_arguments)]
 fn find_best_split(
     hists: &[Histogram],
@@ -689,6 +702,8 @@ fn find_best_split(
     } else {
         leaf_gain(total_grad, total_hess, l1, l2)
     };
+    // sklearn's loss of the current node, `G * value`.
+    let sklearn_node_loss = total_grad * sklearn_node_value(total_grad, total_hess, l2, bounds);
 
     for (&feat, hist) in feature_indices.iter().zip(hists) {
         if all_bins[feat].is_categorical {
@@ -715,52 +730,48 @@ fn find_best_split(
         // missing values).
         let scan_order: Vec<u8> =
             (0..n_value_bins(&all_bins[feat]).min(DEFAULT_MAX_BINS - 1) as u8).collect();
-        let n_candidates = scan_order.len();
 
-        // Try both missing directions.
-        for &missing_left in &[true, false] {
-            let mut left_grad = if missing_left { hist.missing_grad } else { 0.0 };
-            let mut left_hess = if missing_left { hist.missing_hess } else { 0.0 };
-            let mut left_count: usize = if missing_left {
-                hist.missing_count as usize
-            } else {
-                0
-            };
-
-            for &bin in &scan_order[..n_candidates] {
-                let b = bin as usize;
-                left_grad += hist.grad_sum[b];
-                left_hess += hist.hess_sum[b];
-                left_count += hist.count[b] as usize;
-
+        // Gain of sending `left` left (`right = totals - left`); keeps the
+        // candidate if it is strictly better than the best so far.
+        let mut consider =
+            |(left_grad, left_hess, left_count): (f64, f64, usize), bin: u8, missing_left: bool| {
                 if left_count < min_child_samples || left_hess < min_child_weight {
-                    continue;
+                    return;
                 }
                 let right_count = total_count - left_count;
-                // total_grad/hess include all samples (including missing).
-                // When missing_left=true, left already includes missing →
-                //   right = total - left (missing is NOT in right).
-                // When missing_left=false, left does NOT include missing →
-                //   right = total - left (missing IS in right, via total).
-                // In both cases the formula is the same.
                 let right_grad = total_grad - left_grad;
                 let right_hess = total_hess - left_hess;
-
                 if right_count < min_child_samples || right_hess < min_child_weight {
-                    continue;
+                    return;
                 }
 
                 let mut left_val = leaf_value(left_grad, left_hess, l1, l2);
                 let mut right_val = leaf_value(right_grad, right_hess, l1, l2);
-                let gain = if constrained {
+                let gain = if params.sklearn_compat {
+                    // sklearn's `_split_gain`, in its order of operations: with
+                    // integer gradient sums (L1, quantile) mirrored splits tie
+                    // mathematically and the rounding decides. Halved to the
+                    // scale of the other branches (exact).
+                    left_val = sklearn_node_value(left_grad, left_hess, l2, bounds);
+                    right_val = sklearn_node_value(right_grad, right_hess, l2, bounds);
+                    match monotone_of(feat, all_bins, monotone_constraints) {
+                        1 if left_val > right_val => return,
+                        -1 if left_val < right_val => return,
+                        _ => {}
+                    }
+                    let mut gain = sklearn_node_loss;
+                    gain -= left_grad * left_val;
+                    gain -= right_grad * right_val;
+                    0.5 * gain
+                } else if constrained {
                     left_val = left_val.clamp(lo, hi);
                     right_val = right_val.clamp(lo, hi);
                     // Monotone constraint check: feature with monotone=+1
                     // requires left_value <= right_value (predictions
                     // increase as bin increases), -1 the opposite.
                     match monotone_of(feat, all_bins, monotone_constraints) {
-                        1 if left_val > right_val => continue,
-                        -1 if left_val < right_val => continue,
+                        1 if left_val > right_val => return,
+                        -1 if left_val < right_val => return,
                         _ => {}
                     }
                     let left_g = leaf_gain_given_output(left_grad, left_hess, l1, l2, left_val);
@@ -785,6 +796,68 @@ fn find_best_split(
                         categorical_order: None,
                     });
                 }
+            };
+        // Left sums of the bins up to `bin`, plus the missing values when
+        // they go left.
+        let mut scan_ascending = |missing_left: bool, thresholds: &[u8]| {
+            let mut left = if missing_left {
+                (
+                    hist.missing_grad,
+                    hist.missing_hess,
+                    hist.missing_count as usize,
+                )
+            } else {
+                (0.0, 0.0, 0)
+            };
+            for &bin in thresholds {
+                let b = bin as usize;
+                left.0 += hist.grad_sum[b];
+                left.1 += hist.hess_sum[b];
+                left.2 += hist.count[b] as usize;
+                consider(left, bin, missing_left);
+            }
+        };
+
+        if params.sklearn_compat {
+            // sklearn: missing values right with the bins ascending, then (if
+            // the training data had any) missing values left with the bins
+            // descending, accumulating the right child as sklearn does. With
+            // missing values, the last value bin is a threshold too (all
+            // values left, the missing ones right).
+            let n_bins = n_value_bins(&all_bins[feat]);
+            let has_missing = params.has_missing[feat];
+            let thresholds: Vec<u8> = (0..n_bins - 1 + usize::from(has_missing))
+                .map(|b| b as u8)
+                .collect();
+            scan_ascending(false, &thresholds);
+            if has_missing {
+                let mut right = (0.0, 0.0, 0usize);
+                for bin in (0..n_bins.saturating_sub(1)).rev() {
+                    let b = bin + 1;
+                    right.0 += hist.grad_sum[b];
+                    right.1 += hist.hess_sum[b];
+                    right.2 += hist.count[b] as usize;
+                    let left = (
+                        total_grad - right.0,
+                        total_hess - right.1,
+                        total_count - right.2,
+                    );
+                    consider(left, bin as u8, true);
+                }
+            }
+        } else {
+            // LightGBM: both missing directions, the bins ascending.
+            scan_ascending(true, &scan_order);
+            scan_ascending(false, &scan_order);
+        }
+    }
+
+    // sklearn sends missing values the training data did not have to the
+    // child with more samples.
+    if params.sklearn_compat {
+        if let Some(split) = best.as_mut() {
+            if split.categorical_order.is_none() && !params.has_missing[split.feature] {
+                split.missing_left = split.left_count > split.right_count;
             }
         }
     }
@@ -1242,6 +1315,13 @@ pub enum LgbmObjective {
     /// (LightGBM's `objective="quantile"`). Leaf outputs are refit to the
     /// `alpha`-percentile of their residuals.
     Quantile { alpha: f64 },
+    /// Poisson regression with a log link (LightGBM's `objective="poisson"`).
+    /// Targets must be non-negative with a positive sum; predictions are
+    /// `exp` of the raw score.
+    Poisson,
+    /// Gamma regression with a log link (LightGBM's `objective="gamma"`).
+    /// Targets must be positive; predictions are `exp` of the raw score.
+    Gamma,
     /// Binary classification with log-loss.
     Binary,
     /// Multi-class classification with softmax.
@@ -1261,6 +1341,12 @@ struct LgbmParams {
     /// Length must match number of features (empty = all zero).
     monotone_constraints: Vec<i8>,
     categorical: CategoricalSplitParams,
+    /// Evaluate and scan split candidates as sklearn does (see
+    /// `find_best_split`).
+    sklearn_compat: bool,
+    /// Per feature: whether the training data has missing values (used in
+    /// sklearn mode; empty otherwise).
+    has_missing: Vec<bool>,
 }
 
 /// How categorical features are split (LightGBM's parameters of the same
@@ -1339,6 +1425,11 @@ pub struct LgbmRegressor {
     pub objective: LgbmObjective,
     /// Huber transition point (LightGBM's `alpha`, default 0.9).
     pub huber_delta: f64,
+    /// Added to the raw score in the Poisson hessian, `exp(score +
+    /// max_delta_step)`, to safeguard the optimisation (LightGBM's
+    /// `poisson_max_delta_step`, default 0.7; 0 gives the exact hessian).
+    #[serde(default = "default_poisson_max_delta_step")]
+    pub poisson_max_delta_step: f64,
     pub early_stopping_rounds: Option<usize>,
     pub categorical_features: Vec<usize>,
     /// How categorical features are split.
@@ -1348,6 +1439,13 @@ pub struct LgbmRegressor {
     /// Length must match `n_features` (or be empty for no constraints).
     pub monotone_constraints: Vec<i8>,
     pub seed: u64,
+    /// sklearn's numerics instead of LightGBM's: float32 gradients and
+    /// hessians, its L1 / quantile gradient at ties (prediction == target
+    /// counts as below), split search (see `find_best_split`), weighted
+    /// percentiles and given unit weights. The HistGradientBoosting facade
+    /// turns it on.
+    #[serde(skip)]
+    pub(crate) sklearn_compat: bool,
 }
 
 impl LgbmRegressor {
@@ -1372,11 +1470,13 @@ impl LgbmRegressor {
             goss_other_rate: 0.1,
             objective: LgbmObjective::Regression,
             huber_delta: 0.9,
+            poisson_max_delta_step: default_poisson_max_delta_step(),
             early_stopping_rounds: None,
             categorical_features: Vec::new(),
             categorical_split: CategoricalSplitParams::default(),
             monotone_constraints: Vec::new(),
             seed: 0,
+            sklearn_compat: false,
         }
     }
 
@@ -1456,6 +1556,10 @@ impl LgbmRegressor {
         self.huber_delta = d;
         self
     }
+    pub fn with_poisson_max_delta_step(mut self, d: f64) -> Self {
+        self.poisson_max_delta_step = d;
+        self
+    }
     pub fn with_early_stopping(mut self, r: Option<usize>) -> Self {
         self.early_stopping_rounds = r;
         self
@@ -1490,6 +1594,8 @@ impl LgbmRegressor {
             reg_lambda: self.reg_lambda,
             monotone_constraints: self.monotone_constraints.clone(),
             categorical: self.categorical_split,
+            sklearn_compat: self.sklearn_compat,
+            has_missing: Vec::new(),
         }
     }
 }
@@ -1541,6 +1647,9 @@ pub struct FittedLgbmRegressor {
     /// Per-feature split count.
     feature_split_count: Vec<u32>,
     best_iteration: usize,
+    /// Predictions are `exp` of the raw score (Poisson, Gamma).
+    #[serde(default)]
+    log_link: bool,
 }
 
 impl FittedLgbmRegressor {
@@ -1567,12 +1676,45 @@ impl FittedLgbmRegressor {
     }
 }
 
+/// Per column of `x`: whether it has a missing value (all `false` unless
+/// `needed`).
+fn columns_with_missing(x: ArrayView2<f64>, needed: bool) -> Vec<bool> {
+    x.columns()
+        .into_iter()
+        .map(|c| needed && c.iter().any(|v| v.is_nan()))
+        .collect()
+}
+
+/// Round to float32, the precision sklearn keeps gradients and hessians in
+/// (their sums are float64 there too).
+fn round_to_f32(values: &mut [f64]) {
+    for v in values {
+        *v = f64::from(*v as f32);
+    }
+}
+
+fn default_poisson_max_delta_step() -> f64 {
+    0.7
+}
+
+/// Whether the objective models `log E[y]` (predictions are `exp` of the
+/// raw score).
+fn has_log_link(objective: LgbmObjective) -> bool {
+    matches!(objective, LgbmObjective::Poisson | LgbmObjective::Gamma)
+}
+
 fn compute_regression_gradients(
     y: &[f64],
     preds: &[f64],
-    objective: LgbmObjective,
-    huber_delta: f64,
+    model: &LgbmRegressor,
 ) -> (Vec<f64>, Vec<f64>) {
+    let LgbmRegressor {
+        objective,
+        huber_delta,
+        poisson_max_delta_step,
+        sklearn_compat,
+        ..
+    } = *model;
     let n = y.len();
     let mut grad = vec![0.0; n];
     let mut hess = vec![1.0; n];
@@ -1589,7 +1731,11 @@ fn compute_regression_gradients(
             // residual medians afterwards (`renew_leaf_outputs`).
             for i in 0..n {
                 let r = preds[i] - y[i];
-                grad[i] = if r == 0.0 { 0.0 } else { r.signum() };
+                grad[i] = match (r == 0.0, sklearn_compat) {
+                    (false, _) => r.signum(),
+                    (true, false) => 0.0,
+                    (true, true) => -1.0,
+                };
                 hess[i] = 1.0;
             }
         }
@@ -1605,14 +1751,29 @@ fn compute_regression_gradients(
             }
         }
         LgbmObjective::Quantile { alpha } => {
-            // LightGBM: 1 − alpha above the target, −alpha below.
+            // LightGBM: 1 − alpha above the target, −alpha below; sklearn
+            // counts a tie as below.
             for i in 0..n {
-                grad[i] = if preds[i] - y[i] >= 0.0 {
-                    1.0 - alpha
+                let above = if sklearn_compat {
+                    preds[i] > y[i]
                 } else {
-                    -alpha
+                    preds[i] >= y[i]
                 };
+                grad[i] = if above { 1.0 - alpha } else { -alpha };
                 hess[i] = 1.0;
+            }
+        }
+        LgbmObjective::Poisson => {
+            for i in 0..n {
+                grad[i] = preds[i].exp() - y[i];
+                hess[i] = (preds[i] + poisson_max_delta_step).exp();
+            }
+        }
+        LgbmObjective::Gamma => {
+            for i in 0..n {
+                let e = y[i] * (-preds[i]).exp();
+                grad[i] = 1.0 - e;
+                hess[i] = e;
             }
         }
         _ => unreachable!("regressor only supports regression objectives"),
@@ -1621,8 +1782,16 @@ fn compute_regression_gradients(
     (grad, hess)
 }
 
-fn validate_regression_objective(objective: LgbmObjective) -> Result<()> {
+fn validate_regression_objective(objective: LgbmObjective, y: ArrayView1<f64>) -> Result<()> {
     match objective {
+        LgbmObjective::Poisson if y.iter().any(|&v| v < 0.0) || y.sum() <= 0.0 => {
+            Err(RustMlError::InvalidParameter(
+                "the Poisson objective needs non-negative targets with a positive sum".into(),
+            ))
+        }
+        LgbmObjective::Gamma if y.iter().any(|&v| v <= 0.0) => Err(RustMlError::InvalidParameter(
+            "the Gamma objective needs positive targets".into(),
+        )),
         LgbmObjective::Binary | LgbmObjective::Multiclass => Err(RustMlError::InvalidParameter(
             format!("{objective:?} is a classification objective; use LgbmClassifier"),
         )),
@@ -1689,20 +1858,72 @@ fn weighted_percentile(values: &[f64], weights: &[f64], alpha: f64) -> f64 {
     }
 }
 
-/// `alpha`-percentile of `values[rows]`, weighted when `weights` is given.
+/// sklearn's `_weighted_percentile` (numpy's "inverted_cdf"): the first
+/// value whose cumulative weight reaches `alpha` times the total.
+fn sklearn_weighted_percentile(values: &[f64], weights: &[f64], alpha: f64) -> f64 {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let cdf: Vec<f64> = order
+        .iter()
+        .scan(0.0, |acc, &i| {
+            *acc += weights[i];
+            Some(*acc)
+        })
+        .collect();
+    let Some(&total) = cdf.last() else {
+        return 0.0;
+    };
+    // sklearn passes the level in percent: `(100 alpha) / 100 * total`.
+    let mut target = 100.0 * alpha / 100.0 * total;
+    if target == 0.0 {
+        target = f64::from_bits(1);
+    }
+    let pos = cdf.partition_point(|&c| c < target).min(values.len() - 1);
+    values[order[pos]]
+}
+
+/// `alpha`-percentile of `values[rows]`, weighted when `weights` is given
+/// (with sklearn's weighted formula when `sklearn` is set).
 fn rows_percentile(
     values: &[f64],
     rows: &[usize],
     weights: Option<ArrayView1<f64>>,
     alpha: f64,
+    sklearn: bool,
 ) -> f64 {
     let mut v: Vec<f64> = rows.iter().map(|&i| values[i]).collect();
     match weights {
         Some(w) => {
             let wv: Vec<f64> = rows.iter().map(|&i| w[i]).collect();
-            weighted_percentile(&v, &wv, alpha)
+            if sklearn {
+                sklearn_weighted_percentile(&v, &wv, alpha)
+            } else {
+                weighted_percentile(&v, &wv, alpha)
+            }
         }
+        None if sklearn => numpy_percentile(&mut v, alpha),
         None => percentile(&mut v, alpha),
+    }
+}
+
+/// numpy's default (linear) percentile, with numpy's interpolation
+/// `b - (b - a)(1 - t)` for `t >= 0.5` (it differs from [`percentile`] in
+/// the last bits).
+fn numpy_percentile(values: &mut [f64], alpha: f64) -> f64 {
+    let n = values.len();
+    if n <= 1 {
+        return values.first().copied().unwrap_or(0.0);
+    }
+    values.sort_by(f64::total_cmp);
+    let pos = (n - 1) as f64 * alpha;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    let (a, b, t) = (values[lo], values[hi], pos - lo as f64);
+    let diff = b - a;
+    if t >= 0.5 {
+        b - diff * (1.0 - t)
+    } else {
+        a + diff * t
     }
 }
 
@@ -1717,11 +1938,12 @@ fn renew_leaf_outputs(
     residuals: &[f64],
     weights: Option<ArrayView1<f64>>,
     alpha: f64,
+    sklearn: bool,
 ) {
     match node {
         TreeNode::Leaf { value } => {
             if !rows.is_empty() {
-                *value = rows_percentile(residuals, &rows, weights, alpha);
+                *value = rows_percentile(residuals, &rows, weights, alpha, sklearn);
             }
         }
         TreeNode::Internal {
@@ -1740,8 +1962,8 @@ fn renew_leaf_outputs(
             let (l, r): (Vec<usize>, Vec<usize>) = rows
                 .into_iter()
                 .partition(|&i| goes_left(col[i], *bin_threshold, *missing_left, mask.as_deref()));
-            renew_leaf_outputs(left, binned_x, l, residuals, weights, alpha);
-            renew_leaf_outputs(right, binned_x, r, residuals, weights, alpha);
+            renew_leaf_outputs(left, binned_x, l, residuals, weights, alpha, sklearn);
+            renew_leaf_outputs(right, binned_x, r, residuals, weights, alpha, sklearn);
         }
     }
 }
@@ -1753,20 +1975,27 @@ fn effective_sample_weight(w: Option<ArrayView1<f64>>) -> Option<ArrayView1<f64>
 }
 
 /// Initial score of a regression objective: the weighted mean (squared
-/// error, Huber) or the weighted median / `alpha`-percentile (L1,
-/// quantile), as LightGBM's `BoostFromScore`.
+/// error, Huber), the weighted median / `alpha`-percentile (L1, quantile)
+/// or the log of the weighted mean (Poisson, Gamma), as LightGBM's
+/// `BoostFromScore`.
 fn regression_baseline(
     y: &[f64],
     weights: Option<ArrayView1<f64>>,
     objective: LgbmObjective,
+    sklearn: bool,
 ) -> f64 {
     if let Some(alpha) = refit_percentile(objective) {
         let rows: Vec<usize> = (0..y.len()).collect();
-        return rows_percentile(y, &rows, weights, alpha);
+        return rows_percentile(y, &rows, weights, alpha, sklearn);
     }
-    match weights {
+    let mean = match weights {
         Some(w) => y.iter().zip(w).map(|(&v, &wi)| v * wi).sum::<f64>() / w.sum(),
         None => y.iter().sum::<f64>() / y.len() as f64,
+    };
+    if has_log_link(objective) {
+        mean.ln()
+    } else {
+        mean
     }
 }
 
@@ -1843,7 +2072,7 @@ impl LgbmRegressor {
         }
         validate_eval_opts(opts, x.ncols())?;
         validate_max_bins(self.max_bins)?;
-        validate_regression_objective(self.objective)?;
+        validate_regression_objective(self.objective, y)?;
 
         let n = x.nrows();
         let p = x.ncols();
@@ -1859,7 +2088,13 @@ impl LgbmRegressor {
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
 
-        let sample_weight = effective_sample_weight(opts.sample_weight);
+        // sklearn treats any given weights as weights (its weighted
+        // percentiles differ from the unweighted ones even for unit weights).
+        let sample_weight = if self.sklearn_compat {
+            opts.sample_weight
+        } else {
+            effective_sample_weight(opts.sample_weight)
+        };
 
         // Baseline / init_score
         let (baseline, mut preds): (f64, Vec<f64>) = if let Some(init) = opts.init_score {
@@ -1869,7 +2104,7 @@ impl LgbmRegressor {
             let m = init.iter().sum::<f64>() / n as f64;
             (m, init.to_vec())
         } else {
-            let b = regression_baseline(&y_vec, sample_weight, self.objective);
+            let b = regression_baseline(&y_vec, sample_weight, self.objective, self.sklearn_compat);
             (b, vec![b; n])
         };
 
@@ -1878,7 +2113,10 @@ impl LgbmRegressor {
         let mut feature_split_count = vec![0u32; p];
 
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let params = self.params();
+        let params = LgbmParams {
+            has_missing: columns_with_missing(x, self.sklearn_compat),
+            ..self.params()
+        };
 
         // Prepare eval set predictions if present. The eval rows MUST be
         // binned with the training bin edges: trees split on training bin
@@ -1901,8 +2139,7 @@ impl LgbmRegressor {
         let mut stale_rounds = 0usize;
 
         for iter in 0..self.n_estimators {
-            let (mut gradients, mut hessians) =
-                compute_regression_gradients(&y_vec, &preds, self.objective, self.huber_delta);
+            let (mut gradients, mut hessians) = compute_regression_gradients(&y_vec, &preds, self);
 
             // Apply sample weights (multiply into gradients and hessians)
             if let Some(sw) = sample_weight {
@@ -1910,6 +2147,10 @@ impl LgbmRegressor {
                     gradients[i] *= sw[i];
                     hessians[i] *= sw[i];
                 }
+            }
+            if self.sklearn_compat {
+                round_to_f32(&mut gradients);
+                round_to_f32(&mut hessians);
             }
 
             // Row selection: GBDT = bagging, GOSS = top-k + sampled rest w/ amplification
@@ -1949,7 +2190,15 @@ impl LgbmRegressor {
             );
             if let Some((alpha, rows)) = refit {
                 let residuals: Vec<f64> = y_vec.iter().zip(&preds).map(|(y, p)| y - p).collect();
-                renew_leaf_outputs(&mut tree, &binned_x, rows, &residuals, sample_weight, alpha);
+                renew_leaf_outputs(
+                    &mut tree,
+                    &binned_x,
+                    rows,
+                    &residuals,
+                    sample_weight,
+                    alpha,
+                    self.sklearn_compat,
+                );
             }
 
             // Update predictions (on ALL rows, not just sampled)
@@ -2021,6 +2270,7 @@ impl LgbmRegressor {
             feature_gain,
             feature_split_count,
             best_iteration,
+            log_link: has_log_link(self.objective),
         })
     }
 }
@@ -2058,6 +2308,10 @@ fn eval_loss(
                     huber_delta * (r.abs() - 0.5 * huber_delta)
                 }
             }
+            // Negative log-likelihoods of the raw (log-scale) score, up to
+            // terms constant in the prediction.
+            LgbmObjective::Poisson => preds[i].exp() - y[i] * preds[i],
+            LgbmObjective::Gamma => preds[i] + y[i] * (-preds[i]).exp(),
             _ => 0.5 * r * r,
         };
         total += w * loss_i;
@@ -2117,6 +2371,9 @@ impl Predict<f64> for FittedLgbmRegressor {
                 *pred += self.learning_rate * tree.predict_bins(bins);
             }
         }
+        if self.log_link {
+            preds.mapv_inplace(f64::exp);
+        }
 
         Ok(preds)
     }
@@ -2167,6 +2424,11 @@ pub struct LgbmClassifier {
     /// HistGradientBoosting facade turns it off (sklearn's hessian).
     #[serde(skip, default = "default_true")]
     pub(crate) softmax_hessian_factor: bool,
+    /// sklearn's numerics: float32 gradients and hessians and its split
+    /// search (see `find_best_split`); the HistGradientBoosting facade
+    /// turns it on.
+    #[serde(skip)]
+    pub(crate) sklearn_compat: bool,
 }
 
 fn default_true() -> bool {
@@ -2200,6 +2462,7 @@ impl LgbmClassifier {
             early_stopping_rounds: None,
             seed: 0,
             softmax_hessian_factor: true,
+            sklearn_compat: false,
         }
     }
 
@@ -2299,6 +2562,8 @@ impl LgbmClassifier {
             reg_lambda: self.reg_lambda,
             monotone_constraints: self.monotone_constraints.clone(),
             categorical: self.categorical_split,
+            sklearn_compat: self.sklearn_compat,
+            has_missing: Vec::new(),
         }
     }
 
@@ -2504,7 +2769,10 @@ impl LgbmClassifier {
         let mut es = EarlyStopState::new(self.early_stopping_rounds, opts.verbose);
 
         let mut rng = StdRng::seed_from_u64(self.seed);
-        let params = self.params();
+        let params = LgbmParams {
+            has_missing: columns_with_missing(x, self.sklearn_compat),
+            ..self.params()
+        };
         let mut feature_gain = vec![0.0f64; p];
         let mut feature_split_count = vec![0u32; p];
 
@@ -2544,6 +2812,11 @@ impl LgbmClassifier {
                         (pr * (1.0 - pr)).max(1e-12) * effective_weights[i]
                     })
                     .collect();
+
+                if self.sklearn_compat {
+                    round_to_f32(&mut gradients);
+                    round_to_f32(&mut hessians);
+                }
 
                 let row_indices: Vec<usize> = match self.boosting_type {
                     BoostingType::Gbdt => sample_rows(n, self.subsample, &mut rng),
@@ -2683,6 +2956,11 @@ impl LgbmClassifier {
                                 * effective_weights[i]
                         })
                         .collect();
+
+                    if self.sklearn_compat {
+                        round_to_f32(&mut gradients);
+                        round_to_f32(&mut hessians);
+                    }
 
                     let row_indices: Vec<usize> = match self.boosting_type {
                         BoostingType::Gbdt => sample_rows(n, self.subsample, &mut rng),

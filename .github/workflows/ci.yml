@@ -133,7 +133,9 @@ jobs:
         with:
           python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
-      - run: pip install maturin pytest numpy scikit-learn joblib
+      # The tests compare against the pinned reference version (sklearn 1.9
+      # changed HistGradientBoosting outputs, for example).
+      - run: pip install maturin pytest joblib -r test_harness/requirements.txt
       - run: maturin build --release -m crates/anofox-ml-python/Cargo.toml -o dist
       - run: pip install dist/*.whl
       - run: pytest -q crates/anofox-ml-python/tests

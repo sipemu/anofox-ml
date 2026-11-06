@@ -1,6 +1,6 @@
 //! LightGBM 4.7 parity of the L1 objective (median baseline and leaf
 //! refit), weighted baselines, the Huber default and categorical splits
-//! (#50). Reference predictions come from `lightgbm.LGBMRegressor` with
+//! (#50), and LightGBM 4.6 parity of the Poisson / Gamma objectives (#127). Reference predictions come from `lightgbm.LGBMRegressor` with
 //! `min_data_in_bin=3, deterministic=True, force_row_wise=True` on the same
 //! integer-formula data.
 
@@ -382,5 +382,124 @@ fn weighted_multiclass_baseline_matches_lightgbm() {
         for c in 0..3 {
             assert_abs_diff_eq!(proba[[r, c]], expected[3 * k + c], epsilon = 1e-6);
         }
+    }
+}
+
+#[test]
+fn log_link_objectives_match_lightgbm() {
+    // LightGBM 4.6 with objective="poisson" (default poisson_max_delta_step
+    // 0.7) / "gamma" on y + 1, unweighted and weighted. Gamma runs with
+    // min_child_samples=1: LightGBM estimates leaf counts from the hessians
+    // (count ~ n * H_leaf / H_total), which the engine does not, so with
+    // Gamma's uneven hessians the count limit binds differently.
+    let (x, y) = data_num();
+    let y = y + 1.0;
+    let w = weights_num();
+    let cases: [(LgbmObjective, bool, [f64; 16]); 4] = [
+        (
+            LgbmObjective::Poisson,
+            false,
+            [
+                5.744697215,
+                8.978569629,
+                5.320899115,
+                9.317860366,
+                5.320899115,
+                9.938347684,
+                6.527868583,
+                9.570388711,
+                5.908013774,
+                10.356424682,
+                8.978569629,
+                5.320899115,
+                9.317860366,
+                5.784757465,
+                9.184043084,
+                5.908013774,
+            ],
+        ),
+        (
+            LgbmObjective::Poisson,
+            true,
+            [
+                5.269379237,
+                8.843553783,
+                5.269379237,
+                9.117166935,
+                5.269379237,
+                10.036717882,
+                6.113546092,
+                9.631816578,
+                6.113546092,
+                10.442364737,
+                8.843553783,
+                5.269379237,
+                9.117166935,
+                5.269379237,
+                9.257656490,
+                6.113546092,
+            ],
+        ),
+        (
+            LgbmObjective::Gamma,
+            false,
+            [
+                5.257292798,
+                9.277652404,
+                2.803655499,
+                10.347252589,
+                3.476804562,
+                10.347252589,
+                5.793050118,
+                9.912285763,
+                5.445895672,
+                10.993638157,
+                9.277652404,
+                2.803655499,
+                10.347252589,
+                5.125093558,
+                10.347252589,
+                5.114634421,
+            ],
+        ),
+        (
+            LgbmObjective::Gamma,
+            true,
+            [
+                3.904599589,
+                9.452607262,
+                3.153343946,
+                10.241679244,
+                3.153343946,
+                10.241679244,
+                5.292778350,
+                9.785444735,
+                6.232400921,
+                10.863915410,
+                9.452607262,
+                3.153343946,
+                10.241679244,
+                5.151858164,
+                10.241679244,
+                3.874171236,
+            ],
+        ),
+    ];
+    for (objective, weighted, expected) in cases {
+        let opts = LgbmFitOptions {
+            sample_weight: weighted.then(|| w.view()),
+            ..Default::default()
+        };
+        let min_child = if objective == LgbmObjective::Gamma {
+            1
+        } else {
+            5
+        };
+        let m = base()
+            .with_min_child_samples(min_child)
+            .with_objective(objective)
+            .fit_with_eval(&x, &y, &opts)
+            .unwrap();
+        check(&m.predict(&x).unwrap(), (0..200).step_by(13), &expected);
     }
 }
