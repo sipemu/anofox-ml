@@ -46,7 +46,7 @@ def generate():
     X_test = X[::5]
     out = []
 
-    def add(name, kind, params, y, sw=None, fit_kw=None, extra=None):
+    def add(name, kind, params, y, sw=None, fit_kw=None, extra=None, X=X, X_test=X_test):
         cls = lgb.LGBMRegressor if kind == "regressor" else lgb.LGBMClassifier
         m = cls(**params).fit(X, y, sample_weight=sw, **(fit_kw or {}))
         pred = m.predict(X_test) if kind == "regressor" else m.predict_proba(X_test)
@@ -96,6 +96,28 @@ def generate():
         targets["poisson"])
     add("dart_binary", "classifier", dict(dart, drop_rate=0.3), y_bin)
     add("dart_multiclass", "classifier", dict(dart, drop_rate=0.3), y_multi)
+    # Exclusive feature bundling: a one-hot block, sparse columns (some with
+    # missing values) and dense ones. Below 10 000 rows LightGBM bundles
+    # exclusive features only, so bundling is lossless.
+    level = rng.integers(0, 10, size=n)
+    onehot = np.eye(10)[level]
+    sparse = rng.normal(size=(n, 6)) * (rng.uniform(size=(n, 6)) < 0.08)
+    sparse[rng.choice(n, 6, replace=False), 4] = np.nan
+    Xs = np.column_stack([X[:, :2], onehot, sparse])
+    eta_s = (0.6 * X[:, 0] + np.linspace(-1.5, 1.5, 10)[level]
+             + 2.0 * np.nan_to_num(sparse).sum(axis=1))
+    ys = eta_s + rng.normal(scale=0.3, size=n)
+    sparse_kw = dict(X=Xs, X_test=Xs[::5])
+    add("efb_regression", "regressor", dict(base, min_child_samples=5), ys, **sparse_kw)
+    add("efb_regression_weighted", "regressor", dict(base, min_child_samples=5), ys,
+        sw=weights, **sparse_kw)
+    add("efb_no_bundle", "regressor", dict(base, min_child_samples=5, enable_bundle=False), ys,
+        **sparse_kw)
+    add("efb_binary", "classifier", dict(base, min_child_samples=5),
+        (eta_s + rng.logistic(size=n) > 0).astype(float), **sparse_kw)
+    add("efb_multiclass", "classifier", dict(base, min_child_samples=5),
+        np.digitize(eta_s + rng.logistic(size=n) * 0.5, [-0.5, 0.7]).astype(float),
+        **sparse_kw)
     return out
 
 

@@ -513,6 +513,21 @@ def test_hist_gradient_boosting_max_features_class_weight_match_sklearn():
         am.HistGradientBoostingRegressor(max_features=0.0).fit(X, y)
 
 
+def test_lgbm_bundling_matches_lightgbm():
+    lgb = pytest.importorskip("lightgbm")
+    rs = np.random.RandomState(13)
+    level = rs.randint(0, 12, size=400)
+    sparse = rs.normal(size=(400, 4)) * (rs.uniform(size=(400, 4)) < 0.1)
+    X = np.column_stack([rs.normal(size=400), np.eye(12)[level], sparse])
+    y = X[:, 0] + 0.2 * level + 2 * sparse.sum(axis=1) + rs.normal(scale=0.3, size=400)
+    kw = dict(n_estimators=25, learning_rate=0.2, num_leaves=8, min_child_samples=5)
+    ref = lgb.LGBMRegressor(**kw, deterministic=True, force_row_wise=True, verbose=-1,
+                            n_jobs=1).fit(X, y)
+    for enable_bundle in (True, False):
+        ours = am.LGBMRegressor(**kw, enable_bundle=enable_bundle).fit(X, y)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-8)
+
+
 def test_lgbm_dart_matches_lightgbm():
     lgb = pytest.importorskip("lightgbm")
     rs = np.random.RandomState(12)
