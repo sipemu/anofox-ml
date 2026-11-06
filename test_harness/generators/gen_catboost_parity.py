@@ -16,7 +16,7 @@ import tempfile
 import catboost as cb
 import numpy as np
 
-COMMON = dict(random_strength=0, bootstrap_type="No", boosting_type="Plain", has_time=True,
+COMMON = dict(random_strength=0, bootstrap_type="No", has_time=True,
               thread_count=1, verbose=0, allow_writing_files=False)
 
 
@@ -58,7 +58,8 @@ def generate():
         out["quantization"].append({"name": name, "border_count": count, "X": nulls(data),
                                     "borders": borders_of(data, count)})
 
-    base = dict(iterations=30, learning_rate=0.2, depth=4, l2_leaf_reg=3.0, **COMMON)
+    base = dict(iterations=30, learning_rate=0.2, depth=4, l2_leaf_reg=3.0, boosting_type="Plain",
+                **COMMON)
 
     def add(name, kind, params, Xd, y, sw=None):
         cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
@@ -119,11 +120,24 @@ def generate():
             "X_test": nulls(X_test), "predictions": pred.tolist(),
         })
 
+    # Ordered boosting (prefixes of the given order, `has_time=True`).
+    ordered = dict(base, boosting_type="Ordered")
+    add("ordered_rmse", "regressor", ordered, X, y_reg)
+    add("ordered_rmse_l2_depth6", "regressor", dict(ordered, score_function="L2", depth=6,
+                                                     iterations=15), X, y_reg)
+    add("ordered_rmse_weighted", "regressor", ordered, X, y_reg, sw=weights)
+    add("ordered_rmse_gradient", "regressor", dict(ordered, leaf_estimation_method="Gradient",
+                                                    fold_len_multiplier=1.5), X, y_reg)
+    add("ordered_logloss", "classifier", ordered, X, y_bin)
+    big = rng.normal(size=(1200, 3))
+    y_big = big[:, 0] - big[:, 1] ** 2 + rng.normal(scale=0.3, size=1200)
+    add("ordered_rmse_1200", "regressor", dict(ordered, iterations=15), big, y_big)
     add_cat("cat_logloss", cat, y_cat)
     add_cat("cat_logloss_l2", dict(cat, score_function="L2", depth=6), y_cat)
     add_cat("cat_logloss_weighted", cat, y_cat, sw=weights)
     add_cat("cat_logloss_no_onehot", dict(cat, one_hot_max_size=1), y_cat)
     add_cat("cat_only", dict(cat, cat_features=[1, 3, 4]), y_cat)
+    add_cat("ordered_cat_logloss", dict(cat, boosting_type="Ordered"), y_cat)
     return out
 
 

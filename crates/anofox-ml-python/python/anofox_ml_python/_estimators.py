@@ -636,7 +636,9 @@ class _CatBoost(BaseEstimator):
     def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
                  border_count=254, score_function="Cosine", leaf_estimation_method="Newton",
                  boost_from_average=None, cat_features=None, one_hot_max_size=2,
-                 model_size_reg=0.5):
+                 model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0):
+        self.boosting_type = boosting_type
+        self.fold_len_multiplier = fold_len_multiplier
         self.cat_features = cat_features
         self.one_hot_max_size = one_hot_max_size
         self.model_size_reg = model_size_reg
@@ -666,6 +668,10 @@ class _CatBoost(BaseEstimator):
         params["cat_features"] = self._cat_indices(np.shape(X)[1])
         params["one_hot_max_size"] = int(self.one_hot_max_size)
         params["model_size_reg"] = float(self.model_size_reg)
+        params["boosting_type"] = _choice(self.boosting_type,
+                                          {"Plain": "Plain", "Ordered": "Ordered"},
+                                          "boosting_type")
+        params["fold_len_multiplier"] = float(self.fold_len_multiplier)
         return params
 
     def _cat_indices(self, n_features):

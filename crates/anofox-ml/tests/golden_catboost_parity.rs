@@ -6,7 +6,8 @@ mod common;
 use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
-    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostBoostingType, CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor,
+    CatBoostScoreFunction,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -74,6 +75,12 @@ macro_rules! configure {
         }
         if let Some(c) = p["cat_features"].as_array() {
             m = m.with_cat_features(c.iter().map(|v| v.as_u64().unwrap() as usize).collect());
+        }
+        if p["boosting_type"] == "Ordered" {
+            m = m.with_boosting_type(CatBoostBoostingType::Ordered);
+        }
+        if let Some(f) = p["fold_len_multiplier"].as_f64() {
+            m = m.with_fold_len_multiplier(f);
         }
         if let Some(n) = p["one_hot_max_size"].as_u64() {
             m = m.with_one_hot_max_size(n as usize);
