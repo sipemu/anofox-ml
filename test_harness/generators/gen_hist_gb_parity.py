@@ -185,11 +185,13 @@ def early_stopping_cases():
         cls = HistGradientBoostingRegressor if kind == "regressor" else HistGradientBoostingClassifier
         m = cls(**params).fit(X, y, sample_weight=sw)
         pred = m.predict(X[::7]) if kind == "regressor" else m.predict_proba(X[::7])
+        staged = m.staged_predict(X[::7]) if kind == "regressor" else m.staged_predict_proba(X[::7])
         out.append({"name": name, "kind": kind, "params": params, "X": nulls(X),
                     "y": y.tolist(), "sample_weight": None if sw is None else sw.tolist(),
                     "X_test": nulls(X[::7]), "predictions": pred.tolist(),
                     "n_iter": int(m.n_iter_), "train_score": m.train_score_.tolist(),
-                    "validation_score": m.validation_score_.tolist()})
+                    "validation_score": m.validation_score_.tolist(),
+                    "staged": [st.tolist() for st in staged]})
     return out
 
 

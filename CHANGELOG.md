@@ -6,6 +6,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Staged predictions for HistGradientBoosting and LGBM (#127)
+
+- `staged_predict` on the fitted HistGradientBoosting regressor /
+  classifier and the LGBM regressor / classifier, and
+  `staged_predict_proba` on the classifiers (sklearn's methods of the same
+  names): lazy iterators with one prediction per boosting iteration,
+  the last equal to `predict` / `predict_proba`. Match scikit-learn 1.8.0
+  at every stage. (Python and registry support follows with #127 §4.)
+
 ### HistGradientBoosting: max_features and class_weight (#127)
 
 - `with_max_features(f)` (sklearn's `max_features`, in (0, 1]): every split

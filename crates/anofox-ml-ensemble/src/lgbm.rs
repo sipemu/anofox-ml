@@ -2710,6 +2710,36 @@ impl FitWeighted<f64> for LgbmRegressor {
     }
 }
 
+impl FittedLgbmRegressor {
+    /// Predictions after each boosting iteration (sklearn's
+    /// `staged_predict`); the last stage equals `predict`.
+    pub fn staged_predict<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<impl Iterator<Item = Array1<f64>> + '_> {
+        let x: ArrayView2<f64> = x.into();
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+        let binned = bin_matrix(x, &self.bins);
+        let mut raw = Array1::from_elem(x.nrows(), self.baseline);
+        Ok(self.trees.iter().map(move |tree| {
+            for (i, v) in raw.iter_mut().enumerate() {
+                *v += self.learning_rate * tree.predict_bins(row_of(&binned, i));
+            }
+            if self.log_link {
+                raw.mapv(f64::exp)
+            } else {
+                raw.clone()
+            }
+        }))
+    }
+}
+
 impl Predict<f64> for FittedLgbmRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
@@ -3608,21 +3638,90 @@ impl FitWeighted<f64> for LgbmClassifier {
 
 impl Predict<f64> for FittedLgbmClassifier {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
-        let proba = self.predict_proba(x)?;
+        Ok(self.labels_of(&self.predict_proba(x)?))
+    }
+}
+
+impl FittedLgbmClassifier {
+    /// The most probable class of every row of `proba`.
+    fn labels_of(&self, proba: &Array2<f64>) -> Array1<f64> {
+        proba
+            .rows()
+            .into_iter()
+            .map(|row| {
+                let mut best_c = 0;
+                for c in 1..row.len() {
+                    if row[c] > row[best_c] {
+                        best_c = c;
+                    }
+                }
+                self.classes[best_c]
+            })
+            .collect()
+    }
+
+    /// Class probabilities after each boosting iteration (sklearn's
+    /// `staged_predict_proba`); the last stage equals
+    /// [`predict_proba`](Self::predict_proba).
+    pub fn staged_predict_proba<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<impl Iterator<Item = Array2<f64>> + '_> {
+        let x: ArrayView2<f64> = x.into();
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+        let binned = bin_matrix(x, &self.bins);
         let n = x.nrows();
-        let mut preds = Array1::zeros(n);
-        for i in 0..n {
-            let mut best_c = 0;
-            let mut best_p = proba[[i, 0]];
-            for c in 1..self.classes.len() {
-                if proba[[i, c]] > best_p {
-                    best_p = proba[[i, c]];
-                    best_c = c;
+        let binary = self.classes.len() == 2;
+        let n_sets = if binary { 1 } else { self.tree_sets.len() };
+        let mut scores: Vec<Vec<f64>> = (0..n_sets).map(|c| vec![self.baselines[c]; n]).collect();
+        Ok((0..self.n_estimators()).map(move |stage| {
+            for (c, s) in scores.iter_mut().enumerate() {
+                let tree = &self.tree_sets[c][stage];
+                for (i, v) in s.iter_mut().enumerate() {
+                    *v += self.learning_rate * tree.predict_bins(row_of(&binned, i));
                 }
             }
-            preds[i] = self.classes[best_c];
-        }
-        Ok(preds)
+            if binary {
+                Array2::from_shape_fn((n, 2), |(i, c)| {
+                    let p1 = 1.0 / (1.0 + (-scores[0][i]).exp());
+                    if c == 1 {
+                        p1
+                    } else {
+                        1.0 - p1
+                    }
+                })
+            } else {
+                let mut proba = Array2::zeros((n, n_sets));
+                for i in 0..n {
+                    let max_s = scores
+                        .iter()
+                        .map(|s| s[i])
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let exp_sum: f64 = scores.iter().map(|s| (s[i] - max_s).exp()).sum();
+                    for c in 0..n_sets {
+                        proba[[i, c]] = (scores[c][i] - max_s).exp() / exp_sum;
+                    }
+                }
+                proba
+            }
+        }))
+    }
+
+    /// Predicted classes after each boosting iteration (sklearn's
+    /// `staged_predict`).
+    pub fn staged_predict<'a>(
+        &self,
+        x: impl AsArray<'a, f64, Ix2>,
+    ) -> Result<impl Iterator<Item = Array1<f64>> + '_> {
+        Ok(self
+            .staged_predict_proba(x)?
+            .map(move |proba| self.labels_of(&proba)))
     }
 }
 
