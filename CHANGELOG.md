@@ -6,6 +6,29 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LGBM / HistGradientBoosting: speed (#127)
+
+- Profiled on 100k × 50 and rebuilt the hot paths. The models stay bit for
+  bit the same as before (the sklearn and LightGBM golden suites are
+  unchanged), except that nodes above 16 384 rows in LightGBM mode get
+  children's totals summed in fixed chunks (rounding-level, independent of
+  the thread count):
+  - split search: a candidate's outputs only for a new best, counts
+    estimated inline instead of cloning each histogram, features scanned in
+    parallel and reduced in order;
+  - histograms: the node's gradients gathered once as float32 pairs (GOSS
+    now rounds its amplified gradients to float32, as LightGBM), `u32` rows,
+    bin sums indexed by the `u8` bin, counts only in sklearn mode,
+    sequential columns at a root holding every row;
+  - row partitions fused with the children's totals and parallel for large
+    nodes; subtraction without a clone; binning, training-score updates and
+    prediction parallel.
+- `n_jobs` on `LgbmRegressor` / `LgbmClassifier` (Python `n_jobs=`):
+  `None` fits on the physical cores, which beats all logical threads on
+  SMT / hybrid CPUs. Models do not depend on it.
+- `benchmarks/boosting_benchmark.py`: fit / predict against sklearn and
+  LightGBM, results in the README.
+
 ### LGBM engine: exclusive feature bundling (#127)
 
 - LightGBM's EFB (`enable_bundle`, on by default; `with_enable_bundle` on
