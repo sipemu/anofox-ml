@@ -6,6 +6,21 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### HistGradientBoosting: categorical features (#127)
+
+- `with_categorical_features(indices)` on both HistGradientBoosting
+  facades (sklearn's `categorical_features`; Python: indices or a boolean
+  mask). Each distinct value is a category (at most `max_bins`, otherwise
+  an error); `NaN` and categories unseen in training are treated as
+  missing. Splits follow sklearn: categories with enough support sorted by
+  `G / (H + 10)`, scanned from both ends to the middle, missing values as a
+  category of their own, categorical features ahead of numeric ones in
+  ties. Matches scikit-learn 1.8.0 to rounding for regression losses and
+  binary / multiclass classification (`gen_hist_gb_parity.py`).
+- `BinningMethod::Sklearn` now gives every category its own bin (the
+  first `max_bins` in sorted order) instead of LightGBM's rare-category
+  "other" bin.
+
 ### HistGradientBoosting: Poisson and Gamma losses, exact sklearn parity (#127)
 
 - `HistGradientBoostingLoss::{Poisson, Gamma}` (sklearn's `loss="poisson"` /

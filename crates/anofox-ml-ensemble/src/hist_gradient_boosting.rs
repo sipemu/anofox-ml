@@ -30,6 +30,7 @@ macro_rules! hist_gb_config {
                     min_samples_leaf: 20,
                     l2_regularization: 0.0,
                     max_bins: 255,
+                    categorical_features: Vec::new(),
                     $($field: $value,)*
                 }
             }
@@ -63,6 +64,38 @@ macro_rules! hist_gb_config {
             pub fn with_max_bins(mut self, b: usize) -> Self {
                 self.max_bins = b;
                 self
+            }
+            /// Column indices of categorical features (sklearn's
+            /// `categorical_features`). Each distinct value is a category
+            /// (at most `max_bins` per feature); `NaN` and categories unseen
+            /// in training are treated as missing.
+            pub fn with_categorical_features(mut self, features: Vec<usize>) -> Self {
+                self.categorical_features = features;
+                self
+            }
+
+            /// sklearn's checks of `categorical_features` against `x`.
+            fn validate_categorical(&self, x: ArrayView2<f64>) -> Result<()> {
+                for &j in &self.categorical_features {
+                    if j >= x.ncols() {
+                        return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                            "categorical feature {j} out of range for {} features",
+                            x.ncols()
+                        )));
+                    }
+                    let mut values: Vec<f64> =
+                        x.column(j).iter().copied().filter(|v| !v.is_nan()).collect();
+                    values.sort_by(f64::total_cmp);
+                    values.dedup();
+                    if values.len() > self.max_bins {
+                        return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                            "categorical feature {j} has {} categories, more than max_bins = {}",
+                            values.len(),
+                            self.max_bins
+                        )));
+                    }
+                }
+                Ok(())
             }
 
             fn validate(&self) -> Result<()> {
@@ -127,6 +160,9 @@ pub struct HistGradientBoostingRegressor {
     pub min_samples_leaf: usize,
     pub l2_regularization: f64,
     pub max_bins: usize,
+    /// Column indices of categorical features.
+    #[serde(default)]
+    pub categorical_features: Vec<usize>,
     #[serde(default)]
     pub loss: HistGradientBoostingLoss,
     /// Quantile level in (0, 1) for `loss = Quantile`.
@@ -148,6 +184,9 @@ pub struct HistGradientBoostingClassifier {
     pub min_samples_leaf: usize,
     pub l2_regularization: f64,
     pub max_bins: usize,
+    /// Column indices of categorical features.
+    #[serde(default)]
+    pub categorical_features: Vec<usize>,
 }
 
 fn default_leaves() -> Option<usize> {
@@ -204,6 +243,7 @@ impl HistGradientBoostingRegressor {
             .with_min_child_samples(self.min_samples_leaf)
             .with_reg_lambda(self.l2_regularization)
             .with_max_bins(self.max_bins)
+            .with_categorical_features(self.categorical_features.clone())
             .with_binning(BinningMethod::Sklearn);
         engine.sklearn_compat = true;
         Ok(engine)
@@ -221,6 +261,7 @@ impl HistGradientBoostingClassifier {
             .with_min_child_samples(self.min_samples_leaf)
             .with_reg_lambda(self.l2_regularization)
             .with_max_bins(self.max_bins)
+            .with_categorical_features(self.categorical_features.clone())
             .with_binning(BinningMethod::Sklearn);
         // sklearn's multinomial hessian is p(1 - p), without LightGBM's
         // K / (K - 1) factor.
@@ -291,6 +332,7 @@ impl FitWeighted<f64> for HistGradientBoostingRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.validate_categorical(x)?;
         Ok(FittedHistGradientBoostingRegressor {
             inner: self.engine()?.fit_weighted_view(x, y, sample_weight)?,
         })
@@ -314,6 +356,7 @@ impl FitWeighted<f64> for HistGradientBoostingClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.validate_categorical(x)?;
         Ok(FittedHistGradientBoostingClassifier {
             inner: self.engine()?.fit_weighted_view(x, y, sample_weight)?,
         })
@@ -425,6 +468,51 @@ mod tests {
         assert!(fit(HistGradientBoostingLoss::Poisson, &(&counts - 1.0)).is_err());
         assert!(fit(HistGradientBoostingLoss::Poisson, &Array1::zeros(y.len())).is_err());
         assert!(fit(HistGradientBoostingLoss::Gamma, &counts).is_err());
+    }
+
+    #[test]
+    fn categorical_features_split_by_category_and_validate() {
+        // y depends only on the category of feature 0 (codes not ordered by
+        // effect); missing values form their own group.
+        let codes = [5.0, -1.0, 2.5, 9.0];
+        let effect = [3.0, -2.0, 1.0, -4.0];
+        let n = 240;
+        let mut x =
+            Array2::from_shape_fn(
+                (n, 2),
+                |(i, j)| {
+                    if j == 0 {
+                        codes[i % 4]
+                    } else {
+                        (i % 7) as f64
+                    }
+                },
+            );
+        let mut y = Array1::from_shape_fn(n, |i| effect[i % 4]);
+        for i in (0..n).step_by(8) {
+            x[[i, 0]] = f64::NAN;
+            y[i] = 6.0;
+        }
+        let m = HistGradientBoostingRegressor::new()
+            .with_n_estimators(50)
+            .with_categorical_features(vec![0])
+            .fit(&x, &y)
+            .unwrap();
+        let p = m.predict(&x).unwrap();
+        assert!(p.iter().zip(&y).all(|(a, b)| (a - b).abs() < 0.05));
+        // An unseen category is treated as missing.
+        let unseen = m.predict(&array![[42.0, 1.0], [f64::NAN, 1.0]]).unwrap();
+        assert_eq!(unseen[0], unseen[1]);
+
+        let fit = |features, max_bins| {
+            HistGradientBoostingRegressor::new()
+                .with_categorical_features(features)
+                .with_max_bins(max_bins)
+                .fit(&x, &y)
+        };
+        assert!(fit(vec![2], 255).is_err());
+        assert!(fit(vec![1], 6).is_err());
+        assert!(fit(vec![1], 7).is_ok());
     }
 
     #[test]

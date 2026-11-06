@@ -394,6 +394,33 @@ def test_hist_gradient_boosting_quantile_loss():
         am.HistGradientBoostingRegressor(loss="huber").fit(Xq, yq)
 
 
+def test_hist_gradient_boosting_categorical_matches_sklearn():
+    from sklearn.ensemble import HistGradientBoostingClassifier as SkC
+    from sklearn.ensemble import HistGradientBoostingRegressor as SkR
+
+    rs = np.random.RandomState(7)
+    cat = rs.choice([-2.0, 0.5, 3.0, 8.0, 40.0], size=300)
+    cat[::23] = np.nan
+    X = np.column_stack([rs.normal(size=300), cat])
+    effect = {-2.0: 1.0, 0.5: -1.0, 3.0: 0.5, 8.0: 2.0, 40.0: -0.5}
+    y = np.array([effect.get(c, 0.0) for c in cat]) + 0.3 * X[:, 0] + rs.normal(scale=0.2, size=300)
+    Xt = X[::5].copy()
+    Xt[::3, 1] = 99.0  # unseen category
+    kw = dict(max_iter=20, max_leaf_nodes=8, min_samples_leaf=10)
+    for cf in ([1], [False, True]):
+        ours = am.HistGradientBoostingRegressor(categorical_features=cf, **kw).fit(X, y)
+        ref = SkR(categorical_features=cf, early_stopping=False, **kw).fit(X, y)
+        np.testing.assert_allclose(ours.predict(Xt), ref.predict(Xt), rtol=1e-10)
+    yc = (y > 0.3).astype(int)
+    ours = am.HistGradientBoostingClassifier(categorical_features=[1], **kw).fit(X, yc)
+    ref = SkC(categorical_features=[1], early_stopping=False, **kw).fit(X, yc)
+    np.testing.assert_allclose(ours.predict_proba(Xt), ref.predict_proba(Xt), rtol=1e-10)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(categorical_features=[2]).fit(X, y)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(categorical_features=[0], max_bins=10).fit(X, y)
+
+
 def test_hist_gradient_boosting_log_link_losses_match_sklearn():
     from sklearn.ensemble import HistGradientBoostingRegressor as SkHGB
 

@@ -298,9 +298,30 @@ class BaggingRegressor(RegressorMixin, _Bagging):
     _kind = "BaggingRegressor"
 
 
+def _categorical_indices(categorical_features, n_features):
+    """sklearn's ``categorical_features`` (indices or a boolean mask; ``None`` /
+    ``"from_dtype"`` select none for arrays) as column indices."""
+    if categorical_features is None or (isinstance(categorical_features, str)
+                                        and categorical_features == "from_dtype"):
+        return []
+    cf = np.asarray(categorical_features)
+    if cf.dtype.kind == "b":
+        if cf.shape != (n_features,):
+            raise ValueError("categorical_features set as a boolean mask must have "
+                             f"shape (n_features,), got: {cf.shape}")
+        return [int(i) for i in np.flatnonzero(cf)]
+    if cf.dtype.kind not in "iu":
+        raise ValueError("categorical_features must be column indices or a boolean mask")
+    if cf.size and (cf.min() < 0 or cf.max() >= n_features):
+        raise ValueError("categorical_features set as integer indices must be in "
+                         "[0, n_features - 1]")
+    return [int(i) for i in cf.ravel()]
+
+
 class _HistGradientBoosting(BaseEstimator):
     def __init__(self, learning_rate=0.1, max_iter=100, max_leaf_nodes=31, max_depth=None,
-                 min_samples_leaf=20, l2_regularization=0.0, max_bins=255):
+                 min_samples_leaf=20, l2_regularization=0.0, max_bins=255,
+                 categorical_features=None):
         self.learning_rate = learning_rate
         self.max_iter = max_iter
         self.max_leaf_nodes = max_leaf_nodes
@@ -308,12 +329,15 @@ class _HistGradientBoosting(BaseEstimator):
         self.min_samples_leaf = min_samples_leaf
         self.l2_regularization = l2_regularization
         self.max_bins = max_bins
+        self.categorical_features = categorical_features
 
     def _rust_params(self, X, y):
         return {"learning_rate": self.learning_rate, "n_estimators": self.max_iter,
                 "max_leaf_nodes": self.max_leaf_nodes, "max_depth": self.max_depth,
                 "min_samples_leaf": self.min_samples_leaf,
-                "l2_regularization": self.l2_regularization, "max_bins": self.max_bins}
+                "l2_regularization": self.l2_regularization, "max_bins": self.max_bins,
+                "categorical_features": _categorical_indices(self.categorical_features,
+                                                             np.shape(X)[1])}
 
 
 class HistGradientBoostingClassifier(ClassifierMixin, _HistGradientBoosting):
@@ -328,11 +352,12 @@ class HistGradientBoostingRegressor(RegressorMixin, _HistGradientBoosting):
 
     def __init__(self, loss="squared_error", quantile=None, learning_rate=0.1, max_iter=100,
                  max_leaf_nodes=31, max_depth=None, min_samples_leaf=20, l2_regularization=0.0,
-                 max_bins=255):
+                 max_bins=255, categorical_features=None):
         super().__init__(learning_rate=learning_rate, max_iter=max_iter,
                          max_leaf_nodes=max_leaf_nodes, max_depth=max_depth,
                          min_samples_leaf=min_samples_leaf,
-                         l2_regularization=l2_regularization, max_bins=max_bins)
+                         l2_regularization=l2_regularization, max_bins=max_bins,
+                         categorical_features=categorical_features)
         self.loss = loss
         self.quantile = quantile
 

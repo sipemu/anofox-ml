@@ -11,7 +11,7 @@ import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import numpy as np
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 
 
 def generate():
@@ -53,6 +53,51 @@ def generate():
                 "X_test": np.where(np.isnan(X_test), None, X_test).tolist(),
                 "predictions": m.predict(X_test).tolist(),
             })
+    out += categorical_cases()
+    return out
+
+
+def nulls(a):
+    return np.where(np.isnan(a), None, a).tolist()
+
+
+def categorical_cases():
+    """Categorical feature 1 (non-integer and negative codes, NaNs, a rare
+    category, and an unseen category in X_test) next to numeric ones."""
+    rng = np.random.default_rng(1270)
+    n = 400
+    codes = np.array([-1.0, 0.0, 2.5, 3.0, 7.0, 10.0, 11.0, 100.0])
+    effect = np.array([1.2, -0.8, 0.3, 2.0, -1.5, 0.0, 0.9, -0.4])
+    k = rng.choice(len(codes), size=n, p=[.15, .15, .15, .15, .15, .12, .1, .03])
+    cat = codes[k].copy()
+    cat[rng.choice(n, 20, replace=False)] = np.nan
+    X = np.column_stack([rng.normal(size=n), cat, rng.uniform(-2, 2, size=n)])
+    eta = effect[k] * np.where(np.isnan(cat), 0.0, 1.0) + 0.5 * X[:, 0] - 0.3 * X[:, 2]
+    X_test = X[::9].copy()
+    X_test[::4, 1] = 55.0  # unseen category
+    base = dict(max_iter=20, learning_rate=0.2, max_leaf_nodes=8, min_samples_leaf=10,
+                l2_regularization=0.5, early_stopping=False, categorical_features=[1])
+    out = []
+    regression = {
+        "squared_error": eta + rng.normal(scale=0.3, size=n),
+        "absolute_error": eta + rng.standard_t(3, size=n) * 0.3,
+        "poisson": rng.poisson(np.exp(0.5 * eta)).astype(float),
+    }
+    for loss, y in regression.items():
+        params = dict(base, loss=loss)
+        m = HistGradientBoostingRegressor(**params).fit(X, y)
+        out.append({"name": f"categorical_{loss}", "kind": "regressor", "params": params,
+                    "X": nulls(X), "y": y.tolist(), "sample_weight": None,
+                    "X_test": nulls(X_test), "predictions": m.predict(X_test).tolist()})
+    classes = {
+        "binary": (eta + rng.logistic(size=n) > 0).astype(float),
+        "multiclass": np.digitize(eta + rng.logistic(size=n) * 0.5, [-0.5, 0.7]).astype(float),
+    }
+    for name, y in classes.items():
+        m = HistGradientBoostingClassifier(**base).fit(X, y)
+        out.append({"name": f"categorical_{name}", "kind": "classifier", "params": base,
+                    "X": nulls(X), "y": y.tolist(), "sample_weight": None,
+                    "X_test": nulls(X_test), "predictions": m.predict_proba(X_test).tolist()})
     return out
 
 

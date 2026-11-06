@@ -30,16 +30,19 @@ const MISSING_BIN: u8 = 255;
 // Binning
 // ============================================================
 
-/// How numeric features are binned.
+/// How features are binned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BinningMethod {
-    /// LightGBM's greedy binning with `min_data_in_bin`.
+    /// LightGBM's greedy binning with `min_data_in_bin`; categories with
+    /// few samples share the "other" bin.
     #[default]
     LightGbm,
     /// sklearn's `_BinMapper`: midpoints between consecutive distinct values
     /// when there are at most `max_bins` of them, otherwise the
     /// `method="midpoint"` percentiles at `max_bins` equal steps (from a
-    /// subsample of 200 000 rows on larger data).
+    /// subsample of 200 000 rows on larger data). Every category gets its own
+    /// bin (the first `max_bins` in sorted order; later ones are treated as
+    /// missing).
     Sklearn,
 }
 
@@ -118,7 +121,19 @@ fn compute_bins(
 
         let mut edges = Vec::new();
 
-        if is_categorical {
+        if is_categorical && method == BinningMethod::Sklearn {
+            // sklearn ordinal-encodes every category (its estimators reject
+            // more than `max_bins` of them).
+            edges = x
+                .column(j)
+                .iter()
+                .copied()
+                .filter(|v| !v.is_nan())
+                .collect();
+            edges.sort_by(f64::total_cmp);
+            edges.dedup();
+            edges.truncate(max_bins);
+        } else if is_categorical {
             edges = categorical_edges(x.column(j), max_bins, min_data_in_bin);
         } else if method == BinningMethod::Sklearn {
             let mut raw: Vec<f64> = match &subsample {
@@ -657,6 +672,109 @@ fn best_categorical_split(
     )
 }
 
+/// sklearn's categorical split (`_find_best_bin_to_split_category`, Fisher's
+/// grouping): the categories with a support of at least 10 (in hessian
+/// units scaled to samples) are sorted by `G / (H + 10)`, the missing values
+/// counting as a category when the training data had any, and prefixes of up
+/// to half of them are tried from both ends of that order. Low-support
+/// categories always go right. Gains use sklearn's `_split_gain`.
+#[allow(clippy::too_many_arguments)]
+fn sklearn_categorical_split(
+    hist: &Histogram,
+    (total_grad, total_hess): (f64, f64),
+    total_count: usize,
+    feat: usize,
+    n_categories: usize,
+    params: &LgbmParams,
+    bounds: OutputBounds,
+    node_loss: f64,
+) -> Option<BestSplit> {
+    const MIN_CAT_SUPPORT: f64 = 10.0;
+    let (mcs, mcw, l2) = (
+        params.min_child_samples,
+        params.min_child_weight,
+        params.reg_lambda,
+    );
+    let support_factor = total_count as f64 / total_hess;
+    // (bin, gradient sum, hessian sum, count, sort value)
+    let mut cats: Vec<(u8, f64, f64, usize, f64)> = (0..n_categories.min(MISSING_BIN as usize))
+        .map(|b| {
+            (
+                b as u8,
+                hist.grad_sum[b],
+                hist.hess_sum[b],
+                hist.count[b] as usize,
+            )
+        })
+        .chain(params.has_missing[feat].then_some((
+            MISSING_BIN,
+            hist.missing_grad,
+            hist.missing_hess,
+            hist.missing_count as usize,
+        )))
+        .filter(|&(_, _, h, _)| h * support_factor >= MIN_CAT_SUPPORT)
+        .map(|(b, g, h, c)| (b, g, h, c, g / (h + MIN_CAT_SUPPORT)))
+        .collect();
+    if cats.len() <= 1 {
+        return None;
+    }
+    cats.sort_by(|a, b| a.4.total_cmp(&b.4));
+
+    let n_used = cats.len();
+    // (gain, left value, right value, left count, forward scan, index of
+    // the last category sent left)
+    let mut best: Option<(f64, f64, f64, usize, bool, usize)> = None;
+    for forward in [true, false] {
+        let middle = n_used.div_ceil(2) - usize::from(!forward);
+        let (mut lg, mut lh, mut lc) = (0.0, 0.0, 0usize);
+        for i in 0..middle {
+            let k = if forward { i } else { n_used - 1 - i };
+            let (_, g, h, c, _) = cats[k];
+            lc += c;
+            lh += h;
+            lg += g;
+            let (rc, rh, rg) = (total_count - lc, total_hess - lh, total_grad - lg);
+            if lc < mcs || lh < mcw {
+                continue;
+            }
+            if rc < mcs || rh < mcw {
+                break;
+            }
+            let lv = sklearn_node_value(lg, lh, l2, bounds);
+            let rv = sklearn_node_value(rg, rh, l2, bounds);
+            let mut gain = node_loss;
+            gain -= lg * lv;
+            gain -= rg * rv;
+            let gain = 0.5 * gain;
+            if gain > params.min_split_gain && gain > best.as_ref().map_or(-1.0, |b| b.0) {
+                best = Some((gain, lv, rv, lc, forward, k));
+            }
+        }
+    }
+
+    best.map(|(gain, left_value, right_value, left_count, forward, k)| {
+        let left = if forward { &cats[..=k] } else { &cats[k..] };
+        let missing_left = left.iter().any(|c| c.0 == MISSING_BIN);
+        let mut order: Vec<u8> = left
+            .iter()
+            .map(|c| c.0)
+            .filter(|&b| b != MISSING_BIN)
+            .collect();
+        order.sort_unstable();
+        BestSplit {
+            feature: feat,
+            bin_threshold: order.last().copied().unwrap_or(MISSING_BIN),
+            gain,
+            left_value,
+            right_value,
+            left_count,
+            right_count: total_count - left_count,
+            missing_left,
+            categorical_order: Some(order),
+        }
+    })
+}
+
 /// Best split of a node from its histograms (`hists[k]` belongs to
 /// `feature_indices[k]`).
 ///
@@ -705,18 +823,38 @@ fn find_best_split(
     // sklearn's loss of the current node, `G * value`.
     let sklearn_node_loss = total_grad * sklearn_node_value(total_grad, total_hess, l2, bounds);
 
-    for (&feat, hist) in feature_indices.iter().zip(hists) {
+    // sklearn moves the categorical features in front of the numeric ones,
+    // so they win ties.
+    let mut positions: Vec<usize> = (0..feature_indices.len()).collect();
+    if params.sklearn_compat {
+        positions.sort_by_key(|&k| !all_bins[feature_indices[k]].is_categorical);
+    }
+    for (feat, hist) in positions.iter().map(|&k| (feature_indices[k], &hists[k])) {
         if all_bins[feat].is_categorical {
-            let candidate = best_categorical_split(
-                hist,
-                totals,
-                total_count,
-                feat,
-                all_bins[feat].edges.len(),
-                params,
-                constrained.then_some(bounds),
-                parent_gain,
-            );
+            let n_categories = all_bins[feat].edges.len();
+            let candidate = if params.sklearn_compat {
+                sklearn_categorical_split(
+                    hist,
+                    totals,
+                    total_count,
+                    feat,
+                    n_categories,
+                    params,
+                    bounds,
+                    sklearn_node_loss,
+                )
+            } else {
+                best_categorical_split(
+                    hist,
+                    totals,
+                    total_count,
+                    feat,
+                    n_categories,
+                    params,
+                    constrained.then_some(bounds),
+                    parent_gain,
+                )
+            };
             if let Some(split) = candidate {
                 if split.gain > best.as_ref().map_or(0.0, |b| b.gain) {
                     best = Some(split);
@@ -856,7 +994,7 @@ fn find_best_split(
     // child with more samples.
     if params.sklearn_compat {
         if let Some(split) = best.as_mut() {
-            if split.categorical_order.is_none() && !params.has_missing[split.feature] {
+            if !params.has_missing[split.feature] {
                 split.missing_left = split.left_count > split.right_count;
             }
         }
@@ -894,7 +1032,7 @@ enum TreeNode {
 fn categorical_left_mask(order: &[u8], threshold: u8) -> Vec<bool> {
     let mut mask = vec![false; MISSING_BIN as usize + 1];
     let thresh_pos = order.iter().position(|&b| b == threshold).unwrap_or(0);
-    for &b in &order[..=thresh_pos.min(order.len().saturating_sub(1))] {
+    for &b in order.iter().take(thresh_pos + 1) {
         mask[b as usize] = true;
     }
     mask
