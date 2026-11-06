@@ -495,17 +495,48 @@ fn bin_value(v: f64, bins: &FeatureBins) -> u8 {
 }
 
 /// Bin every row of `x` with *existing* (training) bin edges, row-major
-/// (prediction walks one row at a time). Works for any layout of `x`.
+/// (prediction walks one row at a time), in parallel over blocks of rows.
+/// Works for any layout of `x`.
 fn bin_matrix(x: ArrayView2<f64>, all_bins: &[FeatureBins]) -> Array2<u8> {
-    let mut out = Array2::<u8>::zeros((x.nrows(), x.ncols()));
-    for (j, bins) in all_bins.iter().enumerate() {
-        let col = x.column(j);
-        for (o, &v) in out.column_mut(j).iter_mut().zip(col.iter()) {
-            *o = bin_value(v, bins);
-        }
+    use rayon::prelude::*;
+    let (n, p) = x.dim();
+    let mut out = Array2::<u8>::zeros((n, p));
+    if p > 0 {
+        out.as_slice_mut()
+            .expect("row-major")
+            .par_chunks_mut(PREDICT_BLOCK_ROWS * p)
+            .enumerate()
+            .for_each(|(block, out)| {
+                let first = block * PREDICT_BLOCK_ROWS;
+                for (j, bins) in all_bins.iter().enumerate() {
+                    for (k, o) in out.iter_mut().skip(j).step_by(p).enumerate() {
+                        *o = bin_value(x[[first + k, j]], bins);
+                    }
+                }
+            });
     }
     out
 }
+
+/// Run a fit on `n_jobs` threads (`None`: the physical cores, at most the
+/// current pool's threads). Inside a rayon worker (e.g. parallel
+/// cross-validation) the fit stays in the caller's pool.
+fn with_fit_threads<T: Send>(n_jobs: Option<usize>, fit: impl FnOnce() -> T + Send) -> T {
+    let current = rayon::current_num_threads();
+    let threads = n_jobs
+        .unwrap_or_else(|| num_cpus::get_physical().min(current))
+        .max(1);
+    if rayon::current_thread_index().is_some() || threads == current {
+        return fit();
+    }
+    match rayon::ThreadPoolBuilder::new().num_threads(threads).build() {
+        Ok(pool) => pool.install(fit),
+        Err(_) => fit(),
+    }
+}
+
+/// Rows per parallel block of predictions.
+const PREDICT_BLOCK_ROWS: usize = 1024;
 
 /// `scores[i] += factor · tree(row i)` for every row of the row-major
 /// `binned_rows`, in parallel.
@@ -2509,6 +2540,12 @@ pub struct LgbmRegressor {
     /// (up to rounding in the histograms).
     #[serde(default = "default_true")]
     pub enable_bundle: bool,
+    /// Threads of a fit (LightGBM's `n_jobs`): `None` = the physical
+    /// cores (at most the current rayon pool's threads), which on machines
+    /// with SMT or efficiency cores is faster than all logical ones. The
+    /// model does not depend on it.
+    #[serde(default)]
+    pub n_jobs: Option<usize>,
     pub seed: u64,
     /// sklearn's numerics instead of LightGBM's: float32 gradients and
     /// hessians, its L1 / quantile gradient at ties (prediction == target
@@ -2558,6 +2595,7 @@ impl LgbmRegressor {
             categorical_split: CategoricalSplitParams::default(),
             monotone_constraints: Vec::new(),
             enable_bundle: true,
+            n_jobs: None,
             seed: 0,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
@@ -2673,6 +2711,11 @@ impl LgbmRegressor {
     /// Exclusive feature bundling on or off (LightGBM's `enable_bundle`).
     pub fn with_enable_bundle(mut self, on: bool) -> Self {
         self.enable_bundle = on;
+        self
+    }
+    /// Threads of a fit (see the `n_jobs` field).
+    pub fn with_n_jobs(mut self, n_jobs: Option<usize>) -> Self {
+        self.n_jobs = n_jobs;
         self
     }
     pub fn with_seed(mut self, s: u64) -> Self {
@@ -3354,13 +3397,23 @@ impl LgbmRegressor {
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
     ) -> Result<(FittedLgbmRegressor, EarlyStoppingScores)> {
+        with_fit_threads(self.n_jobs, || self.fit_scored_inner(x, y, opts, stopping))
+    }
+
+    fn fit_scored_inner(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+        stopping: Option<SklearnStopping>,
+    ) -> Result<(FittedLgbmRegressor, EarlyStoppingScores)> {
         // LightGBM keeps the quantile level as a float32.
         if let LgbmObjective::Quantile { alpha } = self.objective {
             let alpha32 = f64::from(alpha as f32);
             if !self.sklearn_compat && alpha32 != alpha {
                 let mut m = self.clone();
                 m.objective = LgbmObjective::Quantile { alpha: alpha32 };
-                return m.fit_scored(x, y, opts, stopping);
+                return m.fit_scored_inner(x, y, opts, stopping);
             }
         }
         if x.nrows() != y.len() {
@@ -3836,10 +3889,19 @@ impl Predict<f64> for FittedLgbmRegressor {
         let binned = bin_matrix(x, &self.bins);
         let p = binned.ncols();
         let flat = binned.as_slice().expect("row-major binned matrix");
-        for (pred, bins) in preds.iter_mut().zip(flat.chunks_exact(p.max(1))) {
-            for tree in &self.trees {
-                *pred += self.learning_rate * tree.predict_bins(bins);
-            }
+        {
+            use rayon::prelude::*;
+            preds
+                .as_slice_mut()
+                .unwrap()
+                .par_iter_mut()
+                .with_min_len(PREDICT_BLOCK_ROWS)
+                .zip(flat.par_chunks_exact(p.max(1)))
+                .for_each(|(pred, bins)| {
+                    for tree in &self.trees {
+                        *pred += self.learning_rate * tree.predict_bins(bins);
+                    }
+                });
         }
         if self.log_link {
             preds.mapv_inplace(f64::exp);
@@ -3897,6 +3959,12 @@ pub struct LgbmClassifier {
     /// (up to rounding in the histograms).
     #[serde(default = "default_true")]
     pub enable_bundle: bool,
+    /// Threads of a fit (LightGBM's `n_jobs`): `None` = the physical
+    /// cores (at most the current rayon pool's threads), which on machines
+    /// with SMT or efficiency cores is faster than all logical ones. The
+    /// model does not depend on it.
+    #[serde(default)]
+    pub n_jobs: Option<usize>,
     pub seed: u64,
     /// Scale the softmax hessian by K / (K - 1) as LightGBM does; the
     /// HistGradientBoosting facade turns it off (sklearn's hessian).
@@ -3950,6 +4018,7 @@ impl LgbmClassifier {
             class_weight: None,
             early_stopping_rounds: None,
             enable_bundle: true,
+            n_jobs: None,
             seed: 0,
             softmax_hessian_factor: true,
             sklearn_compat: false,
@@ -4050,6 +4119,11 @@ impl LgbmClassifier {
         self.enable_bundle = on;
         self
     }
+    /// Threads of a fit (see the `n_jobs` field).
+    pub fn with_n_jobs(mut self, n_jobs: Option<usize>) -> Self {
+        self.n_jobs = n_jobs;
+        self
+    }
     pub fn with_seed(mut self, s: u64) -> Self {
         self.seed = s;
         self
@@ -4144,39 +4218,55 @@ impl FittedLgbmClassifier {
             )));
         }
 
+        use rayon::prelude::*;
         let n = x.nrows();
         let n_classes = self.classes.len();
 
         if n_classes == 2 {
             let mut proba = Array2::zeros((n, 2));
             let binned = bin_matrix(x, &self.bins);
-            for i in 0..n {
-                let mut score = self.baselines[0];
-                for tree in &self.tree_sets[0] {
-                    score += self.learning_rate * tree.predict_bins(row_of(&binned, i));
-                }
-                let p1 = 1.0 / (1.0 + (-score).exp());
-                proba[[i, 0]] = 1.0 - p1;
-                proba[[i, 1]] = p1;
-            }
+            proba
+                .as_slice_mut()
+                .unwrap()
+                .par_chunks_mut(2)
+                .with_min_len(PREDICT_BLOCK_ROWS)
+                .enumerate()
+                .for_each(|(i, row)| {
+                    let mut score = self.baselines[0];
+                    for tree in &self.tree_sets[0] {
+                        score += self.learning_rate * tree.predict_bins(row_of(&binned, i));
+                    }
+                    let p1 = 1.0 / (1.0 + (-score).exp());
+                    row[0] = 1.0 - p1;
+                    row[1] = p1;
+                });
             Ok(proba)
         } else {
             let mut proba = Array2::zeros((n, n_classes));
             let binned = bin_matrix(x, &self.bins);
-            let mut scores = vec![0.0; n_classes];
-            for i in 0..n {
-                for (c, ts) in self.tree_sets.iter().enumerate() {
-                    scores[c] = self.baselines[c];
-                    for tree in ts {
-                        scores[c] += self.learning_rate * tree.predict_bins(row_of(&binned, i));
-                    }
-                }
-                let max_s = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let exp_sum: f64 = scores.iter().map(|&s| (s - max_s).exp()).sum();
-                for c in 0..n_classes {
-                    proba[[i, c]] = (scores[c] - max_s).exp() / exp_sum;
-                }
-            }
+            proba
+                .as_slice_mut()
+                .unwrap()
+                .par_chunks_mut(n_classes)
+                .with_min_len(PREDICT_BLOCK_ROWS)
+                .enumerate()
+                .for_each_init(
+                    || vec![0.0; n_classes],
+                    |scores, (i, row)| {
+                        for (c, ts) in self.tree_sets.iter().enumerate() {
+                            scores[c] = self.baselines[c];
+                            for tree in ts {
+                                scores[c] +=
+                                    self.learning_rate * tree.predict_bins(row_of(&binned, i));
+                            }
+                        }
+                        let max_s = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                        let exp_sum: f64 = scores.iter().map(|&s| (s - max_s).exp()).sum();
+                        for c in 0..n_classes {
+                            row[c] = (scores[c] - max_s).exp() / exp_sum;
+                        }
+                    },
+                );
             Ok(proba)
         }
     }
@@ -4197,6 +4287,16 @@ impl LgbmClassifier {
     /// early stopping (on `opts.eval_set` if given, else on the training
     /// data), returning its scores.
     pub(crate) fn fit_scored(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        opts: &LgbmFitOptions<'_>,
+        stopping: Option<SklearnStopping>,
+    ) -> Result<(FittedLgbmClassifier, EarlyStoppingScores)> {
+        with_fit_threads(self.n_jobs, || self.fit_scored_inner(x, y, opts, stopping))
+    }
+
+    fn fit_scored_inner(
         &self,
         x: ArrayView2<f64>,
         y: ArrayView1<f64>,
@@ -6937,6 +7037,29 @@ mod bundling_tests {
             .map(|(p, q)| (p - q).abs())
             .fold(0.0, f64::max);
         assert!(worst < 1e-10, "{worst}");
+    }
+
+    #[test]
+    fn thread_count_leaves_the_model_unchanged() {
+        // Large enough for the parallel histograms, split search and
+        // score updates.
+        let mut s = 7;
+        let x = Array2::from_shape_fn((6000, 24), |_| lcg(&mut s) * 2.0 - 1.0);
+        let y = Array1::from_iter(x.rows().into_iter().map(|r| r[0] + r[1] * r[2]));
+        let labels = y.mapv(|v| f64::from(v > 0.0) + f64::from(v > 0.6));
+        let fit = |jobs| {
+            let reg = LgbmRegressor::new().with_n_estimators(15).with_n_jobs(jobs);
+            let clf = LgbmClassifier::new()
+                .with_n_estimators(10)
+                .with_n_jobs(jobs);
+            (
+                reg.fit(&x, &y).unwrap().predict(&x).unwrap(),
+                clf.fit(&x, &labels).unwrap().predict_proba(&x).unwrap(),
+            )
+        };
+        let one = fit(Some(1));
+        assert_eq!(one, fit(Some(5)));
+        assert_eq!(one, fit(None));
     }
 
     #[test]

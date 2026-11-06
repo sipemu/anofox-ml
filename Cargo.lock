@@ -129,6 +129,7 @@ dependencies = [
  "approx",
  "ndarray",
  "num-traits",
+ "num_cpus",
  "perpetual",
  "proptest",
  "rand 0.8.6",
