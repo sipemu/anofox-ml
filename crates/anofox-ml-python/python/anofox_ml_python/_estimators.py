@@ -635,7 +635,11 @@ class _CatBoost(BaseEstimator):
 
     def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
                  border_count=254, score_function="Cosine", leaf_estimation_method="Newton",
-                 boost_from_average=None):
+                 boost_from_average=None, cat_features=None, one_hot_max_size=2,
+                 model_size_reg=0.5):
+        self.cat_features = cat_features
+        self.one_hot_max_size = one_hot_max_size
+        self.model_size_reg = model_size_reg
         self.iterations = iterations
         self.learning_rate = learning_rate
         self.depth = depth
@@ -659,7 +663,48 @@ class _CatBoost(BaseEstimator):
         }
         if self.boost_from_average is not None:
             params["boost_from_average"] = bool(self.boost_from_average)
+        params["cat_features"] = self._cat_indices(np.shape(X)[1])
+        params["one_hot_max_size"] = int(self.one_hot_max_size)
+        params["model_size_reg"] = float(self.model_size_reg)
         return params
+
+    def _cat_indices(self, n_features):
+        if self.cat_features is None:
+            return []
+        idx = sorted({int(i) % n_features for i in self.cat_features})
+        return idx
+
+    def _encode(self, X, fit):
+        """Numeric array with the categorical columns as category codes (any
+        hashable values; unseen ones get their own code)."""
+        X = np.asarray(X, dtype=object if self.cat_features else np.float64)
+        if X.ndim != 2:
+            raise ValueError(f"Expected a 2D array, got {X.ndim}D")
+        cats = self._cat_indices(X.shape[1])
+        if not cats:
+            return np.ascontiguousarray(X, dtype=np.float64)
+        if fit:
+            self._categories_ = {}
+        out = np.empty(X.shape, dtype=np.float64)
+        for j in range(X.shape[1]):
+            if j not in cats:
+                out[:, j] = X[:, j].astype(np.float64)
+                continue
+            codes = self._categories_.setdefault(j, {}) if fit else self._categories_[j]
+            col = out[:, j]
+            for i, v in enumerate(X[:, j]):
+                key = str(v)
+                if fit:
+                    col[i] = codes.setdefault(key, float(len(codes)))
+                else:
+                    col[i] = codes.get(key, -1.0)
+        return out
+
+    def _fit_model(self, X, y=None, sample_weight=None):
+        return super()._fit_model(self._encode(X, fit=True), y, sample_weight)
+
+    def _call(self, method, X):
+        return super()._call(method, self._encode(X, fit=False))
 
 
 class CatBoostRegressor(RegressorMixin, _CatBoost):

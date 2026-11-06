@@ -72,6 +72,12 @@ macro_rules! configure {
         if let Some(b) = p["boost_from_average"].as_bool() {
             m = m.with_boost_from_average(b);
         }
+        if let Some(c) = p["cat_features"].as_array() {
+            m = m.with_cat_features(c.iter().map(|v| v.as_u64().unwrap() as usize).collect());
+        }
+        if let Some(n) = p["one_hot_max_size"].as_u64() {
+            m = m.with_one_hot_max_size(n as usize);
+        }
         m
     }};
 }
