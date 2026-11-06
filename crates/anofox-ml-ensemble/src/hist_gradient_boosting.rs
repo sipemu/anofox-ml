@@ -9,6 +9,7 @@
 //! and leaves are Newton steps with an L2 penalty. Sample weights, feature
 //! importances and the engine's histogram subtraction come with it.
 
+use anofox_ml_core::class_weight::{effective_sample_weight, ClassWeight};
 pub use anofox_ml_core::numpy_random::TestSize;
 use anofox_ml_core::numpy_random::{
     stratified_train_test_split_indices, train_test_split_indices, RandomState,
@@ -42,6 +43,7 @@ macro_rules! hist_gb_config {
                     n_iter_no_change: 10,
                     tol: 1e-7,
                     random_state: 0,
+                    max_features: 1.0,
                     $($field: $value,)*
                 }
             }
@@ -132,6 +134,22 @@ macro_rules! hist_gb_config {
                 self
             }
 
+            /// Share of the features tried at every split (sklearn's
+            /// `max_features`, in (0, 1]; default 1). The subsets are drawn
+            /// as sklearn draws them for the same `random_state`.
+            pub fn with_max_features(mut self, f: f64) -> Self {
+                self.max_features = f;
+                self
+            }
+
+            /// sklearn's two seeds from `random_state`: the validation split's
+            /// and the feature subsampling's.
+            fn seeds(&self) -> (u32, u32) {
+                let mut rs = RandomState::new(self.random_state);
+                let split = rs.randint(u64::from(u32::MAX)) as u32;
+                (split, rs.randint(u64::from(u32::MAX)) as u32)
+            }
+
             /// Fit `engine` with sklearn's early stopping when it applies:
             /// the validation rows are split off as sklearn's
             /// `train_test_split` does (stratified by class for the
@@ -144,6 +162,7 @@ macro_rules! hist_gb_config {
                 y: ArrayView1<f64>,
                 sample_weight: Option<ArrayView1<f64>>,
                 stratify: bool,
+                seed: u32,
             ) -> Result<(E::Fitted, EarlyStoppingScores)> {
                 let enabled = match self.early_stopping {
                     EarlyStopping::Auto => x.nrows() > 10_000,
@@ -169,9 +188,6 @@ macro_rules! hist_gb_config {
                 let Some(test_size) = self.validation_fraction else {
                     return engine.fit_scored(x, y, &opts, Some(rule));
                 };
-                // sklearn: `_random_seed = rng.randint(np.iinfo(np.uint32).max)`.
-                let seed =
-                    RandomState::new(self.random_state).randint(u64::from(u32::MAX)) as u32;
                 let (train, val) = if stratify {
                     let mut classes: Vec<f64> = y.to_vec();
                     classes.sort_by(f64::total_cmp);
@@ -204,6 +220,12 @@ macro_rules! hist_gb_config {
                 engine: &mut E,
             ) -> Result<()> {
                 self.validate_categorical(x)?;
+                if !(self.max_features > 0.0 && self.max_features <= 1.0) {
+                    return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                        "max_features must be in (0, 1], got {}",
+                        self.max_features
+                    )));
+                }
                 let p = x.ncols();
                 if !self.monotonic_cst.is_empty() {
                     if self.monotonic_cst.len() != p {
@@ -228,6 +250,7 @@ macro_rules! hist_gb_config {
                     Some(cst) => cst.groups(p)?,
                 };
                 engine.set_constraints(self.monotonic_cst.clone(), groups);
+                engine.set_feature_subsampling(self.max_features, self.seeds().1);
                 Ok(())
             }
 
@@ -391,6 +414,7 @@ where
 /// Engines the facades configure with constraints.
 trait ConstrainedEngine {
     fn set_constraints(&mut self, monotone: Vec<i8>, interactions: Vec<Vec<usize>>);
+    fn set_feature_subsampling(&mut self, fraction: f64, seed: u32);
 }
 
 impl ConstrainedEngine for LgbmRegressor {
@@ -398,12 +422,20 @@ impl ConstrainedEngine for LgbmRegressor {
         self.monotone_constraints = monotone;
         self.interaction_cst = interactions;
     }
+    fn set_feature_subsampling(&mut self, fraction: f64, seed: u32) {
+        self.feature_fraction_per_split = fraction;
+        self.feature_subsample_seed = seed;
+    }
 }
 
 impl ConstrainedEngine for LgbmClassifier {
     fn set_constraints(&mut self, monotone: Vec<i8>, interactions: Vec<Vec<usize>>) {
         self.monotone_constraints = monotone;
         self.interaction_cst = interactions;
+    }
+    fn set_feature_subsampling(&mut self, fraction: f64, seed: u32) {
+        self.feature_fraction_per_split = fraction;
+        self.feature_subsample_seed = seed;
     }
 }
 
@@ -457,6 +489,9 @@ pub struct HistGradientBoostingRegressor {
     pub tol: f64,
     #[serde(default)]
     pub random_state: u32,
+    /// Share of the features tried at every split.
+    #[serde(default = "default_max_features")]
+    pub max_features: f64,
     #[serde(default)]
     pub loss: HistGradientBoostingLoss,
     /// Quantile level in (0, 1) for `loss = Quantile`.
@@ -497,6 +532,12 @@ pub struct HistGradientBoostingClassifier {
     pub tol: f64,
     #[serde(default)]
     pub random_state: u32,
+    /// Share of the features tried at every split.
+    #[serde(default = "default_max_features")]
+    pub max_features: f64,
+    /// Class weights (sklearn's `class_weight`).
+    #[serde(default)]
+    pub class_weight: Option<ClassWeight>,
 }
 
 fn default_leaves() -> Option<usize> {
@@ -515,12 +556,25 @@ fn default_tol() -> f64 {
     1e-7
 }
 
+fn default_max_features() -> f64 {
+    1.0
+}
+
 hist_gb_config!(
     HistGradientBoostingRegressor,
     loss: HistGradientBoostingLoss::SquaredError,
     quantile: None
 );
-hist_gb_config!(HistGradientBoostingClassifier);
+hist_gb_config!(HistGradientBoostingClassifier, class_weight: None);
+
+impl HistGradientBoostingClassifier {
+    /// Class weights (sklearn's `class_weight`), multiplied into the sample
+    /// weights.
+    pub fn with_class_weight(mut self, w: Option<ClassWeight>) -> Self {
+        self.class_weight = w;
+        self
+    }
+}
 
 impl HistGradientBoostingRegressor {
     pub fn with_loss(mut self, loss: HistGradientBoostingLoss) -> Self {
@@ -690,7 +744,8 @@ impl FitWeighted<f64> for HistGradientBoostingRegressor {
     ) -> Result<Self::Fitted> {
         let mut engine = self.engine()?;
         self.apply_constraints(x, &mut engine)?;
-        let (inner, scores) = self.fit_engine(&engine, x, y, sample_weight, false)?;
+        let (inner, scores) =
+            self.fit_engine(&engine, x, y, sample_weight, false, self.seeds().0)?;
         Ok(FittedHistGradientBoostingRegressor { inner, scores })
     }
 }
@@ -724,7 +779,17 @@ impl FitWeighted<f64> for HistGradientBoostingClassifier {
                 ));
             }
         }
-        let (inner, scores) = self.fit_engine(&engine, x, y, sample_weight, true)?;
+        // sklearn multiplies the class weights into the sample weights
+        // before the validation split.
+        let weights = effective_sample_weight(y, sample_weight, self.class_weight.as_ref())?;
+        let (inner, scores) = self.fit_engine(
+            &engine,
+            x,
+            y,
+            weights.as_ref().map(|w| w.view()),
+            true,
+            self.seeds().0,
+        )?;
         Ok(FittedHistGradientBoostingClassifier { inner, scores })
     }
 }
@@ -974,6 +1039,24 @@ mod tests {
             .with_early_stopping(EarlyStopping::Enabled)
             .with_validation_fraction(Some(TestSize::Fraction(1.5))))
         .is_err());
+    }
+
+    #[test]
+    fn max_features_is_validated_and_seeded() {
+        let (x, y) = data();
+        let fit = |f: f64, seed: u32| {
+            HistGradientBoostingRegressor::new()
+                .with_n_estimators(10)
+                .with_max_features(f)
+                .with_random_state(seed)
+                .fit(&x, &y)
+                .map(|m| m.predict(&x).unwrap())
+        };
+        assert!(fit(0.0, 0).is_err() && fit(1.5, 0).is_err());
+        assert_eq!(fit(0.5, 1).unwrap(), fit(0.5, 1).unwrap());
+        assert_ne!(fit(0.5, 1).unwrap(), fit(0.5, 2).unwrap());
+        // Without subsampling the seed does not matter.
+        assert_eq!(fit(1.0, 1).unwrap(), fit(1.0, 2).unwrap());
     }
 
     #[test]

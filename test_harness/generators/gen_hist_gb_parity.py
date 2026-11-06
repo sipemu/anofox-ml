@@ -56,6 +56,7 @@ def generate():
     out += categorical_cases()
     out += constraint_cases()
     out += early_stopping_cases()
+    out += max_features_and_class_weight_cases()
     return out
 
 
@@ -189,6 +190,57 @@ def early_stopping_cases():
                     "X_test": nulls(X[::7]), "predictions": pred.tolist(),
                     "n_iter": int(m.n_iter_), "train_score": m.train_score_.tolist(),
                     "validation_score": m.validation_score_.tolist()})
+    return out
+
+
+def max_features_and_class_weight_cases():
+    """max_features (sklearn's per-split feature subsampling, drawn from its
+    default_rng) and class_weight."""
+    rng = np.random.default_rng(1273)
+    n = 400
+    X = rng.normal(size=(n, 6))
+    X[rng.choice(n, 20, replace=False), 3] = np.nan
+    eta = np.sin(2 * X[:, 0]) + 0.6 * X[:, 1] - 0.4 * X[:, 2] + 0.3 * np.nan_to_num(X[:, 3])
+    weights = rng.uniform(0.2, 3.0, size=n)
+    base = dict(max_iter=20, learning_rate=0.2, max_leaf_nodes=8, min_samples_leaf=10,
+                early_stopping=False)
+    y_reg = eta + rng.normal(scale=0.3, size=n)
+    y_bin = (eta + rng.logistic(size=n) > 0.8).astype(float)  # imbalanced
+    y_multi = np.digitize(eta + rng.logistic(size=n) * 0.5, [-0.5, 1.2]).astype(float)
+    cases = [
+        ("max_features_regressor", "regressor", y_reg, None,
+         dict(max_features=0.5, random_state=11)),
+        ("max_features_early_stopping", "regressor", y_reg, weights,
+         dict(max_features=0.3, random_state=4, early_stopping=True, max_iter=200,
+              n_iter_no_change=5)),
+        ("max_features_interactions", "regressor", y_reg, None,
+         dict(max_features=0.6, random_state=2, interaction_cst=[[0, 1, 2], [3, 4, 5]])),
+        ("max_features_binary", "classifier", y_bin, None,
+         dict(max_features=0.5, random_state=21)),
+        ("max_features_multiclass", "classifier", y_multi, None,
+         dict(max_features=0.4, random_state=5)),
+        ("class_weight_balanced", "classifier", y_bin, None, dict(class_weight="balanced")),
+        ("class_weight_dict_weighted", "classifier", y_multi, weights,
+         dict(class_weight={0: 2.0, 2: 0.5})),
+        ("class_weight_early_stopping", "classifier", y_bin, None,
+         dict(class_weight="balanced", early_stopping=True, max_iter=200, n_iter_no_change=5,
+              random_state=8)),
+    ]
+    out = []
+    for name, kind, y, sw, extra in cases:
+        params = dict(base, **extra)
+        cls = HistGradientBoostingRegressor if kind == "regressor" else HistGradientBoostingClassifier
+        m = cls(**params).fit(X, y, sample_weight=sw)
+        pred = m.predict(X[::7]) if kind == "regressor" else m.predict_proba(X[::7])
+        if isinstance(params.get("class_weight"), dict):
+            params["class_weight"] = [[k, v] for k, v in params["class_weight"].items()]
+        case = {"name": name, "kind": kind, "params": params, "X": nulls(X), "y": y.tolist(),
+                "sample_weight": None if sw is None else sw.tolist(),
+                "X_test": nulls(X[::7]), "predictions": pred.tolist()}
+        if params.get("early_stopping") is True:
+            case.update(n_iter=int(m.n_iter_), train_score=m.train_score_.tolist(),
+                        validation_score=m.validation_score_.tolist())
+        out.append(case)
     return out
 
 

@@ -14,6 +14,7 @@
 //!
 //! Not included: EFB, DART, distributed training.
 
+use anofox_ml_core::numpy_random::Generator;
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2, ShapeBuilder};
 use rand::rngs::StdRng;
@@ -810,6 +811,7 @@ fn find_best_split(
     bounds: OutputBounds,
     parent_value: f64,
     groups: &[usize],
+    feature_rng: Option<&mut Generator>,
 ) -> Option<BestSplit> {
     let LgbmParams {
         min_child_samples,
@@ -848,10 +850,19 @@ fn find_best_split(
     if params.sklearn_compat {
         positions.sort_by_key(|&k| !all_bins[feature_indices[k]].is_categorical);
     }
+    positions.retain(|&k| allowed(feature_indices[k]));
+    // sklearn's `max_features`: a random subset of the allowed features for
+    // every node it evaluates (a shuffled mask, drawn from the fit's
+    // generator).
+    if let Some(rng) = feature_rng {
+        let n_allowed = positions.len();
+        let n_sub = ((params.feature_fraction_per_split * n_allowed as f64).ceil() as usize).max(1);
+        let mut mask: Vec<bool> = (0..n_allowed).map(|k| k < n_sub).collect();
+        rng.shuffle(&mut mask);
+        let mut keep = mask.into_iter();
+        positions.retain(|_| keep.next().unwrap_or(false));
+    }
     for (feat, hist) in positions.iter().map(|&k| (feature_indices[k], &hists[k])) {
-        if !allowed(feat) {
-            continue;
-        }
         if all_bins[feat].is_categorical {
             let n_categories = all_bins[feat].edges.len();
             let candidate = if params.sklearn_compat {
@@ -1177,6 +1188,7 @@ fn build_lgbm_tree(
     params: &LgbmParams,
     feature_gain_out: &mut [f64],
     feature_split_count_out: &mut [u32],
+    feature_rng: &mut Option<Generator>,
 ) -> TreeNode {
     let mut nodes: Vec<BuildNode> = Vec::new();
 
@@ -1195,7 +1207,7 @@ fn build_lgbm_tree(
     };
     nodes.push(BuildNode::Leaf { value: root_value });
 
-    let best_for = |hists: &[Histogram], totals, count, bounds, value, groups: &[usize]| {
+    let mut best_for = |hists: &[Histogram], totals, count, bounds, value, groups: &[usize]| {
         find_best_split(
             hists,
             totals,
@@ -1206,6 +1218,7 @@ fn build_lgbm_tree(
             bounds,
             value,
             groups,
+            feature_rng.as_mut(),
         )
     };
     let root_groups: Vec<usize> = (0..params.interaction_cst.len()).collect();
@@ -1218,14 +1231,23 @@ fn build_lgbm_tree(
         &root_indices,
         feature_indices,
     );
-    let root_split = best_for(
-        &root_hists,
-        root_totals,
-        root_indices.len(),
-        UNBOUNDED,
-        root_value,
-        &root_groups,
-    );
+    // sklearn does not evaluate a root it cannot split (which matters for
+    // the draws of its feature subsampling).
+    let root_splittable = !params.sklearn_compat
+        || (root_indices.len() >= 2 * params.min_child_samples
+            && root_totals.1 >= params.min_child_weight);
+    let root_split = root_splittable
+        .then(|| {
+            best_for(
+                &root_hists,
+                root_totals,
+                root_indices.len(),
+                UNBOUNDED,
+                root_value,
+                &root_groups,
+            )
+        })
+        .flatten();
 
     let mut heap: BinaryHeap<LeafCandidate> = BinaryHeap::new();
     if let Some(split) = root_split {
@@ -1325,7 +1347,9 @@ fn build_lgbm_tree(
             n >= 2 * params.min_child_samples && params.max_depth.is_none_or(|d| depth < d)
         };
         let (left_ok, right_ok) = (splittable(left_idx.len()), splittable(right_idx.len()));
-        if !left_ok && !right_ok {
+        // sklearn finalizes both children once the leaf budget is spent,
+        // without evaluating them.
+        if (!left_ok && !right_ok) || (params.sklearn_compat && n_leaves >= params.num_leaves) {
             continue;
         }
 
@@ -1532,6 +1556,9 @@ struct LgbmParams {
     /// may only split on features of the groups that contain every feature
     /// split on above it (sklearn's / LightGBM's `interaction_cst`).
     interaction_cst: Vec<Vec<usize>>,
+    /// sklearn's `max_features`: share of the allowed features tried at
+    /// every split (1 = all).
+    feature_fraction_per_split: f64,
 }
 
 /// How categorical features are split (LightGBM's parameters of the same
@@ -1635,6 +1662,12 @@ pub struct LgbmRegressor {
     /// the HistGradientBoosting facade.
     #[serde(skip)]
     pub(crate) interaction_cst: Vec<Vec<usize>>,
+    /// sklearn's `max_features` (share of features per split) and the seed
+    /// of its `default_rng`; set by the HistGradientBoosting facade.
+    #[serde(skip, default = "default_one")]
+    pub(crate) feature_fraction_per_split: f64,
+    #[serde(skip)]
+    pub(crate) feature_subsample_seed: u32,
 }
 
 impl LgbmRegressor {
@@ -1667,6 +1700,8 @@ impl LgbmRegressor {
             seed: 0,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
+            feature_fraction_per_split: 1.0,
+            feature_subsample_seed: 0,
         }
     }
 
@@ -1787,6 +1822,7 @@ impl LgbmRegressor {
             sklearn_compat: self.sklearn_compat,
             has_missing: Vec::new(),
             interaction_cst: self.interaction_cst.clone(),
+            feature_fraction_per_split: self.feature_fraction_per_split,
         }
     }
 }
@@ -1882,6 +1918,15 @@ fn round_to_f32(values: &mut [f64]) {
     for v in values {
         *v = f64::from(*v as f32);
     }
+}
+
+fn default_one() -> f64 {
+    1.0
+}
+
+/// The generator of sklearn's per-split feature subsampling, if any.
+fn feature_generator(fraction: f64, seed: u32) -> Option<Generator> {
+    (fraction < 1.0).then(|| Generator::new(seed))
 }
 
 fn default_poisson_max_delta_step() -> f64 {
@@ -2384,6 +2429,8 @@ impl LgbmRegressor {
         let mut feature_split_count = vec![0u32; p];
 
         let mut rng = StdRng::seed_from_u64(self.seed);
+        let mut feature_rng =
+            feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
         let params = LgbmParams {
             has_missing: columns_with_missing(x, self.sklearn_compat),
             ..self.params()
@@ -2483,6 +2530,7 @@ impl LgbmRegressor {
                 &params,
                 &mut feature_gain,
                 &mut feature_split_count,
+                &mut feature_rng,
             );
             if let Some((alpha, rows)) = refit {
                 let residuals: Vec<f64> = y_vec.iter().zip(&preds).map(|(y, p)| y - p).collect();
@@ -2745,6 +2793,12 @@ pub struct LgbmClassifier {
     /// the HistGradientBoosting facade.
     #[serde(skip)]
     pub(crate) interaction_cst: Vec<Vec<usize>>,
+    /// sklearn's `max_features` (share of features per split) and the seed
+    /// of its `default_rng`; set by the HistGradientBoosting facade.
+    #[serde(skip, default = "default_one")]
+    pub(crate) feature_fraction_per_split: f64,
+    #[serde(skip)]
+    pub(crate) feature_subsample_seed: u32,
 }
 
 fn default_true() -> bool {
@@ -2780,6 +2834,8 @@ impl LgbmClassifier {
             softmax_hessian_factor: true,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
+            feature_fraction_per_split: 1.0,
+            feature_subsample_seed: 0,
         }
     }
 
@@ -2882,6 +2938,7 @@ impl LgbmClassifier {
             sklearn_compat: self.sklearn_compat,
             has_missing: Vec::new(),
             interaction_cst: self.interaction_cst.clone(),
+            feature_fraction_per_split: self.feature_fraction_per_split,
         }
     }
 
@@ -3124,6 +3181,8 @@ impl LgbmClassifier {
         let train_w = |i: usize| effective_weights[i];
 
         let mut rng = StdRng::seed_from_u64(self.seed);
+        let mut feature_rng =
+            feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
         let params = LgbmParams {
             has_missing: columns_with_missing(x, self.sklearn_compat),
             ..self.params()
@@ -3214,6 +3273,7 @@ impl LgbmClassifier {
                     &params,
                     &mut feature_gain,
                     &mut feature_split_count,
+                    &mut feature_rng,
                 );
 
                 for i in 0..n {
@@ -3384,6 +3444,7 @@ impl LgbmClassifier {
                         &params,
                         &mut feature_gain,
                         &mut feature_split_count,
+                        &mut feature_rng,
                     );
 
                     for i in 0..n {

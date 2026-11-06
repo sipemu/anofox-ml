@@ -6,6 +6,21 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### HistGradientBoosting: max_features and class_weight (#127)
+
+- `with_max_features(f)` (sklearn's `max_features`, in (0, 1]): every split
+  tries a random `ceil(f · n_allowed)` of the features. The subsets are
+  sklearn's for the same `random_state` (its second seed feeds numpy's
+  `default_rng`), and as in sklearn the nodes it cannot split are not
+  evaluated, so the draws stay aligned across trees.
+- `HistGradientBoostingClassifier::with_class_weight` (`Balanced` or
+  per-label weights), multiplied into the sample weights before the
+  early-stopping split, as sklearn does. Python: `max_features`,
+  `class_weight` (dict keys are the original labels; sklearn 1.8 looks
+  them up among its encoded labels instead).
+- `anofox_ml_core::numpy_random::Generator`: numpy's `default_rng` (PCG64
+  seeded through `SeedSequence`) with `shuffle`.
+
 ### HistGradientBoosting: early stopping (#127)
 
 - `with_early_stopping(EarlyStopping::{Auto, Enabled, Disabled})`
