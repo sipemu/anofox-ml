@@ -601,6 +601,32 @@ impl<F: Float> Predict<F> for FittedGradientBoostingRegressor<F> {
 }
 
 impl<F: Float> FittedGradientBoostingRegressor<F> {
+    /// Predictions after each tree (sklearn's `staged_predict`); the last
+    /// equals [`Predict::predict`].
+    pub fn staged_predict<'a>(
+        &self,
+        x: impl AsArray<'a, F, Ix2>,
+    ) -> Result<impl Iterator<Item = Array1<F>> + '_> {
+        let x: ArrayView2<F> = x.into();
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+        let tree_preds = self
+            .trees
+            .iter()
+            .map(|t| t.predict(x))
+            .collect::<Result<Vec<_>>>()?;
+        let mut predictions = Array1::from_elem(x.nrows(), self.initial_prediction);
+        Ok(tree_preds.into_iter().map(move |tree_preds| {
+            predictions += &(tree_preds * self.learning_rate);
+            predictions.clone()
+        }))
+    }
+
     /// Number of trees in the ensemble.
     pub fn n_estimators(&self) -> usize {
         self.trees.len()
@@ -869,6 +895,21 @@ mod tests {
         for &p in preds.iter() {
             assert!(p.is_finite(), "prediction must be finite, got {p}");
         }
+    }
+
+    #[test]
+    fn test_staged_predict_ends_at_predict() {
+        let x = Array2::from_shape_fn((50, 2), |(i, j)| ((i * (j + 3)) as f64 * 0.29).sin());
+        let y = x.column(0).mapv(|v| 2.0 * v) + x.column(1);
+        let f: FittedGradientBoostingRegressor<f64> = GradientBoostingRegressor {
+            n_estimators: 9,
+            ..Default::default()
+        }
+        .fit(&x, &y)
+        .unwrap();
+        let stages: Vec<_> = f.staged_predict(&x).unwrap().collect();
+        assert_eq!(stages.len(), 9);
+        assert_eq!(stages[8], f.predict(&x).unwrap());
     }
 
     #[test]

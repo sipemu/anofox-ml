@@ -159,6 +159,15 @@ class BaseEstimator:
     def _has(self, capability):
         return capability in _native.Model(self._kind, None).capabilities()
 
+    @property
+    def feature_importances_(self):
+        """Per-feature importances (trees, forests, boosting, bagging)."""
+        if not self._has("feature_importances"):
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute 'feature_importances_'"
+            )
+        return self._model().feature_importances()
+
     # -- pickling -----------------------------------------------------------
 
     def __getstate__(self):
@@ -253,6 +262,18 @@ class ClassifierMixin:
         y = np.asarray(y)
         correct = (self.predict(X) == y).astype(np.float64)
         return float(np.average(correct, weights=sample_weight))
+
+
+class StagedPredictMixin:
+    """sklearn's ``staged_predict`` for the boosting estimators."""
+
+    def staged_predict(self, X):
+        """Yield the predictions after each boosting stage."""
+        stages = self._call("staged_predict", X)
+        classifier = getattr(self, "_estimator_type", None) == "classifier"
+        for k in range(stages.shape[1]):
+            column = stages[:, k]
+            yield self.classes_[column.astype(np.int64)] if classifier else column
 
 
 class RegressorMixin:

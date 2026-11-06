@@ -198,6 +198,69 @@ impl PyModel {
         let out = self.inner.embedding().map_err(to_py_err)?;
         Ok(out_to_py(py, out))
     }
+
+    /// Per-feature importances of the fitted model.
+    fn feature_importances(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let out = self.inner.feature_importances().map_err(to_py_err)?;
+        Ok(out_to_py(py, out))
+    }
+
+    /// Predictions after each boosting stage: `n × stages`.
+    fn staged_predict(&self, py: Python<'_>, x: PyReadonlyArray2<'_, f64>) -> PyResult<Py<PyAny>> {
+        self.call(py, x, |m, x| m.staged_predict(x))
+    }
+
+    /// Merge JSON overrides into the configuration, keeping a fitted state.
+    fn set_params_json(&mut self, params_json: &str) -> PyResult<()> {
+        let params = parse_params(Some(params_json))?;
+        self.inner.set_params(&params).map_err(to_py_err)
+    }
+
+    /// Continue training the fitted model (sklearn's `warm_start=True`).
+    #[pyo3(signature = (x, y=None, sample_weight=None))]
+    fn warm_start(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        y: Option<PyReadonlyArray1<'_, f64>>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+    ) -> PyResult<()> {
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_ref().map(|y| y.as_array()),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let inner = &mut self.inner;
+        py.detach(|| inner.warm_start(x, y, w)).map_err(to_py_err)
+    }
+
+    /// Fit with an explicit validation set for early stopping.
+    #[pyo3(signature = (x, y, sample_weight, x_val, y_val, sample_weight_val=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn fit_with_validation(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        y: PyReadonlyArray1<'_, f64>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+        x_val: PyReadonlyArray2<'_, f64>,
+        y_val: PyReadonlyArray1<'_, f64>,
+        sample_weight_val: Option<PyReadonlyArray1<'_, f64>>,
+    ) -> PyResult<()> {
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_array(),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let (xv, yv, wv) = (
+            x_val.as_array(),
+            y_val.as_array(),
+            sample_weight_val.as_ref().map(|w| w.as_array()),
+        );
+        let inner = &mut self.inner;
+        py.detach(|| inner.fit_with_validation(x, Some(y), w, xv, Some(yv), wv))
+            .map_err(to_py_err)
+    }
 }
 
 impl PyModel {

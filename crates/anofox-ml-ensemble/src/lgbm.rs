@@ -535,6 +535,82 @@ fn with_fit_threads<T: Send>(n_jobs: Option<usize>, fit: impl FnOnce() -> T + Se
     }
 }
 
+/// Check that a fit can continue a previous one (`warm_start`): what the
+/// continuation cannot reproduce is an error.
+fn check_warm_start(
+    prev_stages: usize,
+    prev_learning_rate: f64,
+    n_features: usize,
+    p: usize,
+    model: WarmStartModel,
+    opts: &LgbmFitOptions<'_>,
+    stopping: bool,
+) -> Result<()> {
+    let invalid = |m: &str| Err(RustMlError::InvalidParameter(format!("warm start: {m}")));
+    if n_features != p {
+        return invalid(&format!(
+            "X has {p} features, the fitted model {n_features}"
+        ));
+    }
+    if model.n_estimators < prev_stages {
+        return invalid(&format!(
+            "n_estimators={} is fewer than the {prev_stages} fitted stages",
+            model.n_estimators
+        ));
+    }
+    if model.learning_rate != prev_learning_rate {
+        return invalid("the learning rate cannot change");
+    }
+    if model.boosting_type != BoostingType::Gbdt {
+        return invalid("only gbdt boosting can be continued (not GOSS or DART)");
+    }
+    if stopping || opts.eval_set.is_some() || model.early_stopping {
+        return invalid("early stopping cannot be continued");
+    }
+    if opts.init_score.is_some() {
+        return invalid("init_score is not supported");
+    }
+    if model.feature_fraction_per_split < 1.0 {
+        return invalid("max_features < 1 is not supported");
+    }
+    Ok(())
+}
+
+/// The configuration a warm start is checked against.
+struct WarmStartModel {
+    n_estimators: usize,
+    learning_rate: f64,
+    boosting_type: BoostingType,
+    early_stopping: bool,
+    feature_fraction_per_split: f64,
+}
+
+/// Bin `x` with the bins of a fitted model, column-major (as
+/// `compute_bins`).
+fn bin_with(x: ArrayView2<f64>, bins: &[FeatureBins]) -> Array2<u8> {
+    let rows = bin_matrix(x, bins);
+    let mut binned = Array2::zeros(rows.raw_dim().f());
+    binned.assign(&rows);
+    binned
+}
+
+/// Replay the row and feature draws of `rounds` earlier boosting rounds
+/// (they do not depend on the data), so that a continuation draws what a
+/// single fit would.
+fn replay_draws(
+    rng: &mut StdRng,
+    rounds: usize,
+    n: usize,
+    p: usize,
+    subsample: f64,
+    colsample: f64,
+) {
+    for _ in 0..rounds {
+        sample_rows(n, subsample, rng);
+        sample_features(p, colsample, rng);
+    }
+}
+
 /// Rows per parallel block of predictions.
 const PREDICT_BLOCK_ROWS: usize = 1024;
 
@@ -2770,6 +2846,16 @@ impl LgbmRegressor {
         self
     }
 
+    fn warm_start_model(&self) -> WarmStartModel {
+        WarmStartModel {
+            n_estimators: self.n_estimators,
+            learning_rate: self.learning_rate,
+            boosting_type: self.boosting_type,
+            early_stopping: self.early_stopping_rounds.is_some(),
+            feature_fraction_per_split: self.feature_fraction_per_split,
+        }
+    }
+
     fn params(&self) -> LgbmParams {
         LgbmParams {
             num_leaves: self.num_leaves,
@@ -3444,7 +3530,28 @@ impl LgbmRegressor {
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
     ) -> Result<(FittedLgbmRegressor, EarlyStoppingScores)> {
-        with_fit_threads(self.n_jobs, || self.fit_scored_inner(x, y, opts, stopping))
+        with_fit_threads(self.n_jobs, || {
+            self.fit_scored_inner(x, y, opts, stopping, None)
+        })
+    }
+
+    /// Continue `prev` on `(x, y)` up to `n_estimators` trees (sklearn's
+    /// `warm_start=True`): its bins and trees are kept and the bagging draws
+    /// of its rounds replayed, so on the same data the result equals a single
+    /// fit with `n_estimators` trees. GOSS, DART, early stopping,
+    /// `init_score` and a changed learning rate are errors.
+    pub fn fit_warm_start<'a, 'b>(
+        &self,
+        prev: &FittedLgbmRegressor,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+        opts: &LgbmFitOptions<'_>,
+    ) -> Result<FittedLgbmRegressor> {
+        let (x, y) = (x.into(), y.into());
+        with_fit_threads(self.n_jobs, || {
+            self.fit_scored_inner(x, y, opts, None, Some(prev))
+        })
+        .map(|(f, _)| f)
     }
 
     fn fit_scored_inner(
@@ -3453,6 +3560,7 @@ impl LgbmRegressor {
         y: ArrayView1<f64>,
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
+        prev: Option<&FittedLgbmRegressor>,
     ) -> Result<(FittedLgbmRegressor, EarlyStoppingScores)> {
         // LightGBM keeps the quantile level as a float32.
         if let LgbmObjective::Quantile { alpha } = self.objective {
@@ -3460,7 +3568,7 @@ impl LgbmRegressor {
             if !self.sklearn_compat && alpha32 != alpha {
                 let mut m = self.clone();
                 m.objective = LgbmObjective::Quantile { alpha: alpha32 };
-                return m.fit_scored_inner(x, y, opts, stopping);
+                return m.fit_scored_inner(x, y, opts, stopping, prev);
             }
         }
         if x.nrows() != y.len() {
@@ -3501,6 +3609,17 @@ impl LgbmRegressor {
         validate_eval_opts(opts, x.ncols())?;
         validate_max_bins(self.max_bins)?;
         validate_regression_objective(self.objective, y)?;
+        if let Some(f) = prev {
+            check_warm_start(
+                f.trees.len(),
+                f.learning_rate,
+                f.n_features,
+                x.ncols(),
+                self.warm_start_model(),
+                opts,
+                stopping.is_some(),
+            )?;
+        }
 
         let n = x.nrows();
         let p = x.ncols();
@@ -3513,14 +3632,17 @@ impl LgbmRegressor {
             }
         };
         let y_vec: Vec<f64> = y.iter().map(|&v| lgbm_f32(v)).collect();
-        let (binned_x, bins) = compute_bins(
-            x,
-            self.max_bins,
-            &self.categorical_features,
-            self.min_data_in_bin,
-            self.binning,
-            self.seed,
-        );
+        let (binned_x, bins) = match prev {
+            Some(f) => (bin_with(x, &f.bins), f.bins.clone()),
+            None => compute_bins(
+                x,
+                self.max_bins,
+                &self.categorical_features,
+                self.min_data_in_bin,
+                self.binning,
+                self.seed,
+            ),
+        };
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
         // sklearn has no feature bundling (and its parity needs the plain
@@ -3538,8 +3660,15 @@ impl LgbmRegressor {
         };
         let sample_weight = weights.as_ref().map(|w| w.view());
 
-        // Baseline / init_score
-        let (baseline, mut preds): (f64, Vec<f64>) = if let Some(init) = opts.init_score {
+        // Baseline / init_score (a warm start: the previous model's scores,
+        // summed as during its fit)
+        let (baseline, mut preds): (f64, Vec<f64>) = if let Some(f) = prev {
+            let mut preds = vec![f.baseline; n];
+            for tree in &f.trees {
+                add_tree_scores(&mut preds[..], tree, &binned_rows, f.learning_rate);
+            }
+            (f.baseline, preds)
+        } else if let Some(init) = opts.init_score {
             // init_score replaces the baseline entirely; we still store a
             // scalar "baseline" = mean(init) so predict() has a consistent
             // starting value for new rows.
@@ -3550,11 +3679,15 @@ impl LgbmRegressor {
             (b, vec![b; n])
         };
 
+        let start = prev.map_or(0, |f| f.trees.len());
         let mut trees: Vec<TreeNode> = Vec::with_capacity(self.n_estimators);
-        let mut feature_gain = vec![0.0f64; p];
-        let mut feature_split_count = vec![0u32; p];
+        trees.extend(prev.into_iter().flat_map(|f| f.trees.iter().cloned()));
+        let mut feature_gain = prev.map_or_else(|| vec![0.0f64; p], |f| f.feature_gain.clone());
+        let mut feature_split_count =
+            prev.map_or_else(|| vec![0u32; p], |f| f.feature_split_count.clone());
 
         let mut rng = StdRng::seed_from_u64(self.seed);
+        replay_draws(&mut rng, start, n, p, self.subsample, self.colsample_bytree);
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
         let params = LgbmParams {
@@ -3607,7 +3740,7 @@ impl LgbmRegressor {
         }
 
         let mut best_eval_loss = f64::INFINITY;
-        let mut best_iteration = 0usize;
+        let mut best_iteration = start;
         let mut best_feature_gain = feature_gain.clone();
         let mut best_feature_split_count = feature_split_count.clone();
         let mut stale_rounds = 0usize;
@@ -3624,7 +3757,7 @@ impl LgbmRegressor {
         let mut dart = (self.boosting_type == BoostingType::Dart)
             .then(|| DartState::new(self.dart, self.learning_rate));
 
-        for iter in 0..self.n_estimators {
+        for iter in start..self.n_estimators {
             // DART: drop earlier trees before the gradients are computed.
             let dart_step = dart.as_mut().map(|d| {
                 let (drops, shrinkage) = d.drop_trees(trees.len());
@@ -4176,6 +4309,16 @@ impl LgbmClassifier {
         self
     }
 
+    fn warm_start_model(&self) -> WarmStartModel {
+        WarmStartModel {
+            n_estimators: self.n_estimators,
+            learning_rate: self.learning_rate,
+            boosting_type: self.boosting_type,
+            early_stopping: self.early_stopping_rounds.is_some(),
+            feature_fraction_per_split: self.feature_fraction_per_split,
+        }
+    }
+
     fn params(&self) -> LgbmParams {
         LgbmParams {
             num_leaves: self.num_leaves,
@@ -4340,7 +4483,26 @@ impl LgbmClassifier {
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
     ) -> Result<(FittedLgbmClassifier, EarlyStoppingScores)> {
-        with_fit_threads(self.n_jobs, || self.fit_scored_inner(x, y, opts, stopping))
+        with_fit_threads(self.n_jobs, || {
+            self.fit_scored_inner(x, y, opts, stopping, None)
+        })
+    }
+
+    /// Continue `prev` on `(x, y)` up to `n_estimators` rounds (sklearn's
+    /// `warm_start=True`; see [`LgbmRegressor::fit_warm_start`]). The
+    /// classes must be those of `prev`.
+    pub fn fit_warm_start<'a, 'b>(
+        &self,
+        prev: &FittedLgbmClassifier,
+        x: impl AsArray<'a, f64, Ix2>,
+        y: impl AsArray<'b, f64, Ix1>,
+        opts: &LgbmFitOptions<'_>,
+    ) -> Result<FittedLgbmClassifier> {
+        let (x, y) = (x.into(), y.into());
+        with_fit_threads(self.n_jobs, || {
+            self.fit_scored_inner(x, y, opts, None, Some(prev))
+        })
+        .map(|(f, _)| f)
     }
 
     fn fit_scored_inner(
@@ -4349,6 +4511,7 @@ impl LgbmClassifier {
         y: ArrayView1<f64>,
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
+        prev: Option<&FittedLgbmClassifier>,
     ) -> Result<(FittedLgbmClassifier, EarlyStoppingScores)> {
         if x.nrows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -4387,17 +4550,31 @@ impl LgbmClassifier {
         }
         validate_eval_opts(opts, x.ncols())?;
         validate_max_bins(self.max_bins)?;
+        if let Some(f) = prev {
+            check_warm_start(
+                f.n_estimators(),
+                f.learning_rate,
+                f.n_features,
+                x.ncols(),
+                self.warm_start_model(),
+                opts,
+                stopping.is_some(),
+            )?;
+        }
 
         let n = x.nrows();
         let p = x.ncols();
-        let (binned_x, bins) = compute_bins(
-            x,
-            self.max_bins,
-            &self.categorical_features,
-            self.min_data_in_bin,
-            self.binning,
-            self.seed,
-        );
+        let (binned_x, bins) = match prev {
+            Some(f) => (bin_with(x, &f.bins), f.bins.clone()),
+            None => compute_bins(
+                x,
+                self.max_bins,
+                &self.categorical_features,
+                self.min_data_in_bin,
+                self.binning,
+                self.seed,
+            ),
+        };
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
         // sklearn has no feature bundling (and its parity needs the plain
@@ -4414,6 +4591,11 @@ impl LgbmClassifier {
         if n_classes < 2 {
             return Err(RustMlError::InvalidParameter(
                 "need at least 2 classes".into(),
+            ));
+        }
+        if prev.is_some_and(|f| f.classes != classes) {
+            return Err(RustMlError::InvalidParameter(
+                "warm start: y has other classes than the fitted model".into(),
             ));
         }
 
@@ -4483,6 +4665,18 @@ impl LgbmClassifier {
         let train_w = |i: usize| effective_weights[i];
 
         let mut rng = StdRng::seed_from_u64(self.seed);
+        // A warm start replays the draws of the fitted rounds (one tree per
+        // class and round for more than two classes).
+        let start = prev.map_or(0, |f| f.n_estimators());
+        let trees_per_round = if n_classes == 2 { 1 } else { n_classes };
+        replay_draws(
+            &mut rng,
+            start * trees_per_round,
+            n,
+            p,
+            self.subsample,
+            self.colsample_bytree,
+        );
         if self.boosting_type == BoostingType::Dart
             && (opts.init_score.is_some()
                 || tracker.is_some()
@@ -4500,8 +4694,18 @@ impl LgbmClassifier {
             has_missing: columns_with_missing(x, true),
             ..self.params()
         };
-        let mut feature_gain = vec![0.0f64; p];
-        let mut feature_split_count = vec![0u32; p];
+        let mut feature_gain = prev.map_or_else(|| vec![0.0f64; p], |f| f.feature_gain.clone());
+        let mut feature_split_count =
+            prev.map_or_else(|| vec![0u32; p], |f| f.feature_split_count.clone());
+        // The previous model's raw scores of tree set `c`, summed as during
+        // its fit.
+        let prev_scores = |f: &FittedLgbmClassifier, c: usize| {
+            let mut raw = vec![f.baselines[c]; n];
+            for tree in &f.tree_sets[c] {
+                add_tree_scores(&mut raw[..], tree, &binned_rows, f.learning_rate);
+            }
+            raw
+        };
 
         if n_classes == 2 {
             let pos_class = classes[1];
@@ -4516,13 +4720,21 @@ impl LgbmClassifier {
                 .map(|(l, w)| l * w)
                 .sum::<f64>()
                 / effective_weights.iter().sum::<f64>();
-            let baseline = (pos_frac / (1.0 - pos_frac + 1e-15)).ln();
-            let mut raw = if let Some(init) = opts.init_score {
+            let baseline = prev.map_or((pos_frac / (1.0 - pos_frac + 1e-15)).ln(), |f| {
+                f.baselines[0]
+            });
+            let mut raw = if let Some(f) = prev {
+                prev_scores(f, 0)
+            } else if let Some(init) = opts.init_score {
                 init.to_vec()
             } else {
                 vec![baseline; n]
             };
             let mut trees: Vec<TreeNode> = Vec::with_capacity(self.n_estimators);
+            trees.extend(
+                prev.into_iter()
+                    .flat_map(|f| f.tree_sets[0].iter().cloned()),
+            );
             let mut eval_raw: Option<Vec<f64>> =
                 eval_binned.as_ref().map(|eb| vec![baseline; eb.nrows()]);
             let binary_losses = |raw: &[f64], eval_raw: Option<&Vec<f64>>| {
@@ -4557,7 +4769,7 @@ impl LgbmClassifier {
                 t.record(train, validation);
             }
 
-            for iter in 0..self.n_estimators {
+            for iter in start..self.n_estimators {
                 // DART: drop earlier trees before the gradients are computed.
                 let dart_step = dart.as_mut().map(|d| {
                     let (drops, shrinkage) = d.drop_trees(trees.len());
@@ -4706,8 +4918,10 @@ impl LgbmClassifier {
             Ok((fitted, tracker.map(|t| t.scores).unwrap_or_default()))
         } else {
             // Multiclass: softmax with one tree per class per round.
-            let mut tree_sets: Vec<Vec<TreeNode>> =
-                vec![Vec::with_capacity(self.n_estimators); n_classes];
+            let mut tree_sets: Vec<Vec<TreeNode>> = match prev {
+                Some(f) => f.tree_sets.clone(),
+                None => vec![Vec::with_capacity(self.n_estimators); n_classes],
+            };
             let mut baselines = Vec::with_capacity(n_classes);
             let mut raw_scores = vec![vec![0.0; n]; n_classes];
 
@@ -4720,9 +4934,12 @@ impl LgbmClassifier {
                     .map(|(_, w)| w)
                     .sum();
                 let prior = (class_weight / total_weight).max(1e-15);
-                let bl = prior.ln();
+                let bl = prev.map_or(prior.ln(), |f| f.baselines[c]);
                 baselines.push(bl);
-                raw_scores[c] = vec![bl; n];
+                raw_scores[c] = match prev {
+                    Some(f) => prev_scores(f, c),
+                    None => vec![bl; n],
+                };
             }
             let mut eval_raw: Option<Vec<Vec<f64>>> = eval_binned
                 .as_ref()
@@ -4752,7 +4969,7 @@ impl LgbmClassifier {
                 t.record(train, validation);
             }
 
-            for iter in 0..self.n_estimators {
+            for iter in start..self.n_estimators {
                 // DART: drop earlier trees (of every class) first.
                 let dart_step = dart.as_mut().map(|d| {
                     let (drops, shrinkage) = d.drop_trees(tree_sets[0].len());
@@ -7088,6 +7305,62 @@ mod bundling_tests {
             .map(|(p, q)| (p - q).abs())
             .fold(0.0, f64::max);
         assert!(worst < 1e-10, "{worst}");
+    }
+
+    #[test]
+    fn warm_start_equals_a_single_fit() {
+        let (x, y) = sparse_data(500, 11);
+        let opts = LgbmFitOptions::default();
+        for objective in [LgbmObjective::Regression, LgbmObjective::RegressionL1] {
+            let reg = |n| {
+                LgbmRegressor::new()
+                    .with_n_estimators(n)
+                    .with_min_child_samples(5)
+                    .with_subsample(0.7)
+                    .with_colsample_bytree(0.8)
+                    .with_objective(objective)
+                    .with_seed(4)
+            };
+            let part = reg(5).fit(&x, &y).unwrap();
+            let warm = reg(12).fit_warm_start(&part, &x, &y, &opts).unwrap();
+            let once = reg(12).fit(&x, &y).unwrap();
+            assert_eq!(warm.n_estimators(), 12);
+            assert_eq!(warm.predict(&x).unwrap(), once.predict(&x).unwrap());
+            assert_eq!(warm.feature_importances(), once.feature_importances());
+            // As many trees as fitted: unchanged; fewer: an error.
+            let same = reg(5).fit_warm_start(&part, &x, &y, &opts).unwrap();
+            assert_eq!(same.predict(&x).unwrap(), part.predict(&x).unwrap());
+            assert!(reg(4).fit_warm_start(&part, &x, &y, &opts).is_err());
+            assert!(reg(9)
+                .with_learning_rate(0.3)
+                .fit_warm_start(&part, &x, &y, &opts)
+                .is_err());
+            assert!(reg(9)
+                .with_boosting_type(BoostingType::Goss)
+                .fit_warm_start(&part, &x, &y, &opts)
+                .is_err());
+        }
+        for n_classes in [2.0, 3.0] {
+            let labels = y.mapv(|v| (v.abs() * 2.0).floor().min(n_classes - 1.0));
+            let clf = |n| {
+                LgbmClassifier::new()
+                    .with_n_estimators(n)
+                    .with_min_child_samples(5)
+                    .with_subsample(0.7)
+                    .with_colsample_bytree(0.8)
+                    .with_seed(6)
+            };
+            let part = clf(4).fit(&x, &labels).unwrap();
+            let warm = clf(9).fit_warm_start(&part, &x, &labels, &opts).unwrap();
+            let once = clf(9).fit(&x, &labels).unwrap();
+            assert_eq!(warm.n_estimators(), 9);
+            assert_eq!(
+                warm.predict_proba(&x).unwrap(),
+                once.predict_proba(&x).unwrap()
+            );
+            let other = labels.mapv(|v| v + 1.0);
+            assert!(clf(9).fit_warm_start(&part, &x, &other, &opts).is_err());
+        }
     }
 
     #[test]

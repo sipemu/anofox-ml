@@ -433,3 +433,225 @@ mod conformal_tests {
         assert!(err.contains("predict_interval"), "{err}");
     }
 }
+
+#[cfg(test)]
+mod boosting_surface_tests {
+    use super::Out;
+    use ndarray::{Array1, Array2};
+    use serde_json::json;
+
+    fn data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+        let x = Array2::from_shape_fn((120, 4), |(i, j)| ((i * (j + 2)) as f64 * 0.37).sin());
+        let y = Array1::from_shape_fn(120, |i| 2.0 * x[[i, 0]] - x[[i, 2]]);
+        let labels = y.mapv(|v| f64::from(v > 0.0) + f64::from(v > 1.0));
+        (x, y, labels)
+    }
+
+    fn a1(out: Out) -> Array1<f64> {
+        match out {
+            Out::A1(a) => a,
+            Out::A2(_) => panic!("expected 1-D"),
+        }
+    }
+
+    fn a2(out: Out) -> Array2<f64> {
+        match out {
+            Out::A2(a) => a,
+            Out::A1(_) => panic!("expected 2-D"),
+        }
+    }
+
+    const SMALL: &[(&str, &str)] = &[
+        ("DecisionTreeClassifier", "{}"),
+        ("DecisionTreeRegressor", "{}"),
+        ("RandomForestClassifier", r#"{"n_estimators": 5}"#),
+        ("RandomForestRegressor", r#"{"n_estimators": 5}"#),
+        ("ExtraTreesClassifier", r#"{"n_estimators": 5}"#),
+        ("ExtraTreesRegressor", r#"{"n_estimators": 5}"#),
+        ("GradientBoostingClassifier", r#"{"n_estimators": 6}"#),
+        ("GradientBoostingRegressor", r#"{"n_estimators": 6}"#),
+        ("BaggingClassifier", r#"{"n_estimators": 4}"#),
+        ("BaggingRegressor", r#"{"n_estimators": 4}"#),
+        ("HistGradientBoostingClassifier", r#"{"n_estimators": 6}"#),
+        ("HistGradientBoostingRegressor", r#"{"n_estimators": 6}"#),
+        (
+            "LgbmClassifier",
+            r#"{"n_estimators": 6, "min_child_samples": 5}"#,
+        ),
+        (
+            "LgbmRegressor",
+            r#"{"n_estimators": 6, "min_child_samples": 5}"#,
+        ),
+    ];
+
+    fn fitted(kind: &str, params: &str) -> Box<dyn super::DynModel> {
+        let (x, y, labels) = data();
+        let target = if kind.ends_with("Classifier") {
+            labels
+        } else {
+            y
+        };
+        let params: serde_json::Value = serde_json::from_str(params).unwrap();
+        let mut m = super::make(kind, &params).unwrap_or_else(|e| panic!("{kind}: {e}"));
+        m.fit(x.view(), Some(target.view()), None).unwrap();
+        m
+    }
+
+    #[test]
+    fn tree_and_boosting_kinds_give_feature_importances() {
+        let (x, ..) = data();
+        for &(kind, params) in SMALL {
+            let m = fitted(kind, params);
+            assert!(m.capabilities().contains(&"feature_importances"), "{kind}");
+            let imp = a1(m.feature_importances().unwrap());
+            assert_eq!(imp.len(), x.ncols(), "{kind}");
+            assert!(imp.iter().all(|&v| v >= 0.0), "{kind}: {imp}");
+            assert!((imp.sum() - 1.0).abs() < 1e-9, "{kind}: {imp}");
+            // A restored model gives the same importances.
+            let loaded = super::load(kind, &m.to_bytes().unwrap()).unwrap();
+            assert_eq!(a1(loaded.feature_importances().unwrap()), imp, "{kind}");
+        }
+        let unfitted = super::make("LgbmRegressor", &json!({})).unwrap();
+        assert!(unfitted.feature_importances().is_err());
+        let linear = super::make("OlsRegressor", &json!({})).unwrap();
+        assert!(linear.feature_importances().is_err());
+    }
+
+    #[test]
+    fn boosting_kinds_give_staged_predictions() {
+        let (x, ..) = data();
+        for &(kind, params) in SMALL {
+            let m = fitted(kind, params);
+            let staged = m.capabilities().contains(&"staged_predict");
+            let boosting = kind.contains("Boosting") || kind.starts_with("Lgbm");
+            assert_eq!(staged, boosting, "{kind}");
+            if !staged {
+                assert!(m.staged_predict(x.view()).is_err(), "{kind}");
+                continue;
+            }
+            let stages = a2(m.staged_predict(x.view()).unwrap());
+            assert_eq!(stages.dim(), (x.nrows(), 6), "{kind}");
+            let last = stages.column(5).to_owned();
+            assert_eq!(last, a1(m.predict(x.view()).unwrap()), "{kind}");
+        }
+    }
+
+    #[test]
+    fn gradient_boosting_warm_start_continues_the_fit() {
+        let (x, y, labels) = data();
+        for (kind, target) in [
+            ("GradientBoostingRegressor", &y),
+            ("GradientBoostingClassifier", &labels),
+        ] {
+            let params = json!({ "n_estimators": 4, "subsample": 0.7 });
+            let mut m = super::make(kind, &params).unwrap();
+            assert!(m.capabilities().contains(&"warm_start"), "{kind}");
+            assert!(m.warm_start(x.view(), Some(target.view()), None).is_err());
+            m.fit(x.view(), Some(target.view()), None).unwrap();
+            m.set_params(&json!({ "n_estimators": 9 })).unwrap();
+            m.warm_start(x.view(), Some(target.view()), None).unwrap();
+            let mut once =
+                super::make(kind, &json!({ "n_estimators": 9, "subsample": 0.7 })).unwrap();
+            once.fit(x.view(), Some(target.view()), None).unwrap();
+            assert_eq!(
+                a1(m.predict(x.view()).unwrap()),
+                a1(once.predict(x.view()).unwrap()),
+                "{kind}"
+            );
+            // Fewer stages than fitted is an error and keeps the model.
+            m.set_params(&json!({ "n_estimators": 3 })).unwrap();
+            assert!(m.warm_start(x.view(), Some(target.view()), None).is_err());
+            assert_eq!(a2(m.staged_predict(x.view()).unwrap()).ncols(), 9, "{kind}");
+        }
+    }
+
+    #[test]
+    fn lgbm_and_hist_gradient_boosting_warm_start() {
+        let (x, y, labels) = data();
+        for (kind, target, base) in [
+            (
+                "LgbmRegressor",
+                &y,
+                json!({ "min_child_samples": 5, "subsample": 0.8 }),
+            ),
+            ("LgbmClassifier", &labels, json!({ "min_child_samples": 5 })),
+            (
+                "HistGradientBoostingRegressor",
+                &y,
+                json!({ "early_stopping": "Disabled" }),
+            ),
+            (
+                "HistGradientBoostingClassifier",
+                &labels,
+                json!({ "early_stopping": "Disabled" }),
+            ),
+        ] {
+            let mut m = super::make(kind, &base).unwrap();
+            m.set_params(&json!({ "n_estimators": 3 })).unwrap();
+            m.fit(x.view(), Some(target.view()), None).unwrap();
+            m.set_params(&json!({ "n_estimators": 8 })).unwrap();
+            m.warm_start(x.view(), Some(target.view()), None).unwrap();
+            let mut once = super::make(kind, &base).unwrap();
+            once.set_params(&json!({ "n_estimators": 8 })).unwrap();
+            once.fit(x.view(), Some(target.view()), None).unwrap();
+            assert_eq!(
+                a2(m.staged_predict(x.view()).unwrap()),
+                a2(once.staged_predict(x.view()).unwrap()),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_params_merges_and_validates() {
+        let mut m = super::make("LgbmRegressor", &json!({ "n_estimators": 7 })).unwrap();
+        m.set_params(&json!({ "learning_rate": 0.3 })).unwrap();
+        let p = m.params().unwrap();
+        assert_eq!(
+            (p["n_estimators"].as_u64(), p["learning_rate"].as_f64()),
+            (Some(7), Some(0.3))
+        );
+        assert!(m.set_params(&json!({ "no_such": 1 })).is_err());
+        assert_eq!(m.params().unwrap()["learning_rate"].as_f64(), Some(0.3));
+    }
+
+    #[test]
+    fn hist_gradient_boosting_fits_with_an_explicit_validation_set() {
+        use anofox_ml_ensemble as ens;
+        let (x, y, _) = data();
+        let (xt, yt) = (x.slice(ndarray::s![..80, ..]), y.slice(ndarray::s![..80]));
+        let (xv, yv) = (x.slice(ndarray::s![80.., ..]), y.slice(ndarray::s![80..]));
+        let params =
+            json!({ "n_estimators": 300, "early_stopping": "Enabled", "n_iter_no_change": 3 });
+        let mut m = super::make("HistGradientBoostingRegressor", &params).unwrap();
+        assert!(m.capabilities().contains(&"fit_with_validation"));
+        m.fit_with_validation(xt, Some(yt), None, xv, Some(yv), None)
+            .unwrap();
+        let typed = ens::HistGradientBoostingRegressor::new()
+            .with_n_estimators(300)
+            .with_early_stopping(ens::EarlyStopping::Enabled)
+            .with_n_iter_no_change(3)
+            .fit_with_validation(xt, yt, None, xv, yv, None)
+            .unwrap();
+        let stages = a2(m.staged_predict(x.view()).unwrap()).ncols();
+        assert!(stages < 300, "early stopping did not stop: {stages}");
+        assert_eq!(stages, typed.n_estimators());
+        assert!(m
+            .fit_with_validation(xt, None, None, xv, Some(yv), None)
+            .is_err());
+        let mut lgbm = super::make("LgbmRegressor", &json!({})).unwrap();
+        assert!(lgbm
+            .fit_with_validation(xt, Some(yt), None, xv, Some(yv), None)
+            .is_err());
+    }
+
+    #[test]
+    fn extra_trees_classifier_gives_probabilities() {
+        let m = fitted("ExtraTreesClassifier", r#"{"n_estimators": 5}"#);
+        let (x, ..) = data();
+        assert!(m.capabilities().contains(&"predict_proba"));
+        let p = a2(m.predict_proba(x.view()).unwrap());
+        assert_eq!(p.dim(), (x.nrows(), 3));
+        assert!(p.rows().into_iter().all(|r| (r.sum() - 1.0).abs() < 1e-12));
+    }
+}
