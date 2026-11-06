@@ -906,3 +906,20 @@ def test_catboost_ctr_combinations_match_catboost():
     ours = am.CatBoostClassifier(**kw).fit(X, y)
     np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
                                atol=1e-12)
+
+
+def test_catboost_leaf_estimation_iterations_match_catboost():
+    cb = pytest.importorskip("catboost")
+    off = dict(random_strength=0, bootstrap_type="No", has_time=True, thread_count=1,
+               verbose=0, allow_writing_files=False)
+    r = np.random.RandomState(5)
+    X = r.randn(600, 4)
+    y = (X[:, 0] - X[:, 1] ** 2 + r.logistic(size=600) > 0).astype(int)
+    # 200 iterations: CatBoost's Logloss default of 10 Newton steps.
+    for kw in (dict(iterations=200, learning_rate=0.05, depth=4),
+               dict(iterations=30, learning_rate=0.2, depth=4, leaf_estimation_iterations=5,
+                    boosting_type="Ordered")):
+        ref = cb.CatBoostClassifier(**kw, **off).fit(X, y)
+        ours = am.CatBoostClassifier(**kw).fit(X, y)
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
+                                   atol=1e-12)

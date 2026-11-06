@@ -192,6 +192,31 @@ def generate():
     default_combo = {k: v for k, v in cat.items() if k != "max_ctr_complexity"}
     add_cat("combo_default_200", dict(default_combo, iterations=200, learning_rate=0.05,
                                       leaf_estimation_iterations=1), y_cat)
+
+    # Several leaf estimation steps (`leaf_estimation_iterations`), with
+    # CatBoost's backtracking (a step is halved until the objective
+    # improves) or without. Defaults: Logloss takes 10 Newton steps from 200
+    # iterations or 20 features on.
+    add("leaf10_logloss", "classifier", dict(base, leaf_estimation_iterations=10), X, y_bin)
+    add("leaf10_logloss_no_backtracking", "classifier",
+        dict(base, leaf_estimation_iterations=10, leaf_estimation_backtracking="No"), X, y_bin)
+    add("leaf10_logloss_weighted", "classifier", dict(base, leaf_estimation_iterations=10), X,
+        y_bin, sw=weights)
+    add("leaf4_logloss_gradient", "classifier", dict(base, leaf_estimation_method="Gradient",
+                                                     leaf_estimation_iterations=4), X, y_bin)
+    add("leaf_default_logloss_200", "classifier", dict(base, iterations=200, learning_rate=0.05),
+        X, y_bin)
+    X20 = np.column_stack([X, rng.normal(size=(n, 16))])
+    add("leaf_default_logloss_20_features", "classifier", base, X20, y_bin)
+    add("leaf_default_mc_gradient_20_features", "classifier",
+        dict(mc, leaf_estimation_method="Gradient"), X20, y_mc.astype(float))
+    add("leaf3_rmse", "regressor", dict(base, leaf_estimation_iterations=3), X, y_reg)
+    add("leaf5_mc", "classifier", dict(mc, leaf_estimation_iterations=5), X, y_mc.astype(float))
+    add("leaf10_ordered_logloss", "classifier", dict(ordered, leaf_estimation_iterations=10), X,
+        y_bin)
+    add("leaf5_ordered_mc", "classifier", dict(mc_ordered, leaf_estimation_iterations=5), X,
+        y_mc.astype(float))
+    add_cat("leaf10_cat_logloss", dict(cat, leaf_estimation_iterations=10), y_cat)
     return out
 
 

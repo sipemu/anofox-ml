@@ -14,9 +14,12 @@
 //! randomness switched off (`random_strength=0`, no bootstrap,
 //! `has_time=True`) the models agree with CatBoost's.
 //!
-//! Leaves take one Newton (or Gradient) step. CatBoost's Logloss defaults
-//! to 10 steps from 200 iterations or 20 features on; pass
-//! `leaf_estimation_iterations=1` to CatBoost to compare.
+//! Leaves take CatBoost's default number of Newton (or Gradient) steps,
+//! with its backtracking: a step is halved until the objective improves,
+//! the objective computed as CatBoost computes it (for Logloss its float32
+//! fast-log metric on `exp(a)`). That metric is summed in blocks per
+//! thread, so the multi-step Logloss models equal those of CatBoost with
+//! `thread_count=1`.
 
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
@@ -497,6 +500,18 @@ pub enum CatBoostLeafEstimation {
     Gradient,
 }
 
+/// Whether a leaf estimation step is halved until the loss improves
+/// (CatBoost's `leaf_estimation_backtracking`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostBacktracking {
+    /// Halve a step until the objective improves at all (CatBoost's
+    /// default).
+    #[default]
+    AnyImprovement,
+    /// Take every step whole.
+    No,
+}
+
 /// Losses, with CatBoost's derivative signs (`der1 = −∂L/∂a`).
 #[derive(Clone, Copy)]
 enum Loss {
@@ -570,6 +585,79 @@ impl Loss {
         }
     }
 
+    /// CatBoost's objective metric of one row (`RMSE`, `Logloss`,
+    /// `MultiClass`), unweighted: what backtracking compares.
+    fn metric(self, target: f64, approx: &[f64]) -> f64 {
+        match self {
+            Loss::Rmse => (target - approx[0]) * (target - approx[0]),
+            Loss::Logloss => {
+                let a = approx[0];
+                let e = a.exp();
+                if e.is_finite() {
+                    (1.0 + e).ln() - target * a
+                } else {
+                    (1.0 - target) * a
+                }
+            }
+            Loss::MultiClass(_) => {
+                let max = approx.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let sum: f64 = approx.iter().map(|&a| (a - max).exp()).sum();
+                -((approx[target as usize] - max) - sum.ln())
+            }
+        }
+    }
+
+    /// Whether CatBoost stores this loss's approximations as `exp(a)`
+    /// (`IsStoreExpApprox`), which changes how its metric and learning
+    /// folds are computed.
+    fn exp_approx(self) -> bool {
+        matches!(self, Loss::Logloss)
+    }
+
+    /// How a learning fold's approximation moves by the leaf value `v`
+    /// (CatBoost's `ApplyLearningRate`): `v · lr`, or for stored `exp(a)`
+    /// `fast_exp(FastLogf(exp(v)) · lr)`, i.e. `FastLogf(exp(v)) · lr`.
+    fn fold_step(self, v: f64, lr: f64) -> f64 {
+        if self.exp_approx() {
+            f64::from(fast_logf(v.exp() as f32)) * lr
+        } else {
+            v * lr
+        }
+    }
+
+    /// The weighted metric of the rows `0..rows` at `approx` moved by the
+    /// leaf values `leaves` (CatBoost's `EvalErrorsWithLeaves` and
+    /// `GetFinalError`).
+    #[allow(clippy::too_many_arguments)]
+    fn metric_with_leaves(
+        self,
+        target: &[f64],
+        approx: &[f64],
+        leaves: &[f64],
+        leaf_of: &[u32],
+        weights: &[f64],
+        rows: usize,
+    ) -> f64 {
+        if self.exp_approx() {
+            return logloss_metric_exp(target, approx, leaves, leaf_of, weights, rows);
+        }
+        let k = self.dims();
+        let (mut sum, mut sum_w) = (0.0, 0.0);
+        let mut point = vec![0.0; k];
+        for i in 0..rows {
+            let leaf = leaf_of[i] as usize;
+            for d in 0..k {
+                point[d] = approx[i * k + d] + leaves[leaf * k + d];
+            }
+            sum += weights[i] * self.metric(target[i], &point);
+            sum_w += weights[i];
+        }
+        match self {
+            Loss::Rmse => (sum / (sum_w + 1e-38)).sqrt(),
+            _ => sum / sum_w,
+        }
+    }
+
     /// The weighted derivatives of the rows `0..rows`.
     fn all_ders(self, target: &[f64], approx: &[f64], weights: &[f64], rows: usize) -> Ders {
         let (k, h) = (self.dims(), self.hessian_len());
@@ -590,6 +678,76 @@ impl Loss {
         }
         out
     }
+}
+
+/// Paul Mineiro's `FastLogf` (CatBoost's `library/cpp/fast_log`, the same
+/// arithmetic as its SSE `VectorFastLogf`): a float logarithm accurate to
+/// about 1e-5.
+#[inline]
+#[allow(clippy::excessive_precision, clippy::approx_constant)]
+fn fast_logf(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f00_0000);
+    let y = bits as i32 as f32 * 1.1920928955078125e-7f32;
+    let log2 = y - 124.22551499f32 - m * 1.498030302f32 - 1.72587999f32 / (m + 0.3520887068f32);
+    log2 * 0.69314718f32
+}
+
+/// CatBoost's Logloss metric on stored `exp(a)` approximations (what its
+/// backtracking compares): `EvalCrossEntropyVectorized`, i.e. float32 lanes
+/// of four rows with `VectorFastLogf`, horizontally added per block of 4096
+/// rows, and the rows past the last full group in double with `FastLogf`.
+/// The leaf deltas enter as `exp(δ)`.
+fn logloss_metric_exp(
+    target: &[f64],
+    approx: &[f64],
+    leaves: &[f64],
+    leaf_of: &[u32],
+    weights: &[f64],
+    rows: usize,
+) -> f64 {
+    let exp_leaves: Vec<f64> = leaves.iter().map(|v| v.exp()).collect();
+    let (mut s0, mut s1) = (0.0f64, 0.0f64);
+    for start in (0..rows).step_by(4096) {
+        let end = (start + 4096).min(rows);
+        let (mut lanes0, mut lanes1) = ([0.0f32; 4], [0.0f32; 4]);
+        let mut i = start;
+        while i + 4 <= end {
+            for lane in 0..4 {
+                let r = i + lane;
+                let prob = if target[r] > 0.5 { 1.0f32 } else { 0.0 };
+                let (e, d) = (approx[r].exp(), exp_leaves[leaf_of[r] as usize]);
+                let non_exp = fast_logf(e as f32) + fast_logf(d as f32);
+                let e = e * d;
+                let value = if e > f64::MAX {
+                    (1.0 - prob) * non_exp
+                } else {
+                    fast_logf((e + 1.0) as f32) - prob * non_exp
+                };
+                let w = weights[r] as f32;
+                lanes0[lane] += w * value;
+                lanes1[lane] += w;
+            }
+            i += 4;
+        }
+        s0 += f64::from((lanes0[0] + lanes0[1]) + (lanes0[2] + lanes0[3]));
+        s1 += f64::from((lanes1[0] + lanes1[1]) + (lanes1[2] + lanes1[3]));
+        for r in i..end {
+            let w = f64::from(weights[r] as f32);
+            let prob = if target[r] > 0.5 { 1.0 } else { 0.0 };
+            let (e, d) = (approx[r].exp(), exp_leaves[leaf_of[r] as usize]);
+            let mut non_exp = f64::from(fast_logf(e as f32));
+            let e = e * d;
+            non_exp += f64::from(fast_logf(d as f32));
+            s0 += w * if e.is_finite() {
+                f64::from(fast_logf((1.0 + e) as f32)) - prob * non_exp
+            } else {
+                (1.0 - prob) * non_exp
+            };
+            s1 += w;
+        }
+    }
+    s0 / s1
 }
 
 /// Weighted first and second derivatives, `k` and `h` per row.
@@ -708,6 +866,11 @@ struct TrainParams {
     model_size_reg: f64,
     ordered: bool,
     fold_len_multiplier: f64,
+    /// Newton / Gradient steps per leaf estimation.
+    leaf_iterations: usize,
+    /// Halve a step until the loss improves (CatBoost's
+    /// `leaf_estimation_backtracking=AnyImprovement`).
+    backtracking: bool,
 }
 
 /// `sum · 1/(count + λ)` for a non-empty side, else 0 (CatBoost's
@@ -1447,25 +1610,98 @@ impl LeafSums {
     }
 }
 
-/// Leaf deltas (Newton or Gradient, `k` per leaf) from the rows `0..rows`,
-/// times the learning rate.
-fn leaf_deltas(
-    leaf_of: &[u32],
+/// The rows a leaf estimation runs on: the approximations `approx` of the
+/// rows `0..rows` (`k` each), their leaves and the L2 scaling statistics
+/// (weight sum, row count).
+struct LeafProblem<'a> {
+    loss: Loss,
+    target: &'a [f64],
+    approx: &'a [f64],
+    weights: &'a [f64],
+    leaf_of: &'a [u32],
     n_leaves: usize,
-    ders: &Ders,
-    weights: &[f64],
     rows: usize,
-    (sum_w, count): (f64, f64),
+    stats: (f64, f64),
+    /// The model's leaves (CatBoost's `CalcLeafValues`): the metric is taken
+    /// at the moved approximations plus the step. A learning fold
+    /// (`CalcApproxDelta`): at `approx` plus the summed steps.
+    moving: bool,
+}
+
+/// CatBoost's leaf estimation (`FastGradientWalker`): `leaf_iterations`
+/// Newton or Gradient steps, each from the derivatives at the moved
+/// approximations. With backtracking a step is halved until the metric
+/// improves, every try using up an iteration. `accepted` sees each taken
+/// step and that iteration's leaf sums. Returns the summed leaf values
+/// (`k` per leaf, before the learning rate).
+fn estimate_leaves(
+    lp: &LeafProblem<'_>,
     p: &TrainParams,
+    mut accepted: impl FnMut(&[f64], &mut LeafSums),
 ) -> Vec<f64> {
-    let k = ders.k;
-    let sums = LeafSums::of(leaf_of, n_leaves, ders, weights, rows);
-    let mut out = vec![0.0; n_leaves * k];
-    for (leaf, o) in out.chunks_mut(k).enumerate() {
-        sums.delta(leaf, p.l2_leaf_reg, sum_w, count, p, o);
-        o.iter_mut().for_each(|v| *v *= p.learning_rate);
+    let k = lp.loss.dims();
+    let (n_leaves, rows) = (lp.n_leaves, lp.rows);
+    let backtracking = p.backtracking && p.leaf_iterations > 1;
+    let metric = |approx: &[f64], leaves: &[f64]| {
+        lp.loss
+            .metric_with_leaves(lp.target, approx, leaves, lp.leaf_of, lp.weights, rows)
+    };
+    let mut total = vec![0.0; n_leaves * k];
+    let mut point = lp.approx[..rows * k].to_vec();
+    let mut value = if backtracking {
+        metric(&point, &total)
+    } else {
+        0.0
+    };
+    let mut it = 0;
+    while it < p.leaf_iterations {
+        let ders = lp.loss.all_ders(lp.target, &point, lp.weights, rows);
+        let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
+        let mut step = vec![0.0; n_leaves * k];
+        for (leaf, o) in step.chunks_mut(k).enumerate() {
+            sums.delta(leaf, p.l2_leaf_reg, lp.stats.0, lp.stats.1, p, o);
+        }
+        let take = |scaled: &[f64], total: &mut [f64], point: &mut [f64]| {
+            for (t, s) in total.iter_mut().zip(scaled) {
+                *t += s;
+            }
+            for i in 0..rows {
+                let leaf = lp.leaf_of[i] as usize;
+                for d in 0..k {
+                    point[i * k + d] += scaled[leaf * k + d];
+                }
+            }
+        };
+        if !backtracking {
+            take(&step, &mut total, &mut point);
+            accepted(&step, &mut sums);
+            it += 1;
+            continue;
+        }
+        let mut scale = 1.0;
+        loop {
+            let scaled: Vec<f64> = step.iter().map(|&v| scale * v).collect();
+            let after = if lp.moving {
+                metric(&point, &scaled)
+            } else {
+                let candidate: Vec<f64> = total.iter().zip(&scaled).map(|(t, s)| t + s).collect();
+                metric(lp.approx, &candidate)
+            };
+            if after < value {
+                value = after;
+                take(&scaled, &mut total, &mut point);
+                accepted(&scaled, &mut sums);
+                break;
+            }
+            scale /= 2.0;
+            it += 1;
+            if it >= p.leaf_iterations {
+                break;
+            }
+        }
+        it += 1;
     }
-    out
+    total
 }
 
 /// Boosting of oblivious trees from the constant `bias` (one per
@@ -1498,7 +1734,6 @@ fn boost(
     let mut cache = CombinationCache::new();
     let mut ctrs = CtrModel::default();
     for _ in 0..p.iterations {
-        let ders = loss.all_ders(target, &approx, weights, n);
         let (splits, leaf_of) = if p.ordered {
             let fold_ders: Vec<Ders> = tails
                 .iter()
@@ -1529,37 +1764,59 @@ fn boost(
             );
             let n_leaves = 1usize << grown.0.len();
             let leaf_of = &grown.1;
-            for ((&(body, tail, bw), a), d) in tails.iter().zip(&mut fold_approx).zip(&fold_ders) {
-                let body_stats = (bw, body as f64);
+            for (&(body, tail, bw), a) in tails.iter().zip(&mut fold_approx) {
+                let lp = LeafProblem {
+                    loss,
+                    target,
+                    approx: &a[..],
+                    weights,
+                    leaf_of,
+                    n_leaves,
+                    rows: body,
+                    stats: (bw, body as f64),
+                    moving: false,
+                };
                 if k == 1 {
                     // Each prefix's approximation moves by the leaf values
                     // of its body rows.
-                    let deltas = leaf_deltas(leaf_of, n_leaves, d, weights, body, body_stats, &p);
+                    let leaves = estimate_leaves(&lp, &p, |_, _| {});
                     for i in 0..tail {
-                        a[i] += deltas[leaf_of[i] as usize];
+                        a[i] += loss.fold_step(leaves[leaf_of[i] as usize], p.learning_rate);
                     }
                 } else {
                     // Multiclass (CatBoost's `CalcApproxDeltaMulti`): the
-                    // body rows by the leaf values of the body, every tail
-                    // row by those of the body and the tail rows up to it.
-                    let mut sums = LeafSums::of(leaf_of, n_leaves, d, weights, body);
-                    let mut deltas = vec![0.0; n_leaves * k];
-                    for (leaf, o) in deltas.chunks_mut(k).enumerate() {
-                        sums.delta(leaf, p.l2_leaf_reg, bw, body as f64, &p, o);
-                    }
-                    let mut row_delta = vec![0.0; (tail - body) * k];
-                    for i in body..tail {
-                        let leaf = leaf_of[i] as usize;
-                        sums.add(leaf, d, i, weights[i]);
-                        let o = &mut row_delta[(i - body) * k..(i - body + 1) * k];
-                        sums.delta(leaf, p.l2_leaf_reg, bw, body as f64, &p, o);
-                    }
+                    // body rows by the leaf values of the body; after every
+                    // step, each tail row by a Newton step of the body and
+                    // the tail rows up to it, at its moved approximation.
+                    let mut tail_delta = vec![0.0; (tail - body) * k];
+                    let (mut der, mut der2) = (vec![0.0; k], vec![0.0; loss.hessian_len()]);
+                    let leaves = estimate_leaves(&lp, &p, |_, sums| {
+                        for i in body..tail {
+                            let leaf = leaf_of[i] as usize;
+                            let o = &mut tail_delta[(i - body) * k..(i - body + 1) * k];
+                            let point: Vec<f64> =
+                                (0..k).map(|dim| a[i * k + dim] + o[dim]).collect();
+                            loss.ders(target[i], &point, weights[i], &mut der, &mut der2);
+                            let row = Ders {
+                                k,
+                                h: der2.len(),
+                                der: der.clone(),
+                                der2: der2.clone(),
+                            };
+                            sums.add(leaf, &row, 0, weights[i]);
+                            let mut delta = vec![0.0; k];
+                            sums.delta(leaf, p.l2_leaf_reg, bw, body as f64, &p, &mut delta);
+                            for dim in 0..k {
+                                o[dim] += delta[dim];
+                            }
+                        }
+                    });
                     for i in 0..tail {
                         let delta = if i < body {
                             let leaf = leaf_of[i] as usize;
-                            &deltas[leaf * k..(leaf + 1) * k]
+                            &leaves[leaf * k..(leaf + 1) * k]
                         } else {
-                            &row_delta[(i - body) * k..(i - body + 1) * k]
+                            &tail_delta[(i - body) * k..(i - body + 1) * k]
                         };
                         for dim in 0..k {
                             a[i * k + dim] += delta[dim] * p.learning_rate;
@@ -1569,6 +1826,7 @@ fn boost(
             }
             grown
         } else {
+            let ders = loss.all_ders(target, &approx, weights, n);
             let parts = [ScorePart {
                 wder: &ders.der,
                 body: 0,
@@ -1589,7 +1847,22 @@ fn boost(
             )
         };
         let n_leaves = 1usize << splits.len();
-        let leaf_values = leaf_deltas(&leaf_of, n_leaves, &ders, weights, n, (sum_w, n as f64), &p);
+        let lp = LeafProblem {
+            loss,
+            target,
+            approx: &approx,
+            weights,
+            leaf_of: &leaf_of,
+            n_leaves,
+            rows: n,
+            stats: (sum_w, n as f64),
+            moving: true,
+        };
+        let leaf_values: Vec<f64> = estimate_leaves(&lp, &p, |_, _| {})
+            .into_iter()
+            .map(|v| v * p.learning_rate)
+            .collect();
+
         for i in 0..n {
             let leaf = leaf_of[i] as usize;
             for d in 0..k {
@@ -1788,6 +2061,13 @@ macro_rules! catboost_config {
             /// Growth of the body / tail prefixes of ordered boosting
             /// (default 2).
             pub fold_len_multiplier: f64,
+            /// Newton / Gradient steps per leaf estimation (CatBoost's
+            /// `leaf_estimation_iterations`). Default (`None`): CatBoost's,
+            /// 10 Newton or 40 Gradient steps for Logloss, 1 Newton or 10
+            /// Gradient steps for MultiClass, 1 for RMSE, and 1 for any
+            /// loss below 200 iterations with fewer than 20 features.
+            pub leaf_estimation_iterations: Option<usize>,
+            pub leaf_estimation_backtracking: CatBoostBacktracking,
         }
 
         impl Default for $name {
@@ -1807,6 +2087,8 @@ macro_rules! catboost_config {
                     model_size_reg: 0.5,
                     boosting_type: CatBoostBoostingType::Plain,
                     fold_len_multiplier: 2.0,
+                    leaf_estimation_iterations: None,
+                    leaf_estimation_backtracking: CatBoostBacktracking::AnyImprovement,
                 }
             }
         }
@@ -1855,6 +2137,35 @@ macro_rules! catboost_config {
                 self.one_hot_max_size = n;
                 self
             }
+            pub fn with_leaf_estimation_iterations(mut self, n: usize) -> Self {
+                self.leaf_estimation_iterations = Some(n);
+                self
+            }
+            pub fn with_leaf_estimation_backtracking(mut self, b: CatBoostBacktracking) -> Self {
+                self.leaf_estimation_backtracking = b;
+                self
+            }
+
+            /// CatBoost's default leaf estimation iterations for `loss`
+            /// (`GetEstimationMethodDefaults`, then
+            /// `UpdateLeavesEstimationIterations`).
+            fn leaf_iterations(&self, loss: Loss, n_features: usize) -> usize {
+                if let Some(n) = self.leaf_estimation_iterations {
+                    return n;
+                }
+                if self.iterations < 200 && n_features < 20 {
+                    return 1;
+                }
+                let newton = self.leaf_estimation_method == CatBoostLeafEstimation::Newton;
+                match (loss, newton) {
+                    (Loss::Rmse, _) => 1,
+                    (Loss::Logloss, true) => 10,
+                    (Loss::Logloss, false) => 40,
+                    (Loss::MultiClass(_), true) => 1,
+                    (Loss::MultiClass(_), false) => 10,
+                }
+            }
+
             pub fn with_max_ctr_complexity(mut self, n: usize) -> Self {
                 self.max_ctr_complexity = Some(n);
                 self
@@ -1891,6 +2202,9 @@ macro_rules! catboost_config {
                     model_size_reg: self.model_size_reg,
                     ordered: self.boosting_type == CatBoostBoostingType::Ordered,
                     fold_len_multiplier: self.fold_len_multiplier,
+                    leaf_iterations: 1,
+                    backtracking: self.leaf_estimation_backtracking
+                        == CatBoostBacktracking::AnyImprovement,
                 }
             }
         }
@@ -1941,6 +2255,11 @@ impl FitWeighted<f64> for CatBoostRegressor {
     ) -> Result<Self::Fitted> {
         let p = self.train_params();
         validate(x, y, sample_weight, &p, self.border_count)?;
+        if self.leaf_estimation_iterations == Some(0) {
+            return Err(RustMlError::InvalidParameter(
+                "leaf_estimation_iterations must be at least 1".into(),
+            ));
+        }
         if self.max_ctr_complexity == Some(0) {
             return Err(RustMlError::InvalidParameter(
                 "max_ctr_complexity must be at least 1".into(),
@@ -1961,6 +2280,10 @@ impl FitWeighted<f64> for CatBoostRegressor {
             max_ctr_complexity: self.max_ctr_complexity(),
         };
         let q = quantize(x, self.border_count, cat)?;
+        let p = TrainParams {
+            leaf_iterations: self.leaf_iterations(Loss::Rmse, x.ncols()),
+            ..p
+        };
         let (trees, ctrs) = boost(&q, &target, &weights, &[bias], Loss::Rmse, p);
         Ok(FittedCatBoostRegressor {
             trees,
@@ -2066,6 +2389,11 @@ impl FitWeighted<f64> for CatBoostClassifier {
     ) -> Result<Self::Fitted> {
         let p = self.train_params();
         validate(x, y, sample_weight, &p, self.border_count)?;
+        if self.leaf_estimation_iterations == Some(0) {
+            return Err(RustMlError::InvalidParameter(
+                "leaf_estimation_iterations must be at least 1".into(),
+            ));
+        }
         if self.max_ctr_complexity == Some(0) {
             return Err(RustMlError::InvalidParameter(
                 "max_ctr_complexity must be at least 1".into(),
@@ -2108,6 +2436,10 @@ impl FitWeighted<f64> for CatBoostClassifier {
             max_ctr_complexity: self.max_ctr_complexity(),
         };
         let q = quantize(x, self.border_count, cat)?;
+        let p = TrainParams {
+            leaf_iterations: self.leaf_iterations(loss, x.ncols()),
+            ..p
+        };
         let (trees, ctrs) = boost(&q, &target, &weights, &bias, loss, p);
         Ok(FittedCatBoostClassifier {
             trees,

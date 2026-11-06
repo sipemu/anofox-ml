@@ -6,6 +6,28 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: leaf estimation iterations (#127 §5)
+
+- `leaf_estimation_iterations` and `leaf_estimation_backtracking`
+  (`AnyImprovement` / `No`) on `CatBoostRegressor` / `CatBoostClassifier`.
+  This is CatBoost's `FastGradientWalker`: several Newton or Gradient steps
+  per leaf estimation, each from the derivatives at the moved
+  approximations. With backtracking a step is halved until the objective
+  improves, and every try uses up an iteration. The defaults are CatBoost's:
+  Logloss takes 10 Newton / 40 Gradient steps and MultiClass 1 Newton /
+  10 Gradient, but every loss takes 1 below 200 iterations with fewer than
+  20 features. Previously every fit took a single step.
+- The backtracking objective is computed as CatBoost computes it.
+  - The model's leaves are evaluated at the moved point plus the step, and
+    the learning folds at the base plus the summed steps.
+  - Logloss uses CatBoost's float32 `VectorFastLogf` metric on `exp(a)`,
+    summed in four lanes per block of 4096 rows.
+  - Ordered Logloss folds move by `FastLogf(exp(δ)) · lr`
+    (`ApplyLearningRate`).
+- Matches catboost 1.2.10 (`thread_count=1`) to 8e-16 on 12 golden cases.
+  A 20k-row check with CatBoost's full defaults (CTR combinations, 10 leaf
+  steps) matches to 1.2e-15, plain and ordered.
+
 ### CatBoost-style boosting: CTR feature combinations (#127 §5)
 
 - `max_ctr_complexity` on `CatBoostRegressor` / `CatBoostClassifier`

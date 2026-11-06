@@ -637,8 +637,11 @@ class _CatBoost(BaseEstimator):
                  border_count=254, score_function="Cosine", leaf_estimation_method="Newton",
                  boost_from_average=None, cat_features=None, one_hot_max_size=2,
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
-                 max_ctr_complexity=None):
+                 max_ctr_complexity=None, leaf_estimation_iterations=None,
+                 leaf_estimation_backtracking="AnyImprovement"):
         self.max_ctr_complexity = max_ctr_complexity
+        self.leaf_estimation_iterations = leaf_estimation_iterations
+        self.leaf_estimation_backtracking = leaf_estimation_backtracking
         self.boosting_type = boosting_type
         self.fold_len_multiplier = fold_len_multiplier
         self.cat_features = cat_features
@@ -676,6 +679,11 @@ class _CatBoost(BaseEstimator):
         params["fold_len_multiplier"] = float(self.fold_len_multiplier)
         if self.max_ctr_complexity is not None:
             params["max_ctr_complexity"] = int(self.max_ctr_complexity)
+        if self.leaf_estimation_iterations is not None:
+            params["leaf_estimation_iterations"] = int(self.leaf_estimation_iterations)
+        params["leaf_estimation_backtracking"] = _choice(
+            self.leaf_estimation_backtracking, {"AnyImprovement": "AnyImprovement", "No": "No"},
+            "leaf_estimation_backtracking")
         return params
 
     def _cat_indices(self, n_features):
