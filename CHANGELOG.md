@@ -6,6 +6,23 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: multiclass (#127 §5)
+
+- `CatBoostClassifier` fits more than two classes with CatBoost's
+  `MultiClass` loss: one approximation per class, softmax derivatives with
+  the packed Hessian, and the Newton step `(−H + λI)⁻¹ g` through the
+  reference LAPACK `dppsv` (packed Cholesky) with CatBoost's float32 L2
+  scaling. The split scores add up over the classes. Ordered boosting
+  updates the tail rows one at a time, as CatBoost's
+  `CalcApproxDeltaMulti` does. Categorical features get one `Borders` CTR
+  per target border (`classes − 1`) and prior. `raw_predictions` returns
+  the class scores; the registry's `decision_function` returns them for
+  multiclass models (n × classes) and the log-odds for binary ones.
+  `boost_from_average` is rejected for multiclass, as in CatBoost.
+  Matches catboost 1.2.10 to 6e-16 on 15 golden cases (Cosine / L2,
+  Newton / Gradient, weighted, 5 classes, arbitrary labels, ordered,
+  CTRs).
+
 ### CatBoost-style boosting: regressor CTRs (#127 §5)
 
 - `CatBoostRegressor` now builds the `Borders` CTRs of its categorical

@@ -735,7 +735,11 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
-        decision_function: |m, x| m.decision_function(x),
+        // Two classes: the log-odds; more: one column per class.
+        decision_function: |m, x| m.raw_predictions(x).map(|r| match r.ncols() {
+            1 => crate::model::Out::from(r.column(0).to_owned()),
+            _ => crate::model::Out::from(r),
+        }),
     }
     #[cfg(feature = "perpetual")]
     PerpetualRegressor {

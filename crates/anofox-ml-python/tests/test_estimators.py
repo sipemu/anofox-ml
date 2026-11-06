@@ -862,3 +862,26 @@ def test_catboost_categorical_features_match_catboost():
     ref = cb.CatBoostRegressor(**kw, **off).fit(X, yr)
     ours = am.CatBoostRegressor(**kw).fit(X, yr)
     np.testing.assert_allclose(ours.predict(X_new), ref.predict(X_new), rtol=1e-12, atol=1e-12)
+
+
+def test_catboost_multiclass_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    off = dict(random_strength=0, bootstrap_type="No", has_time=True, thread_count=1,
+               verbose=0, allow_writing_files=False, max_ctr_complexity=1)
+    r = np.random.RandomState(12)
+    n = 300
+    X = np.empty((n, 3), dtype=object)
+    X[:, 0], X[:, 1] = r.randn(n), r.uniform(-2, 2, n)
+    X[:, 2] = r.choice(["a", "b", "c", "d", "e"], size=n)
+    eta = X[:, 0].astype(float) + 0.5 * X[:, 1].astype(float) + (X[:, 2] == "b")
+    y = np.array(["low", "mid", "high"])[np.digitize(eta + r.logistic(size=n) * 0.5, [-0.5, 0.7])]
+    kw = dict(iterations=25, learning_rate=0.3, depth=4, cat_features=[2])
+    for boosting in ("Plain", "Ordered"):
+        ref = cb.CatBoostClassifier(**kw, boosting_type=boosting, **off).fit(X, y)
+        ours = am.CatBoostClassifier(**kw, boosting_type=boosting).fit(X, y)
+        np.testing.assert_array_equal(ours.classes_, ref.classes_)
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
+                                   atol=1e-12)
+        np.testing.assert_array_equal(ours.predict(X), ref.predict(X).ravel())
+        raw = ref.predict(X, prediction_type="RawFormulaVal")
+        np.testing.assert_allclose(ours.decision_function(X), raw, rtol=1e-12, atol=1e-12)
