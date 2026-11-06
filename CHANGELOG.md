@@ -6,6 +6,22 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### HistGradientBoosting: early-stopping scorers and explicit validation sets (#127)
+
+- `with_scoring(EarlyStoppingScoring::{Loss, Default, R2,
+  NegMeanSquaredError, NegMeanAbsoluteError, Accuracy, NegLogLoss})`
+  (sklearn's `scoring`; `Default` is the estimator's `score`). As in
+  sklearn, scorers see the predictions of the raw scores and the training
+  scores use at most 10 000 training rows (`resample`, stratified for the
+  classifier, with the split's seed). Python: `scoring=None` or one of
+  these names.
+- `fit_with_validation(x, y, w, x_val, y_val, w_val)` on both facades
+  (sklearn's `fit(..., X_val=, y_val=, sample_weight_val=)`): early stopping
+  on the given rows, without a split. (Python support follows with the
+  registry work in #127 §4.)
+- `anofox_ml_core::numpy_random::resample_without_replacement` (sklearn's
+  `resample(..., replace=False[, stratify])`).
+
 ### Staged predictions for HistGradientBoosting and LGBM (#127)
 
 - `staged_predict` on the fitted HistGradientBoosting regressor /

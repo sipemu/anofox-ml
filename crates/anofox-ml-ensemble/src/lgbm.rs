@@ -14,6 +14,7 @@
 //!
 //! Not included: EFB, DART, distributed training.
 
+use crate::hist_gradient_boosting::EarlyStoppingScoring;
 use anofox_ml_core::numpy_random::Generator;
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2, ShapeBuilder};
@@ -2264,10 +2265,130 @@ fn sample_rows(n: usize, frac: f64, rng: &mut StdRng) -> Vec<usize> {
 /// sklearn's early stopping rule (`scoring="loss"`): stop once none of the
 /// last `n_iter_no_change` scores beats the one before them by more than
 /// `tol`; all trees are kept.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SklearnStopping {
     pub n_iter_no_change: usize,
     pub tol: f64,
+    pub scoring: EarlyStoppingScoring,
+    /// Training rows the scorer is evaluated on (sklearn's small trainset;
+    /// `None` = all). The loss is always taken over all of them.
+    pub small_train: Option<Vec<usize>>,
+}
+
+/// Weighted mean `Σ w v / Σ w` over `rows` (all `0..n` when `None`).
+fn weighted_mean(
+    n: usize,
+    rows: Option<&[usize]>,
+    w: &dyn Fn(usize) -> f64,
+    v: &dyn Fn(usize) -> f64,
+) -> f64 {
+    let (mut total, mut wsum) = (0.0, 0.0);
+    let mut add = |i: usize| {
+        total += w(i) * v(i);
+        wsum += w(i);
+    };
+    match rows {
+        Some(r) => r.iter().copied().for_each(&mut add),
+        None => (0..n).for_each(&mut add),
+    }
+    if wsum > 0.0 {
+        total / wsum
+    } else {
+        total
+    }
+}
+
+/// sklearn's regression scorers on predictions `pred` (non-loss scorings).
+fn regression_score(
+    scoring: EarlyStoppingScoring,
+    y: &[f64],
+    pred: &dyn Fn(usize) -> f64,
+    w: &dyn Fn(usize) -> f64,
+    rows: Option<&[usize]>,
+) -> f64 {
+    let n = y.len();
+    match scoring {
+        EarlyStoppingScoring::NegMeanSquaredError => {
+            -weighted_mean(n, rows, w, &|i| (y[i] - pred(i)).powi(2))
+        }
+        EarlyStoppingScoring::NegMeanAbsoluteError => {
+            -weighted_mean(n, rows, w, &|i| (y[i] - pred(i)).abs())
+        }
+        _ => {
+            // r2_score (also the regressor's default score).
+            let avg = weighted_mean(n, rows, w, &|i| y[i]);
+            let (mut num, mut den) = (0.0, 0.0);
+            let mut add = |i: usize| {
+                num += w(i) * (y[i] - pred(i)).powi(2);
+                den += w(i) * (y[i] - avg).powi(2);
+            };
+            match rows {
+                Some(r) => r.iter().copied().for_each(&mut add),
+                None => (0..n).for_each(&mut add),
+            }
+            if den == 0.0 {
+                if num == 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else {
+                1.0 - num / den
+            }
+        }
+    }
+}
+
+/// sklearn's classification scorers on raw scores (one column for a
+/// binary model, else one per class; non-loss scorings).
+fn classification_score(
+    scoring: EarlyStoppingScoring,
+    raw: &[Vec<f64>],
+    class_of: &dyn Fn(usize) -> usize,
+    w: &dyn Fn(usize) -> f64,
+    rows: Option<&[usize]>,
+) -> f64 {
+    let n = raw.first().map_or(0, Vec::len);
+    let predicted = |i: usize| {
+        if raw.len() == 1 {
+            usize::from(raw[0][i] > 0.0)
+        } else {
+            let mut best = 0;
+            for c in 1..raw.len() {
+                if raw[c][i] > raw[best][i] {
+                    best = c;
+                }
+            }
+            best
+        }
+    };
+    let proba_of_true = |i: usize| {
+        let k = class_of(i);
+        if raw.len() == 1 {
+            let p1 = 1.0 / (1.0 + (-raw[0][i]).exp());
+            if k == 1 {
+                p1
+            } else {
+                1.0 - p1
+            }
+        } else {
+            let max_s = raw.iter().map(|s| s[i]).fold(f64::NEG_INFINITY, f64::max);
+            let sum: f64 = raw.iter().map(|s| (s[i] - max_s).exp()).sum();
+            (raw[k][i] - max_s).exp() / sum
+        }
+    };
+    match scoring {
+        EarlyStoppingScoring::NegLogLoss => {
+            let eps = f64::EPSILON;
+            -weighted_mean(n, rows, w, &|i| {
+                -proba_of_true(i).clamp(eps, 1.0 - eps).ln()
+            })
+        }
+        // accuracy (also the classifier's default score)
+        _ => weighted_mean(n, rows, w, &|i| {
+            f64::from(u8::from(predicted(i) == class_of(i)))
+        }),
+    }
 }
 
 /// Scores recorded by sklearn-style early stopping: the negative mean loss
@@ -2292,14 +2413,14 @@ impl ScoreTracker {
         }
     }
 
-    /// Record the losses after an iteration (or of the baseline); returns
+    /// Record the scores after an iteration (or of the baseline); returns
     /// sklearn's `_should_stop` on the validation scores, or on the training
     /// scores without validation data.
-    fn record(&mut self, train_loss: f64, validation_loss: Option<f64>) -> bool {
-        self.scores.train.push(-train_loss);
-        let scores = match validation_loss {
+    fn record(&mut self, train: f64, validation: Option<f64>) -> bool {
+        self.scores.train.push(train);
+        let scores = match validation {
             Some(v) => {
-                self.scores.validation.push(-v);
+                self.scores.validation.push(v);
                 &self.scores.validation
             }
             None => &self.scores.train,
@@ -2450,24 +2571,29 @@ impl LgbmRegressor {
             .as_ref()
             .map(|(xe, _)| vec![baseline; xe.nrows()]);
 
-        let mut tracker = stopping.map(ScoreTracker::new);
-        let losses = |preds: &[f64], eval_preds: Option<&Vec<f64>>| {
-            let train = eval_loss(
-                &y_vec,
-                preds,
-                sample_weight,
-                self.objective,
-                self.huber_delta,
-            );
-            let validation = eval_y.as_ref().zip(eval_preds).map(|(ye, ep)| {
-                eval_loss(
-                    ye,
-                    ep,
-                    opts.eval_sample_weight,
-                    self.objective,
-                    self.huber_delta,
-                )
+        let (scoring, small_train) = stopping
+            .as_ref()
+            .map_or((EarlyStoppingScoring::Loss, None), |s| {
+                (s.scoring, s.small_train.clone())
             });
+        let mut tracker = stopping.map(ScoreTracker::new);
+        let log_link = has_log_link(self.objective);
+        // sklearn's score of raw predictions: the negative mean loss, or a
+        // scorer on the predictions.
+        let score = |y: &[f64], raw: &[f64], w: Option<ArrayView1<f64>>, rows: Option<&[usize]>| {
+            if scoring == EarlyStoppingScoring::Loss {
+                return -eval_loss(y, raw, w, self.objective, self.huber_delta);
+            }
+            let pred = |i: usize| if log_link { raw[i].exp() } else { raw[i] };
+            let weight = |i: usize| w.map_or(1.0, |w| w[i]);
+            regression_score(scoring, y, &pred, &weight, rows)
+        };
+        let losses = |preds: &[f64], eval_preds: Option<&Vec<f64>>| {
+            let train = score(&y_vec, preds, sample_weight, small_train.as_deref());
+            let validation = eval_y
+                .as_ref()
+                .zip(eval_preds)
+                .map(|(ye, ep)| score(ye, ep, opts.eval_sample_weight, None));
             (train, validation)
         };
         if let Some(t) = tracker.as_mut() {
@@ -3183,6 +3309,11 @@ impl LgbmClassifier {
         };
         let eval_w = |i: usize| opts.eval_sample_weight.map_or(1.0, |w| w[i]);
         let mut es = EarlyStopState::new(self.early_stopping_rounds, opts.verbose);
+        let (scoring, small_train) = stopping
+            .as_ref()
+            .map_or((EarlyStoppingScoring::Loss, None), |s| {
+                (s.scoring, s.small_train.clone())
+            });
         let mut tracker = stopping.map(ScoreTracker::new);
         // sklearn's mean losses (weighted by `w`) of raw scores.
         let mean = |total: f64, wsum: f64| if wsum > 0.0 { total / wsum } else { total };
@@ -3243,10 +3374,30 @@ impl LgbmClassifier {
             let mut eval_raw: Option<Vec<f64>> =
                 eval_binned.as_ref().map(|eb| vec![baseline; eb.nrows()]);
             let binary_losses = |raw: &[f64], eval_raw: Option<&Vec<f64>>| {
-                let train = binary_loss(raw, &|i| labels[i] == 1.0, &train_w);
+                let train_class = |i: usize| usize::from(labels[i] == 1.0);
+                if scoring != EarlyStoppingScoring::Loss {
+                    let train = classification_score(
+                        scoring,
+                        &[raw.to_vec()],
+                        &train_class,
+                        &train_w,
+                        small_train.as_deref(),
+                    );
+                    let validation = eval_raw.zip(eval_class_idx.as_ref()).map(|(er, ci)| {
+                        classification_score(
+                            scoring,
+                            std::slice::from_ref(er),
+                            &|i| ci[i],
+                            &eval_w,
+                            None,
+                        )
+                    });
+                    return (train, validation);
+                }
+                let train = -binary_loss(raw, &|i| labels[i] == 1.0, &train_w);
                 let validation = eval_raw
                     .zip(eval_class_idx.as_ref())
-                    .map(|(er, ci)| binary_loss(er, &|i| ci[i] == 1, &eval_w));
+                    .map(|(er, ci)| -binary_loss(er, &|i| ci[i] == 1, &eval_w));
                 (train, validation)
             };
             if let Some(t) = tracker.as_mut() {
@@ -3393,10 +3544,23 @@ impl LgbmClassifier {
                 .as_ref()
                 .map(|eb| baselines.iter().map(|&bl| vec![bl; eb.nrows()]).collect());
             let multi_losses = |raw: &[Vec<f64>], eval_raw: Option<&Vec<Vec<f64>>>| {
-                let train = multi_loss(raw, &train_class, &train_w);
+                if scoring != EarlyStoppingScoring::Loss {
+                    let train = classification_score(
+                        scoring,
+                        raw,
+                        &train_class,
+                        &train_w,
+                        small_train.as_deref(),
+                    );
+                    let validation = eval_raw.zip(eval_class_idx.as_ref()).map(|(er, ci)| {
+                        classification_score(scoring, er, &|i| ci[i], &eval_w, None)
+                    });
+                    return (train, validation);
+                }
+                let train = -multi_loss(raw, &train_class, &train_w);
                 let validation = eval_raw
                     .zip(eval_class_idx.as_ref())
-                    .map(|(er, ci)| multi_loss(er, &|i| ci[i], &eval_w));
+                    .map(|(er, ci)| -multi_loss(er, &|i| ci[i], &eval_w));
                 (train, validation)
             };
             if let Some(t) = tracker.as_mut() {

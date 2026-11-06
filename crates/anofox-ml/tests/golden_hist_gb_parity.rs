@@ -9,7 +9,7 @@ mod common;
 use anofox_ml::prelude::*;
 use anofox_ml_core::class_weight::ClassWeight;
 use anofox_ml_ensemble::{
-    EarlyStopping, HistGradientBoostingLoss, InteractionConstraints, TestSize,
+    EarlyStopping, EarlyStoppingScoring, HistGradientBoostingLoss, InteractionConstraints, TestSize,
 };
 use common::{json_to_array1, load_golden_data};
 use ndarray::{Array1, Array2};
@@ -60,6 +60,18 @@ macro_rules! early_stopping {
         if let Some(f) = p["max_features"].as_f64() {
             m = m.with_max_features(f);
         }
+        if let Some(sc) = p.get("scoring") {
+            m = m.with_scoring(match sc.as_str() {
+                None => EarlyStoppingScoring::Default,
+                Some("loss") => EarlyStoppingScoring::Loss,
+                Some("r2") => EarlyStoppingScoring::R2,
+                Some("neg_mean_squared_error") => EarlyStoppingScoring::NegMeanSquaredError,
+                Some("neg_mean_absolute_error") => EarlyStoppingScoring::NegMeanAbsoluteError,
+                Some("accuracy") => EarlyStoppingScoring::Accuracy,
+                Some("neg_log_loss") => EarlyStoppingScoring::NegLogLoss,
+                Some(other) => panic!("unknown scoring {other}"),
+            });
+        }
         m
     }};
 }
@@ -92,6 +104,51 @@ fn model(params: &Value) -> HistGradientBoostingRegressor {
         Some(c) => m.with_interaction_cst(c),
         None => m,
     }
+}
+
+/// The case's training data: stored, or rebuilt from the generator's
+/// integer formula (`formula_data`).
+fn training_data(case: &Value) -> (Array2<f64>, Array1<f64>) {
+    let Some(n) = case["formula_rows"].as_u64() else {
+        return (array2_with_nan(&case["X"]), json_to_array1(&case["y"]));
+    };
+    let n = n as usize;
+    let x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+        0 => ((i * 37) % 1000) as f64 / 100.0,
+        1 => ((i * 91) % 713) as f64 / 71.3,
+        _ => ((i * 13) % 7) as f64,
+    });
+    let y = Array1::from_shape_fn(n, |i| {
+        let (x0, x1, x2) = (x[[i, 0]], x[[i, 1]], x[[i, 2]]);
+        let noise = ((i * 7919) % 200) as f64 / 100.0 - 1.0;
+        0.5 * x0 - 0.05 * x0 * x0 + 0.3 * x1 - 0.2 * x2 + noise
+    });
+    if case["formula_classify"] == true {
+        return (x, y.mapv(|v| f64::from(u8::from(v > 1.0))));
+    }
+    (x, y)
+}
+
+/// The case's test rows. For formula data they are rebuilt (rows `::7`,
+/// at most 80) rather than parsed: thresholds there are exact data values,
+/// and a JSON float parsed one ulp off would cross them.
+fn test_rows(case: &Value, x: &Array2<f64>) -> Array2<f64> {
+    if case["formula_rows"].is_null() {
+        return array2_with_nan(&case["X_test"]);
+    }
+    let rows: Vec<usize> = (0..x.nrows()).step_by(7).take(80).collect();
+    x.select(ndarray::Axis(0), &rows)
+}
+
+type Validation = (Array2<f64>, Array1<f64>, Option<Array1<f64>>);
+
+/// The explicit validation set of a case, if any.
+fn validation_data(case: &Value) -> Option<Validation> {
+    case.get("X_val").map(|xv| {
+        let wv = (!case["sample_weight_val"].is_null())
+            .then(|| json_to_array1(&case["sample_weight_val"]));
+        (array2_with_nan(xv), json_to_array1(&case["y_val"]), wv)
+    })
 }
 
 /// Compare `n_iter_` and the score curves of an early-stopping case.
@@ -161,14 +218,18 @@ fn regressor_losses_match_sklearn() {
             continue;
         }
         let name = case["name"].as_str().unwrap();
-        let x = array2_with_nan(&case["X"]);
-        let y = json_to_array1(&case["y"]);
+        let (x, y) = training_data(&case);
         let sw: Option<Array1<f64>> =
             (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
         let expected = json_to_array1(&case["predictions"]);
-        let fitted = model(&case["params"])
-            .fit_weighted(&x, &y, sw.as_ref())
-            .unwrap();
+        let m = model(&case["params"]);
+        let w = sw.as_ref().map(|w| w.view());
+        let fitted = match validation_data(&case) {
+            Some((xv, yv, wv)) => m
+                .fit_with_validation(&x, &y, w, &xv, &yv, wv.as_ref().map(|w| w.view()))
+                .unwrap(),
+            None => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
+        };
         if let Some(msg) = check_scores(
             &case,
             fitted.n_iter(),
@@ -177,7 +238,7 @@ fn regressor_losses_match_sklearn() {
         ) {
             failures.push(format!("{name}: {msg}"));
         }
-        let x_test = array2_with_nan(&case["X_test"]);
+        let x_test = test_rows(&case, &x);
         if let Some(stages) = case["staged"].as_array() {
             let ours: Vec<Array1<f64>> = fitted.staged_predict(&x_test).unwrap().collect();
             let w = if ours.len() == stages.len() {
@@ -236,13 +297,14 @@ fn classifier_matches_sklearn() {
         });
         let sw: Option<Array1<f64>> =
             (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
-        let fitted = model
-            .fit_weighted(
-                &array2_with_nan(&case["X"]),
-                &json_to_array1(&case["y"]),
-                sw.as_ref(),
-            )
-            .unwrap();
+        let (x, y) = training_data(&case);
+        let w = sw.as_ref().map(|w| w.view());
+        let fitted = match validation_data(&case) {
+            Some((xv, yv, wv)) => model
+                .fit_with_validation(&x, &y, w, &xv, &yv, wv.as_ref().map(|w| w.view()))
+                .unwrap(),
+            None => model.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
+        };
         if let Some(msg) = check_scores(
             &case,
             fitted.n_iter(),
@@ -251,7 +313,7 @@ fn classifier_matches_sklearn() {
         ) {
             failures.push(format!("{name}: {msg}"));
         }
-        let x_test = array2_with_nan(&case["X_test"]);
+        let x_test = test_rows(&case, &x);
         if let Some(stages) = case["staged"].as_array() {
             let ours: Vec<Array2<f64>> = fitted.staged_predict_proba(&x_test).unwrap().collect();
             let w = if ours.len() == stages.len() {

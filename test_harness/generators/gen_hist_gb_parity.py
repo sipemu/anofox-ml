@@ -57,6 +57,7 @@ def generate():
     out += constraint_cases()
     out += early_stopping_cases()
     out += max_features_and_class_weight_cases()
+    out += scoring_and_validation_cases()
     return out
 
 
@@ -242,6 +243,89 @@ def max_features_and_class_weight_cases():
         if params.get("early_stopping") is True:
             case.update(n_iter=int(m.n_iter_), train_score=m.train_score_.tolist(),
                         validation_score=m.validation_score_.tolist())
+        out.append(case)
+    return out
+
+
+def formula_data(n):
+    """Data both sides rebuild from integers (no transcendental functions,
+    so the floats agree bit for bit)."""
+    i = np.arange(n)
+    x0 = ((i * 37) % 1000) / 100.0
+    x1 = ((i * 91) % 713) / 71.3
+    x2 = ((i * 13) % 7).astype(float)
+    noise = ((i * 7919) % 200) / 100.0 - 1.0
+    y = 0.5 * x0 - 0.05 * x0 * x0 + 0.3 * x1 - 0.2 * x2 + noise
+    return np.column_stack([x0, x1, x2]), y
+
+
+def scoring_and_validation_cases():
+    """scoring other than "loss" (on sklearn's small trainset above 10 000
+    rows) and explicit X_val / y_val."""
+    rng = np.random.default_rng(1274)
+    n = 400
+    X = rng.normal(size=(n, 3))
+    eta = np.sin(2 * X[:, 0]) + 0.6 * X[:, 1]
+    y_reg = eta + rng.normal(scale=0.5, size=n)
+    y_bin = (eta + rng.logistic(size=n) > 0).astype(float)
+    y_multi = np.digitize(eta + rng.logistic(size=n) * 0.5, [-0.5, 0.7]).astype(float)
+    weights = rng.uniform(0.2, 3.0, size=n)
+    Xv = rng.normal(size=(120, 3))
+    eta_v = np.sin(2 * Xv[:, 0]) + 0.6 * Xv[:, 1]
+    yv_reg = eta_v + rng.normal(scale=0.5, size=120)
+    yv_multi = np.digitize(eta_v + rng.logistic(size=120) * 0.5, [-0.5, 0.7]).astype(float)
+    wv = rng.uniform(0.2, 3.0, size=120)
+    base = dict(max_iter=200, learning_rate=0.3, max_leaf_nodes=8, min_samples_leaf=10,
+                early_stopping=True, n_iter_no_change=5, random_state=13)
+    cases = [
+        ("score_default_regressor", "regressor", X, y_reg, None, dict(scoring=None), None),
+        ("score_neg_mse_weighted", "regressor", X, y_reg, weights,
+         dict(scoring="neg_mean_squared_error"), None),
+        ("score_neg_mae_train", "regressor", X, y_reg, None,
+         dict(scoring="neg_mean_absolute_error", validation_fraction=None, tol=1e-4), None),
+        ("score_r2_poisson", "regressor", X, np.exp(0.3 * y_reg), None,
+         dict(scoring="r2", loss="gamma"), None),
+        ("score_accuracy_binary", "classifier", X, y_bin, None, dict(scoring="accuracy"), None),
+        ("score_log_loss_multiclass", "classifier", X, y_multi, weights,
+         dict(scoring="neg_log_loss"), None),
+        ("score_default_multiclass", "classifier", X, y_multi, None, dict(scoring=None), None),
+        ("x_val_regressor", "regressor", X, y_reg, weights, dict(), (Xv, yv_reg, wv)),
+        ("x_val_classifier_scored", "classifier", X, y_multi, None,
+         dict(scoring="neg_log_loss"), (Xv, yv_multi, None)),
+    ]
+    Xb, yb = formula_data(11500)
+    cases += [
+        ("score_small_trainset_regressor", "regressor", Xb, yb, None,
+         dict(scoring="r2", max_iter=60, early_stopping="auto"), "formula"),
+        ("score_small_trainset_classifier", "classifier", Xb, (yb > 1.0).astype(float), None,
+         dict(scoring="accuracy", max_iter=60, early_stopping="auto"), "formula"),
+    ]
+    out = []
+    for name, kind, Xc, y, sw, extra, val in cases:
+        params = dict(base, **extra)
+        cls = HistGradientBoostingRegressor if kind == "regressor" else HistGradientBoostingClassifier
+        m = cls(**params)
+        fit_kw = {}
+        if isinstance(val, tuple):
+            fit_kw = dict(X_val=val[0], y_val=val[1], sample_weight_val=val[2])
+        m.fit(Xc, y, sample_weight=sw, **fit_kw)
+        Xt = Xc[::7][:80]
+        pred = m.predict(Xt) if kind == "regressor" else m.predict_proba(Xt)
+        case = {"name": name, "kind": kind, "params": params,
+                "sample_weight": None if sw is None else sw.tolist(),
+                "X_test": nulls(Xt), "predictions": pred.tolist(),
+                "n_iter": int(m.n_iter_), "train_score": m.train_score_.tolist(),
+                "validation_score": m.validation_score_.tolist()}
+        if val == "formula":
+            case["formula_rows"] = len(y)
+            case["formula_classify"] = kind == "classifier"
+        else:
+            case["X"] = nulls(Xc)
+            case["y"] = y.tolist()
+        if isinstance(val, tuple):
+            case["X_val"] = nulls(val[0])
+            case["y_val"] = val[1].tolist()
+            case["sample_weight_val"] = None if val[2] is None else val[2].tolist()
         out.append(case)
     return out
 

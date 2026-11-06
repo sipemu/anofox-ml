@@ -471,8 +471,20 @@ def test_hist_gradient_boosting_early_stopping_matches_sklearn():
     np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
     off = am.HistGradientBoostingRegressor(max_iter=20).fit(X, y)
     assert off.n_iter_ == 20 and off.train_score_.size == 0
+    for scoring in (None, "r2", "neg_mean_squared_error"):
+        ours = am.HistGradientBoostingRegressor(scoring=scoring, random_state=2, **kw).fit(X, y)
+        ref = SkR(scoring=scoring, random_state=2, **kw).fit(X, y)
+        assert ours.n_iter_ == ref.n_iter_
+        np.testing.assert_allclose(ours.validation_score_, ref.validation_score_, rtol=1e-10)
+    for scoring in (None, "neg_log_loss"):
+        ours = am.HistGradientBoostingClassifier(scoring=scoring, random_state=6, **kw).fit(X, yc)
+        ref = SkC(scoring=scoring, random_state=6, **kw).fit(X, yc)
+        assert ours.n_iter_ == ref.n_iter_
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
     with pytest.raises(ValueError):
-        am.HistGradientBoostingRegressor(scoring="r2", early_stopping=True).fit(X, y)
+        am.HistGradientBoostingRegressor(scoring="accuracy", early_stopping=True).fit(X, y)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(scoring="roc_auc", early_stopping=True).fit(X, y)
 
 
 def test_hist_gradient_boosting_max_features_class_weight_match_sklearn():

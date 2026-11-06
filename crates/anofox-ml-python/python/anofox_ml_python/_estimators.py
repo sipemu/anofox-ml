@@ -335,8 +335,10 @@ def _interaction_cst(interaction_cst):
 
 def _early_stopping_params(est):
     """sklearn's early-stopping parameters of a HistGradientBoosting model."""
-    if est.scoring != "loss":
-        raise ValueError("only scoring='loss' is supported for early stopping")
+    scorings = {"loss": "Loss", "r2": "R2", "neg_mean_squared_error": "NegMeanSquaredError",
+                "neg_mean_absolute_error": "NegMeanAbsoluteError", "accuracy": "Accuracy",
+                "neg_log_loss": "NegLogLoss"}
+    scoring = "Default" if est.scoring is None else _choice(est.scoring, scorings, "scoring")
     vf = est.validation_fraction
     if vf is None:
         validation = None
@@ -352,7 +354,7 @@ def _early_stopping_params(est):
                                       "early_stopping"),
             "validation_fraction": validation,
             "n_iter_no_change": int(est.n_iter_no_change), "tol": float(est.tol),
-            "random_state": 0 if rs is None else int(rs)}
+            "random_state": 0 if rs is None else int(rs), "scoring": scoring}
 
 
 class _HistGradientBoosting(BaseEstimator):

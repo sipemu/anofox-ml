@@ -344,6 +344,42 @@ pub fn stratified_train_test_split_indices(
     Ok((train, test))
 }
 
+/// sklearn's `resample(np.arange(n), n_samples, replace=False,
+/// random_state=seed, stratify=labels)`: row indices in sklearn's order.
+/// `labels` are class indices `0..n_classes`.
+pub fn resample_without_replacement(
+    n: usize,
+    n_samples: usize,
+    seed: u32,
+    stratify: Option<&[usize]>,
+) -> Result<Vec<usize>> {
+    if n_samples > n {
+        return Err(RustMlError::InvalidParameter(format!(
+            "cannot sample {n_samples} out of {n} rows without replacement"
+        )));
+    }
+    let mut rng = RandomState::new(seed);
+    let Some(labels) = stratify else {
+        let mut idx: Vec<usize> = (0..n).collect();
+        rng.shuffle(&mut idx);
+        idx.truncate(n_samples);
+        return Ok(idx);
+    };
+    let n_classes = labels.iter().max().map_or(0, |&m| m + 1);
+    let mut class_indices: Vec<Vec<usize>> = vec![Vec::new(); n_classes];
+    for (i, &l) in labels.iter().enumerate() {
+        class_indices[l].push(i);
+    }
+    let counts: Vec<usize> = class_indices.iter().map(Vec::len).collect();
+    let n_i = approximate_mode(&counts, n_samples, &mut rng);
+    let mut idx = Vec::with_capacity(n_samples);
+    for (members, &k) in class_indices.iter().zip(&n_i) {
+        idx.extend(rng.choice_without_replacement(members, k));
+    }
+    rng.shuffle(&mut idx);
+    Ok(idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +425,22 @@ mod tests {
         };
         assert_eq!(set(10, 4), vec![4, 7, 8, 9]);
         assert_eq!(set(7, 3), vec![1, 2, 6]);
+    }
+
+    #[test]
+    fn resample_matches_sklearn() {
+        // sklearn 1.8 resample(np.arange(30), n_samples, replace=False,
+        // random_state=17[, stratify=[0]*12 + [1]*10 + [2]*8]).
+        assert_eq!(
+            resample_without_replacement(30, 8, 17, None).unwrap(),
+            vec![0, 18, 21, 11, 5, 23, 27, 19]
+        );
+        let labels: Vec<usize> = [vec![0; 12], vec![1; 10], vec![2; 8]].concat();
+        assert_eq!(
+            resample_without_replacement(30, 11, 17, Some(&labels)).unwrap(),
+            vec![18, 16, 25, 8, 2, 3, 24, 12, 11, 26, 21]
+        );
+        assert!(resample_without_replacement(5, 6, 0, None).is_err());
     }
 
     #[test]
