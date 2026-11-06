@@ -236,6 +236,24 @@ def generate():
     add("perm_ordered_mc", "classifier", dict(mc_ordered, **perm), X, y_mc.astype(float))
     add("perm_plain_rmse", "regressor", dict(base, **perm), X, y_reg)
     add("perm_ordered_rmse_1200", "regressor", dict(ordered, iterations=15, **perm), big, y_big)
+
+    # Score noise (`random_strength`, CatBoost's default 1): normal noise on
+    # every split's score from a generator per candidate, and on every
+    # candidate's best score from the main one.
+    noise = dict(perm, random_strength=1.0)
+    add("noise_rmse", "regressor", dict(base, **noise), X, y_reg)
+    add("noise_rmse_half", "regressor", dict(base, **dict(noise, random_strength=0.5)), X, y_reg)
+    add("noise_logloss", "classifier", dict(base, **noise), X, y_bin)
+    add("noise_ordered_rmse", "regressor", dict(ordered, **noise), X, y_reg)
+    add("noise_mc", "classifier", dict(mc, **noise), X, y_mc.astype(float))
+    add_cat("noise_cat_logloss", dict(cat, **noise), y_cat)
+    add_cat("noise_ordered_cat", dict(cat, boosting_type="Ordered", **noise), y_cat)
+    add_cat("noise_combo", dict(combo, **noise), y_cat)
+    add_cat("noise_combo_ordered", dict(combo, boosting_type="Ordered", **noise), y_cat)
+    add_cat("noise_combo_mc", dict(combo, loss_function="MultiClass", depth=6, **noise), y_cat_mc)
+    add_cat("noise_combo_seed11", dict(combo, depth=6, random_seed=11, **noise), y_cat_reg,
+            kind="regressor")
+    add_cat("noise_leaf10_combo", dict(combo, leaf_estimation_iterations=10, **noise), y_cat)
     return out
 
 

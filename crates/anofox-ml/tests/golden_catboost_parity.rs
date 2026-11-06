@@ -84,6 +84,7 @@ macro_rules! configure {
         }
         // The generator's common settings (not stored) include `has_time`.
         m = m.with_has_time(p["has_time"].as_bool().unwrap_or(true));
+        m = m.with_random_strength(p["random_strength"].as_f64().unwrap_or(0.0));
         if let Some(n) = p["random_seed"].as_u64() {
             m = m.with_random_seed(n);
         }

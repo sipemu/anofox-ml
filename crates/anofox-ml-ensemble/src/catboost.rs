@@ -11,11 +11,11 @@
 //! per class, with CatBoost's full-Hessian Newton step). Categorical
 //! features are split one-hot or through ordered target statistics (CTRs)
 //! of single features and of feature combinations. With CatBoost's
-//! score noise and bootstrap switched off (`random_strength=0`,
-//! `bootstrap_type='No'`) the models agree with CatBoost's, permutations
-//! included: CatBoost's generator (`random_seed`) is reproduced draw for draw,
-//! from the initial shuffle of the rows and the folds' permutations to the
-//! fold picked per tree.
+//! bootstrap switched off (`bootstrap_type='No'`) the models agree with
+//! CatBoost's, permutations and score noise (`random_strength`) included:
+//! CatBoost's generator (`random_seed`) is reproduced draw for draw, from the
+//! initial shuffle of the rows and the folds' permutations to the fold picked
+//! per tree and the noise of every split's score.
 //!
 //! Leaves take CatBoost's default number of Newton (or Gradient) steps,
 //! with its backtracking: a step is halved until the objective improves,
@@ -300,6 +300,13 @@ impl CatRng {
         let seed2 = seeder.next64();
         let seq2 = seeder.next();
         Self::from_parts(seed1, seq1, seed2, seq2)
+    }
+
+    /// Skip `n` draws (`Advance`).
+    fn advance(&mut self, n: usize) {
+        for _ in 0..n {
+            self.gen();
+        }
     }
 
     fn gen(&mut self) -> u64 {
@@ -996,6 +1003,8 @@ struct TrainParams {
     backtracking: bool,
     /// Keep the rows' order (no permutations).
     has_time: bool,
+    /// The scale of the split scores' noise (float32, as in CatBoost).
+    random_strength: f64,
     permutation_count: usize,
 }
 
@@ -1079,6 +1088,8 @@ struct Quantized {
     /// CatBoost's random draws per tree level for the float and one-hot
     /// features: (`rsm` draws, score instances).
     draws: (usize, usize),
+    /// The categorical features (sorted), for per-type feature indices.
+    cat_features: Vec<usize>,
 }
 
 /// A categorical feature with CTRs: every row's category id (in the order
@@ -1330,6 +1341,7 @@ fn quantize(
         borders,
         ctr: None,
         draws,
+        cat_features: cat_features.clone(),
     };
     if !ctr_features.is_empty() {
         let (classes, n_classes) = cat.classes.ok_or_else(|| {
@@ -1483,15 +1495,15 @@ fn combination_columns(
             ColumnSplit::Ctr { table, .. } => seen.push(table.projection.clone()),
         }
     }
-    conditions.floats.sort_unstable();
-    conditions.one_hots.sort_unstable();
+    // The conditions keep the tree's order (`GetBinFeatures`), and the
+    // bases are visited in the order of CatBoost's `THashSet`.
     seen.insert(0, conditions);
-    let mut bases: Vec<&Projection> = Vec::new();
-    for base in seen.iter().filter(|p| !p.is_empty()) {
-        if !bases.contains(&base) {
-            bases.push(base);
-        }
+    let mut set = YHashSet::default();
+    for base in seen {
+        let hash = q.projection_hash(&base);
+        set.insert(base, hash);
     }
+    let bases: Vec<&Projection> = set.iter().filter(|p| !p.is_empty()).collect();
     let draws = bases.len() * src.features.len();
     if src.max_complexity < 2 {
         return (Vec::new(), draws);
@@ -1523,6 +1535,180 @@ fn combination_columns(
     (columns, draws)
 }
 
+/// `IntHash` of Yandex `util` (Thomas Wang's 64-bit mix).
+fn int_hash64(mut key: u64) -> u64 {
+    key = key.wrapping_add(!(key << 32));
+    key ^= key >> 22;
+    key = key.wrapping_add(!(key << 13));
+    key ^= key >> 8;
+    key = key.wrapping_add(key << 3);
+    key ^= key >> 15;
+    key = key.wrapping_add(!(key << 27));
+    key ^= key >> 31;
+    key
+}
+
+/// CatBoost's `TVecHash`: `984121 · h + item` in 32 bits from 1988712,
+/// returned as an `int` (hashed as `size_t`, so sign-extended).
+fn vec_hash(items: impl Iterator<Item = u64>) -> u64 {
+    let mut res: u32 = 1988712;
+    for h in items {
+        res = u64::from(984121u32.wrapping_mul(res)).wrapping_add(h) as u32;
+    }
+    res as i32 as i64 as u64
+}
+
+impl Quantized {
+    /// CatBoost's `TProjection::GetHash`: `MultiHash` of the `TVecHash`es
+    /// of its categorical features, its `TBinFeature`s (float index, border
+    /// index) and its `TOneHotSplit`s (categorical index, category index),
+    /// all by per-type feature index.
+    fn projection_hash(&self, p: &Projection) -> u64 {
+        let float_index =
+            |f: usize| (0..f).filter(|g| !self.cat_features.contains(g)).count() as u64;
+        let cat_index = |f: usize| self.cat_features.iter().filter(|&&g| g < f).count() as u64;
+        let cats = vec_hash(p.cats.iter().map(|&f| cat_index(f)));
+        let bins = vec_hash(p.floats.iter().map(|&(f, bits)| {
+            let s = self.borders[f]
+                .iter()
+                .position(|b| b.to_bits() == bits)
+                .unwrap_or(0);
+            int_hash64(s as u64) ^ float_index(f)
+        }));
+        if p.one_hots.is_empty() {
+            return int_hash64(bins) ^ cats;
+        }
+        let one_hots = vec_hash(p.one_hots.iter().map(|&(f, v)| {
+            let s = self
+                .columns
+                .iter()
+                .find_map(|c| match &c.split {
+                    ColumnSplit::OneHot { feature, values } if *feature == f => {
+                        values.iter().position(|&x| x == v)
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
+            int_hash64(s as u64) ^ cat_index(f)
+        }));
+        int_hash64(int_hash64(one_hots) ^ bins) ^ cats
+    }
+}
+
+/// The iteration order of Yandex `util`'s `THashSet` (`THashTable`): prime
+/// bucket counts, a node inserted at the head of its bucket, a rehash
+/// before an insertion would exceed the bucket count, buckets visited in
+/// order.
+#[derive(Default)]
+struct YHashSet {
+    items: Vec<Projection>,
+    /// Per bucket: item indices, head first (one static bucket at first).
+    buckets: Vec<Vec<(usize, u64)>>,
+}
+
+impl YHashSet {
+    const PRIMES: [usize; 12] = [7, 17, 29, 53, 97, 193, 389, 769, 1543, 3079, 6151, 12289];
+
+    fn insert(&mut self, item: Projection, hash: u64) {
+        if self.buckets.is_empty() {
+            self.buckets.push(Vec::new());
+        }
+        // `reserve(num_elements + 1)`.
+        let (old, hint) = (self.buckets.len(), self.items.len() + 1);
+        if hint + 1 > old && !(old != 1 && hint <= old) {
+            let size = *Self::PRIMES
+                .iter()
+                .find(|&&p| p >= hint + 1)
+                .unwrap_or(&12289);
+            if size > old {
+                let mut buckets = vec![Vec::new(); size];
+                for chain in std::mem::take(&mut self.buckets) {
+                    for node in chain {
+                        buckets[(node.1 % size as u64) as usize].insert(0, node);
+                    }
+                }
+                self.buckets = buckets;
+            }
+        }
+        let n = self.buckets.len() as u64;
+        let bucket = if n == 1 { 0 } else { (hash % n) as usize };
+        if self.buckets[bucket]
+            .iter()
+            .any(|&(i, _)| self.items[i] == item)
+        {
+            return;
+        }
+        self.items.push(item);
+        self.buckets[bucket].insert(0, (self.items.len() - 1, hash));
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Projection> {
+        self.buckets.iter().flatten().map(|&(i, _)| &self.items[i])
+    }
+}
+
+/// CatBoost's candidate list of a level (after `CompressCandidates`): one
+/// entry per non-binary float or one-hot feature, per pack of eight binary
+/// features (`TPackedBinaryFeaturesData`: one-border floats, then
+/// two-valued categoricals, packed whether candidates or not), per simple
+/// CTR feature and per tree CTR projection. An entry holds its candidates,
+/// each the (column, split) bins it chooses its best from.
+fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(usize, usize)>>> {
+    let mut single = Vec::new();
+    let mut packed: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut packed_cats: Vec<(usize, Option<(usize, usize)>)> = Vec::new();
+    let mut ctr_groups: Vec<(Projection, Vec<(usize, usize)>)> = Vec::new();
+    for (c, cand) in candidates.iter().enumerate() {
+        let column = cand.get(q);
+        match &column.split {
+            ColumnSplit::Float { borders, .. } if borders.len() == 1 => packed.push(Some((c, 0))),
+            ColumnSplit::Float { borders, .. } => {
+                single.push(vec![(0..borders.len()).map(|s| (c, s)).collect()]);
+            }
+            // A two-valued categorical's bit is its second category.
+            ColumnSplit::OneHot { feature, values } if values.len() == 2 => {
+                packed_cats.push((*feature, Some((c, 1))));
+            }
+            ColumnSplit::OneHot { values, .. } => {
+                single.push(vec![(0..values.len()).map(|s| (c, s)).collect()]);
+            }
+            ColumnSplit::Ctr { table, .. } => {
+                match ctr_groups.iter_mut().find(|(p, _)| *p == table.projection) {
+                    Some((_, group)) => group.push((c, 0)),
+                    None => ctr_groups.push((table.projection.clone(), vec![(c, 0)])),
+                }
+            }
+        }
+    }
+    // Two-valued categoricals with CTRs take a bit too, as no candidate.
+    if let Some(src) = &q.ctr {
+        for cat in src.features.iter().filter(|c| c.values.len() == 2) {
+            packed_cats.push((cat.feature, None));
+        }
+    }
+    packed_cats.sort_by_key(|&(f, _)| f);
+    packed.extend(packed_cats.into_iter().map(|(_, c)| c));
+    let mut entries = single;
+    for pack in packed.chunks(8) {
+        let bins: Vec<(usize, usize)> = pack.iter().flatten().copied().collect();
+        if !bins.is_empty() {
+            entries.push(vec![bins]);
+        }
+    }
+    for (_, group) in ctr_groups {
+        entries.push(
+            group
+                .into_iter()
+                .map(|(c, _)| {
+                    let n_splits = candidates[c].get(q).n_buckets - 1;
+                    (0..n_splits).map(|s| (c, s)).collect()
+                })
+                .collect(),
+        );
+    }
+    entries
+}
+
 /// Grow one oblivious tree on the weighted first derivatives of the
 /// `parts` (`k` approximations per row) and the weights `w`; returns the
 /// splits as (column, split index) and every row's leaf. The scores of the
@@ -1540,9 +1726,11 @@ fn grow_tree(
     used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
     cache: &mut CombinationCache,
     rng: &mut CatRng,
+    score_std: f64,
 ) -> (Vec<(ColumnRef, usize)>, Vec<u32>) {
     use rayon::prelude::*;
     let n = w.len();
+    let mut score_before_split = 0.0;
     let mut splits: Vec<(ColumnRef, usize)> = Vec::new();
     let mut leaf_of = vec![0u32; n];
     for d in 0..depth {
@@ -1557,21 +1745,13 @@ fn grow_tree(
             )
             .collect();
         // CatBoost's draws of this level, in its order: `rsm` per feature,
-        // per simple CTR feature and per tree CTR, a seed, then one score
-        // instance per candidate (with `random_strength = 0` they leave the
-        // scores as they are).
+        // per simple CTR feature and per tree CTR, then the seed of the
+        // candidates' score noise.
         let n_ctr_features = q.ctr.as_ref().map_or(0, |c| c.features.len());
         for _ in 0..q.draws.0 + n_ctr_features + tree_ctr_draws {
             rng.real1();
         }
-        rng.gen();
-        let ctr_candidates = candidates
-            .iter()
-            .filter(|c| c.get(q).ctr_key.is_some())
-            .count();
-        for _ in 0..q.draws.1 + ctr_candidates {
-            rng.std_normal();
-        }
+        let noise_seed = rng.gen();
         // CatBoost's `GetCatFeatureWeight`: a CTR type not yet in the model
         // scores `(1 + combinations / max combinations)^-model_size_reg`
         // times less, the maximum over this level's CTR candidates.
@@ -1581,8 +1761,8 @@ fn grow_tree(
             .max()
             .unwrap_or(1)
             .max(1);
-        // Best (score, split) per column, the first best split winning.
-        let per_column: Vec<Option<(f64, usize)>> = candidates
+        // The score of every split of every column.
+        let per_column: Vec<Option<Vec<f64>>> = candidates
             .par_iter()
             .map(|c| {
                 let column = c.get(q);
@@ -1659,36 +1839,65 @@ fn grow_tree(
                         }
                     }
                 }
-                let score = |s: usize| match score_function {
-                    CatBoostScoreFunction::Cosine => num[s] / den[s].sqrt(),
-                    CatBoostScoreFunction::L2 => num[s],
-                };
-                let mut best: Option<(f64, usize)> = None;
-                for s in 0..n_splits {
-                    let sc = score(s);
-                    if best.is_none_or(|(b, _)| sc > b) {
-                        best = Some((sc, s));
-                    }
-                }
-                best
+                Some(
+                    (0..n_splits)
+                        .map(|s| match score_function {
+                            CatBoostScoreFunction::Cosine => num[s] / den[s].sqrt(),
+                            CatBoostScoreFunction::L2 => num[s],
+                        })
+                        .collect(),
+                )
             })
             .collect();
+        // CatBoost's candidate list: the non-binary float and one-hot
+        // features, the packs of binary ones, the simple CTRs per feature,
+        // then the tree CTRs per projection. Each entry draws the noise of
+        // its splits from its own generator (`SetBestScore`), each
+        // candidate a noisy instance of its best score from the main one
+        // (`SelectBestCandidate`).
+        let entries = candidate_entries(q, &candidates);
         let mut best: Option<(f64, usize, usize)> = None;
-        for (c, cand) in per_column.into_iter().enumerate() {
-            if let Some((mut sc, s)) = cand {
-                if let Some((key, k)) = &candidates[c].get(q).ctr_key {
-                    if !used_ctrs.contains(key) {
-                        sc *= (1.0 + *k as f64 / max_categories as f64).powf(-model_size_reg);
+        let mut best_gain = f64::NEG_INFINITY;
+        let mut best_score = f64::MIN;
+        for (t, entry) in entries.iter().enumerate() {
+            let mut local = CatRng::new(noise_seed.wrapping_add(t as u64));
+            local.advance(10);
+            for bins in entry {
+                let mut val = f64::MIN;
+                let mut chosen: Option<(usize, usize)> = None;
+                let mut best_instance = f64::MIN;
+                for &(c, s) in bins {
+                    let Some(scores) = &per_column[c] else {
+                        continue;
+                    };
+                    let instance = scores[s] + local.std_normal() * score_std;
+                    if instance > best_instance {
+                        best_instance = instance;
+                        val = scores[s];
+                        chosen = Some((c, s));
                     }
                 }
-                if best.is_none_or(|(b, _, _)| sc > b) {
-                    best = Some((sc, c, s));
+                let mut score = val + rng.std_normal() * score_std;
+                let Some((c, s)) = chosen else {
+                    continue;
+                };
+                if let Some((key, k)) = &candidates[c].get(q).ctr_key {
+                    if !used_ctrs.contains(key) {
+                        score *= (1.0 + *k as f64 / max_categories as f64).powf(-model_size_reg);
+                    }
+                }
+                let gain = score - score_before_split;
+                if gain > best_gain {
+                    best_gain = gain;
+                    best_score = score;
+                    best = Some((score, c, s));
                 }
             }
         }
         let Some((_, c, s)) = best else {
             break;
         };
+        score_before_split = best_score;
         let chosen = candidates[c].clone();
         let column = chosen.get(q);
         for i in 0..n {
@@ -1972,6 +2181,7 @@ impl Quantized {
             borders: self.borders.clone(),
             ctr,
             draws: self.draws,
+            cat_features: self.cat_features.clone(),
         };
         std::mem::swap(&mut q.columns, &mut columns);
         if let Some(src) = &q.ctr {
@@ -2023,6 +2233,41 @@ impl Quantized {
             })
             .collect()
     }
+}
+
+/// The scale of the score noise of a tree (CatBoost's `CalcScoreStDev`
+/// with `NormalWithModelSizeDecrease`): `random_strength` times the root
+/// mean square of the weighted derivatives (ordered boosting: of the tail
+/// rows of every prefix) times `m / (1 + m)` with `m = exp(ln n - model
+/// length)`, the model length being `iteration · learning_rate`.
+fn score_std(
+    ders: &[Ders],
+    tails: &[(usize, usize, f64)],
+    ordered: bool,
+    n: usize,
+    iteration: usize,
+    p: &TrainParams,
+) -> f64 {
+    if p.random_strength == 0.0 {
+        return 0.0;
+    }
+    let (mut sum2, mut count) = (0.0, 0usize);
+    for (d, &(body, tail, _)) in ders.iter().zip(tails) {
+        let from = if ordered { body } else { 0 };
+        let k = d.k;
+        for dim in 0..k {
+            // `L2NormSquared`: blocks of 10000 rows.
+            let rows: Vec<f64> = (from..tail).map(|i| d.der[i * k + dim]).collect();
+            for block in rows.chunks(10000) {
+                sum2 += block.iter().map(|v| v * v).sum::<f64>();
+            }
+        }
+        count += tail - from;
+    }
+    let std = (sum2 / count as f64).sqrt();
+    let model_length = iteration as f64 * p.learning_rate;
+    let left = ((n as f64).ln() - model_length).exp();
+    p.random_strength * std * (left / (1.0 + left))
 }
 
 /// Move a learning fold by the tree with the leaves `leaf_of` (CatBoost's
@@ -2177,7 +2422,7 @@ fn boost(
     let mut trees = Vec::with_capacity(p.iterations);
     let mut used_ctrs = std::collections::HashSet::new();
     let mut ctrs = CtrModel::default();
-    for _ in 0..p.iterations {
+    for iteration in 0..p.iterations {
         let taken = (rng.gen() % n_folds as u64) as usize;
         rng.gen(); // the derivatives' seeds
         let fold = &mut folds[taken];
@@ -2210,6 +2455,7 @@ fn boost(
             &mut used_ctrs,
             &mut fold.cache,
             &mut rng,
+            score_std(&ders, &fold.tails, p.ordered, n, iteration, &p),
         );
         rng.gen(); // the folds' seeds
         let n_leaves = 1usize << splits.len();
@@ -2459,6 +2705,11 @@ macro_rules! catboost_config {
             pub permutation_count: usize,
             /// The seed of CatBoost's generator (`random_seed`, default 0).
             pub random_seed: u64,
+            /// The noise of the split scores (CatBoost's `random_strength`,
+            /// default 1; `NormalWithModelSizeDecrease`): normal with the
+            /// root mean square of the derivatives times this, fading with
+            /// the model's length.
+            pub random_strength: f64,
         }
 
         impl Default for $name {
@@ -2483,6 +2734,7 @@ macro_rules! catboost_config {
                     has_time: false,
                     permutation_count: 4,
                     random_seed: 0,
+                    random_strength: 1.0,
                 }
             }
         }
@@ -2568,6 +2820,10 @@ macro_rules! catboost_config {
                 self.permutation_count = n;
                 self
             }
+            pub fn with_random_strength(mut self, r: f64) -> Self {
+                self.random_strength = r;
+                self
+            }
             pub fn with_random_seed(mut self, seed: u64) -> Self {
                 self.random_seed = seed;
                 self
@@ -2623,6 +2879,7 @@ macro_rules! catboost_config {
                     backtracking: self.leaf_estimation_backtracking
                         == CatBoostBacktracking::AnyImprovement,
                     has_time: self.has_time,
+                    random_strength: f64::from(self.random_strength as f32),
                     permutation_count: self.permutation_count,
                 }
             }

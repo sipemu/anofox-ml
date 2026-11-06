@@ -6,6 +6,28 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: score noise (#127 §5)
+
+- `random_strength` (CatBoost's default 1, `NormalWithModelSizeDecrease`) on
+  `CatBoostRegressor` / `CatBoostClassifier`. The noise scale is the root
+  mean square of the weighted derivatives times `m / (1 + m)`, with
+  `m = exp(ln n − iteration · lr)`. Every split's score gets normal noise
+  from a generator per candidate entry (`SetBestScore`: seeded with the
+  level's seed plus the entry's index, advanced by 10), and every
+  candidate's best score gets noise again from the main generator
+  (`SelectBestCandidate`, comparing gains over the previous level's score).
+- To get the seeds right, the candidate list now follows CatBoost's layout:
+  non-binary float and one-hot features, packs of eight binary features
+  (one-border floats and two-valued categoricals), simple CTRs per
+  feature, then tree CTRs per projection. The projections are visited in
+  the iteration order of Yandex's `THashSet`, emulated with
+  `TProjection::GetHash`, prime bucket counts and head insertion.
+  Projections keep their conditions in tree order, as CatBoost's do.
+- Matches catboost 1.2.10 to 7e-16 on 12 golden cases (RMSE, Logloss and
+  MultiClass, plain and ordered, CTRs and combinations, seeds, 10 leaf
+  steps). A 20k-row fit with CatBoost's defaults except bootstrap matches to
+  1.1e-15.
+
 ### CatBoost-style boosting: permutations (#127 §5)
 
 - `has_time` (now defaulting to false, as in CatBoost), `random_seed`
