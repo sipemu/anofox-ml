@@ -143,6 +143,36 @@ def generate():
     add_cat("cat_rmse_ordered_l2", dict(cat, boosting_type="Ordered", score_function="L2"),
             y_cat_reg, kind="regressor")
     add_cat("cat_rmse_weighted", cat, y_cat_reg, kind="regressor", sw=weights)
+
+    # MultiClass (more than two classes): softmax over one approximation per
+    # class, CatBoost's full Newton step and multiclass CTRs (one target
+    # border per class but the last). `leaf_estimation_iterations=1` is
+    # CatBoost's default for Newton; Gradient defaults to 10 for MultiClass.
+    y_mc = np.digitize(eta + rng.logistic(size=n) * 0.5, [-0.6, 0.4])
+    y_mc5 = np.digitize(eta + rng.logistic(size=n) * 0.5, [-1.2, -0.4, 0.3, 1.0])
+    mc = dict(base, loss_function="MultiClass")
+    add("mc_cosine", "classifier", mc, X, y_mc.astype(float))
+    add("mc_l2", "classifier", dict(mc, score_function="L2"), X, y_mc.astype(float))
+    add("mc_depth6", "classifier", dict(mc, depth=6, iterations=15), X, y_mc.astype(float))
+    add("mc_weighted", "classifier", mc, X, y_mc.astype(float), sw=weights)
+    add("mc_gradient", "classifier", dict(mc, leaf_estimation_method="Gradient",
+                                          leaf_estimation_iterations=1), X, y_mc.astype(float))
+    add("mc_l2_reg", "classifier", dict(mc, l2_leaf_reg=0.5, learning_rate=0.5), X,
+        y_mc.astype(float))
+    add("mc_5_classes", "classifier", mc, X_nan, y_mc5.astype(float))
+    add("mc_labels", "classifier", mc, X, np.array([-1.0, 3.0, 7.0])[y_mc])
+    mc_ordered = dict(mc, boosting_type="Ordered")
+    add("mc_ordered", "classifier", mc_ordered, X, y_mc.astype(float))
+    add("mc_ordered_weighted", "classifier", mc_ordered, X, y_mc.astype(float), sw=weights)
+    add("mc_ordered_gradient", "classifier", dict(mc_ordered, leaf_estimation_method="Gradient",
+                                                  leaf_estimation_iterations=1),
+        X, y_mc.astype(float))
+    y_cat_mc = np.digitize(eta * 0.5 + effect + rng.logistic(size=n) * 0.7, [-0.5, 0.5]).astype(float)
+    cat_mc = dict(cat, loss_function="MultiClass")
+    add_cat("cat_mc", cat_mc, y_cat_mc)
+    add_cat("cat_mc_no_onehot", dict(cat_mc, one_hot_max_size=1, score_function="L2"), y_cat_mc)
+    add_cat("cat_mc_weighted", cat_mc, y_cat_mc, sw=weights)
+    add_cat("cat_mc_ordered", dict(cat_mc, boosting_type="Ordered"), y_cat_mc)
     return out
 
 
