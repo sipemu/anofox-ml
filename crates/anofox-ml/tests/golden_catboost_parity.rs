@@ -6,8 +6,8 @@ mod common;
 use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
-    CatBoostBoostingType, CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor,
-    CatBoostScoreFunction,
+    CatBoostBacktracking, CatBoostBoostingType, CatBoostClassifier, CatBoostLeafEstimation,
+    CatBoostRegressor, CatBoostScoreFunction,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -81,6 +81,12 @@ macro_rules! configure {
         }
         if let Some(f) = p["fold_len_multiplier"].as_f64() {
             m = m.with_fold_len_multiplier(f);
+        }
+        if let Some(n) = p["leaf_estimation_iterations"].as_u64() {
+            m = m.with_leaf_estimation_iterations(n as usize);
+        }
+        if p["leaf_estimation_backtracking"] == "No" {
+            m = m.with_leaf_estimation_backtracking(CatBoostBacktracking::No);
         }
         if let Some(n) = p["max_ctr_complexity"].as_u64() {
             m = m.with_max_ctr_complexity(n as usize);
