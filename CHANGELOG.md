@@ -6,6 +6,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: regressor CTRs (#127 §5)
+
+- `CatBoostRegressor` now builds the `Borders` CTRs of its categorical
+  features too, on CatBoost's single MinEntropy target border
+  (`SelectBorders`: the most balanced split of the distinct targets, at
+  the float32 midpoint). Matches catboost 1.2.10 to 4e-16 (plain, ordered,
+  weighted).
+
 ### CatBoost-style boosting: ordered boosting (#127 §5)
 
 - `boosting_type = Ordered` (and `fold_len_multiplier`, default 2) on
@@ -31,8 +39,7 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   penalty (0.5) on CTRs new to the model. Matches catboost 1.2.10 to 3e-16
   (`max_ctr_complexity=1`; feature combinations are not supported).
   Python: `cat_features` with any category values (unseen ones allowed).
-  `CatBoostRegressor` takes one-hot categorical features; its CTRs (which
-  need CatBoost's target binarization) are not supported yet.
+  (`CatBoostRegressor`: see the regressor CTRs entry.)
 
 ### CatBoost-style boosting: oblivious trees (#127 §5)
 
