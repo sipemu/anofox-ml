@@ -55,6 +55,7 @@ def generate():
             })
     out += categorical_cases()
     out += constraint_cases()
+    out += early_stopping_cases()
     return out
 
 
@@ -146,6 +147,48 @@ def constraint_cases():
         out.append({"name": name, "kind": kind, "params": params, "X": nulls(X),
                     "y": y.tolist(), "sample_weight": None if sw is None else sw.tolist(),
                     "X_test": nulls(X_test), "predictions": pred.tolist()})
+    return out
+
+
+def early_stopping_cases():
+    """early_stopping=True with sklearn's validation split (float / int /
+    None validation_fraction, stratified for classifiers); n_iter_ and the
+    score curves are compared too."""
+    rng = np.random.default_rng(1272)
+    n = 500
+    X = rng.normal(size=(n, 3))
+    X[rng.choice(n, 25, replace=False), 2] = np.nan
+    eta = np.sin(2 * X[:, 0]) + 0.6 * X[:, 1]
+    weights = rng.uniform(0.2, 3.0, size=n)
+    base = dict(max_iter=200, learning_rate=0.3, max_leaf_nodes=8, min_samples_leaf=10,
+                early_stopping=True, n_iter_no_change=5, random_state=7)
+    y_reg = eta + rng.normal(scale=0.5, size=n)
+    cases = [
+        ("es_squared_error", "regressor", y_reg, None, dict()),
+        ("es_squared_error_int_fraction", "regressor", y_reg, None,
+         dict(validation_fraction=60, random_state=123)),
+        ("es_absolute_error_train_loss", "regressor", y_reg, None,
+         dict(loss="absolute_error", validation_fraction=None, tol=1e-3)),
+        ("es_poisson_weighted", "regressor", rng.poisson(np.exp(0.5 * eta)).astype(float),
+         weights, dict(loss="poisson", validation_fraction=0.2)),
+        ("es_quantile", "regressor", y_reg, None, dict(loss="quantile", quantile=0.3)),
+        ("es_binary", "classifier", (eta + rng.logistic(size=n) > 0).astype(float), None,
+         dict()),
+        ("es_multiclass_weighted", "classifier",
+         np.digitize(eta + rng.logistic(size=n) * 0.5, [-0.5, 0.7]).astype(float), weights,
+         dict(validation_fraction=0.25, random_state=99)),
+    ]
+    out = []
+    for name, kind, y, sw, extra in cases:
+        params = dict(base, **extra)
+        cls = HistGradientBoostingRegressor if kind == "regressor" else HistGradientBoostingClassifier
+        m = cls(**params).fit(X, y, sample_weight=sw)
+        pred = m.predict(X[::7]) if kind == "regressor" else m.predict_proba(X[::7])
+        out.append({"name": name, "kind": kind, "params": params, "X": nulls(X),
+                    "y": y.tolist(), "sample_weight": None if sw is None else sw.tolist(),
+                    "X_test": nulls(X[::7]), "predictions": pred.tolist(),
+                    "n_iter": int(m.n_iter_), "train_score": m.train_score_.tolist(),
+                    "validation_score": m.validation_score_.tolist()})
     return out
 
 

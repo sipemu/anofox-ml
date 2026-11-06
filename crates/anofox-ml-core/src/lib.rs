@@ -40,6 +40,7 @@ pub mod halving;
 pub mod inspection;
 pub mod labels;
 pub mod multi_output;
+pub mod numpy_random;
 pub mod optim;
 pub mod persistence;
 pub mod pipeline;

@@ -6,6 +6,31 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### HistGradientBoosting: early stopping (#127)
+
+- `with_early_stopping(EarlyStopping::{Auto, Enabled, Disabled})`
+  (sklearn's `early_stopping`; `Auto`, the default, is on above 10 000
+  samples), `with_validation_fraction(Option<TestSize>)` (fraction, count,
+  or `None` for the training loss), `with_n_iter_no_change`, `with_tol`,
+  `with_random_state`. The validation rows are split off exactly as
+  sklearn's `train_test_split` does (stratified for the classifier), the
+  scores are sklearn's negative mean losses, and sklearn's stopping rule
+  keeps every tree. Fitted models report `n_iter()`, `train_score()` and
+  `validation_score()` (sklearn's `n_iter_`, `train_score_`,
+  `validation_score_`). Python: the same parameters (`scoring="loss"`
+  only) and attributes. Matches scikit-learn 1.8.0 to rounding, iteration
+  counts and score curves included.
+- `anofox_ml_core::numpy_random`: numpy's legacy `RandomState` (MT19937,
+  `randint`, `permutation`, `shuffle`, `choice`) and sklearn's
+  `train_test_split` / stratified split on top of it, draw for draw.
+- Fix: sklearn binning on more than `max_bins` distinct values now
+  computes the `midpoint` percentiles in numpy's arithmetic. Thresholds
+  whose index lands exactly on a data point could differ from sklearn by
+  one value.
+- `Auto` early stopping changes HistGradientBoosting fits on more than
+  10 000 samples (as in sklearn); use `EarlyStopping::Disabled` for the
+  previous behaviour.
+
 ### HistGradientBoosting: monotonic and interaction constraints (#127)
 
 - `with_monotonic_cst(vec)` (sklearn's `monotonic_cst`; `1` / `-1` / `0`
