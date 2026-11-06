@@ -54,6 +54,7 @@ def generate():
                 "predictions": m.predict(X_test).tolist(),
             })
     out += categorical_cases()
+    out += constraint_cases()
     return out
 
 
@@ -98,6 +99,53 @@ def categorical_cases():
         out.append({"name": f"categorical_{name}", "kind": "classifier", "params": base,
                     "X": nulls(X), "y": y.tolist(), "sample_weight": None,
                     "X_test": nulls(X_test), "predictions": m.predict_proba(X_test).tolist()})
+    return out
+
+
+def constraint_cases():
+    """monotonic_cst and interaction_cst on 4 numeric features (NaNs in a
+    constrained one)."""
+    rng = np.random.default_rng(1271)
+    n = 400
+    X = rng.normal(size=(n, 4))
+    eta = np.sin(2 * X[:, 0]) + 0.8 * X[:, 1] - 0.5 * X[:, 2] * X[:, 3] + 0.3 * X[:, 0] * X[:, 1]
+    X[rng.choice(n, 20, replace=False), 1] = np.nan
+    X_test = X[::9]
+    weights = rng.uniform(0.2, 3.0, size=n)
+    base = dict(max_iter=20, learning_rate=0.2, max_leaf_nodes=8, min_samples_leaf=10,
+                l2_regularization=0.5, early_stopping=False)
+    y_reg = eta + rng.normal(scale=0.3, size=n)
+    y_count = rng.poisson(np.exp(0.4 * eta)).astype(float)
+    y_bin = (eta + rng.logistic(size=n) > 0).astype(float)
+    y_multi = np.digitize(eta + rng.logistic(size=n) * 0.5, [-0.5, 0.7]).astype(float)
+    mono = [1, 1, -1, 0]
+    cases = [
+        ("monotonic_squared_error", "regressor", y_reg, None, dict(monotonic_cst=mono)),
+        ("monotonic_squared_error_weighted", "regressor", y_reg, weights,
+         dict(monotonic_cst=mono)),
+        ("monotonic_poisson", "regressor", y_count, None,
+         dict(loss="poisson", monotonic_cst=mono)),
+        ("monotonic_binary", "classifier", y_bin, None, dict(monotonic_cst=mono)),
+        ("interaction_groups", "regressor", y_reg, None, dict(interaction_cst=[[0, 1], [2]])),
+        ("interaction_pairwise", "regressor", y_reg, None, dict(interaction_cst="pairwise")),
+        ("interaction_none", "regressor", y_reg, None, dict(interaction_cst="no_interactions")),
+        ("interaction_multiclass", "classifier", y_multi, None,
+         dict(interaction_cst=[[0, 1], [1, 2], [3]])),
+        ("monotonic_and_interaction", "regressor", y_reg, None,
+         dict(monotonic_cst=mono, interaction_cst=[[0, 1], [2, 3]])),
+    ]
+    out = []
+    for name, kind, y, sw, extra in cases:
+        params = dict(base, **extra)
+        if kind == "regressor":
+            m = HistGradientBoostingRegressor(**params).fit(X, y, sample_weight=sw)
+            pred = m.predict(X_test)
+        else:
+            m = HistGradientBoostingClassifier(**params).fit(X, y, sample_weight=sw)
+            pred = m.predict_proba(X_test)
+        out.append({"name": name, "kind": kind, "params": params, "X": nulls(X),
+                    "y": y.tolist(), "sample_weight": None if sw is None else sw.tolist(),
+                    "X_test": nulls(X_test), "predictions": pred.tolist()})
     return out
 
 

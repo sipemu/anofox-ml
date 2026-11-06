@@ -421,6 +421,32 @@ def test_hist_gradient_boosting_categorical_matches_sklearn():
         am.HistGradientBoostingRegressor(categorical_features=[0], max_bins=10).fit(X, y)
 
 
+def test_hist_gradient_boosting_constraints_match_sklearn():
+    from sklearn.ensemble import HistGradientBoostingClassifier as SkC
+    from sklearn.ensemble import HistGradientBoostingRegressor as SkR
+
+    rs = np.random.RandomState(8)
+    X = rs.normal(size=(300, 3))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 1] * X[:, 2] + rs.normal(scale=0.2, size=300)
+    kw = dict(max_iter=20, max_leaf_nodes=8, min_samples_leaf=10)
+    for extra in (dict(monotonic_cst=[1, 1, 0]), dict(interaction_cst=[[0], [1, 2]]),
+                  dict(interaction_cst="pairwise"), dict(interaction_cst="no_interactions"),
+                  dict(monotonic_cst=np.array([-1, 0, 1]), interaction_cst=[(0, 1)])):
+        ours = am.HistGradientBoostingRegressor(**kw, **extra).fit(X, y).predict(X)
+        ref = SkR(early_stopping=False, **kw, **extra).fit(X, y).predict(X)
+        np.testing.assert_allclose(ours, ref, rtol=1e-10)
+    yc = (y > 0).astype(int)
+    ours = am.HistGradientBoostingClassifier(monotonic_cst=[1, 1, 0], **kw).fit(X, yc)
+    ref = SkC(monotonic_cst=[1, 1, 0], early_stopping=False, **kw).fit(X, yc)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingClassifier(monotonic_cst=[1, 0, 0]).fit(X, np.digitize(y, [0, 1]))
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(interaction_cst=[[0, 5]]).fit(X, y)
+    with pytest.raises(ValueError):
+        am.HistGradientBoostingRegressor(interaction_cst="sometimes").fit(X, y)
+
+
 def test_hist_gradient_boosting_log_link_losses_match_sklearn():
     from sklearn.ensemble import HistGradientBoostingRegressor as SkHGB
 

@@ -6,6 +6,23 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### HistGradientBoosting: monotonic and interaction constraints (#127)
+
+- `with_monotonic_cst(vec)` (sklearn's `monotonic_cst`; `1` / `-1` / `0`
+  per feature) on both facades, validated as sklearn does (length,
+  values, not on categorical features, not for multiclass classifiers).
+  sklearn's node bounds and gains: child outputs clipped to
+  `[lower, mid]` / `[mid, upper]`, gains from the node's stored value.
+- `with_interaction_cst(InteractionConstraints::{Groups, Pairwise,
+  NoInteractions})` (sklearn's `interaction_cst`): a branch only splits on
+  features of the groups that contain every feature split on above it;
+  unlisted features form one more group. Indices always refer to the
+  input columns (sklearn reads them after moving categorical columns
+  first).
+- Python: `monotonic_cst` and `interaction_cst`. Matches scikit-learn
+  1.8.0 to rounding for regressors and binary / multiclass classifiers
+  (`gen_hist_gb_parity.py`).
+
 ### HistGradientBoosting: categorical features (#127)
 
 - `with_categorical_features(indices)` on both HistGradientBoosting

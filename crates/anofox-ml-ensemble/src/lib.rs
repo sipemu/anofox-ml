@@ -91,6 +91,7 @@ pub use gradient_boosting_regressor::{
 pub use hist_gradient_boosting::{
     FittedHistGradientBoostingClassifier, FittedHistGradientBoostingRegressor,
     HistGradientBoostingClassifier, HistGradientBoostingLoss, HistGradientBoostingRegressor,
+    InteractionConstraints,
 };
 pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{

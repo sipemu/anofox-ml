@@ -798,6 +798,7 @@ fn find_best_split(
     params: &LgbmParams,
     bounds: OutputBounds,
     parent_value: f64,
+    groups: &[usize],
 ) -> Option<BestSplit> {
     let LgbmParams {
         min_child_samples,
@@ -820,8 +821,15 @@ fn find_best_split(
     } else {
         leaf_gain(total_grad, total_hess, l1, l2)
     };
-    // sklearn's loss of the current node, `G * value`.
-    let sklearn_node_loss = total_grad * sklearn_node_value(total_grad, total_hess, l2, bounds);
+    // sklearn's loss of the current node, `G * value` with the node's
+    // (bounded) value.
+    let sklearn_node_loss = total_grad * parent_value;
+    let allowed = |feat: usize| {
+        params.interaction_cst.is_empty()
+            || groups
+                .iter()
+                .any(|&g| params.interaction_cst[g].contains(&feat))
+    };
 
     // sklearn moves the categorical features in front of the numeric ones,
     // so they win ties.
@@ -830,6 +838,9 @@ fn find_best_split(
         positions.sort_by_key(|&k| !all_bins[feature_indices[k]].is_categorical);
     }
     for (feat, hist) in positions.iter().map(|&k| (feature_indices[k], &hists[k])) {
+        if !allowed(feat) {
+            continue;
+        }
         if all_bins[feat].is_categorical {
             let n_categories = all_bins[feat].edges.len();
             let candidate = if params.sklearn_compat {
@@ -1102,6 +1113,8 @@ struct LeafCandidate {
     depth: usize,
     /// Output bounds of this leaf (monotone constraints).
     bounds: OutputBounds,
+    /// Interaction groups still open to this node's descendants.
+    groups: Vec<usize>,
 }
 
 impl PartialEq for LeafCandidate {
@@ -1156,17 +1169,22 @@ fn build_lgbm_tree(
 ) -> TreeNode {
     let mut nodes: Vec<BuildNode> = Vec::new();
 
-    // Root is initially a leaf with its value.
+    // Root is initially a leaf with its value (0 in sklearn, whose root
+    // value only enters the split gains).
     let root_totals = node_totals(gradients, hessians, &root_indices);
-    let root_value = leaf_value(
-        root_totals.0,
-        root_totals.1,
-        params.reg_alpha,
-        params.reg_lambda,
-    );
+    let root_value = if params.sklearn_compat {
+        0.0
+    } else {
+        leaf_value(
+            root_totals.0,
+            root_totals.1,
+            params.reg_alpha,
+            params.reg_lambda,
+        )
+    };
     nodes.push(BuildNode::Leaf { value: root_value });
 
-    let best_for = |hists: &[Histogram], totals, count, bounds, value| {
+    let best_for = |hists: &[Histogram], totals, count, bounds, value, groups: &[usize]| {
         find_best_split(
             hists,
             totals,
@@ -1176,8 +1194,10 @@ fn build_lgbm_tree(
             params,
             bounds,
             value,
+            groups,
         )
     };
+    let root_groups: Vec<usize> = (0..params.interaction_cst.len()).collect();
 
     // Try to split the root.
     let root_hists = build_histograms(
@@ -1193,6 +1213,7 @@ fn build_lgbm_tree(
         root_indices.len(),
         UNBOUNDED,
         root_value,
+        &root_groups,
     );
 
     let mut heap: BinaryHeap<LeafCandidate> = BinaryHeap::new();
@@ -1205,6 +1226,7 @@ fn build_lgbm_tree(
             hists: root_hists,
             depth: 0,
             bounds: UNBOUNDED,
+            groups: root_groups,
         });
     }
 
@@ -1278,6 +1300,15 @@ fn build_lgbm_tree(
             split.right_value,
         );
 
+        // The children keep the interaction groups containing the split
+        // feature.
+        let groups: Vec<usize> = candidate
+            .groups
+            .iter()
+            .copied()
+            .filter(|&g| params.interaction_cst[g].contains(&split.feature))
+            .collect();
+
         let depth = candidate.depth + 1;
         let splittable = |n: usize| {
             n >= 2 * params.min_child_samples && params.max_depth.is_none_or(|d| depth < d)
@@ -1326,7 +1357,7 @@ fn build_lgbm_tree(
                 continue;
             }
             let totals = node_totals(gradients, hessians, &child_indices);
-            if let Some(s) = best_for(&hists, totals, child_indices.len(), bounds, value) {
+            if let Some(s) = best_for(&hists, totals, child_indices.len(), bounds, value, &groups) {
                 heap.push(LeafCandidate {
                     node_id: child_id,
                     gain: s.gain,
@@ -1335,6 +1366,7 @@ fn build_lgbm_tree(
                     hists,
                     depth,
                     bounds,
+                    groups: groups.clone(),
                 });
             }
         }
@@ -1485,6 +1517,10 @@ struct LgbmParams {
     /// Per feature: whether the training data has missing values (used in
     /// sklearn mode; empty otherwise).
     has_missing: Vec<bool>,
+    /// Interaction constraints: groups of features (empty = none). A branch
+    /// may only split on features of the groups that contain every feature
+    /// split on above it (sklearn's / LightGBM's `interaction_cst`).
+    interaction_cst: Vec<Vec<usize>>,
 }
 
 /// How categorical features are split (LightGBM's parameters of the same
@@ -1584,6 +1620,10 @@ pub struct LgbmRegressor {
     /// turns it on.
     #[serde(skip)]
     pub(crate) sklearn_compat: bool,
+    /// Interaction constraints (see `LgbmParams::interaction_cst`); set by
+    /// the HistGradientBoosting facade.
+    #[serde(skip)]
+    pub(crate) interaction_cst: Vec<Vec<usize>>,
 }
 
 impl LgbmRegressor {
@@ -1615,6 +1655,7 @@ impl LgbmRegressor {
             monotone_constraints: Vec::new(),
             seed: 0,
             sklearn_compat: false,
+            interaction_cst: Vec::new(),
         }
     }
 
@@ -1734,6 +1775,7 @@ impl LgbmRegressor {
             categorical: self.categorical_split,
             sklearn_compat: self.sklearn_compat,
             has_missing: Vec::new(),
+            interaction_cst: self.interaction_cst.clone(),
         }
     }
 }
@@ -2567,6 +2609,10 @@ pub struct LgbmClassifier {
     /// turns it on.
     #[serde(skip)]
     pub(crate) sklearn_compat: bool,
+    /// Interaction constraints (see `LgbmParams::interaction_cst`); set by
+    /// the HistGradientBoosting facade.
+    #[serde(skip)]
+    pub(crate) interaction_cst: Vec<Vec<usize>>,
 }
 
 fn default_true() -> bool {
@@ -2601,6 +2647,7 @@ impl LgbmClassifier {
             seed: 0,
             softmax_hessian_factor: true,
             sklearn_compat: false,
+            interaction_cst: Vec::new(),
         }
     }
 
@@ -2702,6 +2749,7 @@ impl LgbmClassifier {
             categorical: self.categorical_split,
             sklearn_compat: self.sklearn_compat,
             has_missing: Vec::new(),
+            interaction_cst: self.interaction_cst.clone(),
         }
     }
 
