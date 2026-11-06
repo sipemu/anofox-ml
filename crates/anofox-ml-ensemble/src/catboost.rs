@@ -11,15 +11,20 @@
 //! per class, with CatBoost's full-Hessian Newton step). Categorical
 //! features are split one-hot or through ordered target statistics (CTRs)
 //! of single features and of feature combinations. With CatBoost's
-//! randomness switched off (`random_strength=0`, no bootstrap,
-//! `has_time=True`) the models agree with CatBoost's.
+//! score noise and bootstrap switched off (`random_strength=0`,
+//! `bootstrap_type='No'`) the models agree with CatBoost's, permutations
+//! included: CatBoost's generator (`random_seed`) is reproduced draw for draw,
+//! from the initial shuffle of the rows and the folds' permutations to the
+//! fold picked per tree.
 //!
 //! Leaves take CatBoost's default number of Newton (or Gradient) steps,
 //! with its backtracking: a step is halved until the objective improves,
 //! the objective computed as CatBoost computes it (for Logloss its float32
 //! fast-log metric on `exp(a)`). That metric is summed in blocks per
 //! thread, so the multi-step Logloss models equal those of CatBoost with
-//! `thread_count=1`.
+//! `thread_count=1`. CatBoost keeps Logloss approximations as `exp(a)`
+//! (updated with fmath's fast `exp`); ours agree with those to rounding, which
+//! on large data can rarely decide a near-tie between splits differently.
 
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix2};
@@ -228,6 +233,124 @@ fn bucket(v: f64, borders: &[f32]) -> u8 {
     }
     let v = v as f32;
     borders.partition_point(|&b| v > b) as u8
+}
+
+// ============================================================
+// CatBoost's random numbers
+// ============================================================
+
+/// The 64-bit LCG of the PCG family with CatBoost's (Yandex `util`) output
+/// mixing of the *new* state.
+#[derive(Clone)]
+struct Pcg32 {
+    x: u64,
+    c: u64,
+}
+
+impl Pcg32 {
+    const A: u64 = 6364136223846793005;
+
+    fn next(&mut self) -> u32 {
+        self.x = self.x.wrapping_mul(Self::A).wrapping_add(self.c);
+        let xorshifted = (((self.x >> 18) ^ self.x) >> 27) as u32;
+        xorshifted.rotate_right((self.x >> 59) as u32)
+    }
+
+    /// `GenRand64` of a 32-bit generator: low word first.
+    fn next64(&mut self) -> u64 {
+        let lo = u64::from(self.next());
+        lo | (u64::from(self.next()) << 32)
+    }
+}
+
+/// CatBoost's `TRestorableFastRng64` (`TFastRng64`): two PCG streams
+/// seeded from `TReallyFastRng32(seed)`.
+#[derive(Clone)]
+struct CatRng {
+    r1: Pcg32,
+    r2: Pcg32,
+}
+
+impl CatRng {
+    /// `TFastRng64(seed1, seq1, seed2, seq2)`.
+    fn from_parts(seed1: u64, seq1: u32, seed2: u64, seq2: u32) -> Self {
+        // `FixSeq`: the two streams must differ.
+        let mask = u32::MAX >> 1;
+        let seq2 = if seq1 & mask == seq2 & mask {
+            !seq2
+        } else {
+            seq2
+        };
+        Self {
+            r1: Pcg32 {
+                x: seed1,
+                c: (u64::from(seq1) << 1) | 1,
+            },
+            r2: Pcg32 {
+                x: seed2,
+                c: (u64::from(seq2) << 1) | 1,
+            },
+        }
+    }
+
+    fn new(seed: u64) -> Self {
+        let mut seeder = Pcg32 { x: seed, c: 1 };
+        let seed1 = seeder.next64();
+        let seq1 = seeder.next();
+        let seed2 = seeder.next64();
+        let seq2 = seeder.next();
+        Self::from_parts(seed1, seq1, seed2, seq2)
+    }
+
+    fn gen(&mut self) -> u64 {
+        let x = u64::from(self.r1.next());
+        let y = u64::from(self.r2.next());
+        (x << 32) | y
+    }
+
+    /// Uniform in `[0, max)` by rejection (`GenUniform`).
+    fn uniform(&mut self, max: u64) -> u64 {
+        let limit = u64::MAX - u64::MAX % max;
+        loop {
+            let r = self.gen();
+            if r < limit {
+                return r % max;
+            }
+        }
+    }
+
+    /// Uniform in `[0, 1]` (`GenRandReal1`).
+    fn real1(&mut self) -> f64 {
+        (self.gen() >> 11) as f64 * (1.0 / 9007199254740991.0)
+    }
+
+    /// A standard normal by the polar Box-Muller method
+    /// (`StdNormalDistribution`).
+    fn std_normal(&mut self) -> f64 {
+        loop {
+            let x = self.real1() * 2.0 - 1.0;
+            let y = self.real1() * 2.0 - 1.0;
+            let r = x * x + y * y;
+            if r <= 1.0 && r > 0.0 {
+                return x * (-2.0 * r.ln() / r).sqrt();
+            }
+        }
+    }
+
+    /// CatBoost's fold permutation (`Shuffle` of the objects grouping):
+    /// blocks of `block` rows in Fisher-Yates order (`CreateShuffledIndices`).
+    fn permutation(&mut self, n: usize, block: usize) -> Vec<usize> {
+        let blocks = n.div_ceil(block);
+        let mut order: Vec<usize> = (0..blocks).collect();
+        for i in 1..blocks {
+            let j = self.uniform(i as u64 + 1) as usize;
+            order.swap(i, j);
+        }
+        order
+            .into_iter()
+            .flat_map(|b| b * block..((b + 1) * block).min(n))
+            .collect()
+    }
 }
 
 // ============================================================
@@ -871,6 +994,9 @@ struct TrainParams {
     /// Halve a step until the loss improves (CatBoost's
     /// `leaf_estimation_backtracking=AnyImprovement`).
     backtracking: bool,
+    /// Keep the rows' order (no permutations).
+    has_time: bool,
+    permutation_count: usize,
 }
 
 /// `sum · 1/(count + λ)` for a non-empty side, else 0 (CatBoost's
@@ -950,6 +1076,9 @@ struct Quantized {
     borders: Vec<Vec<f32>>,
     /// The categorical features with CTRs, for their combinations.
     ctr: Option<CtrSource>,
+    /// CatBoost's random draws per tree level for the float and one-hot
+    /// features: (`rsm` draws, score instances).
+    draws: (usize, usize),
 }
 
 /// A categorical feature with CTRs: every row's category id (in the order
@@ -1161,6 +1290,9 @@ fn quantize(
     // Categories in the order of their first appearance (CatBoost's
     // perfect hash).
     let mut ctr_features = Vec::new();
+    // Categorical features with two values (CatBoost packs them as binary
+    // features), and whether they are one-hot candidates.
+    let mut two_valued: Vec<bool> = Vec::new();
     for &f in &cat_features {
         let mut index = std::collections::HashMap::new();
         let mut values = Vec::new();
@@ -1175,6 +1307,9 @@ fn quantize(
                 })
             })
             .collect();
+        if values.len() == 2 {
+            two_valued.push(values.len() <= cat.one_hot_max_size);
+        }
         if values.len() <= cat.one_hot_max_size {
             if values.len() >= 2 {
                 columns.push(Column {
@@ -1189,10 +1324,12 @@ fn quantize(
         }
     }
 
+    let draws = feature_draws(&columns, &two_valued);
     let mut q = Quantized {
         columns,
         borders,
         ctr: None,
+        draws,
     };
     if !ctr_features.is_empty() {
         let (classes, n_classes) = cat.classes.ok_or_else(|| {
@@ -1225,6 +1362,41 @@ fn quantize(
         }
     }
     Ok(q)
+}
+
+/// CatBoost's random draws per tree level for the float and one-hot
+/// features (`SelectCandidatesAndCleanupStatsFromPrevTree` and
+/// `SelectBestCandidate`): one `rsm` draw per feature, and one score
+/// instance per feature, except that the binary ones (one border, two
+/// categories) are packed eight to a candidate (`TPackedBinaryFeaturesData`:
+/// floats, then categoricals; `two_valued` says which categoricals with two
+/// values are one-hot candidates).
+fn feature_draws(columns: &[Column], two_valued: &[bool]) -> (usize, usize) {
+    let mut rsm = 0;
+    let mut single = 0;
+    let mut packed: Vec<bool> = Vec::new();
+    for c in columns {
+        match &c.split {
+            ColumnSplit::Float { borders, .. } => {
+                rsm += 1;
+                if borders.len() == 1 {
+                    packed.push(true);
+                } else {
+                    single += 1;
+                }
+            }
+            ColumnSplit::OneHot { values, .. } => {
+                rsm += 1;
+                if values.len() != 2 {
+                    single += 1;
+                }
+            }
+            ColumnSplit::Ctr { .. } => {}
+        }
+    }
+    packed.extend_from_slice(two_valued);
+    let packs = packed.chunks(8).filter(|p| p.iter().any(|&c| c)).count();
+    (rsm, single + packs)
 }
 
 /// The derivatives a tree's splits are scored on. Plain boosting: all rows
@@ -1288,17 +1460,16 @@ impl ColumnRef {
 /// of a projection are cached across trees.
 type CombinationCache = std::collections::HashMap<Projection, std::sync::Arc<Vec<Column>>>;
 
+/// Also returns CatBoost's `rsm` draws for them: one per base projection
+/// and categorical feature with CTRs, whatever the complexity limit.
 fn combination_columns(
     q: &Quantized,
     splits: &[(ColumnRef, usize)],
     cache: &mut CombinationCache,
-) -> Vec<std::sync::Arc<Vec<Column>>> {
+) -> (Vec<std::sync::Arc<Vec<Column>>>, usize) {
     let Some(src) = &q.ctr else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    if src.max_complexity < 2 || splits.is_empty() {
-        return Vec::new();
-    }
     let mut conditions = Projection::default();
     let mut seen = Vec::new();
     for (c, s) in splits {
@@ -1315,8 +1486,18 @@ fn combination_columns(
     conditions.floats.sort_unstable();
     conditions.one_hots.sort_unstable();
     seen.insert(0, conditions);
-    let mut added: Vec<Projection> = Vec::new();
+    let mut bases: Vec<&Projection> = Vec::new();
     for base in seen.iter().filter(|p| !p.is_empty()) {
+        if !bases.contains(&base) {
+            bases.push(base);
+        }
+    }
+    let draws = bases.len() * src.features.len();
+    if src.max_complexity < 2 {
+        return (Vec::new(), draws);
+    }
+    let mut added: Vec<Projection> = Vec::new();
+    for base in bases {
         for cat in &src.features {
             if base.cats.contains(&cat.feature) {
                 continue;
@@ -1330,7 +1511,7 @@ fn combination_columns(
             added.push(projection);
         }
     }
-    added
+    let columns = added
         .into_iter()
         .map(|projection| {
             cache
@@ -1338,7 +1519,8 @@ fn combination_columns(
                 .or_insert_with(|| std::sync::Arc::new(q.projection_columns(projection)))
                 .clone()
         })
-        .collect()
+        .collect();
+    (columns, draws)
 }
 
 /// Grow one oblivious tree on the weighted first derivatives of the
@@ -1357,6 +1539,7 @@ fn grow_tree(
     model_size_reg: f64,
     used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
     cache: &mut CombinationCache,
+    rng: &mut CatRng,
 ) -> (Vec<(ColumnRef, usize)>, Vec<u32>) {
     use rayon::prelude::*;
     let n = w.len();
@@ -1364,7 +1547,7 @@ fn grow_tree(
     let mut leaf_of = vec![0u32; n];
     for d in 0..depth {
         let leaves = 1usize << d;
-        let combinations = combination_columns(q, &splits, cache);
+        let (combinations, tree_ctr_draws) = combination_columns(q, &splits, cache);
         let candidates: Vec<ColumnRef> = (0..q.columns.len())
             .map(ColumnRef::Base)
             .chain(
@@ -1373,6 +1556,22 @@ fn grow_tree(
                     .flat_map(|c| (0..c.len()).map(|i| ColumnRef::Combination(c.clone(), i))),
             )
             .collect();
+        // CatBoost's draws of this level, in its order: `rsm` per feature,
+        // per simple CTR feature and per tree CTR, a seed, then one score
+        // instance per candidate (with `random_strength = 0` they leave the
+        // scores as they are).
+        let n_ctr_features = q.ctr.as_ref().map_or(0, |c| c.features.len());
+        for _ in 0..q.draws.0 + n_ctr_features + tree_ctr_draws {
+            rng.real1();
+        }
+        rng.gen();
+        let ctr_candidates = candidates
+            .iter()
+            .filter(|c| c.get(q).ctr_key.is_some())
+            .count();
+        for _ in 0..q.draws.1 + ctr_candidates {
+            rng.std_normal();
+        }
         // CatBoost's `GetCatFeatureWeight`: a CTR type not yet in the model
         // scores `(1 + combinations / max combinations)^-model_size_reg`
         // times less, the maximum over this level's CTR candidates.
@@ -1633,14 +1832,16 @@ struct LeafProblem<'a> {
 /// approximations. With backtracking a step is halved until the metric
 /// improves, every try using up an iteration. `accepted` sees each taken
 /// step and that iteration's leaf sums. Returns the summed leaf values
-/// (`k` per leaf, before the learning rate).
+/// (`k` per leaf, before the learning rate) and the number of steps
+/// computed.
 fn estimate_leaves(
     lp: &LeafProblem<'_>,
     p: &TrainParams,
     mut accepted: impl FnMut(&[f64], &mut LeafSums),
-) -> Vec<f64> {
+) -> (Vec<f64>, usize) {
     let k = lp.loss.dims();
     let (n_leaves, rows) = (lp.n_leaves, lp.rows);
+    let mut steps = 0;
     let backtracking = p.backtracking && p.leaf_iterations > 1;
     let metric = |approx: &[f64], leaves: &[f64]| {
         lp.loss
@@ -1655,6 +1856,7 @@ fn estimate_leaves(
     };
     let mut it = 0;
     while it < p.leaf_iterations {
+        steps += 1;
         let ders = lp.loss.all_ders(lp.target, &point, lp.weights, rows);
         let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
         let mut step = vec![0.0; n_leaves * k];
@@ -1701,14 +1903,212 @@ fn estimate_leaves(
         }
         it += 1;
     }
-    total
+    (total, steps)
+}
+
+/// A learning fold (CatBoost's `TFold`): the training rows in the fold's
+/// permutation, with the CTRs computed online in that order, its body /
+/// tail prefixes (plain boosting: one, of all rows) and their
+/// approximations.
+struct LearnFold {
+    q: Quantized,
+    target: Vec<f64>,
+    weights: Vec<f64>,
+    tails: Vec<(usize, usize, f64)>,
+    approx: Vec<Vec<f64>>,
+    cache: CombinationCache,
+}
+
+/// `v` in the order `perm` (`out[i] = v[perm[i] * k ..]`, `k` per row).
+fn permute_rows(v: &[f64], perm: &[usize], k: usize) -> Vec<f64> {
+    perm.iter()
+        .flat_map(|&r| v[r * k..(r + 1) * k].iter().copied())
+        .collect()
+}
+
+impl Quantized {
+    /// The data in the order `perm` (row `i` is the original row
+    /// `perm[i]`): the same columns, the CTRs recomputed online in that
+    /// order.
+    fn permuted(&self, perm: &[usize]) -> Quantized {
+        let rows = |b: &[u8]| perm.iter().map(|&r| b[r]).collect::<Vec<u8>>();
+        let mut columns: Vec<Column> = self
+            .columns
+            .iter()
+            .filter(|c| !matches!(c.split, ColumnSplit::Ctr { .. }))
+            .map(|c| Column {
+                split: match &c.split {
+                    ColumnSplit::Float { feature, borders } => ColumnSplit::Float {
+                        feature: *feature,
+                        borders: borders.clone(),
+                    },
+                    ColumnSplit::OneHot { feature, values } => ColumnSplit::OneHot {
+                        feature: *feature,
+                        values: values.clone(),
+                    },
+                    ColumnSplit::Ctr { .. } => unreachable!(),
+                },
+                buckets: rows(&c.buckets),
+                n_buckets: c.n_buckets,
+                ctr_key: None,
+            })
+            .collect();
+        let ctr = self.ctr.as_ref().map(|src| CtrSource {
+            features: src
+                .features
+                .iter()
+                .map(|c| CatIds {
+                    feature: c.feature,
+                    ids: perm.iter().map(|&r| c.ids[r]).collect(),
+                    values: c.values.clone(),
+                })
+                .collect(),
+            classes: perm.iter().map(|&r| src.classes[r]).collect(),
+            n_classes: src.n_classes,
+            max_complexity: src.max_complexity,
+        });
+        let mut q = Quantized {
+            columns: Vec::new(),
+            borders: self.borders.clone(),
+            ctr,
+            draws: self.draws,
+        };
+        std::mem::swap(&mut q.columns, &mut columns);
+        if let Some(src) = &q.ctr {
+            let features: Vec<usize> = src.features.iter().map(|c| c.feature).collect();
+            for f in features {
+                let c = q.projection_columns(Projection::single(f));
+                q.columns.extend(c);
+            }
+        }
+        q
+    }
+
+    /// The split `split` (of any fold) as a split of this data.
+    fn resolve(&self, split: &ColumnRef, cache: &mut CombinationCache) -> ColumnRef {
+        match split {
+            ColumnRef::Base(c) => ColumnRef::Base(*c),
+            ColumnRef::Combination(columns, j) => {
+                let ColumnSplit::Ctr { table, .. } = &columns[*j].split else {
+                    unreachable!("combinations are CTRs")
+                };
+                let own = cache
+                    .entry(table.projection.clone())
+                    .or_insert_with(|| {
+                        std::sync::Arc::new(self.projection_columns(table.projection.clone()))
+                    })
+                    .clone();
+                ColumnRef::Combination(own, *j)
+            }
+        }
+    }
+
+    /// Every row's leaf under `splits` (resolved in this data).
+    fn leaves(&self, splits: &[(ColumnRef, usize)], cache: &mut CombinationCache) -> Vec<u32> {
+        let resolved: Vec<(ColumnRef, usize)> = splits
+            .iter()
+            .map(|(c, s)| (self.resolve(c, cache), *s))
+            .collect();
+        let n = self.columns.first().map_or(0, |c| c.buckets.len());
+        (0..n)
+            .map(|i| {
+                resolved
+                    .iter()
+                    .enumerate()
+                    .map(|(d, (c, s))| {
+                        let column = c.get(self);
+                        u32::from(column.goes_right(column.buckets[i], *s)) << d
+                    })
+                    .sum()
+            })
+            .collect()
+    }
+}
+
+/// Move a learning fold by the tree with the leaves `leaf_of` (CatBoost's
+/// `UpdateLearningFold`): per body / tail prefix, the leaf values of the
+/// body rows (`CalcApproxDeltaSimple` / `Multi`).
+fn update_fold(
+    fold: &mut LearnFold,
+    leaf_of: &[u32],
+    n_leaves: usize,
+    loss: Loss,
+    p: &TrainParams,
+) {
+    let k = loss.dims();
+    let (target, weights) = (&fold.target, &fold.weights);
+    for (&(body, tail, bw), a) in fold.tails.iter().zip(&mut fold.approx) {
+        let lp = LeafProblem {
+            loss,
+            target,
+            approx: &a[..],
+            weights,
+            leaf_of,
+            n_leaves,
+            rows: body,
+            stats: (bw, body as f64),
+            moving: false,
+        };
+        if k == 1 {
+            // Each prefix's approximation moves by the leaf values of its
+            // body rows.
+            let (leaves, _) = estimate_leaves(&lp, p, |_, _| {});
+            for i in 0..tail {
+                a[i] += loss.fold_step(leaves[leaf_of[i] as usize], p.learning_rate);
+            }
+        } else {
+            // Multiclass (CatBoost's `CalcApproxDeltaMulti`): the body rows
+            // by the leaf values of the body; after every step, each tail
+            // row by a Newton step of the body and the tail rows up to it,
+            // at its moved approximation.
+            let mut tail_delta = vec![0.0; (tail - body) * k];
+            let (mut der, mut der2) = (vec![0.0; k], vec![0.0; loss.hessian_len()]);
+            let (leaves, _) = estimate_leaves(&lp, p, |_, sums| {
+                for i in body..tail {
+                    let leaf = leaf_of[i] as usize;
+                    let o = &mut tail_delta[(i - body) * k..(i - body + 1) * k];
+                    let point: Vec<f64> = (0..k).map(|dim| a[i * k + dim] + o[dim]).collect();
+                    loss.ders(target[i], &point, weights[i], &mut der, &mut der2);
+                    let row = Ders {
+                        k,
+                        h: der2.len(),
+                        der: der.clone(),
+                        der2: der2.clone(),
+                    };
+                    sums.add(leaf, &row, 0, weights[i]);
+                    let mut delta = vec![0.0; k];
+                    sums.delta(leaf, p.l2_leaf_reg, bw, body as f64, p, &mut delta);
+                    for dim in 0..k {
+                        o[dim] += delta[dim];
+                    }
+                }
+            });
+            for i in 0..tail {
+                let delta = if i < body {
+                    let leaf = leaf_of[i] as usize;
+                    &leaves[leaf * k..(leaf + 1) * k]
+                } else {
+                    &tail_delta[(i - body) * k..(i - body + 1) * k]
+                };
+                for dim in 0..k {
+                    a[i * k + dim] += delta[dim] * p.learning_rate;
+                }
+            }
+        }
+    }
 }
 
 /// Boosting of oblivious trees from the constant `bias` (one per
-/// approximation). Plain: the trees are scored and fitted on all rows.
-/// Ordered (CatBoost's ordered boosting): the splits are scored on the body /
-/// tail prefixes of the rows, whose approximations only ever saw the rows
-/// before their tail, and the leaf values of the model come from all rows.
+/// approximation), as CatBoost's `TrainOneIteration` does it.
+///
+/// The trees are searched on a learning fold picked at random each
+/// iteration. Plain boosting scores all of its rows; ordered boosting scores
+/// its body / tail prefixes, whose approximations only ever saw the rows
+/// before their tail. The model's leaf values come from the averaging fold.
+/// Without `has_time`, CTRs (and ordered boosting) need permutations: fold 0
+/// keeps the given order, the other `permutation_count - 2` folds and (with
+/// CTRs) the averaging fold are shuffled with CatBoost's generator, whose
+/// draws follow CatBoost's.
 fn boost(
     q: &Quantized,
     target: &[f64],
@@ -1716,164 +2116,146 @@ fn boost(
     bias: &[f64],
     loss: Loss,
     p: TrainParams,
+    mut rng: CatRng,
 ) -> (Vec<ObliviousTree>, CtrModel) {
     let n = target.len();
     let k = loss.dims();
-    let sum_w: f64 = weights.iter().sum();
-    let scaled_l2 = p.l2_leaf_reg * (sum_w / n as f64);
-    let tails = if p.ordered {
-        body_tails(n, p.fold_len_multiplier, weights)
+    let has_ctrs = q.ctr.is_some();
+    let learn_permuted = !p.has_time && (has_ctrs || p.ordered);
+    let average_permuted = !p.has_time && has_ctrs;
+    let n_folds = if learn_permuted {
+        p.permutation_count.saturating_sub(1).max(1)
     } else {
-        Vec::new()
+        1
+    };
+    let block = if learn_permuted {
+        (n / 1000 + 1).min(256)
+    } else {
+        n
     };
     let start = |rows: usize| -> Vec<f64> { bias.iter().copied().cycle().take(rows * k).collect() };
-    let mut fold_approx: Vec<Vec<f64>> = tails.iter().map(|&(_, t, _)| start(t)).collect();
+    let identity: Vec<usize> = (0..n).collect();
+    let make_fold = |perm: &[usize]| -> LearnFold {
+        let target = permute_rows(target, perm, 1);
+        let weights = permute_rows(weights, perm, 1);
+        let sum_w: f64 = weights.iter().sum();
+        let tails = if p.ordered {
+            body_tails(n, p.fold_len_multiplier, &weights)
+        } else {
+            vec![(n, n, sum_w)]
+        };
+        LearnFold {
+            q: q.permuted(perm),
+            approx: tails.iter().map(|&(_, t, _)| start(t)).collect(),
+            target,
+            weights,
+            tails,
+            cache: CombinationCache::new(),
+        }
+    };
+    let mut folds: Vec<LearnFold> = (0..n_folds)
+        .map(|f| {
+            let perm = if f > 0 && learn_permuted {
+                rng.permutation(n, block)
+            } else {
+                identity.clone()
+            };
+            make_fold(&perm)
+        })
+        .collect();
+    let average_perm = if average_permuted {
+        rng.permutation(n, block)
+    } else {
+        identity.clone()
+    };
+    let mut average = make_fold(&average_perm);
+    let avg_sum_w: f64 = average.weights.iter().sum();
     let mut approx = start(n);
+    // Plain boosting with an unpermuted averaging fold shares its
+    // approximations with fold 0 (`UseAveragingFoldAsFoldZero`).
+    let shared = !p.ordered && !average_permuted;
     let mut trees = Vec::with_capacity(p.iterations);
     let mut used_ctrs = std::collections::HashSet::new();
-    let mut cache = CombinationCache::new();
     let mut ctrs = CtrModel::default();
     for _ in 0..p.iterations {
-        let (splits, leaf_of) = if p.ordered {
-            let fold_ders: Vec<Ders> = tails
-                .iter()
-                .zip(&fold_approx)
-                .map(|(&(_, t, _), a)| loss.all_ders(target, a, weights, t))
-                .collect();
-            let parts: Vec<ScorePart<'_>> = tails
-                .iter()
-                .zip(&fold_ders)
-                .map(|(&(body, tail, bw), d)| ScorePart {
-                    wder: &d.der,
-                    body,
-                    tail,
-                    scaled_l2: p.l2_leaf_reg * (bw / body as f64),
-                })
-                .collect();
-            let grown = grow_tree(
-                q,
-                &parts,
-                k,
-                weights,
-                true,
-                p.depth,
-                p.score_function,
-                p.model_size_reg,
-                &mut used_ctrs,
-                &mut cache,
-            );
-            let n_leaves = 1usize << grown.0.len();
-            let leaf_of = &grown.1;
-            for (&(body, tail, bw), a) in tails.iter().zip(&mut fold_approx) {
-                let lp = LeafProblem {
-                    loss,
-                    target,
-                    approx: &a[..],
-                    weights,
-                    leaf_of,
-                    n_leaves,
-                    rows: body,
-                    stats: (bw, body as f64),
-                    moving: false,
-                };
-                if k == 1 {
-                    // Each prefix's approximation moves by the leaf values
-                    // of its body rows.
-                    let leaves = estimate_leaves(&lp, &p, |_, _| {});
-                    for i in 0..tail {
-                        a[i] += loss.fold_step(leaves[leaf_of[i] as usize], p.learning_rate);
-                    }
-                } else {
-                    // Multiclass (CatBoost's `CalcApproxDeltaMulti`): the
-                    // body rows by the leaf values of the body; after every
-                    // step, each tail row by a Newton step of the body and
-                    // the tail rows up to it, at its moved approximation.
-                    let mut tail_delta = vec![0.0; (tail - body) * k];
-                    let (mut der, mut der2) = (vec![0.0; k], vec![0.0; loss.hessian_len()]);
-                    let leaves = estimate_leaves(&lp, &p, |_, sums| {
-                        for i in body..tail {
-                            let leaf = leaf_of[i] as usize;
-                            let o = &mut tail_delta[(i - body) * k..(i - body + 1) * k];
-                            let point: Vec<f64> =
-                                (0..k).map(|dim| a[i * k + dim] + o[dim]).collect();
-                            loss.ders(target[i], &point, weights[i], &mut der, &mut der2);
-                            let row = Ders {
-                                k,
-                                h: der2.len(),
-                                der: der.clone(),
-                                der2: der2.clone(),
-                            };
-                            sums.add(leaf, &row, 0, weights[i]);
-                            let mut delta = vec![0.0; k];
-                            sums.delta(leaf, p.l2_leaf_reg, bw, body as f64, &p, &mut delta);
-                            for dim in 0..k {
-                                o[dim] += delta[dim];
-                            }
-                        }
-                    });
-                    for i in 0..tail {
-                        let delta = if i < body {
-                            let leaf = leaf_of[i] as usize;
-                            &leaves[leaf * k..(leaf + 1) * k]
-                        } else {
-                            &tail_delta[(i - body) * k..(i - body + 1) * k]
-                        };
-                        for dim in 0..k {
-                            a[i * k + dim] += delta[dim] * p.learning_rate;
-                        }
-                    }
-                }
-            }
-            grown
-        } else {
-            let ders = loss.all_ders(target, &approx, weights, n);
-            let parts = [ScorePart {
-                wder: &ders.der,
-                body: 0,
-                tail: n,
-                scaled_l2,
-            }];
-            grow_tree(
-                q,
-                &parts,
-                k,
-                weights,
-                false,
-                p.depth,
-                p.score_function,
-                p.model_size_reg,
-                &mut used_ctrs,
-                &mut cache,
-            )
-        };
+        let taken = (rng.gen() % n_folds as u64) as usize;
+        rng.gen(); // the derivatives' seeds
+        let fold = &mut folds[taken];
+        let ders: Vec<Ders> = fold
+            .tails
+            .iter()
+            .zip(&fold.approx)
+            .map(|(&(_, t, _), a)| loss.all_ders(&fold.target, a, &fold.weights, t))
+            .collect();
+        let parts: Vec<ScorePart<'_>> = fold
+            .tails
+            .iter()
+            .zip(&ders)
+            .map(|(&(body, tail, bw), d)| ScorePart {
+                wder: &d.der,
+                body: if p.ordered { body } else { 0 },
+                tail,
+                scaled_l2: p.l2_leaf_reg * (bw / body as f64),
+            })
+            .collect();
+        let (splits, _) = grow_tree(
+            &fold.q,
+            &parts,
+            k,
+            &fold.weights,
+            p.ordered,
+            p.depth,
+            p.score_function,
+            p.model_size_reg,
+            &mut used_ctrs,
+            &mut fold.cache,
+            &mut rng,
+        );
+        rng.gen(); // the folds' seeds
         let n_leaves = 1usize << splits.len();
+
+        // The model's leaves, from the averaging fold.
+        let leaf_of = average.q.leaves(&splits, &mut average.cache);
         let lp = LeafProblem {
             loss,
-            target,
+            target: &average.target,
             approx: &approx,
-            weights,
+            weights: &average.weights,
             leaf_of: &leaf_of,
             n_leaves,
             rows: n,
-            stats: (sum_w, n as f64),
+            stats: (avg_sum_w, n as f64),
             moving: true,
         };
-        let leaf_values: Vec<f64> = estimate_leaves(&lp, &p, |_, _| {})
-            .into_iter()
-            .map(|v| v * p.learning_rate)
-            .collect();
-
+        let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
+        if k == 1 {
+            // `CalcLeafValuesSimple` draws a seed per step.
+            for _ in 0..steps {
+                rng.gen();
+            }
+        }
+        let leaf_values: Vec<f64> = leaves.into_iter().map(|v| v * p.learning_rate).collect();
         for i in 0..n {
             let leaf = leaf_of[i] as usize;
             for d in 0..k {
                 approx[i * k + d] += leaf_values[leaf * k + d];
             }
         }
+        for (f, fold) in folds.iter_mut().enumerate() {
+            if f == 0 && shared {
+                fold.approx[0].clone_from(&approx);
+                continue;
+            }
+            let leaf_of = fold.q.leaves(&splits, &mut fold.cache);
+            update_fold(fold, &leaf_of, n_leaves, loss, &p);
+        }
+        let source = &folds[taken];
+        let tree_splits = splits
+            .iter()
+            .map(|(c, s)| c.get(&source.q).tree_split(*s, &mut ctrs))
+            .collect();
         trees.push(ObliviousTree {
-            splits: splits
-                .iter()
-                .map(|(c, s)| c.get(q).tree_split(*s, &mut ctrs))
-                .collect(),
+            splits: tree_splits,
             leaf_values,
         });
     }
@@ -2068,6 +2450,15 @@ macro_rules! catboost_config {
             /// loss below 200 iterations with fewer than 20 features.
             pub leaf_estimation_iterations: Option<usize>,
             pub leaf_estimation_backtracking: CatBoostBacktracking,
+            /// Keep the rows' order: the CTRs and ordered boosting see the
+            /// rows as given, with no permutations (CatBoost's `has_time`,
+            /// default false).
+            pub has_time: bool,
+            /// CatBoost's `permutation_count` (default 4): the learning
+            /// folds are `permutation_count - 1` orders of the rows.
+            pub permutation_count: usize,
+            /// The seed of CatBoost's generator (`random_seed`, default 0).
+            pub random_seed: u64,
         }
 
         impl Default for $name {
@@ -2089,6 +2480,9 @@ macro_rules! catboost_config {
                     fold_len_multiplier: 2.0,
                     leaf_estimation_iterations: None,
                     leaf_estimation_backtracking: CatBoostBacktracking::AnyImprovement,
+                    has_time: false,
+                    permutation_count: 4,
+                    random_seed: 0,
                 }
             }
         }
@@ -2166,9 +2560,32 @@ macro_rules! catboost_config {
                 }
             }
 
+            pub fn with_has_time(mut self, h: bool) -> Self {
+                self.has_time = h;
+                self
+            }
+            pub fn with_permutation_count(mut self, n: usize) -> Self {
+                self.permutation_count = n;
+                self
+            }
+            pub fn with_random_seed(mut self, seed: u64) -> Self {
+                self.random_seed = seed;
+                self
+            }
+
             pub fn with_max_ctr_complexity(mut self, n: usize) -> Self {
                 self.max_ctr_complexity = Some(n);
                 self
+            }
+
+            /// CatBoost's `ShuffleLearnDataIfNeeded`: without `has_time`,
+            /// with categorical features or ordered boosting, the rows are
+            /// shuffled first (the generator then goes on training).
+            fn learn_order(&self, n: usize, rng: &mut CatRng) -> Option<Vec<usize>> {
+                let need = !self.has_time
+                    && (!self.cat_features.is_empty()
+                        || self.boosting_type == CatBoostBoostingType::Ordered);
+                need.then(|| rng.permutation(n, 1))
             }
 
             /// CatBoost's default: 1 below 200 iterations, else 4.
@@ -2205,6 +2622,8 @@ macro_rules! catboost_config {
                     leaf_iterations: 1,
                     backtracking: self.leaf_estimation_backtracking
                         == CatBoostBacktracking::AnyImprovement,
+                    has_time: self.has_time,
+                    permutation_count: self.permutation_count,
                 }
             }
         }
@@ -2265,6 +2684,18 @@ impl FitWeighted<f64> for CatBoostRegressor {
                 "max_ctr_complexity must be at least 1".into(),
             ));
         }
+        let mut rng = CatRng::new(self.random_seed);
+        let shuffled = self.learn_order(x.nrows(), &mut rng).map(|order| {
+            (
+                x.select(ndarray::Axis(0), &order),
+                y.select(ndarray::Axis(0), &order),
+                sample_weight.map(|w| w.select(ndarray::Axis(0), &order)),
+            )
+        });
+        let (x, y, sample_weight) = match &shuffled {
+            Some((x, y, w)) => (x.view(), y.view(), w.as_ref().map(|w| w.view())),
+            None => (x.view(), y.view(), sample_weight.as_ref().map(|w| w.view())),
+        };
         let target = f32_values(y);
         let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
         let bias = if self.boost_from_average {
@@ -2284,7 +2715,7 @@ impl FitWeighted<f64> for CatBoostRegressor {
             leaf_iterations: self.leaf_iterations(Loss::Rmse, x.ncols()),
             ..p
         };
-        let (trees, ctrs) = boost(&q, &target, &weights, &[bias], Loss::Rmse, p);
+        let (trees, ctrs) = boost(&q, &target, &weights, &[bias], Loss::Rmse, p, rng);
         Ok(FittedCatBoostRegressor {
             trees,
             ctrs,
@@ -2399,6 +2830,18 @@ impl FitWeighted<f64> for CatBoostClassifier {
                 "max_ctr_complexity must be at least 1".into(),
             ));
         }
+        let mut rng = CatRng::new(self.random_seed);
+        let shuffled = self.learn_order(x.nrows(), &mut rng).map(|order| {
+            (
+                x.select(ndarray::Axis(0), &order),
+                y.select(ndarray::Axis(0), &order),
+                sample_weight.map(|w| w.select(ndarray::Axis(0), &order)),
+            )
+        });
+        let (x, y, sample_weight) = match &shuffled {
+            Some((x, y, w)) => (x.view(), y.view(), w.as_ref().map(|w| w.view())),
+            None => (x.view(), y.view(), sample_weight.as_ref().map(|w| w.view())),
+        };
         let mut classes: Vec<f64> = y.to_vec();
         classes.sort_by(f64::total_cmp);
         classes.dedup();
@@ -2440,7 +2883,7 @@ impl FitWeighted<f64> for CatBoostClassifier {
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             ..p
         };
-        let (trees, ctrs) = boost(&q, &target, &weights, &bias, loss, p);
+        let (trees, ctrs) = boost(&q, &target, &weights, &bias, loss, p, rng);
         Ok(FittedCatBoostClassifier {
             trees,
             ctrs,
@@ -2570,6 +3013,18 @@ mod tests {
         assert!(CatBoostClassifier::new()
             .fit(&x, &labels.mapv(|_| 1.0))
             .is_err());
+    }
+
+    #[test]
+    fn rng_matches_yandex_util() {
+        // util/random/fast_ut.cpp
+        assert_eq!(CatRng::new(17).gen(), 14895365814383052362);
+        let mut rng = CatRng::from_parts(0, 1, 2, 3);
+        let draws: Vec<u64> = (0..15).map(|_| rng.uniform(100)).collect();
+        assert_eq!(
+            draws,
+            [37, 43, 76, 17, 12, 87, 60, 4, 83, 47, 57, 81, 28, 45, 66]
+        );
     }
 
     #[test]
