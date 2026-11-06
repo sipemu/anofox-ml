@@ -638,7 +638,9 @@ class _CatBoost(BaseEstimator):
                  boost_from_average=None, cat_features=None, one_hot_max_size=2,
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
                  max_ctr_complexity=None, leaf_estimation_iterations=None,
-                 leaf_estimation_backtracking="AnyImprovement"):
+                 leaf_estimation_backtracking="AnyImprovement", has_time=False, random_seed=0):
+        self.has_time = has_time
+        self.random_seed = random_seed
         self.max_ctr_complexity = max_ctr_complexity
         self.leaf_estimation_iterations = leaf_estimation_iterations
         self.leaf_estimation_backtracking = leaf_estimation_backtracking
@@ -679,6 +681,8 @@ class _CatBoost(BaseEstimator):
         params["fold_len_multiplier"] = float(self.fold_len_multiplier)
         if self.max_ctr_complexity is not None:
             params["max_ctr_complexity"] = int(self.max_ctr_complexity)
+        params["has_time"] = bool(self.has_time)
+        params["random_seed"] = int(self.random_seed)
         if self.leaf_estimation_iterations is not None:
             params["leaf_estimation_iterations"] = int(self.leaf_estimation_iterations)
         params["leaf_estimation_backtracking"] = _choice(

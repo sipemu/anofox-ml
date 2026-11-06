@@ -68,7 +68,7 @@ def generate():
         pred = m.predict(X_test) if kind == "regressor" else m.predict_proba(X_test)
         out["models"].append({
             "name": name, "kind": kind,
-            "params": {k: v for k, v in params.items() if k not in COMMON},
+            "params": {k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
             "X": nulls(Xd), "y": y.tolist(),
             "sample_weight": None if sw is None else sw.tolist(),
             "X_test": nulls(X_test), "predictions": pred.tolist(),
@@ -114,7 +114,7 @@ def generate():
         pred = m.predict(Xt) if kind == "regressor" else m.predict_proba(Xt)
         out["models"].append({
             "name": name, "kind": kind,
-            "params": {k: v for k, v in params.items() if k not in COMMON},
+            "params": {k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
             "X": nulls(Xc), "y": y.tolist(),
             "sample_weight": None if sw is None else sw.tolist(),
             "X_test": nulls(X_test), "predictions": pred.tolist(),
@@ -217,6 +217,25 @@ def generate():
     add("leaf5_ordered_mc", "classifier", dict(mc_ordered, leaf_estimation_iterations=5), X,
         y_mc.astype(float))
     add_cat("leaf10_cat_logloss", dict(cat, leaf_estimation_iterations=10), y_cat)
+
+    # Permutations (`has_time=False`): CatBoost's generator (seeded by
+    # `random_seed`) shuffles the learning folds but the first and, with
+    # CTRs, the averaging fold; each iteration searches its tree on a fold
+    # drawn at random. Score noise and bootstrap stay off.
+    perm = dict(has_time=False)
+    add_cat("perm_cat_logloss", dict(cat, **perm), y_cat)
+    add_cat("perm_cat_logloss_seed7", dict(cat, random_seed=7, **perm), y_cat)
+    add_cat("perm_cat_rmse", dict(cat, **perm), y_cat_reg, kind="regressor")
+    add_cat("perm_cat_mc", dict(cat_mc, **perm), y_cat_mc)
+    add_cat("perm_cat_weighted", dict(cat, **perm), y_cat, sw=weights)
+    add_cat("perm_combo", dict(combo, **perm), y_cat)
+    add_cat("perm_ordered_cat", dict(cat, boosting_type="Ordered", **perm), y_cat)
+    add_cat("perm_leaf10_cat", dict(cat, leaf_estimation_iterations=10, **perm), y_cat)
+    add("perm_ordered_rmse", "regressor", dict(ordered, **perm), X, y_reg)
+    add("perm_ordered_logloss", "classifier", dict(ordered, **perm), X, y_bin)
+    add("perm_ordered_mc", "classifier", dict(mc_ordered, **perm), X, y_mc.astype(float))
+    add("perm_plain_rmse", "regressor", dict(base, **perm), X, y_reg)
+    add("perm_ordered_rmse_1200", "regressor", dict(ordered, iterations=15, **perm), big, y_big)
     return out
 
 

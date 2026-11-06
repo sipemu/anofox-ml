@@ -82,6 +82,14 @@ macro_rules! configure {
         if let Some(f) = p["fold_len_multiplier"].as_f64() {
             m = m.with_fold_len_multiplier(f);
         }
+        // The generator's common settings (not stored) include `has_time`.
+        m = m.with_has_time(p["has_time"].as_bool().unwrap_or(true));
+        if let Some(n) = p["random_seed"].as_u64() {
+            m = m.with_random_seed(n);
+        }
+        if let Some(n) = p["permutation_count"].as_u64() {
+            m = m.with_permutation_count(n as usize);
+        }
         if let Some(n) = p["leaf_estimation_iterations"].as_u64() {
             m = m.with_leaf_estimation_iterations(n as usize);
         }

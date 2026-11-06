@@ -6,6 +6,32 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: permutations (#127 §5)
+
+- `has_time` (now defaulting to false, as in CatBoost), `random_seed`
+  (default 0) and `permutation_count` (default 4) on `CatBoostRegressor` /
+  `CatBoostClassifier`. CatBoost's random numbers are reproduced: the
+  `TFastRng64` generator (checked against Yandex `util`'s test vectors),
+  with its uniform draws by rejection, `GenRandReal1`, the polar normal and
+  Fisher-Yates over blocks of `min(256, n / 1000 + 1)` rows. They are drawn
+  in CatBoost's order:
+  - the initial shuffle of the rows (`ShuffleLearnDataIfNeeded`: with
+    categorical features or ordered boosting);
+  - the learning folds' permutations (`permutation_count - 1` folds, the
+    first one unshuffled), then the averaging fold's (with CTRs);
+  - per tree the fold to search on and a seed. Per level: `rsm` draws per
+    feature, simple CTR feature and tree-CTR base, a seed, and a score
+    instance per candidate, with binary features packed eight to a
+    candidate. Then a seed, and one draw per leaf-estimation step.
+- Each fold has its own online CTRs, approximations and body / tail prefixes.
+  Every fold is moved by every tree, and plain boosting shares fold 0 with an
+  unpermuted averaging fold (`UseAveragingFoldAsFoldZero`).
+- Matches catboost 1.2.10 (`random_strength=0`, `bootstrap_type='No'`) to
+  6e-16 on 13 golden cases: plain and ordered; RMSE, Logloss and MultiClass;
+  CTRs and combinations; weights; seed 7; 10 leaf steps; 1200 rows. On
+  20k rows it matches RMSE to 5e-15; Logloss can rarely break a near-tie
+  differently (see the module docs).
+
 ### CatBoost-style boosting: leaf estimation iterations (#127 §5)
 
 - `leaf_estimation_iterations` and `leaf_estimation_backtracking`
