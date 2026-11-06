@@ -340,61 +340,78 @@ fn compute_bins(
             rand::seq::index::sample(&mut rng, n, SKLEARN_BIN_SUBSAMPLE).into_vec()
         });
     let p = x.ncols();
-    // Column-major: histograms read one feature at a time.
-    let mut binned = Array2::zeros((n, p).f());
-    let mut all_bins = Vec::with_capacity(p);
-
     let cat_set: std::collections::HashSet<usize> = categorical_features.iter().copied().collect();
 
-    for j in 0..p {
-        let is_categorical = cat_set.contains(&j);
+    // The columns are binned in parallel.
+    use rayon::prelude::*;
+    let columns: Vec<(Vec<u8>, FeatureBins)> = (0..p)
+        .into_par_iter()
+        .map(|j| {
+            let is_categorical = cat_set.contains(&j);
 
-        let mut edges = Vec::new();
+            let mut edges = Vec::new();
 
-        if is_categorical && method == BinningMethod::Sklearn {
-            // sklearn ordinal-encodes every category (its estimators reject
-            // more than `max_bins` of them).
-            edges = x
+            if is_categorical && method == BinningMethod::Sklearn {
+                // sklearn ordinal-encodes every category (its estimators reject
+                // more than `max_bins` of them).
+                edges = x
+                    .column(j)
+                    .iter()
+                    .copied()
+                    .filter(|v| !v.is_nan())
+                    .collect();
+                edges.sort_by(f64::total_cmp);
+                edges.dedup();
+                edges.truncate(max_bins);
+            } else if is_categorical {
+                edges = categorical_edges(x.column(j), max_bins, min_data_in_bin);
+            } else if method == BinningMethod::Sklearn {
+                let mut raw: Vec<f64> = match &subsample {
+                    Some(rows) => rows.iter().map(|&i| x[[i, j]]).collect(),
+                    None => x.column(j).to_vec(),
+                };
+                raw.retain(|v| !v.is_nan());
+                raw.sort_by(f64::total_cmp);
+                if !raw.is_empty() {
+                    edges = sklearn_thresholds(&raw, max_bins);
+                }
+            } else {
+                edges = lightgbm_bin_edges(x.column(j), max_bins, min_data_in_bin);
+            }
+
+            let column: Vec<u8> = x
                 .column(j)
                 .iter()
-                .copied()
-                .filter(|v| !v.is_nan())
+                .map(|&v| {
+                    if v.is_nan() {
+                        MISSING_BIN
+                    } else if is_categorical {
+                        // Categories without a bin share the "other" (missing) bin.
+                        categorical_bin(v, &edges).map_or(MISSING_BIN, |b| b as u8)
+                    } else {
+                        numeric_bin(v, &edges)
+                    }
+                })
                 .collect();
-            edges.sort_by(f64::total_cmp);
-            edges.dedup();
-            edges.truncate(max_bins);
-        } else if is_categorical {
-            edges = categorical_edges(x.column(j), max_bins, min_data_in_bin);
-        } else if method == BinningMethod::Sklearn {
-            let mut raw: Vec<f64> = match &subsample {
-                Some(rows) => rows.iter().map(|&i| x[[i, j]]).collect(),
-                None => x.column(j).to_vec(),
-            };
-            raw.retain(|v| !v.is_nan());
-            raw.sort_by(f64::total_cmp);
-            if !raw.is_empty() {
-                edges = sklearn_thresholds(&raw, max_bins);
-            }
-        } else {
-            edges = lightgbm_bin_edges(x.column(j), max_bins, min_data_in_bin);
-        }
+            (
+                column,
+                FeatureBins {
+                    edges,
+                    is_categorical,
+                },
+            )
+        })
+        .collect();
 
-        for i in 0..n {
-            let v = x[[i, j]];
-            if v.is_nan() {
-                binned[[i, j]] = MISSING_BIN;
-            } else if is_categorical {
-                // Categories without a bin share the "other" (missing) bin.
-                binned[[i, j]] = categorical_bin(v, &edges).map_or(MISSING_BIN, |b| b as u8);
-            } else {
-                binned[[i, j]] = numeric_bin(v, &edges);
-            }
-        }
-
-        all_bins.push(FeatureBins {
-            edges,
-            is_categorical,
-        });
+    // Column-major: histograms of bundles and row partitions read one
+    // feature at a time.
+    let mut binned = Array2::zeros((n, p).f());
+    let mut all_bins = Vec::with_capacity(p);
+    for (j, (column, bins)) in columns.into_iter().enumerate() {
+        binned
+            .column_mut(j)
+            .assign(&ndarray::ArrayView1::from(&column));
+        all_bins.push(bins);
     }
 
     (binned, all_bins)
@@ -490,6 +507,17 @@ fn bin_matrix(x: ArrayView2<f64>, all_bins: &[FeatureBins]) -> Array2<u8> {
     out
 }
 
+/// `scores[i] += factor · tree(row i)` for every row of the row-major
+/// `binned_rows`, in parallel.
+fn add_tree_scores(scores: &mut [f64], tree: &TreeNode, binned_rows: &Array2<u8>, factor: f64) {
+    use rayon::prelude::*;
+    scores
+        .par_iter_mut()
+        .with_min_len(4096)
+        .enumerate()
+        .for_each(|(i, s)| *s += factor * tree.predict_bins(row_of(binned_rows, i)));
+}
+
 /// Row `i` of a row-major binned matrix.
 #[inline]
 fn row_of(binned: &Array2<u8>, i: usize) -> &[u8] {
@@ -583,29 +611,22 @@ impl Histogram {
         }
     }
 
-    /// `self = parent - self` (histogram subtraction: the larger child's
-    /// histogram from the parent's and the smaller child's).
-    fn subtract_from(&mut self, parent: &Histogram) {
-        for b in 0..self.grad_sum.len() {
-            self.grad_sum[b] = parent.grad_sum[b] - self.grad_sum[b];
-            self.hess_sum[b] = parent.hess_sum[b] - self.hess_sum[b];
-            self.count[b] = parent.count[b] - self.count[b];
-        }
-        self.missing_grad = parent.missing_grad - self.missing_grad;
-        self.missing_hess = parent.missing_hess - self.missing_hess;
-        self.missing_count = parent.missing_count - self.missing_count;
-    }
-
-    fn accumulate(&mut self, bin: u8, grad: f64, hess: f64) {
-        if bin == MISSING_BIN {
-            self.missing_grad += grad;
-            self.missing_hess += hess;
-            self.missing_count += 1;
-        } else {
-            let b = bin as usize;
-            self.grad_sum[b] += grad;
-            self.hess_sum[b] += hess;
-            self.count[b] += 1;
+    /// `self - child` (histogram subtraction: the larger child's histogram
+    /// from the parent's and the smaller child's).
+    fn minus(&self, child: &Histogram) -> Histogram {
+        let sub = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a - b).collect();
+        Histogram {
+            grad_sum: sub(&self.grad_sum, &child.grad_sum),
+            hess_sum: sub(&self.hess_sum, &child.hess_sum),
+            count: self
+                .count
+                .iter()
+                .zip(&child.count)
+                .map(|(a, b)| a - b)
+                .collect(),
+            missing_grad: self.missing_grad - child.missing_grad,
+            missing_hess: self.missing_hess - child.missing_hess,
+            missing_count: self.missing_count - child.missing_count,
         }
     }
 }
@@ -707,23 +728,113 @@ fn monotone_of(feat: usize, all_bins: &[FeatureBins], monotone_constraints: &[i8
     }
 }
 
+/// From this many candidate features a node's splits are searched in
+/// parallel.
+const PARALLEL_SPLIT_FEATURES: usize = 16;
+
+/// Sums per bin value of one feature at one node: gradients and hessians,
+/// and (in sklearn mode) counts, indexed by the `u8` bin (the missing bin
+/// last).
+struct BinSums {
+    gh: [(f64, f64); 256],
+    count: [u32; 256],
+}
+
+/// Bin sums of the bin column `col` over the rows `rows` (`None`: every row,
+/// in order), `gh` holding their gradients and hessians in that order.
+/// Counts are kept with `COUNT`.
+fn bin_sums<const COUNT: bool>(col: &[u8], rows: Option<&[u32]>, gh: &[(f32, f32)]) -> BinSums {
+    let mut s = BinSums {
+        gh: [(0.0, 0.0); 256],
+        count: [0; 256],
+    };
+    let mut add = |b: u8, (g, h): (f32, f32)| {
+        let a = &mut s.gh[b as usize];
+        a.0 += f64::from(g);
+        a.1 += f64::from(h);
+        if COUNT {
+            s.count[b as usize] += 1;
+        }
+    };
+    match rows {
+        Some(rows) => {
+            for (&i, &gh) in rows.iter().zip(gh) {
+                add(col[i as usize], gh);
+            }
+        }
+        None => {
+            for (&b, &gh) in col.iter().zip(gh) {
+                add(b, gh);
+            }
+        }
+    }
+    s
+}
+
+/// The histogram of a feature with `n_bins` value bins from its bin sums.
+fn histogram_of(s: &BinSums, n_bins: usize) -> Histogram {
+    let m = MISSING_BIN as usize;
+    Histogram {
+        grad_sum: s.gh[..n_bins].iter().map(|a| a.0).collect(),
+        hess_sum: s.gh[..n_bins].iter().map(|a| a.1).collect(),
+        count: s.count[..n_bins].to_vec(),
+        missing_grad: s.gh[m].0,
+        missing_hess: s.gh[m].1,
+        missing_count: s.count[m],
+    }
+}
+
 /// Below this many (sample, feature) pairs histograms are built serially.
 const PARALLEL_HISTOGRAM_WORK: usize = 1 << 16;
 
 /// Per-feature gradient/hessian histograms of the rows `indices`, one per
-/// entry of `feature_indices` (built in parallel for large nodes).
+/// entry of `feature_indices`, in parallel over the features for large
+/// nodes. Each feature sums its rows in order. Counts are kept only with
+/// `with_counts` (sklearn mode; LightGBM estimates them from the hessians,
+/// and the counts are then 0).
+///
+/// The node's gradients and hessians are gathered once, in row order and as
+/// float32 (they are float32 values, as in LightGBM and sklearn), so that
+/// every feature reads them sequentially; a node holding every row in order
+/// (the root without bagging) reads the bin columns sequentially too.
+#[allow(clippy::too_many_arguments)]
 fn build_histograms(
     binned_x: &Array2<u8>,
     all_bins: &[FeatureBins],
     bundles: Option<&FeatureBundles>,
+    with_counts: bool,
     gradients: &[f64],
     hessians: &[f64],
     indices: &[usize],
     feature_indices: &[usize],
 ) -> Vec<Histogram> {
     use rayon::prelude::*;
+    let n_rows = binned_x.nrows();
     let parallel = indices.len() * feature_indices.len() >= PARALLEL_HISTOGRAM_WORK;
-    // The histograms of the bundles holding any of the features.
+    let all_in_order = indices.len() == n_rows && indices.is_sorted();
+    let to_f32 = |v: f64| {
+        let r = v as f32;
+        debug_assert!(
+            f64::from(r) == v || v.is_nan(),
+            "gradient {v} is not a float32"
+        );
+        r
+    };
+    let ordered: Vec<(f32, f32)> = indices
+        .iter()
+        .map(|&i| (to_f32(gradients[i]), to_f32(hessians[i])))
+        .collect();
+    let rows32: Option<Vec<u32>> =
+        (!all_in_order).then(|| indices.iter().map(|&i| i as u32).collect());
+    let sums = |col: &[u8]| {
+        if with_counts {
+            bin_sums::<true>(col, rows32.as_deref(), &ordered)
+        } else {
+            bin_sums::<false>(col, rows32.as_deref(), &ordered)
+        }
+    };
+
+    // The bin sums of the bundles holding any of the features.
     let mut needed: Vec<usize> = bundles.map_or_else(Vec::new, |b| {
         feature_indices
             .iter()
@@ -732,45 +843,42 @@ fn build_histograms(
     });
     needed.sort_unstable();
     needed.dedup();
-    let bundle_hist = |id: usize| {
-        let col = &bundles.unwrap().columns[id];
-        let (mut g, mut h, mut c) = (vec![0.0; 256], vec![0.0; 256], vec![0u32; 256]);
-        for &i in indices {
-            let b = col[i] as usize;
-            g[b] += gradients[i];
-            h[b] += hessians[i];
-            c[b] += 1;
-        }
-        (g, h, c)
-    };
-    let bundle_hists: Vec<BundleHistogram> = if parallel {
-        needed.par_iter().map(|&id| bundle_hist(id)).collect()
+    let bundle_sums: Vec<BinSums> = if parallel {
+        needed
+            .par_iter()
+            .map(|&id| sums(&bundles.unwrap().columns[id]))
+            .collect()
     } else {
-        needed.iter().map(|&id| bundle_hist(id)).collect()
+        needed
+            .iter()
+            .map(|&id| sums(&bundles.unwrap().columns[id]))
+            .collect()
     };
     let totals = if needed.is_empty() {
         (0.0, 0.0, 0)
     } else {
         let (g, h) = node_totals(gradients, hessians, indices);
-        (g, h, indices.len() as u32)
+        (g, h, if with_counts { indices.len() as u32 } else { 0 })
     };
 
     let one = |feat: usize| {
+        let n_bins = n_value_bins(&all_bins[feat]);
         if let Some(at) = bundles.and_then(|b| b.bundle_of[feat]) {
             let k = needed.binary_search(&at.0).unwrap();
-            return bundles.unwrap().member_histogram(
-                at,
-                n_value_bins(&all_bins[feat]),
-                &bundle_hists[k],
-                totals,
-            );
+            return bundles
+                .unwrap()
+                .member_histogram(at, n_bins, &bundle_sums[k], totals);
         }
-        let mut hist = Histogram::new(n_value_bins(&all_bins[feat]));
         let col = binned_x.column(feat);
-        for &i in indices {
-            hist.accumulate(col[i], gradients[i], hessians[i]);
-        }
-        hist
+        let owned;
+        let col = match col.as_slice() {
+            Some(c) => c,
+            None => {
+                owned = col.to_vec();
+                &owned
+            }
+        };
+        histogram_of(&sums(col), n_bins)
     };
     if parallel {
         feature_indices.par_iter().map(|&f| one(f)).collect()
@@ -950,12 +1058,12 @@ impl FeatureBundles {
     }
 
     /// Histogram of the `member`-th feature of bundle `bundle` from the
-    /// bundle's histogram `(grad, hess, count)` and the node totals.
+    /// bundle's bin sums and the node totals.
     fn member_histogram(
         &self,
         (bundle, member): (usize, usize),
         n_bins: usize,
-        (grad, hess, count): &BundleHistogram,
+        sums: &BinSums,
         totals: (f64, f64, u32),
     ) -> Histogram {
         let m = &self.members[bundle][member];
@@ -963,18 +1071,16 @@ impl FeatureBundles {
         let (mut g_def, mut h_def, mut c_def) = totals;
         for (k, &b) in m.bins.iter().enumerate() {
             let bb = m.offset + k;
-            g_def -= grad[bb];
-            h_def -= hess[bb];
-            c_def -= count[bb];
-            set_bin(&mut hist, b, grad[bb], hess[bb], count[bb]);
+            let ((g, h), c) = (sums.gh[bb], sums.count[bb]);
+            g_def -= g;
+            h_def -= h;
+            c_def -= c;
+            set_bin(&mut hist, b, g, h, c);
         }
         set_bin(&mut hist, m.default_bin, g_def, h_def, c_def);
         hist
     }
 }
-
-/// Per bundle bin: gradient sum, hessian sum, count.
-type BundleHistogram = (Vec<f64>, Vec<f64>, Vec<u32>);
 
 fn set_bin(hist: &mut Histogram, bin: u8, grad: f64, hess: f64, count: u32) {
     if bin == MISSING_BIN {
@@ -1297,15 +1403,22 @@ fn find_best_split(
     // LightGBM keeps no counts in its histograms: it estimates them from the
     // hessians, `round(hess · n / (H + 2 kEpsilon))`.
     let cnt_factor = total_count as f64 / (total_hess + 2.0 * LGBM_EPSILON);
-    for (feat, hist) in positions.iter().map(|&k| (feature_indices[k], &hists[k])) {
-        let estimated;
-        let hist = if params.sklearn_compat {
-            hist
-        } else {
-            estimated = hist.with_estimated_counts(cnt_factor);
-            &estimated
-        };
+    let est_count = |h: f64| (h * cnt_factor + 0.5) as usize;
+    // Each feature's first best candidate (in parallel for many features),
+    // then the first best over the features in order: the outcome of one
+    // sequential scan.
+    let feature_best = |feat: usize, hist: &Histogram| -> Option<BestSplit> {
+        let mut best: Option<BestSplit> = None;
+        // Gain of the best candidate so far (read by the scans' fast path).
+        let best_gain = std::cell::Cell::new(0.0f64);
         if all_bins[feat].is_categorical {
+            let estimated;
+            let hist = if params.sklearn_compat {
+                hist
+            } else {
+                estimated = hist.with_estimated_counts(cnt_factor);
+                &estimated
+            };
             let n_categories = all_bins[feat].edges.len();
             let candidate = if params.sklearn_compat {
                 sklearn_categorical_split(
@@ -1335,7 +1448,7 @@ fn find_best_split(
                     best = Some(split);
                 }
             }
-            continue;
+            return best;
         }
         // Bins above the feature's last value bin are empty: they would
         // repeat the last candidate with an equal (never better) gain. The
@@ -1357,9 +1470,8 @@ fn find_best_split(
                 return;
             }
 
-            let mut left_val = leaf_value(left_grad, left_hess, l1, l2);
-            let mut right_val = leaf_value(right_grad, right_hess, l1, l2);
-            let gain = if params.sklearn_compat {
+            let (left_val, right_val, gain);
+            if params.sklearn_compat {
                 // sklearn's `_split_gain`, in its order of operations: with
                 // integer gradient sums (L1, quantile) mirrored splits tie
                 // mathematically and the rounding decides. Halved to the
@@ -1371,13 +1483,13 @@ fn find_best_split(
                     -1 if left_val < right_val => return,
                     _ => {}
                 }
-                let mut gain = sklearn_node_loss;
-                gain -= left_grad * left_val;
-                gain -= right_grad * right_val;
-                0.5 * gain
+                let mut g = sklearn_node_loss;
+                g -= left_grad * left_val;
+                g -= right_grad * right_val;
+                gain = 0.5 * g;
             } else if constrained {
-                left_val = left_val.clamp(lo, hi);
-                right_val = right_val.clamp(lo, hi);
+                left_val = leaf_value(left_grad, left_hess, l1, l2).clamp(lo, hi);
+                right_val = leaf_value(right_grad, right_hess, l1, l2).clamp(lo, hi);
                 // Monotone constraint check: feature with monotone=+1
                 // requires left_value <= right_value (predictions
                 // increase as bin increases), -1 the opposite.
@@ -1388,14 +1500,21 @@ fn find_best_split(
                 }
                 let left_g = leaf_gain_given_output(left_grad, left_hess, l1, l2, left_val);
                 let right_g = leaf_gain_given_output(right_grad, right_hess, l1, l2, right_val);
-                0.5 * (left_g + right_g - parent_gain)
+                gain = 0.5 * (left_g + right_g - parent_gain);
             } else {
                 let left_g = leaf_gain(left_grad, left_hess, l1, l2);
                 let right_g = leaf_gain(right_grad, right_hess, l1, l2);
-                0.5 * (left_g + right_g - parent_gain)
-            };
+                gain = 0.5 * (left_g + right_g - parent_gain);
+                // The outputs only for a new best candidate.
+                if !(gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain)) {
+                    return;
+                }
+                left_val = leaf_value(left_grad, left_hess, l1, l2);
+                right_val = leaf_value(right_grad, right_hess, l1, l2);
+            }
 
             if gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain) {
+                best_gain.set(gain);
                 best = Some(BestSplit {
                     feature: feat,
                     bin_threshold: bin,
@@ -1476,13 +1595,30 @@ fn find_best_split(
             let other = |(g, h, c): (f64, f64, usize)| {
                 (total_grad - g, sum_hess - h, total_count.saturating_sub(c))
             };
+            // Without constraints, a candidate goes to `consider` only when
+            // it beats the best one (the same gain, computed here inline).
+            let promising = |(lg, lh, lc): (f64, f64, usize), (rg, rh, rc): (f64, f64, usize)| {
+                if constrained {
+                    return true;
+                }
+                if lc < min_child_samples
+                    || lh < min_child_weight
+                    || rc < min_child_samples
+                    || rh < min_child_weight
+                {
+                    return false;
+                }
+                let gain =
+                    0.5 * (leaf_gain(lg, lh, l1, l2) + leaf_gain(rg, rh, l1, l2) - parent_gain);
+                gain > min_split_gain && gain > best_gain.get()
+            };
             // LightGBM's `num_bin` counts the missing bin.
             if has_nan && n_bins < 2 {
                 // Only the missing values on the right.
                 let right = (
                     hist.missing_grad,
                     LGBM_EPSILON + hist.missing_hess,
-                    hist.missing_count as usize,
+                    est_count(hist.missing_hess),
                 );
                 if right.2 <= total_count {
                     consider(other(right), right, 0, false);
@@ -1492,25 +1628,49 @@ fn find_best_split(
                 for b in (1..n_bins).rev() {
                     right.0 += hist.grad_sum[b];
                     right.1 += hist.hess_sum[b];
-                    right.2 += hist.count[b] as usize;
+                    right.2 += est_count(hist.hess_sum[b]);
                     if right.2 > total_count {
                         break;
                     }
-                    consider(other(right), right, (b - 1) as u8, true);
+                    let left = other(right);
+                    if promising(left, right) {
+                        consider(left, right, (b - 1) as u8, true);
+                    }
                 }
                 if has_nan {
                     let mut left = (0.0, LGBM_EPSILON, 0usize);
                     for b in 0..n_bins {
                         left.0 += hist.grad_sum[b];
                         left.1 += hist.hess_sum[b];
-                        left.2 += hist.count[b] as usize;
+                        left.2 += est_count(hist.hess_sum[b]);
                         if left.2 > total_count {
                             break;
                         }
-                        consider(left, other(left), b as u8, false);
+                        let right = other(left);
+                        if promising(left, right) {
+                            consider(left, right, b as u8, false);
+                        }
                     }
                 }
             }
+        }
+        best
+    };
+    let per_feature: Vec<Option<BestSplit>> = if positions.len() >= PARALLEL_SPLIT_FEATURES {
+        use rayon::prelude::*;
+        positions
+            .par_iter()
+            .map(|&k| feature_best(feature_indices[k], &hists[k]))
+            .collect()
+    } else {
+        positions
+            .iter()
+            .map(|&k| feature_best(feature_indices[k], &hists[k]))
+            .collect()
+    };
+    for split in per_feature.into_iter().flatten() {
+        if split.gain > best.as_ref().map_or(0.0, |b| b.gain) {
+            best = Some(split);
         }
     }
 
@@ -1745,6 +1905,7 @@ fn build_lgbm_tree(
         binned_x,
         all_bins,
         bundles,
+        params.sklearn_compat,
         gradients,
         hessians,
         &root_indices,
@@ -1806,15 +1967,27 @@ fn build_lgbm_tree(
             .categorical_order
             .as_ref()
             .map(|order| categorical_left_mask(order, split.bin_threshold));
+        // The children's rows, and their gradient / hessian totals summed in
+        // row order (as `node_totals`).
         let col = binned_x.column(split.feature);
-        let (left_idx, right_idx): (Vec<usize>, Vec<usize>) = indices.iter().partition(|&&i| {
-            goes_left(
+        let mut left_idx = Vec::with_capacity(split.left_count.min(indices.len()));
+        let mut right_idx = Vec::with_capacity(split.right_count.min(indices.len()));
+        let (mut left_totals, mut right_totals) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
+        for &i in &indices {
+            let (rows, totals) = if goes_left(
                 col[i],
                 split.bin_threshold,
                 split.missing_left,
                 mask.as_deref(),
-            )
-        });
+            ) {
+                (&mut left_idx, &mut left_totals)
+            } else {
+                (&mut right_idx, &mut right_totals)
+            };
+            rows.push(i);
+            totals.0 += gradients[i];
+            totals.1 += hessians[i];
+        }
 
         // Create left and right leaf nodes
         let left_id = nodes.len();
@@ -1880,15 +2053,17 @@ fn build_lgbm_tree(
             binned_x,
             all_bins,
             bundles,
+            params.sklearn_compat,
             gradients,
             hessians,
             small_idx,
             feature_indices,
         );
-        let mut large = small.clone();
-        for (l, parent) in large.iter_mut().zip(&candidate.hists) {
-            l.subtract_from(parent);
-        }
+        let large: Vec<Histogram> = small
+            .iter()
+            .zip(&candidate.hists)
+            .map(|(s, parent)| parent.minus(s))
+            .collect();
         drop(candidate.hists);
         let (left_hists, right_hists) = if left_smaller {
             (small, large)
@@ -1897,7 +2072,7 @@ fn build_lgbm_tree(
         };
 
         // Try to split the new children
-        for (ok, child_id, child_indices, hists, bounds, value) in [
+        for (ok, child_id, child_indices, hists, bounds, value, totals) in [
             (
                 left_ok,
                 left_id,
@@ -1905,6 +2080,7 @@ fn build_lgbm_tree(
                 left_hists,
                 left_bounds,
                 split.left_value,
+                left_totals,
             ),
             (
                 right_ok,
@@ -1913,12 +2089,12 @@ fn build_lgbm_tree(
                 right_hists,
                 right_bounds,
                 split.right_value,
+                right_totals,
             ),
         ] {
             if !ok {
                 continue;
             }
-            let totals = node_totals(gradients, hessians, &child_indices);
             if let Some(s) = best_for(&hists, totals, child_indices.len(), bounds, value, &groups) {
                 heap.push(LeafCandidate {
                     node_id: child_id,
@@ -3354,9 +3530,7 @@ impl LgbmRegressor {
                 let (drops, shrinkage) = d.drop_trees(trees.len());
                 for &k in &drops {
                     trees[k].scale(-1.0);
-                    for (i, p) in preds.iter_mut().enumerate() {
-                        *p += trees[k].predict_bins(row_of(&binned_rows, i));
-                    }
+                    add_tree_scores(&mut preds[..], &trees[k], &binned_rows, 1.0);
                 }
                 (drops, shrinkage)
             });
@@ -3392,8 +3566,9 @@ impl LgbmRegressor {
                     );
                     // Amplify gradients/hessians for the "other" sampled rows
                     for (k, &i) in selected.iter().enumerate() {
-                        gradients[i] *= amp_weights[k];
-                        hessians[i] *= amp_weights[k];
+                        // float32, as LightGBM's `score_t`.
+                        gradients[i] = f64::from((gradients[i] * amp_weights[k]) as f32);
+                        hessians[i] = f64::from((hessians[i] * amp_weights[k]) as f32);
                     }
                     selected
                 }
@@ -3401,7 +3576,6 @@ impl LgbmRegressor {
 
             let feature_indices = sample_features(p, self.colsample_bytree, &mut rng);
             let refit = refit_percentile(self.objective).map(|a| (a, row_indices.clone()));
-
             let mut tree = build_lgbm_tree(
                 &binned_x,
                 bundles.as_ref(),
@@ -3432,9 +3606,7 @@ impl LgbmRegressor {
                 // The tree's leaves carry its weight; the first tree also
                 // carries the initial score (LightGBM's `AddBias`).
                 tree.scale(shrinkage);
-                for (i, p) in preds.iter_mut().enumerate() {
-                    *p += tree.predict_bins(row_of(&binned_rows, i));
-                }
+                add_tree_scores(&mut preds[..], &tree, &binned_rows, 1.0);
                 if iter == 0 && baseline.abs() > LGBM_EPSILON {
                     tree.add_bias(baseline);
                 }
@@ -3442,20 +3614,15 @@ impl LgbmRegressor {
                 for &k in &drops {
                     trees[k].scale(f_valid);
                     trees[k].scale(f_train);
-                    for (i, p) in preds.iter_mut().enumerate() {
-                        *p += trees[k].predict_bins(row_of(&binned_rows, i));
-                    }
+                    add_tree_scores(&mut preds[..], &trees[k], &binned_rows, 1.0);
                 }
                 d.push(shrinkage);
                 trees.push(tree);
                 best_iteration = iter + 1;
                 continue;
             }
-
             // Update predictions (on ALL rows, not just sampled)
-            for i in 0..n {
-                preds[i] += self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
-            }
+            add_tree_scores(&mut preds[..], &tree, &binned_rows, self.learning_rate);
 
             if let Some(t) = tracker.as_mut() {
                 if let (Some(eb), Some(ep)) = (eval_binned.as_ref(), eval_preds.as_mut()) {
@@ -4249,9 +4416,7 @@ impl LgbmClassifier {
                     let (drops, shrinkage) = d.drop_trees(trees.len());
                     for &k in &drops {
                         trees[k].scale(-1.0);
-                        for (i, r) in raw.iter_mut().enumerate() {
-                            *r += trees[k].predict_bins(row_of(&binned_rows, i));
-                        }
+                        add_tree_scores(&mut raw[..], &trees[k], &binned_rows, 1.0);
                     }
                     (drops, shrinkage)
                 });
@@ -4285,8 +4450,9 @@ impl LgbmClassifier {
                             &mut rng,
                         );
                         for (k, &i) in selected.iter().enumerate() {
-                            gradients[i] *= amp[k];
-                            hessians[i] *= amp[k];
+                            // float32, as LightGBM's `score_t`.
+                            gradients[i] = f64::from((gradients[i] * amp[k]) as f32);
+                            hessians[i] = f64::from((hessians[i] * amp[k]) as f32);
                         }
                         selected
                     }
@@ -4310,9 +4476,7 @@ impl LgbmClassifier {
                 if let (Some(d), Some((drops, shrinkage))) = (dart.as_mut(), dart_step) {
                     let mut tree = tree;
                     tree.scale(shrinkage);
-                    for (i, r) in raw.iter_mut().enumerate() {
-                        *r += tree.predict_bins(row_of(&binned_rows, i));
-                    }
+                    add_tree_scores(&mut raw[..], &tree, &binned_rows, 1.0);
                     if iter == 0 && baseline.abs() > LGBM_EPSILON {
                         tree.add_bias(baseline);
                     }
@@ -4320,17 +4484,13 @@ impl LgbmClassifier {
                     for &k in &drops {
                         trees[k].scale(f_valid);
                         trees[k].scale(f_train);
-                        for (i, r) in raw.iter_mut().enumerate() {
-                            *r += trees[k].predict_bins(row_of(&binned_rows, i));
-                        }
+                        add_tree_scores(&mut raw[..], &trees[k], &binned_rows, 1.0);
                     }
                     d.push(shrinkage);
                     trees.push(tree);
                     continue;
                 }
-                for i in 0..n {
-                    raw[i] += self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
-                }
+                add_tree_scores(&mut raw[..], &tree, &binned_rows, self.learning_rate);
 
                 if let Some(t) = tracker.as_mut() {
                     if let (Some(eb), Some(er)) = (eval_binned.as_ref(), eval_raw.as_mut()) {
@@ -4452,9 +4612,7 @@ impl LgbmClassifier {
                     for &k in &drops {
                         for (ts, rs) in tree_sets.iter_mut().zip(raw_scores.iter_mut()) {
                             ts[k].scale(-1.0);
-                            for (i, r) in rs.iter_mut().enumerate() {
-                                *r += ts[k].predict_bins(row_of(&binned_rows, i));
-                            }
+                            add_tree_scores(&mut rs[..], &ts[k], &binned_rows, 1.0);
                         }
                     }
                     (drops, shrinkage)
@@ -4510,8 +4668,9 @@ impl LgbmClassifier {
                                 &mut rng,
                             );
                             for (k, &i) in selected.iter().enumerate() {
-                                gradients[i] *= amp[k];
-                                hessians[i] *= amp[k];
+                                // float32, as LightGBM's `score_t`.
+                                gradients[i] = f64::from((gradients[i] * amp[k]) as f32);
+                                hessians[i] = f64::from((hessians[i] * amp[k]) as f32);
                             }
                             selected
                         }
@@ -4535,17 +4694,17 @@ impl LgbmClassifier {
                     let mut tree = tree;
                     if let Some((_, shrinkage)) = &dart_step {
                         tree.scale(*shrinkage);
-                        for (i, r) in raw_scores[c].iter_mut().enumerate() {
-                            *r += tree.predict_bins(row_of(&binned_rows, i));
-                        }
+                        add_tree_scores(&mut raw_scores[c][..], &tree, &binned_rows, 1.0);
                         if iter == 0 && baselines[c].abs() > LGBM_EPSILON {
                             tree.add_bias(baselines[c]);
                         }
                     } else {
-                        for i in 0..n {
-                            raw_scores[c][i] +=
-                                self.learning_rate * tree.predict_bins(row_of(&binned_rows, i));
-                        }
+                        add_tree_scores(
+                            &mut raw_scores[c][..],
+                            &tree,
+                            &binned_rows,
+                            self.learning_rate,
+                        );
                     }
                     if let (Some(eb), Some(er)) = (eval_binned.as_ref(), eval_raw.as_mut()) {
                         for i in 0..eb.nrows() {
@@ -4562,9 +4721,7 @@ impl LgbmClassifier {
                         for (ts, rs) in tree_sets.iter_mut().zip(raw_scores.iter_mut()) {
                             ts[k].scale(f_valid);
                             ts[k].scale(f_train);
-                            for (i, r) in rs.iter_mut().enumerate() {
-                                *r += ts[k].predict_bins(row_of(&binned_rows, i));
-                            }
+                            add_tree_scores(&mut rs[..], &ts[k], &binned_rows, 1.0);
                         }
                     }
                     d.push(shrinkage);
@@ -6707,12 +6864,23 @@ mod bundling_tests {
         let (binned, bins) = compute_bins(x.view(), 255, &[10], 3, BinningMethod::LightGbm, 0);
         let bundles = FeatureBundles::find(&binned).unwrap();
         let mut s = 9;
-        let grad: Vec<f64> = (0..300).map(|_| lcg(&mut s) - 0.5).collect();
-        let hess: Vec<f64> = (0..300).map(|_| 0.5 + lcg(&mut s)).collect();
+        let mut grad: Vec<f64> = (0..300).map(|_| lcg(&mut s) - 0.5).collect();
+        let mut hess: Vec<f64> = (0..300).map(|_| 0.5 + lcg(&mut s)).collect();
+        round_to_f32(&mut grad);
+        round_to_f32(&mut hess);
         let rows: Vec<usize> = (0..300).filter(|i| i % 3 != 0).collect();
         let feats: Vec<usize> = (0..15).collect();
-        let plain = build_histograms(&binned, &bins, None, &grad, &hess, &rows, &feats);
-        let bundled = build_histograms(&binned, &bins, Some(&bundles), &grad, &hess, &rows, &feats);
+        let plain = build_histograms(&binned, &bins, None, true, &grad, &hess, &rows, &feats);
+        let bundled = build_histograms(
+            &binned,
+            &bins,
+            Some(&bundles),
+            true,
+            &grad,
+            &hess,
+            &rows,
+            &feats,
+        );
         for (a, b) in plain.iter().zip(&bundled) {
             assert_eq!(a.count, b.count);
             assert_eq!(a.missing_count, b.missing_count);
