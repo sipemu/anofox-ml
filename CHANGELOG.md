@@ -6,6 +6,25 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LGBM engine: exclusive feature bundling (#127)
+
+- LightGBM's EFB (`enable_bundle`, on by default; `with_enable_bundle` on
+  `LgbmRegressor` / `LgbmClassifier`, Python `enable_bundle=`): features
+  that are never off their most frequent bin in the same row (one-hot
+  blocks, sparse columns) share one bin column, found greedily in feature
+  order and by non-default count as LightGBM does. A node takes one pass
+  over its rows per bundle, and each member's most frequent bin comes from
+  the node totals (LightGBM's `FixHistogram`). Only exactly exclusive
+  features are bundled, so the model is unchanged up to rounding (LightGBM
+  also allows `n / 10000` conflicts). Off in the HistGradientBoosting
+  facade (sklearn has no bundling).
+- Histograms are sized to each feature's bins instead of 255. Together:
+  50 000 × 310 one-hot-heavy data trains about 2× faster.
+- Weighted L2 rounds the residual to float32 before weighting, as LightGBM:
+  weighted regression now matches LightGBM 4.7.0 to 2e-16 (was 5e-9).
+- 5 golden cases on one-hot / sparse data (with and without bundling) in
+  `lgbm_parity.json`.
+
 ### LGBM engine: DART (#127)
 
 - `BoostingType::Dart` with `DartParams` (`drop_rate`, `max_drop`,

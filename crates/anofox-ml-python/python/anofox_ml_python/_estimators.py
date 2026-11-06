@@ -471,8 +471,9 @@ class _Lgbm(BaseEstimator):
                  n_estimators=100, min_split_gain=0.0, min_child_weight=1e-3,
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
                  max_bin=255, random_state=None, drop_rate=0.1, max_drop=50, skip_drop=0.5,
-                 uniform_drop=False, xgboost_dart_mode=False, drop_seed=4):
+                 uniform_drop=False, xgboost_dart_mode=False, drop_seed=4, enable_bundle=True):
         self.boosting_type = boosting_type
+        self.enable_bundle = enable_bundle
         self.drop_rate = drop_rate
         self.max_drop = max_drop
         self.skip_drop = skip_drop
@@ -510,6 +511,7 @@ class _Lgbm(BaseEstimator):
                 "min_child_samples": self.min_child_samples,
                 "colsample_bytree": self.colsample_bytree, "reg_alpha": self.reg_alpha,
                 "reg_lambda": self.reg_lambda, "max_bins": self.max_bin,
+                "enable_bundle": bool(self.enable_bundle),
                 "seed": _seed(self.random_state)}
 
 
@@ -520,12 +522,13 @@ class LGBMClassifier(ClassifierMixin, _Lgbm):
                  n_estimators=100, min_split_gain=0.0, min_child_weight=1e-3,
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
                  max_bin=255, class_weight=None, random_state=None, drop_rate=0.1, max_drop=50,
-                 skip_drop=0.5, uniform_drop=False, xgboost_dart_mode=False, drop_seed=4):
+                 skip_drop=0.5, uniform_drop=False, xgboost_dart_mode=False, drop_seed=4,
+                 enable_bundle=True):
         super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
                          min_split_gain, min_child_weight, min_child_samples,
                          colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
                          drop_rate, max_drop, skip_drop, uniform_drop, xgboost_dart_mode,
-                         drop_seed)
+                         drop_seed, enable_bundle)
         self.class_weight = class_weight
 
     def _rust_params(self, X, y):

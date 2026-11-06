@@ -714,24 +714,278 @@ const PARALLEL_HISTOGRAM_WORK: usize = 1 << 16;
 /// entry of `feature_indices` (built in parallel for large nodes).
 fn build_histograms(
     binned_x: &Array2<u8>,
+    all_bins: &[FeatureBins],
+    bundles: Option<&FeatureBundles>,
     gradients: &[f64],
     hessians: &[f64],
     indices: &[usize],
     feature_indices: &[usize],
 ) -> Vec<Histogram> {
+    use rayon::prelude::*;
+    let parallel = indices.len() * feature_indices.len() >= PARALLEL_HISTOGRAM_WORK;
+    // The histograms of the bundles holding any of the features.
+    let mut needed: Vec<usize> = bundles.map_or_else(Vec::new, |b| {
+        feature_indices
+            .iter()
+            .filter_map(|&f| b.bundle_of[f].map(|(id, _)| id))
+            .collect()
+    });
+    needed.sort_unstable();
+    needed.dedup();
+    let bundle_hist = |id: usize| {
+        let col = &bundles.unwrap().columns[id];
+        let (mut g, mut h, mut c) = (vec![0.0; 256], vec![0.0; 256], vec![0u32; 256]);
+        for &i in indices {
+            let b = col[i] as usize;
+            g[b] += gradients[i];
+            h[b] += hessians[i];
+            c[b] += 1;
+        }
+        (g, h, c)
+    };
+    let bundle_hists: Vec<BundleHistogram> = if parallel {
+        needed.par_iter().map(|&id| bundle_hist(id)).collect()
+    } else {
+        needed.iter().map(|&id| bundle_hist(id)).collect()
+    };
+    let totals = if needed.is_empty() {
+        (0.0, 0.0, 0)
+    } else {
+        let (g, h) = node_totals(gradients, hessians, indices);
+        (g, h, indices.len() as u32)
+    };
+
     let one = |feat: usize| {
-        let mut hist = Histogram::new(DEFAULT_MAX_BINS);
+        if let Some(at) = bundles.and_then(|b| b.bundle_of[feat]) {
+            let k = needed.binary_search(&at.0).unwrap();
+            return bundles.unwrap().member_histogram(
+                at,
+                n_value_bins(&all_bins[feat]),
+                &bundle_hists[k],
+                totals,
+            );
+        }
+        let mut hist = Histogram::new(n_value_bins(&all_bins[feat]));
         let col = binned_x.column(feat);
         for &i in indices {
             hist.accumulate(col[i], gradients[i], hessians[i]);
         }
         hist
     };
-    if indices.len() * feature_indices.len() >= PARALLEL_HISTOGRAM_WORK {
-        use rayon::prelude::*;
+    if parallel {
         feature_indices.par_iter().map(|&f| one(f)).collect()
     } else {
         feature_indices.iter().map(|&f| one(f)).collect()
+    }
+}
+
+// ============================================================
+// Exclusive feature bundling
+// ============================================================
+
+/// Groups of features searched for a bundle a feature can join (the most
+/// recent ones, as LightGBM's `max_search_group`).
+const MAX_SEARCH_BUNDLES: usize = 100;
+
+/// One feature of a bundle.
+struct BundleMember {
+    /// The feature's most frequent bin (`MISSING_BIN` for missing), which
+    /// is not stored in the bundle.
+    default_bin: u8,
+    /// The feature's other bins present in the training data, ascending
+    /// (`MISSING_BIN` last); the k-th is bundle bin `offset + k`.
+    bins: Vec<u8>,
+    offset: usize,
+}
+
+/// LightGBM's exclusive feature bundling (EFB, `enable_bundle`). Features
+/// that are never off their most frequent bin in the same row (typically
+/// one-hot or sparse columns) share one bin column: bundle bin 0 means
+/// every member is at its most frequent bin, the others name one member's
+/// bin. A node then takes one pass over its rows per bundle instead of one
+/// per feature, and each member's histogram is read off the bundle's,
+/// its most frequent bin being the node totals minus its other bins (as
+/// LightGBM's `FixHistogram`).
+///
+/// Bundling is lossless: only exactly exclusive features are bundled
+/// (LightGBM tolerates `n / 10000` conflicting rows, so from 10 000 rows on
+/// it can bundle features this does not). Splits, row partitions and
+/// predictions keep using the per-feature bins.
+struct FeatureBundles {
+    /// Per bundle: the bundle bin of every row.
+    columns: Vec<Vec<u8>>,
+    members: Vec<Vec<BundleMember>>,
+    /// Per feature: its bundle and its position there, `None` when it is
+    /// on its own.
+    bundle_of: Vec<Option<(usize, usize)>>,
+}
+
+/// Rows of one feature off its most frequent bin, and that bin.
+fn non_default_rows(col: ArrayView1<u8>) -> (u8, Vec<usize>) {
+    let mut counts = [0usize; 256];
+    for &b in col {
+        counts[b as usize] += 1;
+    }
+    // The first of the most frequent bins.
+    let default_bin = (0..256).rev().max_by_key(|&b| counts[b]).unwrap() as u8;
+    let rows = (0..col.len()).filter(|&i| col[i] != default_bin).collect();
+    (default_bin, rows)
+}
+
+/// Greedy bundles of features in the order `order`: each feature joins the
+/// most recent bundle (of the last `MAX_SEARCH_BUNDLES`) it conflicts with
+/// in no row and whose bins it fits into.
+fn greedy_bundles(
+    order: &[usize],
+    rows: &[Vec<usize>],
+    n_bins: &[usize],
+    n: usize,
+) -> Vec<Vec<usize>> {
+    let words = n.div_ceil(64);
+    let mut bundles: Vec<Vec<usize>> = Vec::new();
+    let mut used: Vec<Vec<u64>> = Vec::new();
+    let mut total_rows: Vec<usize> = Vec::new();
+    let mut total_bins: Vec<usize> = Vec::new();
+    for &f in order {
+        let fits = |g: usize| {
+            total_rows[g] + rows[f].len() <= n
+                && total_bins[g] + n_bins[f] <= 256
+                && rows[f]
+                    .iter()
+                    .all(|&i| used[g][i / 64] & (1 << (i % 64)) == 0)
+        };
+        let target = (0..bundles.len())
+            .rev()
+            .take(MAX_SEARCH_BUNDLES)
+            .find(|&g| fits(g));
+        let g = target.unwrap_or_else(|| {
+            bundles.push(Vec::new());
+            used.push(vec![0; words]);
+            total_rows.push(0);
+            total_bins.push(1);
+            bundles.len() - 1
+        });
+        bundles[g].push(f);
+        total_rows[g] += rows[f].len();
+        total_bins[g] += n_bins[f];
+        for &i in &rows[f] {
+            used[g][i / 64] |= 1 << (i % 64);
+        }
+    }
+    bundles
+}
+
+impl FeatureBundles {
+    /// Bundles of the columns of `binned_x`, `None` when no two features
+    /// can share one. As LightGBM, features are bundled in their own order
+    /// and in descending order of their non-default counts, and the
+    /// grouping with fewer bundles is kept.
+    fn find(binned_x: &Array2<u8>) -> Option<Self> {
+        let (n, p) = binned_x.dim();
+        if p < 2 {
+            return None;
+        }
+        let (defaults, rows): (Vec<u8>, Vec<Vec<usize>>) =
+            (0..p).map(|f| non_default_rows(binned_x.column(f))).unzip();
+        let mut present: Vec<Vec<u8>> = (0..p)
+            .map(|f| {
+                let col = binned_x.column(f);
+                let mut seen = [false; 256];
+                for &i in &rows[f] {
+                    seen[col[i] as usize] = true;
+                }
+                (0..=255u8).filter(|&b| seen[b as usize]).collect()
+            })
+            .collect();
+        let n_bins: Vec<usize> = present.iter().map(Vec::len).collect();
+        let natural: Vec<usize> = (0..p).collect();
+        let mut by_count = natural.clone();
+        by_count.sort_by_key(|&f| std::cmp::Reverse(rows[f].len()));
+        let first = greedy_bundles(&natural, &rows, &n_bins, n);
+        let second = greedy_bundles(&by_count, &rows, &n_bins, n);
+        let groups = if second.len() < first.len() {
+            second
+        } else {
+            first
+        };
+        if groups.len() == p {
+            return None;
+        }
+
+        let mut bundle_of = vec![None; p];
+        let mut columns = Vec::new();
+        let mut members = Vec::new();
+        for group in groups.into_iter().filter(|g| g.len() > 1) {
+            let id = columns.len();
+            let mut column = vec![0u8; n];
+            let mut offset = 1;
+            let mut group_members = Vec::with_capacity(group.len());
+            for f in group {
+                bundle_of[f] = Some((id, group_members.len()));
+                let bins = std::mem::take(&mut present[f]);
+                let mut bundle_bin = [0u8; 256];
+                for (k, &b) in bins.iter().enumerate() {
+                    bundle_bin[b as usize] = (offset + k) as u8;
+                }
+                let col = binned_x.column(f);
+                for &i in &rows[f] {
+                    column[i] = bundle_bin[col[i] as usize];
+                }
+                let width = bins.len();
+                group_members.push(BundleMember {
+                    default_bin: defaults[f],
+                    bins,
+                    offset,
+                });
+                offset += width;
+            }
+            columns.push(column);
+            members.push(group_members);
+        }
+        Some(Self {
+            columns,
+            members,
+            bundle_of,
+        })
+    }
+
+    /// Histogram of the `member`-th feature of bundle `bundle` from the
+    /// bundle's histogram `(grad, hess, count)` and the node totals.
+    fn member_histogram(
+        &self,
+        (bundle, member): (usize, usize),
+        n_bins: usize,
+        (grad, hess, count): &BundleHistogram,
+        totals: (f64, f64, u32),
+    ) -> Histogram {
+        let m = &self.members[bundle][member];
+        let mut hist = Histogram::new(n_bins);
+        let (mut g_def, mut h_def, mut c_def) = totals;
+        for (k, &b) in m.bins.iter().enumerate() {
+            let bb = m.offset + k;
+            g_def -= grad[bb];
+            h_def -= hess[bb];
+            c_def -= count[bb];
+            set_bin(&mut hist, b, grad[bb], hess[bb], count[bb]);
+        }
+        set_bin(&mut hist, m.default_bin, g_def, h_def, c_def);
+        hist
+    }
+}
+
+/// Per bundle bin: gradient sum, hessian sum, count.
+type BundleHistogram = (Vec<f64>, Vec<f64>, Vec<u32>);
+
+fn set_bin(hist: &mut Histogram, bin: u8, grad: f64, hess: f64, count: u32) {
+    if bin == MISSING_BIN {
+        hist.missing_grad = grad;
+        hist.missing_hess = hess;
+        hist.missing_count = count;
+    } else {
+        let b = bin as usize;
+        hist.grad_sum[b] = grad;
+        hist.hess_sum[b] = hess;
+        hist.count[b] = count;
     }
 }
 
@@ -1442,6 +1696,7 @@ enum BuildNode {
 #[allow(clippy::too_many_arguments)]
 fn build_lgbm_tree(
     binned_x: &Array2<u8>,
+    bundles: Option<&FeatureBundles>,
     gradients: &[f64],
     hessians: &[f64],
     root_indices: Vec<usize>,
@@ -1488,6 +1743,8 @@ fn build_lgbm_tree(
     // Try to split the root.
     let root_hists = build_histograms(
         binned_x,
+        all_bins,
+        bundles,
         gradients,
         hessians,
         &root_indices,
@@ -1619,7 +1876,15 @@ fn build_lgbm_tree(
         // derive the larger child's from the parent's.
         let left_smaller = left_idx.len() <= right_idx.len();
         let small_idx = if left_smaller { &left_idx } else { &right_idx };
-        let small = build_histograms(binned_x, gradients, hessians, small_idx, feature_indices);
+        let small = build_histograms(
+            binned_x,
+            all_bins,
+            bundles,
+            gradients,
+            hessians,
+            small_idx,
+            feature_indices,
+        );
         let mut large = small.clone();
         for (l, parent) in large.iter_mut().zip(&candidate.hists) {
             l.subtract_from(parent);
@@ -2063,6 +2328,11 @@ pub struct LgbmRegressor {
     /// Per-feature monotone constraint: -1 (decreasing), 0 (none), +1 (increasing).
     /// Length must match `n_features` (or be empty for no constraints).
     pub monotone_constraints: Vec<i8>,
+    /// Exclusive feature bundling (LightGBM's `enable_bundle`, default
+    /// true): see `FeatureBundles`. It changes the speed, not the model
+    /// (up to rounding in the histograms).
+    #[serde(default = "default_true")]
+    pub enable_bundle: bool,
     pub seed: u64,
     /// sklearn's numerics instead of LightGBM's: float32 gradients and
     /// hessians, its L1 / quantile gradient at ties (prediction == target
@@ -2111,6 +2381,7 @@ impl LgbmRegressor {
             categorical_features: Vec::new(),
             categorical_split: CategoricalSplitParams::default(),
             monotone_constraints: Vec::new(),
+            enable_bundle: true,
             seed: 0,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
@@ -2221,6 +2492,11 @@ impl LgbmRegressor {
     }
     pub fn with_monotone_constraints(mut self, constraints: Vec<i8>) -> Self {
         self.monotone_constraints = constraints;
+        self
+    }
+    /// Exclusive feature bundling on or off (LightGBM's `enable_bundle`).
+    pub fn with_enable_bundle(mut self, on: bool) -> Self {
+        self.enable_bundle = on;
         self
     }
     pub fn with_seed(mut self, s: u64) -> Self {
@@ -2971,6 +3247,11 @@ impl LgbmRegressor {
         );
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
+        // sklearn has no feature bundling (and its parity needs the plain
+        // histogram sums).
+        let bundles = (self.enable_bundle && !self.sklearn_compat)
+            .then(|| FeatureBundles::find(&binned_x))
+            .flatten();
 
         // sklearn treats any given weights as weights (its weighted
         // percentiles differ from the unweighted ones even for unit weights).
@@ -3083,6 +3364,11 @@ impl LgbmRegressor {
 
             // Apply sample weights (multiply into gradients and hessians)
             if let Some(sw) = sample_weight {
+                // LightGBM's weighted L2 rounds the residual to float32
+                // before weighting it.
+                if !self.sklearn_compat && matches!(self.objective, LgbmObjective::Regression) {
+                    round_to_f32(&mut gradients);
+                }
                 for i in 0..n {
                     gradients[i] *= sw[i];
                     hessians[i] *= sw[i];
@@ -3118,6 +3404,7 @@ impl LgbmRegressor {
 
             let mut tree = build_lgbm_tree(
                 &binned_x,
+                bundles.as_ref(),
                 &gradients,
                 &hessians,
                 row_indices,
@@ -3438,6 +3725,11 @@ pub struct LgbmClassifier {
     pub monotone_constraints: Vec<i8>,
     pub class_weight: Option<LgbmClassWeight>,
     pub early_stopping_rounds: Option<usize>,
+    /// Exclusive feature bundling (LightGBM's `enable_bundle`, default
+    /// true): see `FeatureBundles`. It changes the speed, not the model
+    /// (up to rounding in the histograms).
+    #[serde(default = "default_true")]
+    pub enable_bundle: bool,
     pub seed: u64,
     /// Scale the softmax hessian by K / (K - 1) as LightGBM does; the
     /// HistGradientBoosting facade turns it off (sklearn's hessian).
@@ -3490,6 +3782,7 @@ impl LgbmClassifier {
             monotone_constraints: Vec::new(),
             class_weight: None,
             early_stopping_rounds: None,
+            enable_bundle: true,
             seed: 0,
             softmax_hessian_factor: true,
             sklearn_compat: false,
@@ -3583,6 +3876,11 @@ impl LgbmClassifier {
     }
     pub fn with_early_stopping(mut self, r: Option<usize>) -> Self {
         self.early_stopping_rounds = r;
+        self
+    }
+    /// Exclusive feature bundling on or off (LightGBM's `enable_bundle`).
+    pub fn with_enable_bundle(mut self, on: bool) -> Self {
+        self.enable_bundle = on;
         self
     }
     pub fn with_seed(mut self, s: u64) -> Self {
@@ -3788,6 +4086,11 @@ impl LgbmClassifier {
         );
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
+        // sklearn has no feature bundling (and its parity needs the plain
+        // histogram sums).
+        let bundles = (self.enable_bundle && !self.sklearn_compat)
+            .then(|| FeatureBundles::find(&binned_x))
+            .flatten();
 
         let mut classes: Vec<f64> = y.iter().copied().collect();
         classes.sort_by(f64::total_cmp);
@@ -3992,6 +4295,7 @@ impl LgbmClassifier {
 
                 let tree = build_lgbm_tree(
                     &binned_x,
+                    bundles.as_ref(),
                     &gradients,
                     &hessians,
                     row_indices,
@@ -4216,6 +4520,7 @@ impl LgbmClassifier {
 
                     let tree = build_lgbm_tree(
                         &binned_x,
+                        bundles.as_ref(),
                         &gradients,
                         &hessians,
                         row_indices,
@@ -6326,5 +6631,160 @@ mod early_stopping_regression_tests {
         let a = m.fit(&x, &y).unwrap();
         let b = m.fit(&xf, &y).unwrap();
         assert_eq!(a.predict(&x).unwrap(), b.predict(&xf).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod bundling_tests {
+    use super::*;
+
+    fn lcg(s: &mut u64) -> f64 {
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*s >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Two dense columns, a one-hot block of 8, a categorical column that is
+    /// mostly 0, and 4 sparse columns, one with missing values.
+    fn sparse_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut s = seed;
+        let mut x = Array2::<f64>::zeros((n, 15));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            x[[i, 0]] = lcg(&mut s) * 4.0 - 2.0;
+            x[[i, 1]] = lcg(&mut s);
+            let level = (lcg(&mut s) * 8.0) as usize;
+            x[[i, 2 + level]] = 1.0;
+            if lcg(&mut s) < 0.15 {
+                x[[i, 10]] = 1.0 + (lcg(&mut s) * 4.0).floor();
+            }
+            for j in 11..15 {
+                if lcg(&mut s) < 0.1 {
+                    x[[i, j]] = lcg(&mut s) * 2.0 - 1.0;
+                }
+            }
+            if lcg(&mut s) < 0.03 {
+                x[[i, 14]] = f64::NAN;
+            }
+            y[i] =
+                x[[i, 0]] + 0.3 * level as f64 - x[[i, 10]] + 3.0 * x[[i, 12]] + 0.2 * lcg(&mut s);
+        }
+        (x, y)
+    }
+
+    #[test]
+    fn exclusive_columns_share_a_bundle() {
+        let (x, _) = sparse_data(300, 1);
+        let (binned, _) = compute_bins(x.view(), 255, &[10], 3, BinningMethod::LightGbm, 0);
+        let b = FeatureBundles::find(&binned).expect("bundles");
+        assert!(b.bundle_of[0].is_none() && b.bundle_of[1].is_none());
+        // The one-hot block never overlaps, so it fits into one bundle.
+        let (first, _) = b.bundle_of[2].expect("one-hot column bundled");
+        assert!((3..10).all(|f| b.bundle_of[f].map(|(id, _)| id) == Some(first)));
+        // Every bundle is exactly exclusive: a row is off the most frequent
+        // bin in at most one member.
+        for id in 0..b.members.len() {
+            for i in 0..x.nrows() {
+                let off = (0..15)
+                    .filter_map(|f| match b.bundle_of[f] {
+                        Some((g, k)) if g == id => {
+                            Some(binned[[i, f]] != b.members[g][k].default_bin)
+                        }
+                        _ => None,
+                    })
+                    .filter(|&o| o)
+                    .count();
+                assert!(off <= 1);
+                assert_eq!(b.columns[id][i] == 0, off == 0);
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_histograms_match_plain_ones() {
+        let (x, _) = sparse_data(300, 2);
+        let (binned, bins) = compute_bins(x.view(), 255, &[10], 3, BinningMethod::LightGbm, 0);
+        let bundles = FeatureBundles::find(&binned).unwrap();
+        let mut s = 9;
+        let grad: Vec<f64> = (0..300).map(|_| lcg(&mut s) - 0.5).collect();
+        let hess: Vec<f64> = (0..300).map(|_| 0.5 + lcg(&mut s)).collect();
+        let rows: Vec<usize> = (0..300).filter(|i| i % 3 != 0).collect();
+        let feats: Vec<usize> = (0..15).collect();
+        let plain = build_histograms(&binned, &bins, None, &grad, &hess, &rows, &feats);
+        let bundled = build_histograms(&binned, &bins, Some(&bundles), &grad, &hess, &rows, &feats);
+        for (a, b) in plain.iter().zip(&bundled) {
+            assert_eq!(a.count, b.count);
+            assert_eq!(a.missing_count, b.missing_count);
+            for k in 0..a.grad_sum.len() {
+                assert!((a.grad_sum[k] - b.grad_sum[k]).abs() < 1e-12);
+                assert!((a.hess_sum[k] - b.hess_sum[k]).abs() < 1e-12);
+            }
+            assert!((a.missing_grad - b.missing_grad).abs() < 1e-12);
+            assert!((a.missing_hess - b.missing_hess).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn bundling_leaves_the_model_unchanged() {
+        let (x, y) = sparse_data(400, 3);
+        let reg = LgbmRegressor::new()
+            .with_n_estimators(30)
+            .with_num_leaves(12)
+            .with_min_child_samples(5)
+            .with_categorical_features(vec![10]);
+        let a = reg.clone().fit(&x, &y).unwrap().predict(&x).unwrap();
+        let b = reg
+            .with_enable_bundle(false)
+            .fit(&x, &y)
+            .unwrap()
+            .predict(&x)
+            .unwrap();
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0, f64::max);
+        assert!(worst < 1e-10, "{worst}");
+
+        let labels = y.mapv(|v| f64::from(v > 0.5) + f64::from(v > 1.5));
+        let clf = LgbmClassifier::new()
+            .with_n_estimators(20)
+            .with_min_child_samples(5);
+        let a = clf
+            .clone()
+            .fit(&x, &labels)
+            .unwrap()
+            .predict_proba(&x)
+            .unwrap();
+        let b = clf
+            .with_enable_bundle(false)
+            .fit(&x, &labels)
+            .unwrap()
+            .predict_proba(&x)
+            .unwrap();
+        let worst = a
+            .iter()
+            .zip(&b)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0, f64::max);
+        assert!(worst < 1e-10, "{worst}");
+    }
+
+    #[test]
+    fn dense_or_single_columns_are_not_bundled() {
+        let mut s = 4;
+        let x = Array2::from_shape_fn((200, 4), |_| lcg(&mut s));
+        let (binned, _) = compute_bins(x.view(), 255, &[], 3, BinningMethod::LightGbm, 0);
+        assert!(FeatureBundles::find(&binned).is_none());
+        let (binned, _) = compute_bins(
+            x.column(0).insert_axis(ndarray::Axis(1)),
+            255,
+            &[],
+            3,
+            BinningMethod::LightGbm,
+            0,
+        );
+        assert!(FeatureBundles::find(&binned).is_none());
     }
 }

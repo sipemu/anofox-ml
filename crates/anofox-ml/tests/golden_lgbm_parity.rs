@@ -63,6 +63,9 @@ macro_rules! configure {
                 drop_seed: p["drop_seed"].as_u64().map_or(d.drop_seed, |v| v as u32),
             });
         }
+        if let Some(b) = p["enable_bundle"].as_bool() {
+            m = m.with_enable_bundle(b);
+        }
         if let Some(c) = p["monotone_constraints"].as_array() {
             m = m.with_monotone_constraints(c.iter().map(|v| v.as_i64().unwrap() as i8).collect());
         }
