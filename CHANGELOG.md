@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: ordered boosting (#127 §5)
+
+- `boosting_type = Ordered` (and `fold_len_multiplier`, default 2) on
+  `CatBoostRegressor` / `CatBoostClassifier`: CatBoost's ordered boosting
+  against prediction shift. The rows (in the given order, as
+  `has_time=True`) form body / tail prefixes (`SelectMinBatchSize`, then
+  `ceil(body · multiplier)`), each with its own approximation that only its
+  body rows move; splits are scored by body-row leaf estimates on the tail
+  rows with per-prefix L2 scaling (`CalcStatsKernel`,
+  `UpdateScoreBinKernelOrdered`); the model's leaf values come from all
+  rows. Matches catboost 1.2.10 to 8e-16 on 7 golden cases (incl. 1200
+  rows, weights, Gradient leaves and categorical CTRs). Python:
+  `boosting_type="Ordered"`, `fold_len_multiplier=`.
+
 ### CatBoost-style boosting: categorical features (#127 §5)
 
 - `cat_features` on `CatBoostClassifier`: categorical features with at

@@ -360,6 +360,17 @@ pub enum CatBoostScoreFunction {
     L2,
 }
 
+/// CatBoost's `boosting_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostBoostingType {
+    /// The trees are scored and fitted on all rows.
+    #[default]
+    Plain,
+    /// Ordered boosting: the splits are scored with approximations that
+    /// did not see the scored rows (against CatBoost's prediction shift).
+    Ordered,
+}
+
 /// How leaf values are estimated (CatBoost's `leaf_estimation_method`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CatBoostLeafEstimation {
@@ -401,6 +412,8 @@ struct TrainParams {
     score_function: CatBoostScoreFunction,
     leaf_estimation: CatBoostLeafEstimation,
     model_size_reg: f64,
+    ordered: bool,
+    fold_len_multiplier: f64,
 }
 
 /// `sum · 1/(count + λ)` for a non-empty side, else 0 (CatBoost's
@@ -610,19 +623,56 @@ fn quantize(
 /// Grow one oblivious tree on the weighted first derivatives `wder`
 /// (`w · der1`) and weights `w`; returns the splits as (column, split
 /// index) and every row's leaf.
+/// The derivatives a tree's splits are scored on. Plain boosting: all rows
+/// (`body = 0`). Ordered boosting: one part per body / tail of the fold,
+/// whose leaf estimates come from the body rows and are scored on the tail
+/// rows (CatBoost's `CalcStatsKernel` and `UpdateScoreBinKernelOrdered`).
+struct ScorePart<'a> {
+    /// `w · der1` of the rows `0..tail`.
+    wder: &'a [f64],
+    body: usize,
+    tail: usize,
+    scaled_l2: f64,
+}
+
+/// Bucket statistics: weighted derivative and weight sums of the scored
+/// rows, and (ordered) derivative and weight sums of the body rows.
+#[derive(Clone, Copy, Default)]
+struct BucketStats {
+    swd: f64,
+    sw: f64,
+    sd: f64,
+    count: f64,
+}
+
+impl BucketStats {
+    fn add(&mut self, o: &Self) {
+        self.swd += o.swd;
+        self.sw += o.sw;
+        self.sd += o.sd;
+        self.count += o.count;
+    }
+    fn remove(&mut self, o: &Self) {
+        self.swd -= o.swd;
+        self.sw -= o.sw;
+        self.sd -= o.sd;
+        self.count -= o.count;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn grow_tree(
     q: &Quantized,
-    wder: &[f64],
+    parts: &[ScorePart<'_>],
     w: &[f64],
+    ordered: bool,
     depth: usize,
-    scaled_l2: f64,
     score_function: CatBoostScoreFunction,
     model_size_reg: f64,
     used_ctrs: &mut std::collections::HashSet<(usize, bool)>,
 ) -> (Vec<(usize, usize)>, Vec<u32>) {
     use rayon::prelude::*;
-    let n = wder.len();
+    let n = w.len();
     // CatBoost's `GetCatFeatureWeight`: a CTR type not yet in the model
     // scores `(1 + categories / max categories)^-model_size_reg` times less.
     let max_categories = q
@@ -647,54 +697,68 @@ fn grow_tree(
                 if nb < 2 {
                     return None;
                 }
-                let mut hist = vec![(0.0f64, 0.0f64); leaves * nb];
-                for i in 0..n {
-                    let h = &mut hist[leaf_of[i] as usize * nb + column.buckets[i] as usize];
-                    h.0 += wder[i];
-                    h.1 += w[i];
+                let mut hist = vec![BucketStats::default(); parts.len() * leaves * nb];
+                for (pi, part) in parts.iter().enumerate() {
+                    let base = pi * leaves * nb;
+                    for i in 0..part.tail {
+                        let h =
+                            &mut hist[base + leaf_of[i] as usize * nb + column.buckets[i] as usize];
+                        if i < part.body {
+                            h.sd += part.wder[i];
+                            h.count += w[i];
+                        } else {
+                            h.swd += part.wder[i];
+                            h.sw += w[i];
+                        }
+                    }
                 }
                 let mut num = vec![0.0f64; n_splits];
                 let mut den = vec![1e-100f64; n_splits];
-                let mut add = |s: usize, t: (f64, f64), f: (f64, f64)| {
-                    let (at, af) = (average(t.0, t.1, scaled_l2), average(f.0, f.1, scaled_l2));
-                    match score_function {
-                        // CatBoost's SSE kernel: `prev + (false + true)`.
-                        CatBoostScoreFunction::Cosine => {
-                            num[s] += af * f.0 + at * t.0;
-                            den[s] += af * af * f.1 + at * at * t.1;
+                for (pi, part) in parts.iter().enumerate() {
+                    let l2 = part.scaled_l2;
+                    let mut add = |s: usize, t: &BucketStats, f: &BucketStats| {
+                        // Plain: averages of the scored rows; ordered: of
+                        // the body rows.
+                        let (at, af) = if ordered {
+                            (average(t.sd, t.count, l2), average(f.sd, f.count, l2))
+                        } else {
+                            (average(t.swd, t.sw, l2), average(f.swd, f.sw, l2))
+                        };
+                        match score_function {
+                            // CatBoost's SSE kernel: `prev + (false + true)`.
+                            CatBoostScoreFunction::Cosine => {
+                                num[s] += af * f.swd + at * t.swd;
+                                den[s] += af * af * f.sw + at * at * t.sw;
+                            }
+                            // `AddLeaf(true)` then `AddLeaf(false)`.
+                            CatBoostScoreFunction::L2 => {
+                                num[s] += at * t.swd;
+                                num[s] += af * f.swd;
+                            }
                         }
-                        // `AddLeaf(true)` then `AddLeaf(false)`.
-                        CatBoostScoreFunction::L2 => {
-                            num[s] += at * t.0;
-                            num[s] += af * f.0;
+                    };
+                    // CatBoost's `CalcScoresForLeaf`.
+                    for leaf in 0..leaves {
+                        let start = (pi * leaves + leaf) * nb;
+                        let buckets = &hist[start..start + nb];
+                        let mut all = BucketStats::default();
+                        for b in buckets {
+                            all.add(b);
                         }
-                    }
-                };
-                // CatBoost's `CalcScoresForLeaf`.
-                for leaf in 0..leaves {
-                    let buckets = &hist[leaf * nb..(leaf + 1) * nb];
-                    let mut all = (0.0, 0.0);
-                    for b in buckets {
-                        all.0 += b.0;
-                        all.1 += b.1;
-                    }
-                    if one_hot {
-                        let mut f = all;
-                        for (s, &b) in buckets.iter().enumerate() {
-                            f.0 -= b.0;
-                            f.1 -= b.1;
-                            add(s, b, f);
-                            f.0 += b.0;
-                            f.1 += b.1;
-                        }
-                    } else {
-                        let (mut t, mut f) = (all, (0.0f64, 0.0f64));
-                        for (s, b) in buckets[..n_splits].iter().enumerate() {
-                            f.0 += b.0;
-                            f.1 += b.1;
-                            t.0 -= b.0;
-                            t.1 -= b.1;
-                            add(s, t, f);
+                        if one_hot {
+                            let mut f = all;
+                            for (s, b) in buckets.iter().enumerate() {
+                                f.remove(b);
+                                add(s, b, &f);
+                                f.add(b);
+                            }
+                        } else {
+                            let (mut t, mut f) = (all, BucketStats::default());
+                            for (s, b) in buckets[..n_splits].iter().enumerate() {
+                                f.add(b);
+                                t.remove(b);
+                                add(s, &t, &f);
+                            }
                         }
                     }
                 }
@@ -767,7 +831,56 @@ fn grow_tree(
     (splits, leaf_of)
 }
 
-/// Plain boosting of oblivious trees from the constant `bias`.
+/// CatBoost's body / tail prefixes of a fold for ordered boosting: the
+/// first body is 1 row (`min(100, n / 50)` above 500 rows), every tail
+/// ends at `ceil(body · fold_len_multiplier)`.
+fn body_tails(n: usize, multiplier: f64, weights: &[f64]) -> Vec<(usize, usize, f64)> {
+    let mut left = if n > 500 { 100.min(n / 50) } else { 1 }.min(n);
+    let mut out = Vec::new();
+    while out.is_empty() || left < n {
+        let body = left;
+        let tail = ((left as f64 * multiplier).ceil() as usize).min(n);
+        let body_weight: f64 = weights[..body].iter().sum();
+        out.push((body, tail, body_weight));
+        left = tail;
+    }
+    out
+}
+
+/// Leaf deltas (Newton or Gradient) from the rows `0..rows`, times the
+/// learning rate.
+fn leaf_deltas(
+    leaf_of: &[u32],
+    n_leaves: usize,
+    ders: &[(f64, f64)],
+    weights: &[f64],
+    rows: usize,
+    scaled_l2: f64,
+    p: &TrainParams,
+) -> Vec<f64> {
+    let mut sums = vec![(0.0f64, 0.0f64, 0.0f64); n_leaves];
+    for i in 0..rows {
+        let s = &mut sums[leaf_of[i] as usize];
+        s.0 += weights[i] * ders[i].0;
+        s.1 += weights[i] * ders[i].1;
+        s.2 += weights[i];
+    }
+    sums.iter()
+        .map(|&(der, der2, w)| {
+            let delta = match p.leaf_estimation {
+                CatBoostLeafEstimation::Newton => der / (-der2 + scaled_l2),
+                CatBoostLeafEstimation::Gradient => average(der, w, scaled_l2),
+            };
+            p.learning_rate * delta
+        })
+        .collect()
+}
+
+/// Boosting of oblivious trees from the constant `bias`. Plain: the trees
+/// are scored and fitted on all rows. Ordered (CatBoost's ordered
+/// boosting): the splits are scored on the body / tail prefixes of the
+/// rows, whose approximations only ever saw the rows before their tail, and
+/// the leaf values of the model come from all rows.
 fn boost(
     q: &Quantized,
     target: &[f64],
@@ -779,44 +892,86 @@ fn boost(
     let n = target.len();
     let sum_w: f64 = weights.iter().sum();
     let scaled_l2 = p.l2_leaf_reg * (sum_w / n as f64);
+    let ders_of = |approx: &[f64], rows: usize| -> Vec<(f64, f64)> {
+        target[..rows]
+            .iter()
+            .zip(approx)
+            .map(|(&t, &a)| loss.ders(t, a))
+            .collect()
+    };
+    let tails = if p.ordered {
+        body_tails(n, p.fold_len_multiplier, weights)
+    } else {
+        Vec::new()
+    };
+    let mut fold_approx: Vec<Vec<f64>> = tails.iter().map(|&(_, t, _)| vec![bias; t]).collect();
     let mut approx = vec![bias; n];
     let mut trees = Vec::with_capacity(p.iterations);
     let mut used_ctrs = std::collections::HashSet::new();
     for _ in 0..p.iterations {
-        let ders: Vec<(f64, f64)> = target
-            .iter()
-            .zip(&approx)
-            .map(|(&t, &a)| loss.ders(t, a))
-            .collect();
-        let wder: Vec<f64> = ders.iter().zip(weights).map(|(d, &w)| w * d.0).collect();
-        let (splits, leaf_of) = grow_tree(
-            q,
-            &wder,
-            weights,
-            p.depth,
-            scaled_l2,
-            p.score_function,
-            p.model_size_reg,
-            &mut used_ctrs,
-        );
+        let ders = ders_of(&approx, n);
+        let (splits, leaf_of) = if p.ordered {
+            let fold_ders: Vec<Vec<(f64, f64)>> = tails
+                .iter()
+                .zip(&fold_approx)
+                .map(|(&(_, t, _), a)| ders_of(a, t))
+                .collect();
+            let wders: Vec<Vec<f64>> = fold_ders
+                .iter()
+                .map(|d| d.iter().zip(weights).map(|(d, &w)| w * d.0).collect())
+                .collect();
+            let parts: Vec<ScorePart<'_>> = tails
+                .iter()
+                .zip(&wders)
+                .map(|(&(body, tail, bw), wder)| ScorePart {
+                    wder,
+                    body,
+                    tail,
+                    scaled_l2: p.l2_leaf_reg * (bw / body as f64),
+                })
+                .collect();
+            let grown = grow_tree(
+                q,
+                &parts,
+                weights,
+                true,
+                p.depth,
+                p.score_function,
+                p.model_size_reg,
+                &mut used_ctrs,
+            );
+            // Each prefix's approximation moves by the leaf values of its
+            // body rows.
+            let n_leaves = 1usize << grown.0.len();
+            for ((&(body, tail, bw), a), d) in tails.iter().zip(&mut fold_approx).zip(&fold_ders) {
+                let l2 = p.l2_leaf_reg * (bw / body as f64);
+                let deltas = leaf_deltas(&grown.1, n_leaves, d, weights, body, l2, &p);
+                for i in 0..tail {
+                    a[i] += deltas[grown.1[i] as usize];
+                }
+            }
+            grown
+        } else {
+            let wder: Vec<f64> = ders.iter().zip(weights).map(|(d, &w)| w * d.0).collect();
+            let parts = [ScorePart {
+                wder: &wder,
+                body: 0,
+                tail: n,
+                scaled_l2,
+            }];
+            grow_tree(
+                q,
+                &parts,
+                weights,
+                false,
+                p.depth,
+                p.score_function,
+                p.model_size_reg,
+                &mut used_ctrs,
+            )
+        };
         let n_leaves = 1usize << splits.len();
-        let mut sums = vec![(0.0f64, 0.0f64, 0.0f64); n_leaves];
-        for i in 0..n {
-            let s = &mut sums[leaf_of[i] as usize];
-            s.0 += wder[i];
-            s.1 += weights[i] * ders[i].1;
-            s.2 += weights[i];
-        }
-        let leaf_values: Vec<f64> = sums
-            .iter()
-            .map(|&(der, der2, w)| {
-                let delta = match p.leaf_estimation {
-                    CatBoostLeafEstimation::Newton => der / (-der2 + scaled_l2),
-                    CatBoostLeafEstimation::Gradient => average(der, w, scaled_l2),
-                };
-                p.learning_rate * delta
-            })
-            .collect();
+        let leaf_values = leaf_deltas(&leaf_of, n_leaves, &ders, weights, n, scaled_l2, &p);
         for i in 0..n {
             approx[i] += leaf_values[leaf_of[i] as usize];
         }
@@ -962,6 +1117,11 @@ macro_rules! catboost_config {
             /// Penalty on CTRs new to the model (CatBoost's
             /// `model_size_reg`, default 0.5).
             pub model_size_reg: f64,
+            /// Plain (default) or ordered boosting.
+            pub boosting_type: CatBoostBoostingType,
+            /// Growth of the body / tail prefixes of ordered boosting
+            /// (default 2).
+            pub fold_len_multiplier: f64,
         }
 
         impl Default for $name {
@@ -978,6 +1138,8 @@ macro_rules! catboost_config {
                     cat_features: Vec::new(),
                     one_hot_max_size: 2,
                     model_size_reg: 0.5,
+                    boosting_type: CatBoostBoostingType::Plain,
+                    fold_len_multiplier: 2.0,
                 }
             }
         }
@@ -1030,6 +1192,14 @@ macro_rules! catboost_config {
                 self.model_size_reg = r;
                 self
             }
+            pub fn with_boosting_type(mut self, b: CatBoostBoostingType) -> Self {
+                self.boosting_type = b;
+                self
+            }
+            pub fn with_fold_len_multiplier(mut self, m: f64) -> Self {
+                self.fold_len_multiplier = m;
+                self
+            }
 
             /// CatBoost keeps the learning rate and the L2 regularization
             /// as float32.
@@ -1042,6 +1212,8 @@ macro_rules! catboost_config {
                     score_function: self.score_function,
                     leaf_estimation: self.leaf_estimation_method,
                     model_size_reg: self.model_size_reg,
+                    ordered: self.boosting_type == CatBoostBoostingType::Ordered,
+                    fold_len_multiplier: self.fold_len_multiplier,
                 }
             }
         }
@@ -1365,6 +1537,26 @@ mod tests {
         };
         let (q, model) = quantize(x.view(), 254, cat).unwrap();
         assert!(q.columns[0].one_hot() && model.ctrs.is_empty());
+    }
+
+    #[test]
+    fn ordered_boosting_prefixes_double() {
+        let w = vec![1.0; 10];
+        let tails: Vec<(usize, usize)> =
+            body_tails(10, 2.0, &w).iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(tails, vec![(1, 2), (2, 4), (4, 8), (8, 10)]);
+        let w = vec![1.0; 1200];
+        assert_eq!(body_tails(1200, 2.0, &w)[0].0, 24);
+        let (x, y) = data(150);
+        let m = |b| {
+            CatBoostRegressor::new()
+                .with_iterations(20)
+                .with_learning_rate(0.2)
+                .with_boosting_type(b)
+        };
+        let plain = m(CatBoostBoostingType::Plain).fit(&x, &y).unwrap();
+        let ordered = m(CatBoostBoostingType::Ordered).fit(&x, &y).unwrap();
+        assert_ne!(plain.predict(&x).unwrap(), ordered.predict(&x).unwrap());
     }
 
     #[test]
