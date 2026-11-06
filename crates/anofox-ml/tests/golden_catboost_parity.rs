@@ -1,0 +1,115 @@
+//! CatBoost-style estimators against catboost 1.2.10 (#127), with its
+//! randomness switched off. Generator: `test_harness/generators/gen_catboost_parity.py`.
+
+mod common;
+
+use anofox_ml::prelude::*;
+use anofox_ml_ensemble::catboost::catboost_borders;
+use anofox_ml_ensemble::{
+    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
+};
+use common::{json_to_array1, load_golden_file};
+use ndarray::{Array1, Array2};
+use serde_json::Value;
+
+/// The models agree with CatBoost to rounding.
+const TOL: f64 = 1e-12;
+
+fn array2_with_nan(val: &Value) -> Array2<f64> {
+    let rows = val.as_array().unwrap();
+    let p = rows[0].as_array().unwrap().len();
+    let flat: Vec<f64> = rows
+        .iter()
+        .flat_map(|r| r.as_array().unwrap().iter())
+        .map(|v| v.as_f64().unwrap_or(f64::NAN))
+        .collect();
+    Array2::from_shape_vec((rows.len(), p), flat).unwrap()
+}
+
+fn worst(pred: impl IntoIterator<Item = f64>, expected: impl IntoIterator<Item = f64>) -> f64 {
+    pred.into_iter()
+        .zip(expected)
+        .map(|(a, e)| (a - e).abs() / e.abs().max(1.0))
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn quantization_matches_catboost() {
+    let data = load_golden_file("catboost_parity.json");
+    for case in data["quantization"].as_array().unwrap() {
+        let x = array2_with_nan(&case["X"]);
+        let count = case["border_count"].as_u64().unwrap() as usize;
+        let ours = catboost_borders(x.view(), count);
+        for (f, expected) in case["borders"].as_array().unwrap().iter().enumerate() {
+            let expected: Vec<f32> = expected
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            assert_eq!(ours[f], expected, "{} feature {f}", case["name"]);
+        }
+    }
+}
+
+macro_rules! configure {
+    ($m:expr, $p:expr) => {{
+        let p = $p;
+        let mut m = $m
+            .with_iterations(p["iterations"].as_u64().unwrap() as usize)
+            .with_learning_rate(p["learning_rate"].as_f64().unwrap())
+            .with_depth(p["depth"].as_u64().unwrap() as usize)
+            .with_l2_leaf_reg(p["l2_leaf_reg"].as_f64().unwrap());
+        if let Some(b) = p["border_count"].as_u64() {
+            m = m.with_border_count(b as usize);
+        }
+        if p["score_function"] == "L2" {
+            m = m.with_score_function(CatBoostScoreFunction::L2);
+        }
+        if p["leaf_estimation_method"] == "Gradient" {
+            m = m.with_leaf_estimation_method(CatBoostLeafEstimation::Gradient);
+        }
+        if let Some(b) = p["boost_from_average"].as_bool() {
+            m = m.with_boost_from_average(b);
+        }
+        m
+    }};
+}
+
+#[test]
+fn catboost_models_match_catboost() {
+    let data = load_golden_file("catboost_parity.json");
+    let mut report = Vec::new();
+    let mut failures = Vec::new();
+    for case in data["models"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let x = array2_with_nan(&case["X"]);
+        let y = json_to_array1(&case["y"]);
+        let sw: Option<Array1<f64>> =
+            (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
+        let x_test = array2_with_nan(&case["X_test"]);
+        let err = if case["kind"] == "regressor" {
+            let f = configure!(CatBoostRegressor::new(), &case["params"])
+                .fit_weighted(&x, &y, sw.as_ref())
+                .unwrap();
+            worst(
+                f.predict(&x_test).unwrap(),
+                json_to_array1(&case["predictions"]),
+            )
+        } else {
+            let f = configure!(CatBoostClassifier::new(), &case["params"])
+                .fit_weighted(&x, &y, sw.as_ref())
+                .unwrap();
+            worst(
+                f.predict_proba(&x_test).unwrap(),
+                array2_with_nan(&case["predictions"]),
+            )
+        };
+        report.push(format!("{name}: {err:e}"));
+        if err > TOL {
+            failures.push(format!("{name}: {err:e}"));
+        }
+    }
+    eprintln!("{report:#?}");
+    assert!(failures.is_empty(), "{failures:#?}");
+}

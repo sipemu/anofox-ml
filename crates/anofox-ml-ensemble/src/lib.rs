@@ -49,6 +49,7 @@ mod bagging_common;
 mod bagging_generic;
 pub mod bagging_regressor;
 pub mod calibrated_classifier;
+pub mod catboost;
 pub mod extra_trees_classifier;
 pub mod extra_trees_regressor;
 mod forest_common;
@@ -80,6 +81,10 @@ pub use bagging_generic::{
 };
 pub use bagging_regressor::{BaggingRegressor, FittedBaggingRegressor};
 pub use calibrated_classifier::{CalibratedClassifierCV, CalibrationMethod};
+pub use catboost::{
+    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
+    FittedCatBoostClassifier, FittedCatBoostRegressor,
+};
 pub use extra_trees_classifier::{ExtraTreesClassifier, FittedExtraTreesClassifier};
 pub use extra_trees_regressor::{ExtraTreesRegressor, FittedExtraTreesRegressor};
 pub use gradient_boosting_classifier::{

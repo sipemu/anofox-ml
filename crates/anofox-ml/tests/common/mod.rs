@@ -16,6 +16,17 @@ pub fn load_golden_data(filename: &str) -> Vec<Value> {
     serde_json::from_str(&contents).expect("Failed to parse JSON")
 }
 
+/// Load a golden data JSON file whose top level is an object.
+pub fn load_golden_file(filename: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("golden_data")
+        .join(filename);
+    let contents = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
+    serde_json::from_str(&contents).expect("Failed to parse JSON")
+}
+
 /// Parse a JSON array of numbers into an ndarray Array1<f64>.
 pub fn json_to_array1(val: &Value) -> Array1<f64> {
     let vec: Vec<f64> = val

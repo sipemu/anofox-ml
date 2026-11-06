@@ -6,6 +6,24 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: oblivious trees (#127 §5)
+
+- `CatBoostRegressor` (RMSE) and `CatBoostClassifier` (Logloss, two
+  classes) on oblivious (symmetric) trees, with CatBoost's parameter names
+  and defaults (`iterations`, `learning_rate`, `depth`, `l2_leaf_reg`,
+  `border_count`, `score_function` Cosine / L2, `leaf_estimation_method`
+  Newton / Gradient, `boost_from_average`). The numerics are CatBoost
+  1.2's: GreedyLogSum quantization (with libc++'s heap order, which decides
+  its ties), float32 features / targets / learning rate, `nan_mode=Min`,
+  the Cosine score in its SSE summation order, the scaled L2
+  regularization, redundant-split removal, plain boosting. With CatBoost's
+  randomness off (`random_strength=0`, no bootstrap, `has_time=True`) the
+  models match catboost 1.2.10 to 1e-15 on 14 golden cases and its borders
+  exactly. Registry kinds and Python `CatBoostRegressor` /
+  `CatBoostClassifier`. Not yet: categorical features (ordered target
+  statistics), ordered boosting, multiclass, the bootstrap and score
+  noise.
+
 ### Registry / Python: boosting surface (#127 §4, #125)
 
 - `DynModel` gains `feature_importances()` (decision trees, random forests,

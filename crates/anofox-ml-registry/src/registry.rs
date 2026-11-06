@@ -723,6 +723,20 @@ registry! {
             c.fit_warm_start(&prev, x, need_y(K, y)?, &opts)
         },
     }
+    CatBoostRegressor {
+        config: ensemble::CatBoostRegressor = Default::default(),
+        fitted: ensemble::FittedCatBoostRegressor,
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+    }
+    CatBoostClassifier {
+        config: ensemble::CatBoostClassifier = Default::default(),
+        fitted: ensemble::FittedCatBoostClassifier,
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        decision_function: |m, x| m.decision_function(x),
+    }
     #[cfg(feature = "perpetual")]
     PerpetualRegressor {
         config: ensemble::PerpetualRegressor = Default::default(),
