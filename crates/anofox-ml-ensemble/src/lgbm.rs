@@ -759,9 +759,9 @@ fn monotone_of(feat: usize, all_bins: &[FeatureBins], monotone_constraints: &[i8
     }
 }
 
-/// From this many candidate features a node's splits are searched in
-/// parallel.
-const PARALLEL_SPLIT_FEATURES: usize = 16;
+/// From this many bins (over the candidate features) a node's splits are
+/// searched in parallel.
+const PARALLEL_SPLIT_BINS: usize = 4096;
 
 /// Sums per bin value of one feature at one node: gradients and hessians,
 /// and (in sklearn mode) counts, indexed by the `u8` bin (the missing bin
@@ -815,12 +815,41 @@ fn histogram_of(s: &BinSums, n_bins: usize) -> Histogram {
     }
 }
 
+/// Rows per chunk of a large node's parallel partition (LightGBM mode; see
+/// `build_lgbm_tree`).
+const PARTITION_CHUNK_ROWS: usize = 16_384;
+
+/// Rows going left / right (in order) and their gradient / hessian totals,
+/// summed in row order (as `node_totals`).
+type Partition = (Vec<usize>, Vec<usize>, (f64, f64), (f64, f64));
+
+fn partition_rows(
+    rows: &[usize],
+    goes_left: impl Fn(usize) -> bool,
+    gradients: &[f64],
+    hessians: &[f64],
+) -> Partition {
+    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let (mut lt, mut rt) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
+    for &i in rows {
+        let (side, totals) = if goes_left(i) {
+            (&mut left, &mut lt)
+        } else {
+            (&mut right, &mut rt)
+        };
+        side.push(i);
+        totals.0 += gradients[i];
+        totals.1 += hessians[i];
+    }
+    (left, right, lt, rt)
+}
+
 /// Below this many (sample, feature) pairs histograms are built serially.
 const PARALLEL_HISTOGRAM_WORK: usize = 1 << 16;
 
-/// Per-feature gradient/hessian histograms of the rows `indices`, one per
-/// entry of `feature_indices`, in parallel over the features for large
-/// nodes. Each feature sums its rows in order. Counts are kept only with
+/// Per-feature gradient/hessian histograms of the rows `indices` (whose
+/// gradient / hessian totals are `totals`), one per entry of
+/// `feature_indices`, in parallel over the features for large nodes. Each feature sums its rows in order. Counts are kept only with
 /// `with_counts` (sklearn mode; LightGBM estimates them from the hessians,
 /// and the counts are then 0).
 ///
@@ -837,6 +866,7 @@ fn build_histograms(
     gradients: &[f64],
     hessians: &[f64],
     indices: &[usize],
+    totals: (f64, f64),
     feature_indices: &[usize],
 ) -> Vec<Histogram> {
     use rayon::prelude::*;
@@ -885,12 +915,11 @@ fn build_histograms(
             .map(|&id| sums(&bundles.unwrap().columns[id]))
             .collect()
     };
-    let totals = if needed.is_empty() {
-        (0.0, 0.0, 0)
-    } else {
-        let (g, h) = node_totals(gradients, hessians, indices);
-        (g, h, if with_counts { indices.len() as u32 } else { 0 })
-    };
+    let totals = (
+        totals.0,
+        totals.1,
+        if with_counts { indices.len() as u32 } else { 0 },
+    );
 
     let one = |feat: usize| {
         let n_bins = n_value_bins(&all_bins[feat]);
@@ -1481,13 +1510,6 @@ fn find_best_split(
             }
             return best;
         }
-        // Bins above the feature's last value bin are empty: they would
-        // repeat the last candidate with an equal (never better) gain. The
-        // last *global* bin is never a threshold (nothing to its right but
-        // missing values).
-        let scan_order: Vec<u8> =
-            (0..n_value_bins(&all_bins[feat]).min(DEFAULT_MAX_BINS - 1) as u8).collect();
-
         // Gain of sending `left` left (`right = totals - left`); keeps the
         // candidate if it is strictly better than the best so far.
         let mut consider = |(left_grad, left_hess, left_count): (f64, f64, usize),
@@ -1619,7 +1641,6 @@ fn find_best_split(
             // bottom up (missing values right). The hessian sums start at
             // `kEpsilon`, the node's at `2 kEpsilon`, and the counts are
             // the estimates of `hist` (see above).
-            let _ = (&scan_order, &mut scan_ascending);
             let n_bins = n_value_bins(&all_bins[feat]);
             let has_nan = params.has_missing[feat];
             let sum_hess = total_hess + 2.0 * LGBM_EPSILON;
@@ -1687,10 +1708,15 @@ fn find_best_split(
         }
         best
     };
-    let per_feature: Vec<Option<BestSplit>> = if positions.len() >= PARALLEL_SPLIT_FEATURES {
+    let n_bins: usize = positions
+        .iter()
+        .map(|&k| n_value_bins(&all_bins[feature_indices[k]]))
+        .sum();
+    let per_feature: Vec<Option<BestSplit>> = if n_bins >= PARALLEL_SPLIT_BINS {
         use rayon::prelude::*;
         positions
             .par_iter()
+            .with_min_len(4)
             .map(|&k| feature_best(feature_indices[k], &hists[k]))
             .collect()
     } else {
@@ -1940,6 +1966,7 @@ fn build_lgbm_tree(
         gradients,
         hessians,
         &root_indices,
+        root_totals,
         feature_indices,
     );
     // sklearn does not evaluate a root it cannot split (which matters for
@@ -1998,27 +2025,42 @@ fn build_lgbm_tree(
             .categorical_order
             .as_ref()
             .map(|order| categorical_left_mask(order, split.bin_threshold));
-        // The children's rows, and their gradient / hessian totals summed in
-        // row order (as `node_totals`).
         let col = binned_x.column(split.feature);
-        let mut left_idx = Vec::with_capacity(split.left_count.min(indices.len()));
-        let mut right_idx = Vec::with_capacity(split.right_count.min(indices.len()));
-        let (mut left_totals, mut right_totals) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
-        for &i in &indices {
-            let (rows, totals) = if goes_left(
+        let col = col.as_slice().expect("column-major binned matrix");
+        let left = |i: usize| {
+            goes_left(
                 col[i],
                 split.bin_threshold,
                 split.missing_left,
                 mask.as_deref(),
-            ) {
-                (&mut left_idx, &mut left_totals)
+            )
+        };
+        let (left_idx, right_idx, left_totals, right_totals) =
+            if params.sklearn_compat || indices.len() <= PARTITION_CHUNK_ROWS {
+                partition_rows(&indices, left, gradients, hessians)
             } else {
-                (&mut right_idx, &mut right_totals)
+                // Large nodes (LightGBM numerics): fixed chunks in parallel,
+                // joined in order; the totals are the chunks' sums added in
+                // chunk order (independent of the thread count).
+                use rayon::prelude::*;
+                let parts: Vec<_> = indices
+                    .par_chunks(PARTITION_CHUNK_ROWS)
+                    .map(|chunk| partition_rows(chunk, left, gradients, hessians))
+                    .collect();
+                let n_left = parts.iter().map(|p| p.0.len()).sum();
+                let (mut li, mut ri) = (
+                    Vec::with_capacity(n_left),
+                    Vec::with_capacity(indices.len() - n_left),
+                );
+                let (mut lt, mut rt) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
+                for (l, r, ls, rs) in parts {
+                    li.extend_from_slice(&l);
+                    ri.extend_from_slice(&r);
+                    lt = (lt.0 + ls.0, lt.1 + ls.1);
+                    rt = (rt.0 + rs.0, rt.1 + rs.1);
+                }
+                (li, ri, lt, rt)
             };
-            rows.push(i);
-            totals.0 += gradients[i];
-            totals.1 += hessians[i];
-        }
 
         // Create left and right leaf nodes
         let left_id = nodes.len();
@@ -2079,7 +2121,11 @@ fn build_lgbm_tree(
         // Histogram subtraction: build the smaller child's histograms and
         // derive the larger child's from the parent's.
         let left_smaller = left_idx.len() <= right_idx.len();
-        let small_idx = if left_smaller { &left_idx } else { &right_idx };
+        let (small_idx, small_totals) = if left_smaller {
+            (&left_idx, left_totals)
+        } else {
+            (&right_idx, right_totals)
+        };
         let small = build_histograms(
             binned_x,
             all_bins,
@@ -2088,6 +2134,7 @@ fn build_lgbm_tree(
             gradients,
             hessians,
             small_idx,
+            small_totals,
             feature_indices,
         );
         let large: Vec<Histogram> = small
@@ -6970,7 +7017,10 @@ mod bundling_tests {
         round_to_f32(&mut hess);
         let rows: Vec<usize> = (0..300).filter(|i| i % 3 != 0).collect();
         let feats: Vec<usize> = (0..15).collect();
-        let plain = build_histograms(&binned, &bins, None, true, &grad, &hess, &rows, &feats);
+        let totals = node_totals(&grad, &hess, &rows);
+        let plain = build_histograms(
+            &binned, &bins, None, true, &grad, &hess, &rows, totals, &feats,
+        );
         let bundled = build_histograms(
             &binned,
             &bins,
@@ -6979,6 +7029,7 @@ mod bundling_tests {
             &grad,
             &hess,
             &rows,
+            totals,
             &feats,
         );
         for (a, b) in plain.iter().zip(&bundled) {
@@ -7041,10 +7092,10 @@ mod bundling_tests {
 
     #[test]
     fn thread_count_leaves_the_model_unchanged() {
-        // Large enough for the parallel histograms, split search and
-        // score updates.
+        // Large enough for the parallel histograms, split search, row
+        // partitions and score updates.
         let mut s = 7;
-        let x = Array2::from_shape_fn((6000, 24), |_| lcg(&mut s) * 2.0 - 1.0);
+        let x = Array2::from_shape_fn((20_000, 20), |_| lcg(&mut s) * 2.0 - 1.0);
         let y = Array1::from_iter(x.rows().into_iter().map(|r| r[0] + r[1] * r[2]));
         let labels = y.mapv(|v| f64::from(v > 0.0) + f64::from(v > 0.6));
         let fit = |jobs| {
