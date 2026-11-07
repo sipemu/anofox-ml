@@ -631,7 +631,7 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
 
 class _CatBoost(BaseEstimator):
     """CatBoost-style boosting on oblivious trees; parameters follow
-    ``catboost.CatBoost`` (``learning_rate=None`` is 0.03)."""
+    ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""
 
     def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
                  border_count=254, score_function="Cosine", leaf_estimation_method="Newton",
@@ -668,7 +668,6 @@ class _CatBoost(BaseEstimator):
     def _rust_params(self, X, y):
         params = {
             "iterations": int(self.iterations),
-            "learning_rate": 0.03 if self.learning_rate is None else float(self.learning_rate),
             "depth": int(self.depth), "l2_leaf_reg": float(self.l2_leaf_reg),
             "border_count": int(self.border_count),
             "score_function": _choice(self.score_function, {"Cosine": "Cosine", "L2": "L2"},
@@ -688,6 +687,8 @@ class _CatBoost(BaseEstimator):
         params["fold_len_multiplier"] = float(self.fold_len_multiplier)
         if self.max_ctr_complexity is not None:
             params["max_ctr_complexity"] = int(self.max_ctr_complexity)
+        if self.learning_rate is not None:
+            params["learning_rate"] = float(self.learning_rate)
         params["has_time"] = bool(self.has_time)
         params["random_seed"] = int(self.random_seed)
         params["random_strength"] = float(self.random_strength)

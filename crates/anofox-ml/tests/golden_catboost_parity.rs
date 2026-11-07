@@ -58,9 +58,13 @@ macro_rules! configure {
         let p = $p;
         let mut m = $m
             .with_iterations(p["iterations"].as_u64().unwrap() as usize)
-            .with_learning_rate(p["learning_rate"].as_f64().unwrap())
-            .with_depth(p["depth"].as_u64().unwrap() as usize)
-            .with_l2_leaf_reg(p["l2_leaf_reg"].as_f64().unwrap());
+            .with_depth(p["depth"].as_u64().unwrap_or(6) as usize);
+        if let Some(lr) = p["learning_rate"].as_f64() {
+            m = m.with_learning_rate(lr);
+        }
+        if let Some(l2) = p["l2_leaf_reg"].as_f64() {
+            m = m.with_l2_leaf_reg(l2);
+        }
         if let Some(b) = p["border_count"].as_u64() {
             m = m.with_border_count(b as usize);
         }
