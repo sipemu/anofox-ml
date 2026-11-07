@@ -18,6 +18,29 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   the default was a fixed 0.03. Python: `learning_rate=None` now means the
   automatic rate. Matches catboost 1.2.10 on 6 golden cases.
 
+### CatBoost-style boosting: more regression losses (#153)
+
+- `CatBoostRegressor::loss_function` (`CatBoostRegressionLoss`): RMSE
+  (default), MAE, Quantile, Expectile, Poisson, Tweedie and LogLinQuantile,
+  with CatBoost's derivatives, metrics (for backtracking) and defaults:
+  - Exact leaves for MAE / Quantile (the weighted quantile of each leaf's
+    float32 residuals, CatBoost's `CalcSampleQuantile` with its bisection
+    and `delta` shift). Like CatBoost, the model's leaves are unweighted
+    (its averaging fold is never bootstrapped); the folds use the weights
+    of their last bootstrap.
+  - `boost_from_average` on for RMSE, MAE and Quantile (the weighted
+    quantile); Newton steps for Expectile (5), Poisson (10) and Tweedie,
+    Gradient for LogLinQuantile; the automatic learning rate only for RMSE.
+  - Poisson and LogLinQuantile store `exp(a)` as CatBoost does; Poisson and
+    Tweedie predict `exp(raw)` (CatBoost's `Exponent` prediction type).
+  - The error functions read `alpha` as float32, as CatBoost does.
+- **Breaking:** `leaf_estimation_method` and `boost_from_average` are now
+  `Option`s (`None` = CatBoost's default for the loss; the builders are
+  unchanged), and `CatBoostLeafEstimation` gains `Exact`. Python:
+  `loss_function` (catboost strings such as `"Quantile:alpha=0.3"`), and
+  `leaf_estimation_method=None` by default.
+- Matches catboost 1.2.10 to 3e-15 on 19 golden cases.
+
 ### CatBoost-style boosting: class weights, monotone constraints, shrinkage (#156)
 
 - `CatBoostClassifier`: `class_weights` (per class, labels ascending) and
