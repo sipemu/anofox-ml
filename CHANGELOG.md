@@ -26,6 +26,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   recomputing them every evaluation. Same results; a 20k × 10 Logloss fit
   with 200 iterations went from 3.0 s to 1.95 s (catboost single-threaded:
   0.76 s).
+- `thread_count` (CatBoost's name; Python `thread_count=-1`): a fit runs on
+  the physical cores by default, like the LGBM engine's `n_jobs`, instead
+  of every logical thread of the rayon pool (slower on SMT / hybrid CPUs).
+  With the plain-boosting histogram fast path, the same 20k × 10 fits now
+  take 0.56 s (RMSE; catboost single-threaded 0.60 s) and 1.32 s (Logloss).
+  The model does not depend on the thread count.
 
 ### CatBoost-style boosting: Depthwise and Lossguide trees (#154)
 

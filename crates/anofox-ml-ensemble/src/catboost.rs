@@ -2246,6 +2246,16 @@ fn grow_tree(
             .max()
             .unwrap_or(1)
             .max(1);
+        // Plain boosting with one approximation: the taken rows, their
+        // leaves and (weighted derivative, weight), gathered once per level.
+        let plain_rows: Option<(Vec<(u32, u32)>, Vec<(f64, f64)>)> =
+            (!ordered && k == 1 && parts.len() == 1).then(|| {
+                let part = &parts[0];
+                (0..part.tail)
+                    .filter(|&i| sample.taken[i])
+                    .map(|i| ((i as u32, leaf_of[i]), (part.swder[i], sample.weights[i])))
+                    .unzip()
+            });
         // The score of every split of every column.
         let per_column: Vec<Option<Vec<f64>>> = candidates
             .par_iter()
@@ -2259,7 +2269,16 @@ fn grow_tree(
                 }
                 // Per part and dimension: leaves × buckets.
                 let mut hist = vec![BucketStats::default(); parts.len() * k * leaves * nb];
-                for (pi, part) in parts.iter().enumerate() {
+                if let Some((rows, contrib)) = &plain_rows {
+                    // Plain boosting, one approximation: the taken rows in
+                    // order, as the general loop sums them.
+                    for (&(i, leaf), &(swd, sw)) in rows.iter().zip(contrib) {
+                        let h = &mut hist[leaf as usize * nb + column.buckets[i as usize] as usize];
+                        h.swd += swd;
+                        h.sw += sw;
+                    }
+                }
+                for (pi, part) in parts.iter().enumerate().filter(|_| plain_rows.is_none()) {
                     for i in 0..part.tail {
                         if !sample.taken[i] {
                             continue;
@@ -4393,6 +4412,11 @@ macro_rules! catboost_config {
             pub min_data_in_leaf: usize,
             /// Lossguide: the most leaves of a tree (default 31).
             pub max_leaves: usize,
+            /// Threads of a fit (CatBoost's `thread_count`): `None` = the
+            /// physical cores (at most the current rayon pool's), which on
+            /// SMT / hybrid CPUs beats all logical ones. The model does not
+            /// depend on it.
+            pub thread_count: Option<usize>,
             $($($(#[$fdoc])* pub $field: $fty,)*)?
         }
 
@@ -4433,6 +4457,7 @@ macro_rules! catboost_config {
                     grow_policy: CatBoostGrowPolicy::SymmetricTree,
                     min_data_in_leaf: 1,
                     max_leaves: 31,
+                    thread_count: None,
                     $($($field: $fdef,)*)?
                 }
             }
@@ -4590,6 +4615,10 @@ macro_rules! catboost_config {
             }
             pub fn with_grow_policy(mut self, g: CatBoostGrowPolicy) -> Self {
                 self.grow_policy = g;
+                self
+            }
+            pub fn with_thread_count(mut self, n: Option<usize>) -> Self {
+                self.thread_count = n;
                 self
             }
             pub fn with_max_leaves(mut self, n: usize) -> Self {
@@ -5131,16 +5160,18 @@ impl CatBoostRegressor {
             use_best_model: use_best,
             ..p
         };
-        let b = boost(
-            &q,
-            &target,
-            &weights,
-            &[bias],
-            loss,
-            p,
-            rng,
-            eval_set.as_ref(),
-        );
+        let b = crate::lgbm::with_fit_threads(self.thread_count, || {
+            boost(
+                &q,
+                &target,
+                &weights,
+                &[bias],
+                loss,
+                p,
+                rng,
+                eval_set.as_ref(),
+            )
+        });
         Ok(FittedCatBoostRegressor {
             trees: b.trees,
             ctrs: b.ctrs,
@@ -5402,16 +5433,18 @@ impl CatBoostClassifier {
             use_best_model: use_best,
             ..p
         };
-        let b = boost(
-            &q,
-            &target,
-            &weights,
-            &bias,
-            loss,
-            p,
-            rng,
-            eval_set.as_ref(),
-        );
+        let b = crate::lgbm::with_fit_threads(self.thread_count, || {
+            boost(
+                &q,
+                &target,
+                &weights,
+                &bias,
+                loss,
+                p,
+                rng,
+                eval_set.as_ref(),
+            )
+        });
         Ok(FittedCatBoostClassifier {
             trees: b.trees,
             ctrs: b.ctrs,
