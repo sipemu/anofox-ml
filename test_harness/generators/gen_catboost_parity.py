@@ -383,6 +383,69 @@ def generate():
         dict(base, loss_function="Poisson", iterations=200, learning_rate=0.05), X, y_count)
     add_cat("loss_quantile_cat", dict(cat, loss_function="Quantile:alpha=0.6"), y_cat_reg,
             kind="regressor")
+
+    # Eval sets (#155): the objective's metric per iteration, the
+    # overfitting detector and use_best_model (on by default with an eval
+    # set, which also switches the automatic learning rate's coefficients).
+    Xv = np.column_stack([rng.normal(size=150), rng.uniform(-2, 2, size=150),
+                          np.round(rng.normal(size=150) * 3), rng.exponential(size=150)])
+    eta_v = np.sin(2 * Xv[:, 0]) + 0.6 * Xv[:, 1] - 0.2 * Xv[:, 2] + 0.3 * Xv[:, 3]
+    yv_reg = eta_v + rng.normal(scale=0.4, size=150)
+    yv_bin = (eta_v + rng.logistic(size=150) > 0).astype(float)
+    yv_mc = np.digitize(eta_v + rng.logistic(size=150) * 0.5, [-0.5, 0.7]).astype(float)
+    wv = rng.uniform(0.2, 3.0, size=150)
+
+    def add_eval(name, kind, params, Xd, y, Xe, ye, sw=None, we=None, fit_kw=None):
+        cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
+        m = cls(**params).fit(Xd, y, sample_weight=sw, eval_set=cb.Pool(Xe, ye, weight=we),
+                              **(fit_kw or {}))
+        X_test = Xd[::4]
+        pred = m.predict(X_test) if kind == "regressor" else m.predict_proba(X_test)
+        evals = m.get_evals_result()["validation"]
+        metric = next(iter(evals))
+        out["models"].append({
+            "name": name, "kind": kind,
+            "params": dict({k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+                           **(fit_kw or {})),
+            "X": nulls(Xd), "y": y.tolist(),
+            "sample_weight": None if sw is None else sw.tolist(),
+            "eval": {"X": nulls(Xe), "y": ye.tolist(),
+                     "sample_weight": None if we is None else we.tolist(),
+                     "metrics": evals[metric], "best_iteration": m.get_best_iteration(),
+                     "tree_count": m.tree_count_},
+            "X_test": nulls(X_test), "predictions": pred.tolist(),
+        })
+
+    over = dict(base, iterations=80, learning_rate=0.4)
+    add_eval("eval_rmse_best", "regressor", over, X, y_reg, Xv, yv_reg)
+    add_eval("eval_rmse_early", "regressor", over, X, y_reg, Xv, yv_reg,
+             fit_kw=dict(early_stopping_rounds=5))
+    add_eval("eval_rmse_no_best", "regressor", over, X, y_reg, Xv, yv_reg,
+             fit_kw=dict(use_best_model=False))
+    add_eval("eval_rmse_inctodec", "regressor", dict(over, od_type="IncToDec", od_pval=0.01,
+                                                     od_wait=5), X, y_reg, Xv, yv_reg)
+    add_eval("eval_rmse_weighted", "regressor", over, X, y_reg, Xv, yv_reg, sw=weights, we=wv,
+             fit_kw=dict(early_stopping_rounds=8))
+    add_eval("eval_rmse_auto_lr", "regressor", dict(COMMON, iterations=60, depth=4), X, y_reg,
+             Xv, yv_reg)
+    add_eval("eval_logloss", "classifier", over, X, y_bin, Xv, yv_bin,
+             fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_logloss_auto_lr", "classifier", dict(COMMON, iterations=60, depth=4), X,
+             y_bin, Xv, yv_bin)
+    add_eval("eval_mc", "classifier", dict(mc, iterations=60, learning_rate=0.4), X,
+             y_mc.astype(float), Xv, yv_mc, fit_kw=dict(early_stopping_rounds=5))
+    add_eval("eval_quantile", "regressor", dict(over, loss_function="Quantile:alpha=0.3"), X,
+             y_reg, Xv, yv_reg, fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_poisson", "regressor", dict(over, loss_function="Poisson"), X, y_count, Xv,
+             np.round(np.exp(0.5 * eta_v)), fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_monotone_shrink", "regressor", dict(over, monotone_constraints=[1, 1, -1, 0]),
+             X, y_reg, Xv, yv_reg, fit_kw=dict(early_stopping_rounds=5))
+    add_eval("eval_class_weights", "classifier", dict(over, auto_class_weights="Balanced"), X,
+             y_imb, Xv, yv_bin, fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_defaults", "regressor",
+             dict(COMMON, iterations=120, depth=4, random_strength=1.0, has_time=False,
+                  bootstrap_type="MVS"), X, y_reg, Xv, yv_reg,
+             fit_kw=dict(early_stopping_rounds=10))
     return out
 
 

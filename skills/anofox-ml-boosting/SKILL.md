@@ -65,7 +65,8 @@ Builder names follow each reference library's parameter names (with a
   `with_boosting_type`, `with_leaf_estimation_method`,
   `with_leaf_estimation_iterations`, `with_bootstrap_type`, `with_subsample`,
   `with_random_strength`, `with_random_seed`, `with_has_time`,
-  `with_monotone_constraints`, `with_model_shrink_rate`; classifier:
+  `with_monotone_constraints`, `with_model_shrink_rate`,
+  `with_early_stopping_rounds`, `with_use_best_model`, `fit_with_eval`; classifier:
   `with_class_weights`, `with_auto_class_weights`.
 
 Check the docs (`cargo doc -p anofox-ml-ensemble --open`) before relying on

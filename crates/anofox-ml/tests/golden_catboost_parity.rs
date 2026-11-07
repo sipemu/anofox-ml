@@ -7,8 +7,8 @@ use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
-    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressionLoss, CatBoostRegressor,
-    CatBoostScoreFunction, CatBoostShrinkMode,
+    CatBoostClassifier, CatBoostEvalSet, CatBoostLeafEstimation, CatBoostOdType,
+    CatBoostRegressionLoss, CatBoostRegressor, CatBoostScoreFunction, CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -120,6 +120,21 @@ macro_rules! configure {
         if let Some(n) = p["max_ctr_complexity"].as_u64() {
             m = m.with_max_ctr_complexity(n as usize);
         }
+        if let Some(n) = p["early_stopping_rounds"].as_u64() {
+            m = m.with_early_stopping_rounds(n as usize);
+        }
+        if let Some(b) = p["use_best_model"].as_bool() {
+            m = m.with_use_best_model(b);
+        }
+        if p["od_type"] == "IncToDec" {
+            m = m.with_od_type(CatBoostOdType::IncToDec);
+        }
+        if let Some(v) = p["od_pval"].as_f64() {
+            m = m.with_od_pval(v);
+        }
+        if let Some(n) = p["od_wait"].as_u64() {
+            m = m.with_od_wait(n as usize);
+        }
         if let Some(n) = p["one_hot_max_size"].as_u64() {
             m = m.with_one_hot_max_size(n as usize);
         }
@@ -148,6 +163,33 @@ fn catboost_models_match_catboost() {
         let sw: Option<Array1<f64>> =
             (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
         let x_test = array2_with_nan(&case["X_test"]);
+        // An eval set: its data, and CatBoost's metrics and tree count.
+        let ev = &case["eval"];
+        let eval_data = (!ev.is_null()).then(|| {
+            let w: Option<Array1<f64>> =
+                (!ev["sample_weight"].is_null()).then(|| json_to_array1(&ev["sample_weight"]));
+            (array2_with_nan(&ev["X"]), json_to_array1(&ev["y"]), w)
+        });
+        let eval_set = eval_data.as_ref().map(|(x, y, w)| CatBoostEvalSet {
+            x: x.view(),
+            y: y.view(),
+            sample_weight: w.as_ref().map(|w| w.view()),
+        });
+        let mut check_eval = |metrics: &[f64], trees: usize| {
+            if ev.is_null() {
+                return;
+            }
+            let expected = json_to_array1(&ev["metrics"]);
+            let e = worst(metrics.iter().copied(), expected.iter().copied());
+            let n = ev["tree_count"].as_u64().unwrap() as usize;
+            if metrics.len() != expected.len() || e > TOL || trees != n {
+                failures.push(format!(
+                    "{name}: eval {} vs {} metrics (worst {e:e}), {trees} vs {n} trees",
+                    metrics.len(),
+                    expected.len()
+                ));
+            }
+        };
         let err = if case["kind"] == "regressor" {
             let p = &case["params"];
             let mut m = configure!(CatBoostRegressor::new(), p);
@@ -166,7 +208,13 @@ fn catboost_models_match_catboost() {
                     other => panic!("unknown loss {other}"),
                 });
             }
-            let f = m.fit_weighted(&x, &y, sw.as_ref()).unwrap();
+            let f = match eval_set {
+                Some(e) => m
+                    .fit_with_eval(x.view(), y.view(), sw.as_ref().map(|w| w.view()), e)
+                    .unwrap(),
+                None => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
+            };
+            check_eval(f.eval_metrics(), f.n_estimators());
             worst(
                 f.predict(&x_test).unwrap(),
                 json_to_array1(&case["predictions"]),
@@ -186,7 +234,13 @@ fn catboost_models_match_catboost() {
                 }
                 _ => {}
             }
-            let f = m.fit_weighted(&x, &y, sw.as_ref()).unwrap();
+            let f = match eval_set {
+                Some(e) => m
+                    .fit_with_eval(x.view(), y.view(), sw.as_ref().map(|w| w.view()), e)
+                    .unwrap(),
+                None => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
+            };
+            check_eval(f.eval_metrics(), f.n_estimators());
             worst(
                 f.predict_proba(&x_test).unwrap(),
                 array2_with_nan(&case["predictions"]),

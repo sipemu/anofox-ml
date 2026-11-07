@@ -655,6 +655,16 @@ pub enum CatBoostRegressionLoss {
     LogLinQuantile { alpha: f64 },
 }
 
+/// CatBoost's overfitting detector (`od_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostOdType {
+    None,
+    /// Stop when the expected improvement is unlikely (`od_pval`).
+    IncToDec,
+    /// Stop `od_wait` iterations after the best one.
+    Iter,
+}
+
 /// CatBoost's `model_shrink_mode`: the factor the model is shrunk by
 /// before iteration `i > 0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1011,6 +1021,30 @@ impl Loss {
         }
     }
 
+    /// CatBoost's objective metric on an eval set, whose approximations it
+    /// keeps on the raw scale (`TestApprox`).
+    fn eval_metric(self, target: &[f64], approx: &[f64], weights: &[f64]) -> f64 {
+        let k = self.dims();
+        let (mut sum, mut sum_w) = (0.0, 0.0);
+        for (i, (&t, &w)) in target.iter().zip(weights).enumerate() {
+            let a = &approx[i * k..(i + 1) * k];
+            let m = match self {
+                Loss::Poisson => a[0].exp() - t * a[0],
+                Loss::LogLinQuantile { alpha } => {
+                    let v = t - a[0].exp();
+                    (if v > 0.0 { alpha } else { -(1.0 - alpha) }) * v
+                }
+                _ => self.metric(t, a),
+            };
+            sum += m * w;
+            sum_w += w;
+        }
+        match self {
+            Loss::Rmse => (sum / (sum_w + 1e-38)).sqrt(),
+            _ => sum / sum_w,
+        }
+    }
+
     /// Whether CatBoost stores this loss's approximations as `exp(a)`
     /// (`IsStoreExpApprox`), which changes how its metric and learning
     /// folds are computed.
@@ -1312,6 +1346,12 @@ struct TrainParams {
     /// CatBoost's `model_shrink_rate` (0 = none) and `model_shrink_mode`.
     shrink_rate: f64,
     shrink_mode: CatBoostShrinkMode,
+    /// The overfitting detector's p-value threshold (0: off; `Iter`: 1)
+    /// and wait.
+    od_threshold: f64,
+    od_wait: usize,
+    /// Shrink the model to its best iteration on the eval set.
+    use_best_model: bool,
 }
 
 /// `sum · 1/(count + λ)` for a non-empty side, else 0 (CatBoost's
@@ -3069,6 +3109,106 @@ fn update_fold(
 /// keeps the given order, the other `permutation_count - 2` folds and (with
 /// CTRs) the averaging fold are shuffled with CatBoost's generator, whose
 /// draws follow CatBoost's.
+/// A validation set (CatBoost's `eval_set`): raw features, targets (class
+/// indices for classifiers) and weights, as float32 values.
+struct EvalSet<'a> {
+    x: ArrayView2<'a, f64>,
+    target: Vec<f64>,
+    weights: Vec<f64>,
+}
+
+/// An eval set for `fit_with_eval` (CatBoost's `eval_set`): features,
+/// targets and optional weights.
+#[derive(Debug, Clone, Copy)]
+pub struct CatBoostEvalSet<'a> {
+    pub x: ArrayView2<'a, f64>,
+    pub y: ArrayView1<'a, f64>,
+    pub sample_weight: Option<ArrayView1<'a, f64>>,
+}
+
+/// What [`boost`] returns.
+struct Boosted {
+    trees: Vec<ObliviousTree>,
+    ctrs: CtrModel,
+    bias: Vec<f64>,
+    /// The eval set's metric after every iteration.
+    eval_metrics: Vec<f64>,
+    /// The iteration of the best eval metric (0-based).
+    best_iteration: Option<usize>,
+}
+
+/// CatBoost's `TErrorTracker` with its `IncToDec` overfitting detector
+/// (`Iter` is `IncToDec` with threshold 1): the first strictly smallest
+/// error, and a stop once the p-value falls below the threshold.
+struct ErrorTracker {
+    threshold: f64,
+    wait: usize,
+    best: f64,
+    best_iteration: Option<usize>,
+    empty: bool,
+    local_max: f64,
+    expected_inc: f64,
+    from_max: usize,
+    errors: std::collections::VecDeque<f64>,
+}
+
+impl ErrorTracker {
+    fn new(threshold: f64, wait: usize) -> Self {
+        Self {
+            threshold,
+            wait,
+            best: f64::INFINITY,
+            best_iteration: None,
+            empty: true,
+            local_max: 0.0,
+            expected_inc: 0.0,
+            from_max: 0,
+            errors: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Record the error of `iteration`; whether to stop.
+    fn add(&mut self, error: f64, iteration: usize) -> bool {
+        if error < self.best {
+            self.best = error;
+            self.best_iteration = Some(iteration);
+        }
+        if self.threshold <= 0.0 {
+            return false;
+        }
+        // The detector maximizes.
+        let e = -error;
+        if self.empty || e > self.local_max {
+            if self.empty {
+                self.empty = false;
+                self.expected_inc = 0.0;
+            }
+            self.local_max = e;
+            self.from_max = 0;
+        } else {
+            self.from_max += 1;
+        }
+        self.errors.push_front(e);
+        if self.errors.len() > 2000 {
+            self.errors.pop_back();
+        }
+        self.expected_inc *= 0.99;
+        let mut mult = 1.0;
+        for &x in &self.errors {
+            self.expected_inc = self.expected_inc.max(mult * (e - x));
+            mult *= 0.99;
+        }
+        let p_value = if self.from_max >= self.wait {
+            let ratio = self.expected_inc / (self.local_max - e).max(1e-10);
+            (-0.5 / ratio.max(1e-10)).exp()
+        } else {
+            1.0
+        };
+        !self.empty && p_value < self.threshold
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn boost(
     q: &Quantized,
     target: &[f64],
@@ -3077,7 +3217,8 @@ fn boost(
     loss: Loss,
     p: TrainParams,
     mut rng: CatRng,
-) -> (Vec<ObliviousTree>, CtrModel, Vec<f64>) {
+    eval: Option<&EvalSet<'_>>,
+) -> Boosted {
     let n = target.len();
     let k = loss.dims();
     let has_ctrs = q.ctr.is_some();
@@ -3145,6 +3286,12 @@ fn boost(
     let mut shrink_history: Vec<f64> = Vec::new();
     let mut bias = bias.to_vec();
     let unit_weights = vec![1.0; n];
+    // CatBoost's `TestApprox`: the bias plus the trees so far.
+    let mut eval_approx: Vec<f64> = eval.map_or_else(Vec::new, |e| {
+        bias.iter().copied().cycle().take(e.x.nrows() * k).collect()
+    });
+    let mut eval_metrics = Vec::new();
+    let mut tracker = ErrorTracker::new(p.od_threshold, p.od_wait);
     for iteration in 0..p.iterations {
         if shrink_rate > 0.0 {
             let factor = if iteration == 0 {
@@ -3169,6 +3316,9 @@ fn boost(
                 }
                 for b in &mut bias {
                     *b *= factor;
+                }
+                for v in &mut eval_approx {
+                    *v *= factor;
                 }
             }
             shrink_history.push(factor);
@@ -3281,10 +3431,35 @@ fn boost(
             .iter()
             .map(|(c, s)| c.get(&source.q).tree_split(*s, &mut ctrs))
             .collect();
-        trees.push(ObliviousTree {
+        let tree = ObliviousTree {
             splits: tree_splits,
             leaf_values,
-        });
+        };
+        if let Some(e) = eval {
+            for (i, row) in e.x.rows().into_iter().enumerate() {
+                let leaf = tree.leaf(row, &ctrs);
+                for d in 0..k {
+                    eval_approx[i * k + d] += tree.leaf_values[leaf * k + d];
+                }
+            }
+            let metric = loss.eval_metric(&e.target, &eval_approx, &e.weights);
+            eval_metrics.push(metric);
+            trees.push(tree);
+            if tracker.add(metric, iteration) {
+                break;
+            }
+            continue;
+        }
+        trees.push(tree);
+    }
+    // `use_best_model`: the model up to the best iteration (the bias keeps
+    // the shrinkage of every iteration, as CatBoost's does).
+    let best_iteration = tracker.best_iteration;
+    if p.use_best_model {
+        if let Some(b) = best_iteration {
+            trees.truncate(b + 1);
+            shrink_history.truncate(b + 1);
+        }
     }
     let mut accumulated = 1.0;
     for (tree, &factor) in trees.iter_mut().zip(&shrink_history).rev() {
@@ -3293,7 +3468,13 @@ fn boost(
         }
         accumulated *= factor;
     }
-    (trees, ctrs, bias)
+    Boosted {
+        trees,
+        ctrs,
+        bias,
+        eval_metrics,
+        best_iteration,
+    }
 }
 
 /// Raw scores `bias + Σ leaf values` of the rows of `x`, one column per
@@ -3527,6 +3708,17 @@ macro_rules! catboost_config {
             pub model_shrink_rate: Option<f64>,
             /// CatBoost's `model_shrink_mode` (default `Constant`).
             pub model_shrink_mode: CatBoostShrinkMode,
+            /// Keep the trees up to the best iteration on the eval set
+            /// (`fit_with_eval`). Default (`None`): on with an eval set.
+            pub use_best_model: Option<bool>,
+            /// CatBoost's overfitting detector on the eval set. Default
+            /// (`None`): `IncToDec` with `od_pval`, else `Iter` with
+            /// `od_wait`, else none.
+            pub od_type: Option<CatBoostOdType>,
+            /// Iterations to wait after the best one (default 20).
+            pub od_wait: Option<usize>,
+            /// `IncToDec`'s p-value threshold (default 0: off).
+            pub od_pval: Option<f64>,
             $($($(#[$fdoc])* pub $field: $fty,)*)?
         }
 
@@ -3560,6 +3752,10 @@ macro_rules! catboost_config {
                     monotone_constraints: Vec::new(),
                     model_shrink_rate: None,
                     model_shrink_mode: CatBoostShrinkMode::Constant,
+                    use_best_model: None,
+                    od_type: None,
+                    od_wait: None,
+                    od_pval: None,
                     $($($field: $fdef,)*)?
                 }
             }
@@ -3696,6 +3892,29 @@ macro_rules! catboost_config {
                 self.model_shrink_mode = m;
                 self
             }
+            pub fn with_use_best_model(mut self, b: bool) -> Self {
+                self.use_best_model = Some(b);
+                self
+            }
+            /// Stop `n` iterations after the best one on the eval set
+            /// (CatBoost's `early_stopping_rounds`: `Iter` with `od_wait`).
+            pub fn with_early_stopping_rounds(mut self, n: usize) -> Self {
+                self.od_type = Some(CatBoostOdType::Iter);
+                self.od_wait = Some(n);
+                self
+            }
+            pub fn with_od_type(mut self, t: CatBoostOdType) -> Self {
+                self.od_type = Some(t);
+                self
+            }
+            pub fn with_od_wait(mut self, n: usize) -> Self {
+                self.od_wait = Some(n);
+                self
+            }
+            pub fn with_od_pval(mut self, p: f64) -> Self {
+                self.od_pval = Some(p);
+                self
+            }
             pub fn with_mvs_reg(mut self, r: f64) -> Self {
                 self.mvs_reg = Some(r);
                 self
@@ -3705,7 +3924,7 @@ macro_rules! catboost_config {
             /// one, else `TAutoLRParamsGuesser` (CPU, no best model),
             /// `exp(A ln n + B) · exp(C ln iterations) / exp(C ln 1000)`
             /// capped at 0.5 and rounded to 6 digits.
-            fn learning_rate_for(&self, loss: Loss, n: usize) -> f64 {
+            fn learning_rate_for(&self, loss: Loss, n: usize, use_best: bool) -> f64 {
                 if let Some(lr) = self.learning_rate {
                     return lr;
                 }
@@ -3713,12 +3932,22 @@ macro_rules! catboost_config {
                     && self.leaf_estimation_method.is_none()
                     && self.leaf_estimation_iterations.is_none();
                 // (A, B, C, D): dataset size and iteration coefficients.
-                let coeffs = match (loss, self.boost_from_average_for(loss)) {
-                    (Loss::Logloss, true) => (0.408, -7.299, -0.928, 2.701),
-                    (Loss::Logloss, false) => (0.427, -7.525, -0.917, 2.63),
-                    (Loss::MultiClass(_), false) => (0.051, -2.889, -0.845, 2.928),
-                    (Loss::Rmse, true) => (0.158, -4.287, -0.813, 2.571),
-                    (Loss::Rmse, false) => (0.178, -4.473, -0.76, 2.133),
+                let bfa = if matches!(loss, Loss::Logloss | Loss::MultiClass(_)) {
+                    self.boost_from_average.unwrap_or(false)
+                } else {
+                    self.boost_from_average_for(loss)
+                };
+                let coeffs = match (loss, bfa, use_best) {
+                    (Loss::Logloss, true, true) => (0.246, -5.127, -0.451, 0.978),
+                    (Loss::Logloss, true, false) => (0.408, -7.299, -0.928, 2.701),
+                    (Loss::Logloss, false, true) => (0.247, -5.158, -0.435, 0.934),
+                    (Loss::Logloss, false, false) => (0.427, -7.525, -0.917, 2.63),
+                    (Loss::MultiClass(_), false, true) => (0.02, -2.364, -0.382, 0.924),
+                    (Loss::MultiClass(_), false, false) => (0.051, -2.889, -0.845, 2.928),
+                    (Loss::Rmse, true, true) => (0.157, -4.062, -0.61, 1.557),
+                    (Loss::Rmse, true, false) => (0.158, -4.287, -0.813, 2.571),
+                    (Loss::Rmse, false, true) => (0.189, -4.383, -0.623, 1.439),
+                    (Loss::Rmse, false, false) => (0.178, -4.473, -0.76, 2.133),
                     _ => return 0.03,
                 };
                 if !defaults {
@@ -3793,6 +4022,35 @@ macro_rules! catboost_config {
 
             /// CatBoost keeps the learning rate and the L2 regularization
             /// as float32.
+            /// `use_best_model` for a fit with or without an eval set (whose
+            /// shape is checked).
+            fn use_best_model_with(
+                &self,
+                eval: Option<&CatBoostEvalSet<'_>>,
+                n_features: usize,
+            ) -> Result<bool> {
+                let invalid = |m: String| Err(RustMlError::InvalidParameter(m));
+                let Some(e) = eval else {
+                    if self.use_best_model == Some(true) {
+                        return invalid("use_best_model needs an eval set".into());
+                    }
+                    return Ok(false);
+                };
+                if e.x.nrows() == 0 || e.x.nrows() != e.y.len() {
+                    return invalid("the eval set needs as many rows as targets, at least one".into());
+                }
+                if e.x.ncols() != n_features {
+                    return invalid(format!(
+                        "the eval set has {} features, X {n_features}",
+                        e.x.ncols()
+                    ));
+                }
+                if e.sample_weight.is_some_and(|w| w.len() != e.y.len()) {
+                    return invalid("the eval set's sample_weight does not match its rows".into());
+                }
+                Ok(self.use_best_model.unwrap_or(true))
+            }
+
             /// CatBoost's checks of `monotone_constraints` and the shrinkage.
             fn check_monotone(&self, n_features: usize) -> Result<()> {
                 let invalid = |m: String| Err(RustMlError::InvalidParameter(m));
@@ -3854,6 +4112,19 @@ macro_rules! catboost_config {
                         },
                     ),
                     shrink_mode: self.model_shrink_mode,
+                    od_threshold: match self.od_type.unwrap_or(if self.od_pval.is_some() {
+                        CatBoostOdType::IncToDec
+                    } else if self.od_wait.is_some() {
+                        CatBoostOdType::Iter
+                    } else {
+                        CatBoostOdType::None
+                    }) {
+                        CatBoostOdType::None => 0.0,
+                        CatBoostOdType::Iter => 1.0,
+                        CatBoostOdType::IncToDec => self.od_pval.unwrap_or(0.0),
+                    },
+                    od_wait: self.od_wait.unwrap_or(20),
+                    use_best_model: false,
                 }
             }
         }
@@ -3963,13 +4234,15 @@ impl CatBoostClassifier {
 
     /// The sample weights with the class weights (CatBoost's
     /// `MakeClassificationWeights`: float32 products).
-    fn class_adjusted_weights(
+    /// The class weights: given, or CatBoost's automatic ones from the
+    /// training rows (which also weight an eval set).
+    fn class_weight_vector(
         &self,
         classes_of: &[u8],
         n_classes: usize,
-        weights: Vec<f64>,
-    ) -> Result<Vec<f64>> {
-        let class_weights: Vec<f32> = match (&self.class_weights, self.auto_class_weights) {
+        weights: &[f64],
+    ) -> Result<Option<Vec<f32>>> {
+        Ok(Some(match (&self.class_weights, self.auto_class_weights) {
             (Some(w), _) => {
                 if w.len() != n_classes {
                     return Err(RustMlError::InvalidParameter(format!(
@@ -3984,14 +4257,26 @@ impl CatBoostClassifier {
                 }
                 w.iter().map(|&v| v as f32).collect()
             }
-            (None, Some(auto)) => auto_class_weights(classes_of, n_classes, &weights, auto),
-            (None, None) => return Ok(weights),
-        };
-        Ok(weights
+            (None, Some(auto)) => auto_class_weights(classes_of, n_classes, weights, auto),
+            (None, None) => return Ok(None),
+        }))
+    }
+}
+
+/// Sample weights times the class weights (CatBoost's
+/// `MakeClassificationWeights`: float32 products).
+fn apply_class_weights(
+    weights: Vec<f64>,
+    classes_of: &[u8],
+    class_weights: Option<&[f32]>,
+) -> Vec<f64> {
+    match class_weights {
+        None => weights,
+        Some(cw) => weights
             .iter()
             .zip(classes_of)
-            .map(|(&w, &c)| f64::from(w as f32 * class_weights[c as usize]))
-            .collect())
+            .map(|(&w, &c)| f64::from(w as f32 * cw[c as usize]))
+            .collect(),
     }
 }
 
@@ -4005,6 +4290,10 @@ pub struct FittedCatBoostRegressor {
     /// Predictions are `exp(raw)` (Poisson, Tweedie).
     #[serde(default)]
     exp_prediction: bool,
+    #[serde(default)]
+    eval_metrics: Vec<f64>,
+    #[serde(default)]
+    best_iteration: Option<usize>,
     borders: Vec<Vec<f32>>,
     n_features: usize,
 }
@@ -4012,6 +4301,14 @@ pub struct FittedCatBoostRegressor {
 impl FittedCatBoostRegressor {
     pub fn n_estimators(&self) -> usize {
         self.trees.len()
+    }
+    /// The eval set's metric after every iteration (`fit_with_eval`).
+    pub fn eval_metrics(&self) -> &[f64] {
+        &self.eval_metrics
+    }
+    /// The iteration with the best eval metric (0-based).
+    pub fn best_iteration(&self) -> Option<usize> {
+        self.best_iteration
     }
     /// Quantization borders per feature.
     pub fn borders(&self) -> &[Vec<f32>] {
@@ -4028,7 +4325,40 @@ impl FitWeighted<f64> for CatBoostRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.fit_inner(x, y, sample_weight, None)
+    }
+}
+
+impl CatBoostRegressor {
+    /// Fit with an eval set (CatBoost's `eval_set`): its metric after every
+    /// iteration, the overfitting detector and `use_best_model` (default
+    /// on).
+    pub fn fit_with_eval(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: CatBoostEvalSet<'_>,
+    ) -> Result<FittedCatBoostRegressor> {
+        self.fit_inner(x, y, sample_weight, Some(eval))
+    }
+
+    fn fit_inner(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: Option<CatBoostEvalSet<'_>>,
+    ) -> Result<FittedCatBoostRegressor> {
         let p = self.train_params();
+        let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
+        let eval_set = eval.map(|e| EvalSet {
+            x: e.x,
+            target: f32_values(e.y),
+            weights: e
+                .sample_weight
+                .map_or_else(|| vec![1.0; e.y.len()], f32_values),
+        });
         validate(x, y, sample_weight, &p, self.border_count)?;
         self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
@@ -4076,18 +4406,30 @@ impl FitWeighted<f64> for CatBoostRegressor {
         let q = quantize(x, self.border_count, cat)?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         let p = TrainParams {
-            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows()) as f32),
+            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             leaf_estimation: self.leaf_method(loss),
             bootstrap,
             subsample,
+            use_best_model: use_best,
             ..p
         };
-        let (trees, ctrs, bias) = boost(&q, &target, &weights, &[bias], loss, p, rng);
+        let b = boost(
+            &q,
+            &target,
+            &weights,
+            &[bias],
+            loss,
+            p,
+            rng,
+            eval_set.as_ref(),
+        );
         Ok(FittedCatBoostRegressor {
-            trees,
-            ctrs,
-            bias: bias[0],
+            trees: b.trees,
+            ctrs: b.ctrs,
+            bias: b.bias[0],
+            eval_metrics: b.eval_metrics,
+            best_iteration: b.best_iteration,
             exp_prediction: loss.exp_prediction(),
             borders: q.borders,
             n_features: x.ncols(),
@@ -4128,9 +4470,21 @@ pub struct FittedCatBoostClassifier {
     borders: Vec<Vec<f32>>,
     classes: Vec<f64>,
     n_features: usize,
+    #[serde(default)]
+    eval_metrics: Vec<f64>,
+    #[serde(default)]
+    best_iteration: Option<usize>,
 }
 
 impl FittedCatBoostClassifier {
+    /// The eval set's metric after every iteration (`fit_with_eval`).
+    pub fn eval_metrics(&self) -> &[f64] {
+        &self.eval_metrics
+    }
+    /// The iteration with the best eval metric (0-based).
+    pub fn best_iteration(&self) -> Option<usize> {
+        self.best_iteration
+    }
     pub fn classes(&self) -> &[f64] {
         &self.classes
     }
@@ -4192,7 +4546,33 @@ impl FitWeighted<f64> for CatBoostClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.fit_inner(x, y, sample_weight, None)
+    }
+}
+
+impl CatBoostClassifier {
+    /// Fit with an eval set (CatBoost's `eval_set`): see
+    /// [`CatBoostRegressor::fit_with_eval`]. Its labels must be classes of
+    /// `y`; the class weights weight it too.
+    pub fn fit_with_eval(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: CatBoostEvalSet<'_>,
+    ) -> Result<FittedCatBoostClassifier> {
+        self.fit_inner(x, y, sample_weight, Some(eval))
+    }
+
+    fn fit_inner(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: Option<CatBoostEvalSet<'_>>,
+    ) -> Result<FittedCatBoostClassifier> {
         let p = self.train_params();
+        let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
         validate(x, y, sample_weight, &p, self.border_count)?;
         self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
@@ -4249,11 +4629,34 @@ impl FitWeighted<f64> for CatBoostClassifier {
             .map(|v| classes.partition_point(|c| c < v) as f64)
             .collect();
         let classes_of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
-        let weights = self.class_adjusted_weights(
-            &classes_of,
-            classes.len(),
-            sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values),
-        )?;
+        let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
+        let class_weights = self.class_weight_vector(&classes_of, classes.len(), &weights)?;
+        let weights = apply_class_weights(weights, &classes_of, class_weights.as_deref());
+        let eval_set = match eval {
+            None => None,
+            Some(e) => {
+                let mut target = Vec::with_capacity(e.y.len());
+                for &v in e.y.iter() {
+                    match classes.binary_search_by(|c| c.total_cmp(&v)) {
+                        Ok(c) => target.push(c as f64),
+                        Err(_) => {
+                            return Err(RustMlError::InvalidParameter(format!(
+                                "the eval set has the label {v}, not in y"
+                            )))
+                        }
+                    }
+                }
+                let of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
+                let w = e
+                    .sample_weight
+                    .map_or_else(|| vec![1.0; e.y.len()], f32_values);
+                Some(EvalSet {
+                    x: e.x,
+                    weights: apply_class_weights(w, &of, class_weights.as_deref()),
+                    target,
+                })
+            }
+        };
         let (loss, bias) = if multiclass {
             (Loss::MultiClass(classes.len()), vec![0.0; classes.len()])
         } else if boost_from_average {
@@ -4271,17 +4674,32 @@ impl FitWeighted<f64> for CatBoostClassifier {
         let q = quantize(x, self.border_count, cat)?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         let p = TrainParams {
-            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows()) as f32),
+            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             bootstrap,
             subsample,
             ..p
         };
-        let (trees, ctrs, bias) = boost(&q, &target, &weights, &bias, loss, p, rng);
+        let p = TrainParams {
+            use_best_model: use_best,
+            ..p
+        };
+        let b = boost(
+            &q,
+            &target,
+            &weights,
+            &bias,
+            loss,
+            p,
+            rng,
+            eval_set.as_ref(),
+        );
         Ok(FittedCatBoostClassifier {
-            trees,
-            ctrs,
-            bias,
+            trees: b.trees,
+            ctrs: b.ctrs,
+            bias: b.bias,
+            eval_metrics: b.eval_metrics,
+            best_iteration: b.best_iteration,
             borders: q.borders,
             classes,
             n_features: x.ncols(),

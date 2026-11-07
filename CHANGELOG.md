@@ -18,6 +18,25 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   the default was a fixed 0.03. Python: `learning_rate=None` now means the
   automatic rate. Matches catboost 1.2.10 on 6 golden cases.
 
+### CatBoost-style boosting: eval sets, early stopping, use_best_model (#155)
+
+- `fit_with_eval(x, y, w, CatBoostEvalSet { x, y, sample_weight })` on
+  both CatBoost estimators (registry: `fit_with_validation`; Python:
+  `fit(..., eval_set=(X_val, y_val[, w_val]))`). The eval set's objective
+  metric is tracked after every iteration on CatBoost's `TestApprox`
+  (shrunk with the model), `eval_metrics()` / `best_iteration()`
+  (Python `evals_result_`, `best_iteration_`).
+- CatBoost's overfitting detector: `od_type` (`IncToDec` with `od_pval`,
+  `Iter`), `od_wait` (default 20), `with_early_stopping_rounds(n)`; and
+  `use_best_model` (default on with an eval set), which keeps the trees up
+  to the first strictly best iteration. With it, the automatic learning
+  rate takes CatBoost's `use_best_model` coefficients.
+- Class weights also weight the eval set, as in CatBoost.
+- Python: the dict form of `class_weights` now keys on the original labels
+  (it used the encoded ones).
+- Matches catboost 1.2.10 on 14 golden cases: predictions to 1.5e-15 and the
+  per-iteration eval metrics and tree counts exactly.
+
 ### CatBoost-style boosting: more regression losses (#153)
 
 - `CatBoostRegressor::loss_function` (`CatBoostRegressionLoss`): RMSE
