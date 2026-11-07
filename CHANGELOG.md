@@ -46,6 +46,9 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   generator's draws in CatBoost's order, Lossguide's libc++
   `priority_queue` by gain, and CatBoost's leaf numbering (the false side
   keeps the leaf's id).
+- Lossguide also takes categorical features with CTRs (simple CTRs, as
+  CatBoost scores non-symmetric trees without combinations, with its model
+  size penalty); Depthwise with CTRs is still rejected.
 - Trees serialize their nodes (`children`); oblivious models are
   unchanged.
 - Matches catboost 1.2.10 to 1.6e-15 on 21 golden cases (RMSE, Logloss,

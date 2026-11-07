@@ -477,6 +477,12 @@ def generate():
     add("lg_defaults", "regressor",
         dict(COMMON, iterations=80, grow_policy="Lossguide", random_strength=1.0,
              has_time=False, bootstrap_type="MVS"), X, y_reg)
+    add_cat("lg_ctr_rmse_perm", dict(cat, grow_policy="Lossguide", has_time=False, depth=5),
+            y_cat_reg, kind="regressor")
+    add_cat("lg_ctr", dict(cat, grow_policy="Lossguide", max_leaves=12), y_cat)
+    add_cat("lg_ctr_defaults", dict(COMMON, iterations=60, grow_policy="Lossguide",
+                                    cat_features=cat_cols, random_strength=1.0,
+                                    has_time=False, bootstrap_type="MVS"), y_cat)
     add_cat("dw_onehot", dict(cat, grow_policy="Depthwise", one_hot_max_size=255), y_cat_reg,
             kind="regressor")
     return out

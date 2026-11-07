@@ -2540,6 +2540,7 @@ fn select_best(
     rng: &mut CatRng,
     score_std: f64,
     score_before: f64,
+    penalty: &dyn Fn(usize) -> f64,
 ) -> Option<(f64, usize, usize)> {
     let mut best: Option<(f64, usize, usize)> = None;
     let mut best_gain = f64::NEG_INFINITY;
@@ -2561,10 +2562,11 @@ fn select_best(
                     chosen = Some((c, s));
                 }
             }
-            let score = val + rng.std_normal() * score_std;
+            let mut score = val + rng.std_normal() * score_std;
             let Some((c, s)) = chosen else {
                 continue;
             };
+            score *= penalty(c);
             let gain = score - score_before;
             if gain > best_gain {
                 best_gain = gain;
@@ -2573,6 +2575,31 @@ fn select_best(
         }
     }
     best
+}
+
+/// CatBoost's `GetCatFeatureWeight` for the candidates: a CTR type not yet
+/// in the model scores `(1 + k / max k)^-model_size_reg` times less.
+fn ctr_penalties(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+    used_ctrs: &std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
+) -> Vec<f64> {
+    let max = candidates
+        .iter()
+        .filter_map(|c| c.get(q).ctr_key.as_ref().map(|(_, k)| *k))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    candidates
+        .iter()
+        .map(|c| match &c.get(q).ctr_key {
+            Some((key, k)) if !used_ctrs.contains(key) => {
+                (1.0 + *k as f64 / max as f64).powf(-model_size_reg)
+            }
+            _ => 1.0,
+        })
+        .collect()
 }
 
 /// A non-symmetric tree's nodes (CatBoost's `TNonSymmetricTreeStructure`):
@@ -2597,8 +2624,11 @@ fn grow_depthwise(
     score_std: f64,
     sample: &Sample,
     min_data: usize,
+    used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
+    let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -2627,7 +2657,11 @@ fn grow_depthwise(
             .collect()
     };
     // `CalcBestScoreAndCandidate`: (gain, best split) of a leaf's stats.
-    let score = |stats: &[Vec<BucketStats>], rows: &[usize], rng: &mut CatRng| {
+    let score = |stats: &[Vec<BucketStats>],
+                 rows: &[usize],
+                 rng: &mut CatRng,
+                 used: &std::collections::HashSet<(Projection, bool)>| {
+        let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
         let noise_seed = rng.gen();
         let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
         // `CalcScoreWithoutSplit`: the leaf's sums (all dimensions).
@@ -2645,7 +2679,15 @@ fn grow_depthwise(
             CatBoostScoreFunction::Cosine => (a * swd) / (1e-100 + a * a * sw).sqrt(),
             CatBoostScoreFunction::L2 => a * swd,
         };
-        let best = select_best(&entries, &scores, noise_seed, rng, score_std, before);
+        let best = select_best(
+            &entries,
+            &scores,
+            noise_seed,
+            rng,
+            score_std,
+            before,
+            &|c| penalties[c],
+        );
         best.map_or((0.0, None), |(s, c, sp)| (s - before, Some((c, sp))))
     };
     let subtract = |parent: &[Vec<BucketStats>], small: &[Vec<BucketStats>]| {
@@ -2668,7 +2710,7 @@ fn grow_depthwise(
     let mut parents: std::collections::VecDeque<Vec<Vec<BucketStats>>> = Default::default();
     let mut current: Vec<usize> = vec![0];
     for _ in 0..depth {
-        for _ in 0..q.draws.0 {
+        for _ in 0..level_draws {
             rng.real1();
         }
         let mut next_level = Vec::new();
@@ -2693,9 +2735,9 @@ fn grow_depthwise(
                 p
             } else if even && next_considered && trick && size <= next_size {
                 let small = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&small, &rows_of[current[id]], rng);
+                let (g, b) = score(&small, &rows_of[current[id]], rng, used_ctrs);
                 let large = subtract(&parents[0], &small);
-                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng);
+                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng, used_ctrs);
                 parents.pop_front();
                 push(&mut parents, g, &b, small);
                 push(&mut parents, g2, &b2, large);
@@ -2703,9 +2745,9 @@ fn grow_depthwise(
                 (g, b)
             } else if even && next_considered && trick {
                 let small = stats_of(&rows_of[current[id + 1]]);
-                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng);
+                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng, used_ctrs);
                 let large = subtract(&parents[0], &small);
-                let (g, b) = score(&large, &rows_of[current[id]], rng);
+                let (g, b) = score(&large, &rows_of[current[id]], rng, used_ctrs);
                 parents.pop_front();
                 push(&mut parents, g, &b, large);
                 push(&mut parents, g2, &b2, small);
@@ -2713,7 +2755,7 @@ fn grow_depthwise(
                 (g, b)
             } else {
                 let st = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&st, &rows_of[current[id]], rng);
+                let (g, b) = score(&st, &rows_of[current[id]], rng, used_ctrs);
                 parents.pop_front();
                 if trick {
                     push(&mut parents, g, &b, st);
@@ -2745,6 +2787,9 @@ fn grow_depthwise(
             leaf_parent.push(node);
             splits.push((candidates[c].clone(), s));
             let column = candidates[c].get(q);
+            if let Some((key, _)) = &column.ctr_key {
+                used_ctrs.insert(key.clone());
+            }
             let (right, left): (Vec<usize>, Vec<usize>) = rows_of[leaf]
                 .iter()
                 .partition(|&&i| column.goes_right(column.buckets[i], s));
@@ -2792,8 +2837,11 @@ fn grow_lossguide(
     score_std: f64,
     sample: &Sample,
     min_data: usize,
+    used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
+    let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -2822,7 +2870,11 @@ fn grow_lossguide(
             })
             .collect()
     };
-    let score = |stats: &[Vec<BucketStats>], rows: &[usize], rng: &mut CatRng| {
+    let score = |stats: &[Vec<BucketStats>],
+                 rows: &[usize],
+                 rng: &mut CatRng,
+                 used: &std::collections::HashSet<(Projection, bool)>| {
+        let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
         let noise_seed = rng.gen();
         let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
         let (mut swd, mut sw) = (0.0, 0.0);
@@ -2839,8 +2891,16 @@ fn grow_lossguide(
             CatBoostScoreFunction::Cosine => (a * swd) / (1e-100 + a * a * sw).sqrt(),
             CatBoostScoreFunction::L2 => a * swd,
         };
-        select_best(&entries, &scores, noise_seed, rng, score_std, before)
-            .map(|(s, c, sp)| (s - before, c, sp))
+        select_best(
+            &entries,
+            &scores,
+            noise_seed,
+            rng,
+            score_std,
+            before,
+            &|c| penalties[c],
+        )
+        .map(|(s, c, sp)| (s - before, c, sp))
     };
     let subtract = |parent: &[Vec<BucketStats>], small: &[Vec<BucketStats>]| {
         parent
@@ -2880,11 +2940,11 @@ fn grow_lossguide(
         }
     };
     if max_depth > 0 && rows_of[0].len() >= min_data {
-        for _ in 0..q.draws.0 {
+        for _ in 0..level_draws {
             rng.real1();
         }
         let st = stats_of(&rows_of[0]);
-        let best = score(&st, &rows_of[0], rng);
+        let best = score(&st, &rows_of[0], rng, used_ctrs);
         offer(&mut queue, &mut store, 0, best, st);
     }
     while !queue.0.is_empty() && children.len() + 1 < max_leaves {
@@ -2907,6 +2967,9 @@ fn grow_lossguide(
         leaf_parent.push(node);
         splits.push((candidates[cand.column].clone(), cand.split));
         let column = candidates[cand.column].get(q);
+        if let Some((key, _)) = &column.ctr_key {
+            used_ctrs.insert(key.clone());
+        }
         let (right, left): (Vec<usize>, Vec<usize>) = rows_of[leaf]
             .iter()
             .partition(|&&i| column.goes_right(column.buckets[i], cand.split));
@@ -2923,7 +2986,7 @@ fn grow_lossguide(
         if !need_l && !need_r {
             continue;
         }
-        for _ in 0..q.draws.0 {
+        for _ in 0..level_draws {
             rng.real1();
         }
         let direct = !trick || need_l != need_r;
@@ -2932,19 +2995,19 @@ fn grow_lossguide(
         let (mut lb, mut rb) = (None, None);
         if need_l && l_direct {
             ls = stats_of(&rows_of[l]);
-            lb = score(&ls, &rows_of[l], rng);
+            lb = score(&ls, &rows_of[l], rng, used_ctrs);
         }
         if need_r && r_direct {
             rs = stats_of(&rows_of[r]);
-            rb = score(&rs, &rows_of[r], rng);
+            rb = score(&rs, &rows_of[r], rng, used_ctrs);
         }
         if need_l && !l_direct {
             ls = subtract(&store[cand.stats], &rs);
-            lb = score(&ls, &rows_of[l], rng);
+            lb = score(&ls, &rows_of[l], rng, used_ctrs);
         }
         if need_r && !r_direct {
             rs = subtract(&store[cand.stats], &ls);
-            rb = score(&rs, &rows_of[r], rng);
+            rb = score(&rs, &rows_of[r], rng, used_ctrs);
         }
         if need_l {
             offer(&mut queue, &mut store, l, lb, ls);
@@ -4022,6 +4085,8 @@ fn boost(
                 std,
                 &sample,
                 p.min_data_in_leaf,
+                &mut used_ctrs,
+                p.model_size_reg,
             )
         } else if p.grow_policy == CatBoostGrowPolicy::Depthwise {
             grow_depthwise(
@@ -4034,6 +4099,8 @@ fn boost(
                 std,
                 &sample,
                 p.min_data_in_leaf,
+                &mut used_ctrs,
+                p.model_size_reg,
             )
         } else {
             let (splits, _) = grow_tree(
@@ -4778,8 +4845,11 @@ macro_rules! catboost_config {
                 if self.boosting_type == CatBoostBoostingType::Ordered {
                     return invalid("Depthwise / Lossguide trees need plain boosting");
                 }
-                if has_ctrs {
-                    return invalid("Depthwise / Lossguide trees support numeric and one-hot features only");
+                // Depthwise with CTRs does not match CatBoost yet (#154).
+                if has_ctrs && self.grow_policy == CatBoostGrowPolicy::Depthwise {
+                    return invalid(
+                        "Depthwise trees support numeric and one-hot features only (Lossguide also CTRs)",
+                    );
                 }
                 if self.monotone_constraints.iter().any(|&m| m != 0) {
                     return invalid("Depthwise / Lossguide trees do not support monotone constraints");
