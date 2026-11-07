@@ -993,3 +993,23 @@ def test_catboost_defaults_match_catboost():
     ref = cb.CatBoostRegressor(**kw, **off).fit(X, y)
     ours = am.CatBoostRegressor(**kw).fit(X, y)
     np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-12)
+
+
+def test_catboost_class_weights_and_monotone_match_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(31)
+    X = rs.normal(size=(300, 4))
+    eta = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2]
+    y = eta + rs.normal(scale=0.3, size=300)
+    yc = (eta + rs.logistic(size=300) > 1.0).astype(int)
+    kw = dict(iterations=30, learning_rate=0.2, depth=4, random_strength=0, bootstrap_type="No",
+              has_time=True)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    for extra in (dict(auto_class_weights="Balanced"), dict(class_weights={0: 1.0, 1: 3.0})):
+        ref = cb.CatBoostClassifier(**kw, **extra, **ref_kw).fit(X, yc)
+        ours = am.CatBoostClassifier(**kw, **extra).fit(X, yc)
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
+    mono = dict(monotone_constraints=[1, 1, -1, 0])
+    ref = cb.CatBoostRegressor(**kw, **mono, **ref_kw).fit(X, y)
+    ours = am.CatBoostRegressor(**kw, **mono).fit(X, y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)

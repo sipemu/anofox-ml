@@ -6,8 +6,9 @@ mod common;
 use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
-    CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap, CatBoostClassifier,
-    CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
+    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -122,6 +123,15 @@ macro_rules! configure {
         if let Some(n) = p["one_hot_max_size"].as_u64() {
             m = m.with_one_hot_max_size(n as usize);
         }
+        if let Some(c) = p["monotone_constraints"].as_array() {
+            m = m.with_monotone_constraints(c.iter().map(|v| v.as_i64().unwrap() as i8).collect());
+        }
+        if let Some(r) = p["model_shrink_rate"].as_f64() {
+            m = m.with_model_shrink_rate(r);
+        }
+        if p["model_shrink_mode"] == "Decreasing" {
+            m = m.with_model_shrink_mode(CatBoostShrinkMode::Decreasing);
+        }
         m
     }};
 }
@@ -147,9 +157,21 @@ fn catboost_models_match_catboost() {
                 json_to_array1(&case["predictions"]),
             )
         } else {
-            let f = configure!(CatBoostClassifier::new(), &case["params"])
-                .fit_weighted(&x, &y, sw.as_ref())
-                .unwrap();
+            let p = &case["params"];
+            let mut m = configure!(CatBoostClassifier::new(), p);
+            if let Some(w) = p["class_weights"].as_array() {
+                m = m.with_class_weights(w.iter().map(|v| v.as_f64().unwrap()).collect());
+            }
+            match p["auto_class_weights"].as_str() {
+                Some("Balanced") => {
+                    m = m.with_auto_class_weights(CatBoostAutoClassWeights::Balanced)
+                }
+                Some("SqrtBalanced") => {
+                    m = m.with_auto_class_weights(CatBoostAutoClassWeights::SqrtBalanced)
+                }
+                _ => {}
+            }
+            let f = m.fit_weighted(&x, &y, sw.as_ref()).unwrap();
             worst(
                 f.predict_proba(&x_test).unwrap(),
                 array2_with_nan(&case["predictions"]),

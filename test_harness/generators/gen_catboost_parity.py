@@ -291,6 +291,56 @@ def generate():
     add_cat("auto_lr_defaults", dict(COMMON, iterations=250, cat_features=cat_cols,
                                       random_strength=1.0, has_time=False,
                                       bootstrap_type="MVS"), y_cat)
+
+    # Class weights (#156): multiplied into the sample weights; the
+    # automatic ones from the classes' weight sums (truncated to integers).
+    y_imb = (eta + rng.logistic(size=n) > 1.2).astype(float)
+    add("cw_explicit", "classifier", dict(base, class_weights=[1.0, 2.5]), X, y_imb)
+    add("cw_balanced", "classifier", dict(base, auto_class_weights="Balanced"), X, y_imb)
+    add("cw_sqrt_balanced", "classifier", dict(base, auto_class_weights="SqrtBalanced"), X,
+        y_imb)
+    add("cw_balanced_weighted", "classifier", dict(base, auto_class_weights="Balanced"), X,
+        y_imb, sw=weights)
+    add("cw_balanced_average", "classifier",
+        dict(base, auto_class_weights="Balanced", boost_from_average=True), X, y_imb)
+    add("cw_ordered", "classifier",
+        dict(ordered, auto_class_weights="SqrtBalanced"), X, y_imb)
+    add("cw_mc_balanced", "classifier", dict(mc, auto_class_weights="Balanced"), X,
+        y_mc5.astype(float))
+    add("cw_mc_explicit", "classifier", dict(mc, class_weights=[0.5, 1.0, 3.0]), X,
+        y_mc.astype(float), sw=weights)
+    add_cat("cw_cat_defaults", dict(COMMON, iterations=80, depth=4, cat_features=cat_cols,
+                                     random_strength=1.0, has_time=False, bootstrap_type="MVS",
+                                     auto_class_weights="Balanced"), y_cat)
+
+    # Monotone constraints (#156): isotonic leaf values in the split scores
+    # and the leaf estimation, and model shrinkage (default 0.01 with them).
+    mono = [1, 1, -1, 0]
+    add("mono_rmse", "regressor", dict(base, monotone_constraints=mono), X, y_reg)
+    add("mono_rmse_l2_depth6", "regressor",
+        dict(base, monotone_constraints=mono, score_function="L2", depth=6, iterations=15),
+        X, y_reg)
+    add("mono_rmse_gradient", "regressor",
+        dict(base, monotone_constraints=mono, leaf_estimation_method="Gradient"), X, y_reg)
+    add("mono_rmse_weighted", "regressor", dict(base, monotone_constraints=mono), X, y_reg,
+        sw=weights)
+    add("mono_rmse_no_shrink", "regressor",
+        dict(base, monotone_constraints=mono, model_shrink_rate=0.0), X, y_reg)
+    add("mono_rmse_decreasing", "regressor",
+        dict(base, monotone_constraints=mono, model_shrink_mode="Decreasing"), X, y_reg)
+    add("mono_ordered_rmse", "regressor", dict(ordered, monotone_constraints=mono), X, y_reg)
+    add("mono_logloss", "classifier", dict(base, monotone_constraints=mono), X, y_bin)
+    add("mono_leaf10_logloss", "classifier",
+        dict(base, monotone_constraints=mono, leaf_estimation_iterations=10), X, y_bin)
+    add("mono_ordered_logloss", "classifier", dict(ordered, monotone_constraints=[0, 1, 0, 1]),
+        X, y_bin)
+    add("shrink_only_rmse", "regressor", dict(base, model_shrink_rate=0.05), X, y_reg)
+    add("shrink_decreasing_logloss", "classifier",
+        dict(base, model_shrink_rate=0.3, model_shrink_mode="Decreasing"), X, y_bin)
+    add_cat("mono_cat_logloss", dict(cat, monotone_constraints=[1, 0, 1, 0, 0]), y_cat)
+    add("mono_defaults", "regressor",
+        dict(COMMON, iterations=80, depth=4, monotone_constraints=mono, random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
     return out
 
 
