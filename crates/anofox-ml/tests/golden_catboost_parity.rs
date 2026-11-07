@@ -8,6 +8,7 @@ use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
     CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -121,6 +122,15 @@ macro_rules! configure {
         }
         if let Some(n) = p["one_hot_max_size"].as_u64() {
             m = m.with_one_hot_max_size(n as usize);
+        }
+        if let Some(c) = p["monotone_constraints"].as_array() {
+            m = m.with_monotone_constraints(c.iter().map(|v| v.as_i64().unwrap() as i8).collect());
+        }
+        if let Some(r) = p["model_shrink_rate"].as_f64() {
+            m = m.with_model_shrink_rate(r);
+        }
+        if p["model_shrink_mode"] == "Decreasing" {
+            m = m.with_model_shrink_mode(CatBoostShrinkMode::Decreasing);
         }
         m
     }};

@@ -630,6 +630,80 @@ pub enum CatBoostLeafEstimation {
     Gradient,
 }
 
+/// CatBoost's `model_shrink_mode`: the factor the model is shrunk by
+/// before iteration `i > 0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostShrinkMode {
+    /// `1 - rate · learning_rate`.
+    Constant,
+    /// `1 - rate / i`.
+    Decreasing,
+}
+
+/// CatBoost's `BuildMonotonicLinearOrdersOnLeafs`: for the constraints of
+/// a tree's levels, the leaves of every subtree of the unconstrained
+/// levels in the order the constrained ones require to be increasing.
+fn monotone_orders(constraints: &[i8]) -> Vec<Vec<usize>> {
+    let free = constraints.iter().filter(|&&c| c == 0).count();
+    (0..1usize << free)
+        .map(|mut subtree| {
+            let (mut bit, mut least) = (1usize, 0usize);
+            let mut masks = Vec::new();
+            for &c in constraints {
+                if c == 0 {
+                    if subtree & 1 == 1 {
+                        least |= bit;
+                    }
+                    subtree >>= 1;
+                } else {
+                    masks.push(bit);
+                    if c == -1 {
+                        least |= bit;
+                    }
+                }
+                bit <<= 1;
+            }
+            let m = masks.len();
+            (0..1usize << m)
+                .map(|rank| {
+                    let mut leaf = least;
+                    for (depth, &mask) in masks.iter().enumerate() {
+                        if (rank >> (m - 1 - depth)) & 1 == 1 {
+                            leaf ^= mask;
+                        }
+                    }
+                    leaf
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// CatBoost's `CalcOneDimensionalIsotonicRegression` (pool adjacent
+/// violators) of `values` along `order`, in place.
+fn isotonic(values: &mut [f64], weights: &[f64], order: &[usize]) {
+    // (begin, end, weight, weighted sum) of each level set.
+    let mut sets: Vec<(usize, usize, f64, f64)> = Vec::new();
+    for (rank, &i) in order.iter().enumerate() {
+        let mut set = (rank, rank + 1, weights[i], weights[i] * values[i]);
+        while let Some(last) = sets.last() {
+            if last.3 / last.2 >= set.3 / set.2 {
+                set = (last.0, set.1, last.2 + set.2, last.3 + set.3);
+                sets.pop();
+            } else {
+                break;
+            }
+        }
+        sets.push(set);
+    }
+    for (begin, end, w, sum) in sets {
+        let v = sum / w;
+        for &i in &order[begin..end] {
+            values[i] = v;
+        }
+    }
+}
+
 /// CatBoost's `auto_class_weights`, from the classes' weight sums `S_c`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CatBoostAutoClassWeights {
@@ -1040,7 +1114,7 @@ fn newton_multi(der: &[f64], der2: &[f64], l2: f64, sum_w: f64, count: f64, out:
 }
 
 /// Shared training parameters.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TrainParams {
     iterations: usize,
     learning_rate: f64,
@@ -1065,6 +1139,11 @@ struct TrainParams {
     bagging_temperature: f64,
     mvs_reg: Option<f64>,
     permutation_count: usize,
+    /// Per numeric feature: -1, 0 or +1 (empty: no constraints).
+    monotone: Vec<i8>,
+    /// CatBoost's `model_shrink_rate` (0 = none) and `model_shrink_mode`.
+    shrink_rate: f64,
+    shrink_mode: CatBoostShrinkMode,
 }
 
 /// `sum · 1/(count + λ)` for a non-empty side, else 0 (CatBoost's
@@ -1101,7 +1180,44 @@ struct Column {
     ctr_key: Option<((Projection, bool), usize)>,
 }
 
+/// CatBoost's `CalcScoresForLeaf`: every split of a leaf's buckets, as
+/// `visit(split, true side, false side)`.
+fn each_split(
+    one_hot: bool,
+    buckets: &[BucketStats],
+    n_splits: usize,
+    mut visit: impl FnMut(usize, &BucketStats, &BucketStats),
+) {
+    let mut all = BucketStats::default();
+    for b in buckets {
+        all.add(b);
+    }
+    if one_hot {
+        let mut f = all;
+        for (s, b) in buckets.iter().enumerate() {
+            f.remove(b);
+            visit(s, b, &f);
+            f.add(b);
+        }
+    } else {
+        let (mut t, mut f) = (all, BucketStats::default());
+        for (s, b) in buckets[..n_splits].iter().enumerate() {
+            f.add(b);
+            t.remove(b);
+            visit(s, &t, &f);
+        }
+    }
+}
+
 impl Column {
+    /// The monotone constraint of the column (numeric features only).
+    fn monotone(&self, constraints: &[i8]) -> i8 {
+        match self.split {
+            ColumnSplit::Float { feature, .. } => constraints.get(feature).copied().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     fn one_hot(&self) -> bool {
         matches!(self.split, ColumnSplit::OneHot { .. })
     }
@@ -1789,6 +1905,7 @@ fn grow_tree(
     rng: &mut CatRng,
     score_std: f64,
     sample: &Sample,
+    monotone: &[i8],
 ) -> (Vec<(ColumnRef, usize)>, Vec<u32>) {
     use rayon::prelude::*;
     let n = w.len();
@@ -1856,7 +1973,61 @@ fn grow_tree(
                 }
                 let mut num = vec![0.0f64; n_splits];
                 let mut den = vec![1e-100f64; n_splits];
-                for (pi, part) in parts.iter().enumerate() {
+                // Monotone constraints (CatBoost's `UpdateScores`): the
+                // leaf values of every split, made monotone by isotonic
+                // regression along the tree's leaf orders, then scored leaf
+                // by leaf (`AddLeaf`: the false sides, then the true ones).
+                if !monotone.is_empty() {
+                    let mut constraints: Vec<i8> = splits
+                        .iter()
+                        .map(|(c, _)| c.get(q).monotone(monotone))
+                        .collect();
+                    constraints.push(column.monotone(monotone));
+                    let orders = monotone_orders(&constraints);
+                    let nl = 2 * leaves;
+                    for (pi, part) in parts.iter().enumerate() {
+                        let l2 = part.scaled_l2;
+                        for d in 0..k {
+                            let mut delta = vec![0.0f64; n_splits * nl];
+                            let mut body_w = vec![0.0f64; n_splits * nl];
+                            let mut tail = vec![(0.0f64, 0.0f64); n_splits * nl];
+                            for leaf in 0..leaves {
+                                let start = ((pi * k + d) * leaves + leaf) * nb;
+                                each_split(
+                                    one_hot,
+                                    &hist[start..start + nb],
+                                    n_splits,
+                                    |s, t, f| {
+                                        for (id, st) in [(leaf, f), (leaf + leaves, t)] {
+                                            let (v, w) = if ordered {
+                                                (average(st.sd, st.count, l2), st.count)
+                                            } else {
+                                                (average(st.swd, st.sw, l2), st.sw)
+                                            };
+                                            delta[s * nl + id] = v;
+                                            body_w[s * nl + id] = w + l2;
+                                            tail[s * nl + id] = (st.swd, st.sw);
+                                        }
+                                    },
+                                );
+                            }
+                            for s in 0..n_splits {
+                                let values = &mut delta[s * nl..(s + 1) * nl];
+                                let weights = &body_w[s * nl..(s + 1) * nl];
+                                for order in &orders {
+                                    isotonic(values, weights, order);
+                                }
+                                for (v, &(swd, sw)) in values.iter().zip(&tail[s * nl..]) {
+                                    num[s] += v * swd;
+                                    if score_function == CatBoostScoreFunction::Cosine {
+                                        den[s] += v * v * sw;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                for (pi, part) in parts.iter().enumerate().filter(|_| monotone.is_empty()) {
                     let l2 = part.scaled_l2;
                     let mut add = |s: usize, t: &BucketStats, f: &BucketStats| {
                         // Plain: averages of the scored rows; ordered: of
@@ -1879,29 +2050,9 @@ fn grow_tree(
                             }
                         }
                     };
-                    // CatBoost's `CalcScoresForLeaf`.
                     for leaf in (0..k).flat_map(|d| (0..leaves).map(move |l| (d, l))) {
                         let start = ((pi * k + leaf.0) * leaves + leaf.1) * nb;
-                        let buckets = &hist[start..start + nb];
-                        let mut all = BucketStats::default();
-                        for b in buckets {
-                            all.add(b);
-                        }
-                        if one_hot {
-                            let mut f = all;
-                            for (s, b) in buckets.iter().enumerate() {
-                                f.remove(b);
-                                add(s, b, &f);
-                                f.add(b);
-                            }
-                        } else {
-                            let (mut t, mut f) = (all, BucketStats::default());
-                            for (s, b) in buckets[..n_splits].iter().enumerate() {
-                                f.add(b);
-                                t.remove(b);
-                                add(s, &t, &f);
-                            }
-                        }
+                        each_split(one_hot, &hist[start..start + nb], n_splits, &mut add);
                     }
                 }
                 Some(
@@ -2099,6 +2250,8 @@ struct LeafProblem<'a> {
     /// at the moved approximations plus the step. A learning fold
     /// (`CalcApproxDelta`): at `approx` plus the summed steps.
     moving: bool,
+    /// The tree's monotone leaf orders (empty: unconstrained).
+    orders: &'a [Vec<usize>],
 }
 
 /// CatBoost's leaf estimation (`FastGradientWalker`): `leaf_iterations`
@@ -2134,8 +2287,36 @@ fn estimate_leaves(
         let ders = lp.loss.all_ders(lp.target, &point, lp.weights, rows);
         let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
         let mut step = vec![0.0; n_leaves * k];
-        for (leaf, o) in step.chunks_mut(k).enumerate() {
-            sums.delta(leaf, p.l2_leaf_reg, lp.stats.0, lp.stats.1, p, o);
+        if lp.orders.is_empty() {
+            for (leaf, o) in step.chunks_mut(k).enumerate() {
+                sums.delta(leaf, p.l2_leaf_reg, lp.stats.0, lp.stats.1, p, o);
+            }
+        } else {
+            // CatBoost's `CalcMonotonicLeafDeltasSimple`: the leaf values
+            // after the step (the model's: from the summed steps; a fold's:
+            // from 0) made monotone along the orders, weighted by the
+            // steps' denominators.
+            let scaled_l2 = p.l2_leaf_reg * (lp.stats.0 / lp.stats.1);
+            let weights: Vec<f64> = (0..n_leaves)
+                .map(|leaf| match p.leaf_estimation {
+                    CatBoostLeafEstimation::Gradient => sums.w[leaf] + scaled_l2,
+                    CatBoostLeafEstimation::Newton => -sums.der2[leaf] + scaled_l2,
+                })
+                .collect();
+            let current = if lp.moving {
+                total.clone()
+            } else {
+                vec![0.0; n_leaves]
+            };
+            let mut values: Vec<f64> = (0..n_leaves)
+                .map(|leaf| current[leaf] + sums.der[leaf] / weights[leaf])
+                .collect();
+            for order in lp.orders {
+                isotonic(&mut values, &weights, order);
+            }
+            for leaf in 0..n_leaves {
+                step[leaf] = values[leaf] - current[leaf];
+            }
         }
         let take = |scaled: &[f64], total: &mut [f64], point: &mut [f64]| {
             for (t, s) in total.iter_mut().zip(scaled) {
@@ -2532,6 +2713,7 @@ fn update_fold(
     n_leaves: usize,
     loss: Loss,
     p: &TrainParams,
+    orders: &[Vec<usize>],
 ) {
     let k = loss.dims();
     let (target, weights) = (&fold.target, &fold.weights);
@@ -2546,6 +2728,7 @@ fn update_fold(
             rows: body,
             stats: (bw, body as f64),
             moving: false,
+            orders,
         };
         if k == 1 {
             // Each prefix's approximation moves by the leaf values of its
@@ -2615,7 +2798,7 @@ fn boost(
     loss: Loss,
     p: TrainParams,
     mut rng: CatRng,
-) -> (Vec<ObliviousTree>, CtrModel) {
+) -> (Vec<ObliviousTree>, CtrModel, Vec<f64>) {
     let n = target.len();
     let k = loss.dims();
     let has_ctrs = q.ctr.is_some();
@@ -2675,7 +2858,40 @@ fn boost(
     let mut trees = Vec::with_capacity(p.iterations);
     let mut used_ctrs = std::collections::HashSet::new();
     let mut ctrs = CtrModel::default();
+    // CatBoost's model shrinkage (float32 rate and learning rate): every
+    // learning approximation is scaled before each iteration after the
+    // first (`ScaleAllApproxes`); the bias then too, the trees at the end.
+    let shrink_rate = f64::from(p.shrink_rate as f32);
+    let mut shrink_history: Vec<f64> = Vec::new();
+    let mut bias = bias.to_vec();
     for iteration in 0..p.iterations {
+        if shrink_rate > 0.0 {
+            let factor = if iteration == 0 {
+                1.0
+            } else {
+                match p.shrink_mode {
+                    CatBoostShrinkMode::Constant => 1.0 - shrink_rate * p.learning_rate,
+                    CatBoostShrinkMode::Decreasing => 1.0 - shrink_rate / iteration as f64,
+                }
+            };
+            if iteration > 0 {
+                for a in folds
+                    .iter_mut()
+                    .flat_map(|f| f.approx.iter_mut())
+                    .chain(std::iter::once(&mut average.approx[0]))
+                    .chain(std::iter::once(&mut approx))
+                {
+                    // Stored `exp(a)` (Logloss) moves as by a leaf value.
+                    for v in a.iter_mut() {
+                        *v = loss.fold_step(*v, factor);
+                    }
+                }
+                for b in &mut bias {
+                    *b *= factor;
+                }
+            }
+            shrink_history.push(factor);
+        }
         let taken = (rng.gen() % n_folds as u64) as usize;
         rng.gen(); // the derivatives' seeds
         let fold = &mut folds[taken];
@@ -2726,9 +2942,19 @@ fn boost(
             &mut rng,
             score_std(&ders, &fold.tails, p.ordered, n, iteration, &p),
             &sample,
+            &p.monotone,
         );
         rng.gen(); // the folds' seeds
         let n_leaves = 1usize << splits.len();
+        let tree_monotone: Vec<i8> = splits
+            .iter()
+            .map(|(c, _)| c.get(&fold.q).monotone(&p.monotone))
+            .collect();
+        let orders = if tree_monotone.iter().any(|&m| m != 0) {
+            monotone_orders(&tree_monotone)
+        } else {
+            Vec::new()
+        };
 
         // The model's leaves, from the averaging fold.
         let leaf_of = average.q.leaves(&splits, &mut average.cache);
@@ -2742,6 +2968,7 @@ fn boost(
             rows: n,
             stats: (avg_sum_w, n as f64),
             moving: true,
+            orders: &orders,
         };
         let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
@@ -2763,7 +2990,7 @@ fn boost(
                 continue;
             }
             let leaf_of = fold.q.leaves(&splits, &mut fold.cache);
-            update_fold(fold, &leaf_of, n_leaves, loss, &p);
+            update_fold(fold, &leaf_of, n_leaves, loss, &p, &orders);
         }
         let source = &folds[taken];
         let tree_splits = splits
@@ -2775,7 +3002,14 @@ fn boost(
             leaf_values,
         });
     }
-    (trees, ctrs)
+    let mut accumulated = 1.0;
+    for (tree, &factor) in trees.iter_mut().zip(&shrink_history).rev() {
+        for v in &mut tree.leaf_values {
+            *v *= accumulated;
+        }
+        accumulated *= factor;
+    }
+    (trees, ctrs, bias)
 }
 
 /// Raw scores `bias + Σ leaf values` of the rows of `x`, one column per
@@ -2996,6 +3230,16 @@ macro_rules! catboost_config {
             /// MVS's regularization; default (`None`): from the last tree's
             /// leaves (the first tree: from the gradients).
             pub mvs_reg: Option<f64>,
+            /// Per feature: -1 (decreasing), 0 or +1 (increasing); numeric
+            /// features only (CatBoost's `monotone_constraints`; empty =
+            /// none). Not with more than two classes.
+            pub monotone_constraints: Vec<i8>,
+            /// CatBoost's `model_shrink_rate`: the model is shrunk before
+            /// every iteration. Default (`None`): 0, or with monotone
+            /// constraints 0.01 (`Constant`) / 0.2 (`Decreasing`).
+            pub model_shrink_rate: Option<f64>,
+            /// CatBoost's `model_shrink_mode` (default `Constant`).
+            pub model_shrink_mode: CatBoostShrinkMode,
             $($($(#[$fdoc])* pub $field: $fty,)*)?
         }
 
@@ -3026,6 +3270,9 @@ macro_rules! catboost_config {
                     subsample: None,
                     bagging_temperature: 1.0,
                     mvs_reg: None,
+                    monotone_constraints: Vec::new(),
+                    model_shrink_rate: None,
+                    model_shrink_mode: CatBoostShrinkMode::Constant,
                     $($($field: $fdef,)*)?
                 }
             }
@@ -3122,6 +3369,18 @@ macro_rules! catboost_config {
             }
             pub fn with_bagging_temperature(mut self, t: f64) -> Self {
                 self.bagging_temperature = t;
+                self
+            }
+            pub fn with_monotone_constraints(mut self, m: Vec<i8>) -> Self {
+                self.monotone_constraints = m;
+                self
+            }
+            pub fn with_model_shrink_rate(mut self, r: f64) -> Self {
+                self.model_shrink_rate = Some(r);
+                self
+            }
+            pub fn with_model_shrink_mode(mut self, m: CatBoostShrinkMode) -> Self {
+                self.model_shrink_mode = m;
                 self
             }
             pub fn with_mvs_reg(mut self, r: f64) -> Self {
@@ -3221,6 +3480,28 @@ macro_rules! catboost_config {
 
             /// CatBoost keeps the learning rate and the L2 regularization
             /// as float32.
+            /// CatBoost's checks of `monotone_constraints` and the shrinkage.
+            fn check_monotone(&self, n_features: usize) -> Result<()> {
+                let invalid = |m: String| Err(RustMlError::InvalidParameter(m));
+                let m = &self.monotone_constraints;
+                if !m.is_empty() && m.len() != n_features {
+                    return invalid(format!(
+                        "monotone_constraints has {} entries but X has {n_features} features",
+                        m.len()
+                    ));
+                }
+                if m.iter().any(|v| !(-1..=1).contains(v)) {
+                    return invalid("monotone_constraints must be -1, 0 or 1".into());
+                }
+                if self.cat_features.iter().any(|&f| m.get(f).is_some_and(|&v| v != 0)) {
+                    return invalid("monotone constraints apply to numeric features only".into());
+                }
+                if self.model_shrink_rate.is_some_and(|r| !(0.0..1.0).contains(&r)) {
+                    return invalid("model_shrink_rate must be in [0, 1)".into());
+                }
+                Ok(())
+            }
+
             fn train_params(&self) -> TrainParams {
                 TrainParams {
                     iterations: self.iterations,
@@ -3242,6 +3523,24 @@ macro_rules! catboost_config {
                     bagging_temperature: self.bagging_temperature,
                     mvs_reg: self.mvs_reg,
                     permutation_count: self.permutation_count,
+                    monotone: if self.monotone_constraints.iter().any(|&m| m != 0) {
+                        self.monotone_constraints.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    // CatBoost's default with monotone constraints: 0.01
+                    // (Constant mode) or 0.2 (Decreasing).
+                    shrink_rate: self.model_shrink_rate.unwrap_or(
+                        if self.monotone_constraints.iter().any(|&m| m != 0) {
+                            match self.model_shrink_mode {
+                                CatBoostShrinkMode::Constant => 0.01,
+                                CatBoostShrinkMode::Decreasing => 0.2,
+                            }
+                        } else {
+                            0.0
+                        },
+                    ),
+                    shrink_mode: self.model_shrink_mode,
                 }
             }
         }
@@ -3344,6 +3643,7 @@ impl FitWeighted<f64> for CatBoostRegressor {
     ) -> Result<Self::Fitted> {
         let p = self.train_params();
         validate(x, y, sample_weight, &p, self.border_count)?;
+        self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
             return Err(RustMlError::InvalidParameter(
                 "leaf_estimation_iterations must be at least 1".into(),
@@ -3389,11 +3689,11 @@ impl FitWeighted<f64> for CatBoostRegressor {
             subsample,
             ..p
         };
-        let (trees, ctrs) = boost(&q, &target, &weights, &[bias], Loss::Rmse, p, rng);
+        let (trees, ctrs, bias) = boost(&q, &target, &weights, &[bias], Loss::Rmse, p, rng);
         Ok(FittedCatBoostRegressor {
             trees,
             ctrs,
-            bias,
+            bias: bias[0],
             borders: q.borders,
             n_features: x.ncols(),
         })
@@ -3494,6 +3794,7 @@ impl FitWeighted<f64> for CatBoostClassifier {
     ) -> Result<Self::Fitted> {
         let p = self.train_params();
         validate(x, y, sample_weight, &p, self.border_count)?;
+        self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
             return Err(RustMlError::InvalidParameter(
                 "leaf_estimation_iterations must be at least 1".into(),
@@ -3526,6 +3827,11 @@ impl FitWeighted<f64> for CatBoostClassifier {
             )));
         }
         let multiclass = classes.len() > 2;
+        if multiclass && !p.monotone.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "monotone constraints are not supported for more than two classes".into(),
+            ));
+        }
         if multiclass && self.boost_from_average {
             return Err(RustMlError::InvalidParameter(
                 "boost_from_average is not supported for more than two classes".into(),
@@ -3565,7 +3871,7 @@ impl FitWeighted<f64> for CatBoostClassifier {
             subsample,
             ..p
         };
-        let (trees, ctrs) = boost(&q, &target, &weights, &bias, loss, p, rng);
+        let (trees, ctrs, bias) = boost(&q, &target, &weights, &bias, loss, p, rng);
         Ok(FittedCatBoostClassifier {
             trees,
             ctrs,
@@ -3887,6 +4193,49 @@ mod tests {
         let w = Array1::from_elem(19, 1.0);
         assert!(CatBoostRegressor::new()
             .fit_weighted(&x, &y, Some(&w))
+            .is_err());
+    }
+
+    #[test]
+    fn monotone_constraints_hold_and_are_validated() {
+        let (x, y) = data(300);
+        let m = CatBoostRegressor::new()
+            .with_iterations(40)
+            .with_learning_rate(0.3)
+            .with_depth(4)
+            .with_monotone_constraints(vec![-1, 1, 0])
+            .fit(&x, &y)
+            .unwrap();
+        // Along a constrained feature, with the others fixed.
+        for row in [0usize, 7, 42] {
+            let preds: Vec<f64> = (0..60)
+                .map(|t| {
+                    let mut r = x.row(row).to_owned().insert_axis(ndarray::Axis(0));
+                    r[[0, 0]] = t as f64 / 5.0;
+                    r[[0, 1]] = 12.0 - t as f64 / 5.0;
+                    m.predict(&r).unwrap()[0]
+                })
+                .collect();
+            assert!(preds.windows(2).all(|w| w[1] <= w[0] + 1e-12), "{preds:?}");
+        }
+        let fit = |c: Vec<i8>| {
+            CatBoostRegressor::new()
+                .with_iterations(3)
+                .with_monotone_constraints(c)
+                .fit(&x, &y)
+        };
+        assert!(fit(vec![1, 0]).is_err());
+        assert!(fit(vec![2, 0, 0]).is_err());
+        let labels = y.mapv(|v| (v * 3.0).rem_euclid(3.0).floor());
+        assert!(CatBoostClassifier::new()
+            .with_iterations(3)
+            .with_monotone_constraints(vec![1, 0, 0])
+            .fit(&x, &labels)
+            .is_err());
+        assert!(CatBoostClassifier::new()
+            .with_iterations(3)
+            .with_class_weights(vec![1.0])
+            .fit(&x, &labels)
             .is_err());
     }
 

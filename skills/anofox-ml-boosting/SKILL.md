@@ -64,7 +64,9 @@ Builder names follow each reference library's parameter names (with a
   `with_cat_features`, `with_one_hot_max_size`, `with_max_ctr_complexity`,
   `with_boosting_type`, `with_leaf_estimation_method`,
   `with_leaf_estimation_iterations`, `with_bootstrap_type`, `with_subsample`,
-  `with_random_strength`, `with_random_seed`, `with_has_time`.
+  `with_random_strength`, `with_random_seed`, `with_has_time`,
+  `with_monotone_constraints`, `with_model_shrink_rate`; classifier:
+  `with_class_weights`, `with_auto_class_weights`.
 
 Check the docs (`cargo doc -p anofox-ml-ensemble --open`) before relying on
 any other name.
@@ -89,7 +91,9 @@ m = am.HistGradientBoostingClassifier(early_stopping=True).fit(X, y)
 - MVS bootstrap with `subsample` 0.8 (Bayesian for multiclass);
 - `max_ctr_complexity` 4 (1 below 200 iterations);
 - `leaf_estimation_iterations` 10 for Logloss (1 below 200 iterations with
-  fewer than 20 features).
+  fewer than 20 features);
+- with `monotone_constraints`, model shrinkage `model_shrink_rate=0.01`
+  (CatBoost switches it on with them; pass 0 to turn it off).
 
 CatBoost's random generator is reproduced draw for draw. The same data,
 parameters and `random_seed` give **the model catboost trains** (with

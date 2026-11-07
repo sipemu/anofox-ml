@@ -640,7 +640,14 @@ class _CatBoost(BaseEstimator):
                  max_ctr_complexity=None, leaf_estimation_iterations=None,
                  leaf_estimation_backtracking="AnyImprovement", has_time=False, random_seed=0,
                  random_strength=1.0, bootstrap_type=None, subsample=None,
-                 bagging_temperature=1.0, mvs_reg=None):
+                 bagging_temperature=1.0, mvs_reg=None, monotone_constraints=None,
+                 model_shrink_rate=None, model_shrink_mode="Constant", class_weights=None,
+                 auto_class_weights=None):
+        self.monotone_constraints = monotone_constraints
+        self.model_shrink_rate = model_shrink_rate
+        self.model_shrink_mode = model_shrink_mode
+        self.class_weights = class_weights
+        self.auto_class_weights = auto_class_weights
         self.bootstrap_type = bootstrap_type
         self.subsample = subsample
         self.bagging_temperature = bagging_temperature
@@ -707,6 +714,33 @@ class _CatBoost(BaseEstimator):
         params["leaf_estimation_backtracking"] = _choice(
             self.leaf_estimation_backtracking, {"AnyImprovement": "AnyImprovement", "No": "No"},
             "leaf_estimation_backtracking")
+        n_features = np.shape(X)[1]
+        if self.monotone_constraints is not None:
+            mc = self.monotone_constraints
+            if isinstance(mc, dict):
+                full = [0] * n_features
+                for j, v in mc.items():
+                    full[int(j)] = int(v)
+                mc = full
+            params["monotone_constraints"] = [int(v) for v in mc]
+        if self.model_shrink_rate is not None:
+            params["model_shrink_rate"] = float(self.model_shrink_rate)
+        params["model_shrink_mode"] = _choice(
+            self.model_shrink_mode, {"Constant": "Constant", "Decreasing": "Decreasing"},
+            "model_shrink_mode")
+        if self.class_weights is not None or self.auto_class_weights is not None:
+            if self._kind != "CatBoostClassifier":
+                raise ValueError("class weights apply to CatBoostClassifier only")
+            if self.class_weights is not None:
+                cw = self.class_weights
+                if isinstance(cw, dict):
+                    cw = [cw[c] for c in np.unique(y).tolist()]
+                params["class_weights"] = [float(v) for v in cw]
+            if self.auto_class_weights is not None:
+                params["auto_class_weights"] = _choice(
+                    self.auto_class_weights,
+                    {"Balanced": "Balanced", "SqrtBalanced": "SqrtBalanced"},
+                    "auto_class_weights")
         return params
 
     def _cat_indices(self, n_features):

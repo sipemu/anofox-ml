@@ -18,6 +18,31 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   the default was a fixed 0.03. Python: `learning_rate=None` now means the
   automatic rate. Matches catboost 1.2.10 on 6 golden cases.
 
+### CatBoost-style boosting: class weights, monotone constraints, shrinkage (#156)
+
+- `CatBoostClassifier`: `class_weights` (per class, labels ascending) and
+  `auto_class_weights` (`Balanced`, `SqrtBalanced`), folded into the sample
+  weights as CatBoost's `MakeClassificationWeights` does (float32 products).
+  The automatic ones follow `CalculateClassWeights`, including its
+  truncation of the classes' weight sums to integers.
+- `monotone_constraints` (per feature, -1 / 0 / +1; numeric features, not
+  for more than two classes). As in CatBoost:
+  - every split candidate is scored on leaf values made monotone by
+    isotonic regression along the tree's leaf orders (`AddLeaf`);
+  - every Newton / Gradient step of the leaf estimation is monotonized (the
+    model's leaves from the summed steps, the folds' from 0).
+- `model_shrink_rate` / `model_shrink_mode` (`Constant`, `Decreasing`):
+  every learning approximation is shrunk before each iteration (stored
+  `exp(a)` for Logloss as CatBoost does), the trees and the bias at the
+  end. Default 0, or with monotone constraints CatBoost's 0.01 (`Constant`)
+  / 0.2 (`Decreasing`).
+- Python: `class_weights` (list or dict), `auto_class_weights`,
+  `monotone_constraints` (list or dict), `model_shrink_rate`,
+  `model_shrink_mode`.
+- Matches catboost 1.2.10 on 23 golden cases: to ~1e-15 (RMSE, class
+  weights) and ~5e-14 (Logloss with shrinkage: CatBoost's `fast_exp` on the
+  stored `exp(a)`).
+
 ## [0.4.0] - 2026-11-06
 
 Gradient boosting (#127): HistGradientBoosting parity with scikit-learn 1.8,
