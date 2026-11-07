@@ -2630,12 +2630,36 @@ fn ctr_penalties(
     used_ctrs: &std::collections::HashSet<(Projection, bool)>,
     model_size_reg: f64,
 ) -> Vec<f64> {
-    let max = candidates
+    let max = max_ctr_count(q, candidates, |_| true);
+    ctr_penalties_with_max(q, candidates, used_ctrs, model_size_reg, max)
+}
+
+/// The largest combination count of the CTR candidates whose projection
+/// passes `computed` (CatBoost's `CalcMaxFeatureValueCount`: a CTR not yet
+/// computed in the fold counts 0), at least 1.
+fn max_ctr_count(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+    computed: impl Fn(&Projection) -> bool,
+) -> usize {
+    candidates
         .iter()
-        .filter_map(|c| c.get(q).ctr_key.as_ref().map(|(_, k)| *k))
+        .filter_map(|c| c.get(q).ctr_key.as_ref())
+        .filter(|((p, _), _)| computed(p))
+        .map(|(_, k)| *k)
         .max()
         .unwrap_or(1)
-        .max(1);
+        .max(1)
+}
+
+/// [`ctr_penalties`] relative to the combination count `max`.
+fn ctr_penalties_with_max(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+    used_ctrs: &std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
+    max: usize,
+) -> Vec<f64> {
     candidates
         .iter()
         .map(|c| match &c.get(q).ctr_key {
@@ -2671,6 +2695,7 @@ fn grow_depthwise(
     min_data: usize,
     used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
     model_size_reg: f64,
+    computed_ctrs: &mut std::collections::HashSet<Projection>,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
     let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
@@ -2705,8 +2730,9 @@ fn grow_depthwise(
     let score = |stats: &[Vec<BucketStats>],
                  rows: &[usize],
                  rng: &mut CatRng,
-                 used: &std::collections::HashSet<(Projection, bool)>| {
-        let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
+                 used: &std::collections::HashSet<(Projection, bool)>,
+                 max_count: usize| {
+        let penalties = ctr_penalties_with_max(q, &candidates, used, model_size_reg, max_count);
         let noise_seed = rng.gen();
         let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
         // `CalcScoreWithoutSplit`: the leaf's sums (all dimensions).
@@ -2758,6 +2784,11 @@ fn grow_depthwise(
         for _ in 0..level_draws {
             rng.real1();
         }
+        // CatBoost's `TSubtractTrickInfo` (Depthwise) takes the CTRs'
+        // largest value count at the start of the level, when only the CTRs
+        // the fold computed before count.
+        let max_count = max_ctr_count(q, &candidates, |p| computed_ctrs.contains(p));
+        let mut scored = false;
         let mut next_level = Vec::new();
         let mut pending: Option<(f64, Option<(usize, usize)>)> = None;
         for id in 0..current.len() {
@@ -2768,6 +2799,7 @@ fn grow_depthwise(
                 continue;
             }
             let even = id % 2 == 0;
+            scored = true;
             let push = |parents: &mut std::collections::VecDeque<_>,
                         g: f64,
                         b: &Option<(usize, usize)>,
@@ -2780,9 +2812,9 @@ fn grow_depthwise(
                 p
             } else if even && next_considered && trick && size <= next_size {
                 let small = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&small, &rows_of[current[id]], rng, used_ctrs);
+                let (g, b) = score(&small, &rows_of[current[id]], rng, used_ctrs, max_count);
                 let large = subtract(&parents[0], &small);
-                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng, used_ctrs);
+                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng, used_ctrs, max_count);
                 parents.pop_front();
                 push(&mut parents, g, &b, small);
                 push(&mut parents, g2, &b2, large);
@@ -2790,9 +2822,9 @@ fn grow_depthwise(
                 (g, b)
             } else if even && next_considered && trick {
                 let small = stats_of(&rows_of[current[id + 1]]);
-                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng, used_ctrs);
+                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng, used_ctrs, max_count);
                 let large = subtract(&parents[0], &small);
-                let (g, b) = score(&large, &rows_of[current[id]], rng, used_ctrs);
+                let (g, b) = score(&large, &rows_of[current[id]], rng, used_ctrs, max_count);
                 parents.pop_front();
                 push(&mut parents, g, &b, large);
                 push(&mut parents, g2, &b2, small);
@@ -2800,7 +2832,7 @@ fn grow_depthwise(
                 (g, b)
             } else {
                 let st = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&st, &rows_of[current[id]], rng, used_ctrs);
+                let (g, b) = score(&st, &rows_of[current[id]], rng, used_ctrs, max_count);
                 parents.pop_front();
                 if trick {
                     push(&mut parents, g, &b, st);
@@ -2842,6 +2874,14 @@ fn grow_depthwise(
             rows_of.push(right);
             next_level.push(leaf);
             next_level.push(new_leaf);
+        }
+        // Scoring a leaf computes the CTRs of every candidate.
+        if scored {
+            computed_ctrs.extend(
+                candidates
+                    .iter()
+                    .filter_map(|c| c.get(q).ctr_key.as_ref().map(|((p, _), _)| p.clone())),
+            );
         }
         current = next_level;
     }
@@ -3431,6 +3471,9 @@ struct LearnFold {
     tails: Vec<(usize, usize, f64)>,
     approx: Vec<Vec<f64>>,
     cache: CombinationCache,
+    /// The projections whose CTRs CatBoost has computed in this fold
+    /// (which Depthwise trees' CTR penalties see).
+    computed_ctrs: std::collections::HashSet<Projection>,
     /// CatBoost's `TFold::SampleWeights`: the bootstrap times the sample
     /// weights of the fold's last turn as the taken fold (1 before), what
     /// its Exact leaves are weighted with.
@@ -4036,6 +4079,7 @@ fn boost(
             weights,
             tails,
             cache: CombinationCache::new(),
+            computed_ctrs: Default::default(),
             sample_weights: vec![1.0; n],
         }
     };
@@ -4173,6 +4217,7 @@ fn boost(
                 p.min_data_in_leaf,
                 &mut used_ctrs,
                 p.model_size_reg,
+                &mut fold.computed_ctrs,
             )
         } else {
             let (splits, _) = grow_tree(
@@ -4248,6 +4293,15 @@ fn boost(
             }
             let leaf_of = fold.q.tree_leaves(&splits, &children, &mut fold.cache);
             update_fold(fold, &leaf_of, n_leaves, loss, &p, &orders);
+        }
+        // The tree's CTRs are computed in every fold (`TrainOneIteration`).
+        let tree_ctrs: Vec<Projection> = splits
+            .iter()
+            .filter_map(|(c, _)| c.get(&folds[taken].q).ctr_key.as_ref())
+            .map(|((p, _), _)| p.clone())
+            .collect();
+        for fold in &mut folds {
+            fold.computed_ctrs.extend(tree_ctrs.iter().cloned());
         }
         let source = &folds[taken];
         let tree_splits = splits
