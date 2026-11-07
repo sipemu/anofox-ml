@@ -1213,7 +1213,54 @@ fn logloss_metric_exp(
     weights: &[f64],
     rows: usize,
 ) -> f64 {
+    let point = exp_point(&approx[..rows]);
+    logloss_metric_exp_at(target, &point, leaves, leaf_of, weights)
+}
+
+/// Every row's `exp(a)` and `FastLogf(exp(a))` (what the Logloss metric
+/// needs of the approximations; cached while they do not move).
+fn exp_point(approx: &[f64]) -> Vec<(f64, f32)> {
+    approx
+        .iter()
+        .map(|a| {
+            let e = a.exp();
+            (e, fast_logf(e as f32))
+        })
+        .collect()
+}
+
+/// [`Loss::all_ders`] of Logloss at approximations given by
+/// [`exp_point`] (the same arithmetic on the cached `exp(a)`).
+fn logloss_ders_at(target: &[f64], point: &[(f64, f32)], weights: &[f64]) -> Ders {
+    let (der, der2) = point
+        .iter()
+        .zip(target)
+        .zip(weights)
+        .map(|((&(e, _), &t), &w)| {
+            let p = e / (1.0 + e);
+            let p = if p.is_nan() { 1.0 } else { p };
+            (w * (t - p), w * (-p * (1.0 - p)))
+        })
+        .unzip();
+    Ders {
+        k: 1,
+        h: 1,
+        der,
+        der2,
+    }
+}
+
+/// [`logloss_metric_exp`] of approximations given by [`exp_point`].
+fn logloss_metric_exp_at(
+    target: &[f64],
+    point: &[(f64, f32)],
+    leaves: &[f64],
+    leaf_of: &[u32],
+    weights: &[f64],
+) -> f64 {
+    let rows = point.len();
     let exp_leaves: Vec<f64> = leaves.iter().map(|v| v.exp()).collect();
+    let log_leaves: Vec<f32> = exp_leaves.iter().map(|&d| fast_logf(d as f32)).collect();
     let (mut s0, mut s1) = (0.0f64, 0.0f64);
     for start in (0..rows).step_by(4096) {
         let end = (start + 4096).min(rows);
@@ -1223,8 +1270,9 @@ fn logloss_metric_exp(
             for lane in 0..4 {
                 let r = i + lane;
                 let prob = if target[r] > 0.5 { 1.0f32 } else { 0.0 };
-                let (e, d) = (approx[r].exp(), exp_leaves[leaf_of[r] as usize]);
-                let non_exp = fast_logf(e as f32) + fast_logf(d as f32);
+                let leaf = leaf_of[r] as usize;
+                let ((e, le), d) = (point[r], exp_leaves[leaf]);
+                let non_exp = le + log_leaves[leaf];
                 let e = e * d;
                 let value = if e > f64::MAX {
                     (1.0 - prob) * non_exp
@@ -1242,10 +1290,11 @@ fn logloss_metric_exp(
         for r in i..end {
             let w = f64::from(weights[r] as f32);
             let prob = if target[r] > 0.5 { 1.0 } else { 0.0 };
-            let (e, d) = (approx[r].exp(), exp_leaves[leaf_of[r] as usize]);
-            let mut non_exp = f64::from(fast_logf(e as f32));
+            let leaf = leaf_of[r] as usize;
+            let ((e, le), d) = (point[r], exp_leaves[leaf]);
+            let mut non_exp = f64::from(le);
             let e = e * d;
-            non_exp += f64::from(fast_logf(d as f32));
+            non_exp += f64::from(log_leaves[leaf]);
             s0 += w * if e.is_finite() {
                 f64::from(fast_logf((1.0 + e) as f32)) - prob * non_exp
             } else {
@@ -3107,21 +3156,42 @@ fn estimate_leaves(
     }
     let mut steps = 0;
     let backtracking = p.backtracking && p.leaf_iterations > 1;
-    let metric = |approx: &[f64], leaves: &[f64]| {
-        lp.loss
-            .metric_with_leaves(lp.target, approx, leaves, lp.leaf_of, lp.weights, rows)
+    // Logloss: the approximations' exponentials and logarithms, cached for
+    // the base and the current point (the metric is evaluated many times).
+    let logloss = lp.loss == Loss::Logloss;
+    let base_exp = if logloss && !lp.moving {
+        exp_point(&lp.approx[..rows])
+    } else {
+        Vec::new()
+    };
+    let mut point_exp: Vec<(f64, f32)> = Vec::new();
+    let metric = |approx: &[f64], leaves: &[f64], cached: &[(f64, f32)]| {
+        if logloss {
+            logloss_metric_exp_at(lp.target, cached, leaves, lp.leaf_of, lp.weights)
+        } else {
+            lp.loss
+                .metric_with_leaves(lp.target, approx, leaves, lp.leaf_of, lp.weights, rows)
+        }
     };
     let mut total = vec![0.0; n_leaves * k];
     let mut point = lp.approx[..rows * k].to_vec();
+    if logloss && backtracking && lp.moving {
+        point_exp = exp_point(&point);
+    }
     let mut value = if backtracking {
-        metric(&point, &total)
+        let cached = if lp.moving { &point_exp } else { &base_exp };
+        metric(&point, &total, cached)
     } else {
         0.0
     };
     let mut it = 0;
     while it < p.leaf_iterations {
         steps += 1;
-        let ders = lp.loss.all_ders(lp.target, &point, lp.weights, rows);
+        let ders = if logloss && !point_exp.is_empty() {
+            logloss_ders_at(lp.target, &point_exp, lp.weights)
+        } else {
+            lp.loss.all_ders(lp.target, &point, lp.weights, rows)
+        };
         let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
         let mut step = vec![0.0; n_leaves * k];
         if lp.orders.is_empty() {
@@ -3178,14 +3248,17 @@ fn estimate_leaves(
         loop {
             let scaled: Vec<f64> = step.iter().map(|&v| scale * v).collect();
             let after = if lp.moving {
-                metric(&point, &scaled)
+                metric(&point, &scaled, &point_exp)
             } else {
                 let candidate: Vec<f64> = total.iter().zip(&scaled).map(|(t, s)| t + s).collect();
-                metric(lp.approx, &candidate)
+                metric(lp.approx, &candidate, &base_exp)
             };
             if after < value {
                 value = after;
                 take(&scaled, &mut total, &mut point);
+                if logloss && lp.moving {
+                    point_exp = exp_point(&point);
+                }
                 accepted(&scaled, &mut sums);
                 break;
             }

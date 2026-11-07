@@ -18,6 +18,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   the default was a fixed 0.03. Python: `learning_rate=None` now means the
   automatic rate. Matches catboost 1.2.10 on 6 golden cases.
 
+### CatBoost-style boosting: faster Logloss leaf estimation (#157, part)
+
+- The Logloss leaf estimation (10 backtracked Newton steps by default from
+  200 iterations or 20 features on) caches `exp(a)` and `FastLogf(exp(a))`
+  of the current approximations for its metric and derivatives instead of
+  recomputing them every evaluation. Same results; a 20k × 10 Logloss fit
+  with 200 iterations went from 3.0 s to 1.95 s (catboost single-threaded:
+  0.76 s).
+
 ### CatBoost-style boosting: Depthwise and Lossguide trees (#154)
 
 - `grow_policy` (`SymmetricTree` default, `Depthwise`, `Lossguide`),
