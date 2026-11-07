@@ -727,12 +727,28 @@ registry! {
         config: ensemble::CatBoostRegressor = Default::default(),
         fitted: ensemble::FittedCatBoostRegressor,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
+        fit_with_validation: |c, x, y, w, xv, yv, wv| {
+            let eval = ensemble::CatBoostEvalSet {
+                x: xv,
+                y: need_y(K, yv)?,
+                sample_weight: wv,
+            };
+            c.fit_with_eval(x, need_y(K, y)?, w, eval)
+        },
         predict: |m, x| m.predict(x),
     }
     CatBoostClassifier {
         config: ensemble::CatBoostClassifier = Default::default(),
         fitted: ensemble::FittedCatBoostClassifier,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
+        fit_with_validation: |c, x, y, w, xv, yv, wv| {
+            let eval = ensemble::CatBoostEvalSet {
+                x: xv,
+                y: need_y(K, yv)?,
+                sample_weight: wv,
+            };
+            c.fit_with_eval(x, need_y(K, y)?, w, eval)
+        },
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
         // Two classes: the log-odds; more: one column per class.

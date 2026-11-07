@@ -102,15 +102,26 @@ impl GreedyBin {
 /// `std::priority_queue` (a max-heap by score) as libc++ implements it
 /// (CatBoost is built with clang and libc++): its sift order decides ties
 /// as CatBoost's binarizer does.
-struct StdPriorityQueue(Vec<GreedyBin>);
+/// What a [`StdPriorityQueue`] orders by.
+trait HeapKey {
+    fn key(&self) -> f64;
+}
 
-impl StdPriorityQueue {
-    fn less(a: &GreedyBin, b: &GreedyBin) -> bool {
-        a.best_score < b.best_score
+impl HeapKey for GreedyBin {
+    fn key(&self) -> f64 {
+        self.best_score
+    }
+}
+
+struct StdPriorityQueue<T>(Vec<T>);
+
+impl<T: Copy + HeapKey> StdPriorityQueue<T> {
+    fn less(a: &T, b: &T) -> bool {
+        a.key() < b.key()
     }
 
     /// libc++'s `__sift_up` of the last of the first `len` elements.
-    fn sift_up(v: &mut [GreedyBin], len: usize) {
+    fn sift_up(v: &mut [T], len: usize) {
         if len <= 1 {
             return;
         }
@@ -133,19 +144,19 @@ impl StdPriorityQueue {
         }
     }
 
-    fn push(&mut self, value: GreedyBin) {
+    fn push(&mut self, value: T) {
         self.0.push(value);
         let len = self.0.len();
         Self::sift_up(&mut self.0, len);
     }
 
-    fn top(&self) -> &GreedyBin {
+    fn top(&self) -> &T {
         &self.0[0]
     }
 
     /// libc++'s `__pop_heap` (Floyd's sift-down, then a sift-up) and
     /// `pop_back`.
-    fn pop(&mut self) -> GreedyBin {
+    fn pop(&mut self) -> T {
         let len = self.0.len();
         let top = self.0[0];
         if len > 1 {
@@ -382,10 +393,33 @@ enum TreeSplit {
 struct ObliviousTree {
     splits: Vec<TreeSplit>,
     leaf_values: Vec<f64>,
+    /// Non-symmetric trees (Depthwise): the children of the node of every
+    /// split, a child `c < 0` being leaf `!c`; empty for oblivious trees.
+    #[serde(default)]
+    children: NodeChildren,
 }
 
 impl ObliviousTree {
     fn leaf(&self, row: ArrayView1<f64>, ctrs: &CtrModel) -> usize {
+        let right = |split: &TreeSplit| match *split {
+            TreeSplit::Float { feature, border } => (row[feature] as f32) > border,
+            TreeSplit::OneHot { feature, value } => category(row[feature]) == value,
+            TreeSplit::Ctr { ctr, bucket } => ctrs.bucket(ctr, row) > bucket,
+        };
+        if !self.children.is_empty() {
+            let mut node = 0i32;
+            loop {
+                let (l, r) = self.children[node as usize];
+                node = if right(&self.splits[node as usize]) {
+                    r
+                } else {
+                    l
+                };
+                if node < 0 {
+                    return !node as usize;
+                }
+            }
+        }
         self.splits
             .iter()
             .enumerate()
@@ -653,6 +687,28 @@ pub enum CatBoostRegressionLoss {
     /// The `alpha` quantile of `exp(raw)` (predictions stay raw, as in
     /// CatBoost).
     LogLinQuantile { alpha: f64 },
+}
+
+/// CatBoost's `grow_policy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostGrowPolicy {
+    /// Oblivious trees: one split per level.
+    #[default]
+    SymmetricTree,
+    /// Level by level, each leaf with its own split.
+    Depthwise,
+    /// The leaf of the largest gain next, up to `max_leaves`.
+    Lossguide,
+}
+
+/// CatBoost's overfitting detector (`od_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostOdType {
+    None,
+    /// Stop when the expected improvement is unlikely (`od_pval`).
+    IncToDec,
+    /// Stop `od_wait` iterations after the best one.
+    Iter,
 }
 
 /// CatBoost's `model_shrink_mode`: the factor the model is shrunk by
@@ -1011,6 +1067,30 @@ impl Loss {
         }
     }
 
+    /// CatBoost's objective metric on an eval set, whose approximations it
+    /// keeps on the raw scale (`TestApprox`).
+    fn eval_metric(self, target: &[f64], approx: &[f64], weights: &[f64]) -> f64 {
+        let k = self.dims();
+        let (mut sum, mut sum_w) = (0.0, 0.0);
+        for (i, (&t, &w)) in target.iter().zip(weights).enumerate() {
+            let a = &approx[i * k..(i + 1) * k];
+            let m = match self {
+                Loss::Poisson => a[0].exp() - t * a[0],
+                Loss::LogLinQuantile { alpha } => {
+                    let v = t - a[0].exp();
+                    (if v > 0.0 { alpha } else { -(1.0 - alpha) }) * v
+                }
+                _ => self.metric(t, a),
+            };
+            sum += m * w;
+            sum_w += w;
+        }
+        match self {
+            Loss::Rmse => (sum / (sum_w + 1e-38)).sqrt(),
+            _ => sum / sum_w,
+        }
+    }
+
     /// Whether CatBoost stores this loss's approximations as `exp(a)`
     /// (`IsStoreExpApprox`), which changes how its metric and learning
     /// folds are computed.
@@ -1312,6 +1392,15 @@ struct TrainParams {
     /// CatBoost's `model_shrink_rate` (0 = none) and `model_shrink_mode`.
     shrink_rate: f64,
     shrink_mode: CatBoostShrinkMode,
+    /// The overfitting detector's p-value threshold (0: off; `Iter`: 1)
+    /// and wait.
+    od_threshold: f64,
+    od_wait: usize,
+    /// Shrink the model to its best iteration on the eval set.
+    use_best_model: bool,
+    grow_policy: CatBoostGrowPolicy,
+    min_data_in_leaf: usize,
+    max_leaves: usize,
 }
 
 /// `sum · 1/(count + λ)` for a non-empty side, else 0 (CatBoost's
@@ -2322,6 +2411,483 @@ fn grow_tree(
     (splits, leaf_of)
 }
 
+/// The split scores of one leaf's bucket statistics (`k` × buckets per
+/// column), CatBoost's `CalcScoresForSubCandidate` with `AddLeafPlain`.
+fn leaf_scores(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+    stats: &[Vec<BucketStats>],
+    k: usize,
+    l2: f64,
+    score_function: CatBoostScoreFunction,
+) -> Vec<Option<Vec<f64>>> {
+    candidates
+        .iter()
+        .zip(stats)
+        .map(|(c, st)| {
+            let column = c.get(q);
+            let nb = column.n_buckets;
+            if nb < 2 {
+                return None;
+            }
+            let one_hot = column.one_hot();
+            let n_splits = if one_hot { nb } else { nb - 1 };
+            let mut num = vec![0.0f64; n_splits];
+            let mut den = vec![1e-100f64; n_splits];
+            for d in 0..k {
+                each_split(one_hot, &st[d * nb..(d + 1) * nb], n_splits, |s, t, f| {
+                    let (at, af) = (average(t.swd, t.sw, l2), average(f.swd, f.sw, l2));
+                    match score_function {
+                        CatBoostScoreFunction::Cosine => {
+                            num[s] += af * f.swd + at * t.swd;
+                            den[s] += af * af * f.sw + at * at * t.sw;
+                        }
+                        CatBoostScoreFunction::L2 => {
+                            num[s] += at * t.swd;
+                            num[s] += af * f.swd;
+                        }
+                    }
+                });
+            }
+            Some(
+                (0..n_splits)
+                    .map(|s| match score_function {
+                        CatBoostScoreFunction::Cosine => num[s] / den[s].sqrt(),
+                        CatBoostScoreFunction::L2 => num[s],
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// CatBoost's `SelectBestCandidate`: every candidate entry's noisy best
+/// split (its own generator from `noise_seed`), each noised again from the
+/// main one; the largest gain over `score_before`.
+#[allow(clippy::too_many_arguments)]
+fn select_best(
+    entries: &[Vec<Vec<(usize, usize)>>],
+    scores: &[Option<Vec<f64>>],
+    noise_seed: u64,
+    rng: &mut CatRng,
+    score_std: f64,
+    score_before: f64,
+) -> Option<(f64, usize, usize)> {
+    let mut best: Option<(f64, usize, usize)> = None;
+    let mut best_gain = f64::NEG_INFINITY;
+    for (t, entry) in entries.iter().enumerate() {
+        let mut local = CatRng::new(noise_seed.wrapping_add(t as u64));
+        local.advance(10);
+        for bins in entry {
+            let mut val = f64::MIN;
+            let mut chosen: Option<(usize, usize)> = None;
+            let mut best_instance = f64::MIN;
+            for &(c, s) in bins {
+                let Some(sc) = &scores[c] else {
+                    continue;
+                };
+                let instance = sc[s] + local.std_normal() * score_std;
+                if instance > best_instance {
+                    best_instance = instance;
+                    val = sc[s];
+                    chosen = Some((c, s));
+                }
+            }
+            let score = val + rng.std_normal() * score_std;
+            let Some((c, s)) = chosen else {
+                continue;
+            };
+            let gain = score - score_before;
+            if gain > best_gain {
+                best_gain = gain;
+                best = Some((score, c, s));
+            }
+        }
+    }
+    best
+}
+
+/// A non-symmetric tree's nodes (CatBoost's `TNonSymmetricTreeStructure`):
+/// per node its split and children, a child `c < 0` being leaf `!c`.
+type NodeChildren = Vec<(i32, i32)>;
+
+/// CatBoost's `GreedyTensorSearchDepthwise` (plain boosting, no CTRs):
+/// level by level, every leaf with at least `min_data` sampled rows is
+/// split by its best candidate if that gains at least 1e-9. Of two
+/// siblings the smaller one's bucket statistics are computed, the larger
+/// one's are the parent's minus them (one approximation, from CatBoost's
+/// FIFO of the parents' statistics). Splitting leaf `l` keeps `l` for the
+/// false side and numbers the true side next.
+#[allow(clippy::too_many_arguments)]
+fn grow_depthwise(
+    q: &Quantized,
+    part: &ScorePart<'_>,
+    k: usize,
+    depth: usize,
+    score_function: CatBoostScoreFunction,
+    rng: &mut CatRng,
+    score_std: f64,
+    sample: &Sample,
+    min_data: usize,
+) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
+    let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
+    let entries = candidate_entries(q, &candidates);
+    let n = sample.taken.len();
+    let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
+    let mut splits: Vec<(ColumnRef, usize)> = Vec::new();
+    let mut children: NodeChildren = Vec::new();
+    let mut leaf_parent: Vec<i32> = vec![-1];
+    let l2 = part.scaled_l2;
+    let trick = k == 1;
+    let stats_of = |rows: &[usize]| -> Vec<Vec<BucketStats>> {
+        candidates
+            .iter()
+            .map(|c| {
+                let column = c.get(q);
+                let nb = column.n_buckets;
+                let mut st = vec![BucketStats::default(); k * nb];
+                for &i in rows {
+                    let b = column.buckets[i] as usize;
+                    for d in 0..k {
+                        let h = &mut st[d * nb + b];
+                        h.swd += part.swder[i * k + d];
+                        h.sw += sample.weights[i];
+                    }
+                }
+                st
+            })
+            .collect()
+    };
+    // `CalcBestScoreAndCandidate`: (gain, best split) of a leaf's stats.
+    let score = |stats: &[Vec<BucketStats>], rows: &[usize], rng: &mut CatRng| {
+        let noise_seed = rng.gen();
+        let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
+        // `CalcScoreWithoutSplit`: the leaf's sums (all dimensions).
+        let (mut swd, mut sw) = (0.0, 0.0);
+        for d in 0..k {
+            for &i in rows {
+                swd += part.swder[i * k + d];
+            }
+        }
+        for &i in rows {
+            sw += sample.weights[i];
+        }
+        let a = average(swd, sw, l2);
+        let before = match score_function {
+            CatBoostScoreFunction::Cosine => (a * swd) / (1e-100 + a * a * sw).sqrt(),
+            CatBoostScoreFunction::L2 => a * swd,
+        };
+        let best = select_best(&entries, &scores, noise_seed, rng, score_std, before);
+        best.map_or((0.0, None), |(s, c, sp)| (s - before, Some((c, sp))))
+    };
+    let subtract = |parent: &[Vec<BucketStats>], small: &[Vec<BucketStats>]| {
+        parent
+            .iter()
+            .zip(small)
+            .map(|(p, s)| {
+                p.iter()
+                    .zip(s)
+                    .map(|(p, s)| BucketStats {
+                        swd: p.swd - s.swd,
+                        sw: p.sw - s.sw,
+                        sd: 0.0,
+                        count: 0.0,
+                    })
+                    .collect()
+            })
+            .collect::<Vec<Vec<BucketStats>>>()
+    };
+    let mut parents: std::collections::VecDeque<Vec<Vec<BucketStats>>> = Default::default();
+    let mut current: Vec<usize> = vec![0];
+    for _ in 0..depth {
+        for _ in 0..q.draws.0 {
+            rng.real1();
+        }
+        let mut next_level = Vec::new();
+        let mut pending: Option<(f64, Option<(usize, usize)>)> = None;
+        for id in 0..current.len() {
+            let size = rows_of[current[id]].len();
+            let next_size = current.get(id + 1).map_or(0, |&l| rows_of[l].len());
+            let next_considered = next_size >= min_data;
+            if size < min_data {
+                continue;
+            }
+            let even = id % 2 == 0;
+            let push = |parents: &mut std::collections::VecDeque<_>,
+                        g: f64,
+                        b: &Option<(usize, usize)>,
+                        st| {
+                if !(g < 1e-9) && b.is_some() {
+                    parents.push_back(st);
+                }
+            };
+            let (gain, best) = if let (false, Some(p)) = (even, pending.take()) {
+                p
+            } else if even && next_considered && trick && size <= next_size {
+                let small = stats_of(&rows_of[current[id]]);
+                let (g, b) = score(&small, &rows_of[current[id]], rng);
+                let large = subtract(&parents[0], &small);
+                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng);
+                parents.pop_front();
+                push(&mut parents, g, &b, small);
+                push(&mut parents, g2, &b2, large);
+                pending = Some((g2, b2));
+                (g, b)
+            } else if even && next_considered && trick {
+                let small = stats_of(&rows_of[current[id + 1]]);
+                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng);
+                let large = subtract(&parents[0], &small);
+                let (g, b) = score(&large, &rows_of[current[id]], rng);
+                parents.pop_front();
+                push(&mut parents, g, &b, large);
+                push(&mut parents, g2, &b2, small);
+                pending = Some((g2, b2));
+                (g, b)
+            } else {
+                let st = stats_of(&rows_of[current[id]]);
+                let (g, b) = score(&st, &rows_of[current[id]], rng);
+                parents.pop_front();
+                if trick {
+                    push(&mut parents, g, &b, st);
+                }
+                pending = None;
+                (g, b)
+            };
+            let Some((c, s)) = best else {
+                continue;
+            };
+            if gain < 1e-9 {
+                continue;
+            }
+            // `AddSplit`: the leaf keeps its id on the false side.
+            let leaf = current[id];
+            let new_leaf = children.len() + 1;
+            let node = children.len() as i32;
+            let parent = leaf_parent[leaf];
+            if parent >= 0 {
+                let ch = &mut children[parent as usize];
+                if ch.0 == !(leaf as i32) {
+                    ch.0 = node;
+                } else {
+                    ch.1 = node;
+                }
+            }
+            children.push((!(leaf as i32), !(new_leaf as i32)));
+            leaf_parent[leaf] = node;
+            leaf_parent.push(node);
+            splits.push((candidates[c].clone(), s));
+            let column = candidates[c].get(q);
+            let (right, left): (Vec<usize>, Vec<usize>) = rows_of[leaf]
+                .iter()
+                .partition(|&&i| column.goes_right(column.buckets[i], s));
+            rows_of[leaf] = left;
+            rows_of.push(right);
+            next_level.push(leaf);
+            next_level.push(new_leaf);
+        }
+        current = next_level;
+    }
+    (splits, children)
+}
+
+/// A leaf waiting to be split (CatBoost's `TSplitLeafCandidate`): its
+/// gain, best split and statistics (an index into the caller's store).
+#[derive(Clone, Copy)]
+struct SplitCandidate {
+    leaf: usize,
+    gain: f64,
+    column: usize,
+    split: usize,
+    stats: usize,
+}
+
+impl HeapKey for SplitCandidate {
+    fn key(&self) -> f64 {
+        self.gain
+    }
+}
+
+/// CatBoost's `GreedyTensorSearchLossguide` (plain boosting, no CTRs): the
+/// leaf of the largest gain is split next (libc++'s `priority_queue`)
+/// until `max_leaves`; its children are scored if within `max_depth` with
+/// at least `min_data` sampled rows (the smaller one directly, the other as
+/// the parent's statistics minus it, for one approximation).
+#[allow(clippy::too_many_arguments)]
+fn grow_lossguide(
+    q: &Quantized,
+    part: &ScorePart<'_>,
+    k: usize,
+    max_depth: usize,
+    max_leaves: usize,
+    score_function: CatBoostScoreFunction,
+    rng: &mut CatRng,
+    score_std: f64,
+    sample: &Sample,
+    min_data: usize,
+) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
+    let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
+    let entries = candidate_entries(q, &candidates);
+    let n = sample.taken.len();
+    let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
+    let mut depth_of = vec![0usize];
+    let mut splits: Vec<(ColumnRef, usize)> = Vec::new();
+    let mut children: NodeChildren = Vec::new();
+    let mut leaf_parent: Vec<i32> = vec![-1];
+    let l2 = part.scaled_l2;
+    let trick = k == 1;
+    let stats_of = |rows: &[usize]| -> Vec<Vec<BucketStats>> {
+        candidates
+            .iter()
+            .map(|c| {
+                let column = c.get(q);
+                let nb = column.n_buckets;
+                let mut st = vec![BucketStats::default(); k * nb];
+                for &i in rows {
+                    let b = column.buckets[i] as usize;
+                    for d in 0..k {
+                        let h = &mut st[d * nb + b];
+                        h.swd += part.swder[i * k + d];
+                        h.sw += sample.weights[i];
+                    }
+                }
+                st
+            })
+            .collect()
+    };
+    let score = |stats: &[Vec<BucketStats>], rows: &[usize], rng: &mut CatRng| {
+        let noise_seed = rng.gen();
+        let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
+        let (mut swd, mut sw) = (0.0, 0.0);
+        for d in 0..k {
+            for &i in rows {
+                swd += part.swder[i * k + d];
+            }
+        }
+        for &i in rows {
+            sw += sample.weights[i];
+        }
+        let a = average(swd, sw, l2);
+        let before = match score_function {
+            CatBoostScoreFunction::Cosine => (a * swd) / (1e-100 + a * a * sw).sqrt(),
+            CatBoostScoreFunction::L2 => a * swd,
+        };
+        select_best(&entries, &scores, noise_seed, rng, score_std, before)
+            .map(|(s, c, sp)| (s - before, c, sp))
+    };
+    let subtract = |parent: &[Vec<BucketStats>], small: &[Vec<BucketStats>]| {
+        parent
+            .iter()
+            .zip(small)
+            .map(|(p, s)| {
+                p.iter()
+                    .zip(s)
+                    .map(|(p, s)| BucketStats {
+                        swd: p.swd - s.swd,
+                        sw: p.sw - s.sw,
+                        sd: 0.0,
+                        count: 0.0,
+                    })
+                    .collect()
+            })
+            .collect::<Vec<Vec<BucketStats>>>()
+    };
+    let mut store: Vec<Vec<Vec<BucketStats>>> = Vec::new();
+    let mut queue: StdPriorityQueue<SplitCandidate> = StdPriorityQueue(Vec::new());
+    let offer = |queue: &mut StdPriorityQueue<SplitCandidate>,
+                 store: &mut Vec<Vec<Vec<BucketStats>>>,
+                 leaf: usize,
+                 best: Option<(f64, usize, usize)>,
+                 stats: Vec<Vec<BucketStats>>| {
+        if let Some((gain, column, split)) = best {
+            if gain >= 1e-9 {
+                store.push(stats);
+                queue.push(SplitCandidate {
+                    leaf,
+                    gain,
+                    column,
+                    split,
+                    stats: store.len() - 1,
+                });
+            }
+        }
+    };
+    if max_depth > 0 && rows_of[0].len() >= min_data {
+        for _ in 0..q.draws.0 {
+            rng.real1();
+        }
+        let st = stats_of(&rows_of[0]);
+        let best = score(&st, &rows_of[0], rng);
+        offer(&mut queue, &mut store, 0, best, st);
+    }
+    while !queue.0.is_empty() && children.len() + 1 < max_leaves {
+        let cand = *queue.top();
+        queue.pop();
+        let leaf = cand.leaf;
+        let new_leaf = children.len() + 1;
+        let node = children.len() as i32;
+        let parent = leaf_parent[leaf];
+        if parent >= 0 {
+            let ch = &mut children[parent as usize];
+            if ch.0 == !(leaf as i32) {
+                ch.0 = node;
+            } else {
+                ch.1 = node;
+            }
+        }
+        children.push((!(leaf as i32), !(new_leaf as i32)));
+        leaf_parent[leaf] = node;
+        leaf_parent.push(node);
+        splits.push((candidates[cand.column].clone(), cand.split));
+        let column = candidates[cand.column].get(q);
+        let (right, left): (Vec<usize>, Vec<usize>) = rows_of[leaf]
+            .iter()
+            .partition(|&&i| column.goes_right(column.buckets[i], cand.split));
+        rows_of[leaf] = left;
+        rows_of.push(right);
+        let d = depth_of[leaf] + 1;
+        depth_of[leaf] = d;
+        depth_of.push(d);
+        // `FindBestCandidate` of the two children.
+        let (l, r) = (leaf, new_leaf);
+        let (nl, nr) = (rows_of[l].len(), rows_of[r].len());
+        let need_l = d < max_depth && nl >= min_data;
+        let need_r = d < max_depth && nr >= min_data;
+        if !need_l && !need_r {
+            continue;
+        }
+        for _ in 0..q.draws.0 {
+            rng.real1();
+        }
+        let direct = !trick || need_l != need_r;
+        let (l_direct, r_direct) = (direct || nl <= nr, direct || nl > nr);
+        let (mut ls, mut rs) = (Vec::new(), Vec::new());
+        let (mut lb, mut rb) = (None, None);
+        if need_l && l_direct {
+            ls = stats_of(&rows_of[l]);
+            lb = score(&ls, &rows_of[l], rng);
+        }
+        if need_r && r_direct {
+            rs = stats_of(&rows_of[r]);
+            rb = score(&rs, &rows_of[r], rng);
+        }
+        if need_l && !l_direct {
+            ls = subtract(&store[cand.stats], &rs);
+            lb = score(&ls, &rows_of[l], rng);
+        }
+        if need_r && !r_direct {
+            rs = subtract(&store[cand.stats], &ls);
+            rb = score(&rs, &rows_of[r], rng);
+        }
+        if need_l {
+            offer(&mut queue, &mut store, l, lb, ls);
+        }
+        if need_r {
+            offer(&mut queue, &mut store, r, rb, rs);
+        }
+    }
+    (splits, children)
+}
+
 /// CatBoost's body / tail prefixes of a fold for ordered boosting: the
 /// first body is 1 row (`min(100, n / 50)` above 500 rows), every tail
 /// ends at `ceil(body · fold_len_multiplier)`.
@@ -2736,6 +3302,37 @@ impl Quantized {
         }
     }
 
+    /// Every row's leaf: oblivious `splits`, or the nodes `children`.
+    fn tree_leaves(
+        &self,
+        splits: &[(ColumnRef, usize)],
+        children: &[(i32, i32)],
+        cache: &mut CombinationCache,
+    ) -> Vec<u32> {
+        if children.is_empty() {
+            return self.leaves(splits, cache);
+        }
+        let n = self.columns.first().map_or(0, |c| c.buckets.len());
+        (0..n)
+            .map(|i| {
+                let mut node = 0i32;
+                loop {
+                    let (c, s) = &splits[node as usize];
+                    let column = c.get(self);
+                    let (l, r) = children[node as usize];
+                    node = if column.goes_right(column.buckets[i], *s) {
+                        r
+                    } else {
+                        l
+                    };
+                    if node < 0 {
+                        return !node as u32;
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// Every row's leaf under `splits` (resolved in this data).
     fn leaves(&self, splits: &[(ColumnRef, usize)], cache: &mut CombinationCache) -> Vec<u32> {
         let resolved: Vec<(ColumnRef, usize)> = splits
@@ -3069,6 +3666,106 @@ fn update_fold(
 /// keeps the given order, the other `permutation_count - 2` folds and (with
 /// CTRs) the averaging fold are shuffled with CatBoost's generator, whose
 /// draws follow CatBoost's.
+/// A validation set (CatBoost's `eval_set`): raw features, targets (class
+/// indices for classifiers) and weights, as float32 values.
+struct EvalSet<'a> {
+    x: ArrayView2<'a, f64>,
+    target: Vec<f64>,
+    weights: Vec<f64>,
+}
+
+/// An eval set for `fit_with_eval` (CatBoost's `eval_set`): features,
+/// targets and optional weights.
+#[derive(Debug, Clone, Copy)]
+pub struct CatBoostEvalSet<'a> {
+    pub x: ArrayView2<'a, f64>,
+    pub y: ArrayView1<'a, f64>,
+    pub sample_weight: Option<ArrayView1<'a, f64>>,
+}
+
+/// What [`boost`] returns.
+struct Boosted {
+    trees: Vec<ObliviousTree>,
+    ctrs: CtrModel,
+    bias: Vec<f64>,
+    /// The eval set's metric after every iteration.
+    eval_metrics: Vec<f64>,
+    /// The iteration of the best eval metric (0-based).
+    best_iteration: Option<usize>,
+}
+
+/// CatBoost's `TErrorTracker` with its `IncToDec` overfitting detector
+/// (`Iter` is `IncToDec` with threshold 1): the first strictly smallest
+/// error, and a stop once the p-value falls below the threshold.
+struct ErrorTracker {
+    threshold: f64,
+    wait: usize,
+    best: f64,
+    best_iteration: Option<usize>,
+    empty: bool,
+    local_max: f64,
+    expected_inc: f64,
+    from_max: usize,
+    errors: std::collections::VecDeque<f64>,
+}
+
+impl ErrorTracker {
+    fn new(threshold: f64, wait: usize) -> Self {
+        Self {
+            threshold,
+            wait,
+            best: f64::INFINITY,
+            best_iteration: None,
+            empty: true,
+            local_max: 0.0,
+            expected_inc: 0.0,
+            from_max: 0,
+            errors: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Record the error of `iteration`; whether to stop.
+    fn add(&mut self, error: f64, iteration: usize) -> bool {
+        if error < self.best {
+            self.best = error;
+            self.best_iteration = Some(iteration);
+        }
+        if self.threshold <= 0.0 {
+            return false;
+        }
+        // The detector maximizes.
+        let e = -error;
+        if self.empty || e > self.local_max {
+            if self.empty {
+                self.empty = false;
+                self.expected_inc = 0.0;
+            }
+            self.local_max = e;
+            self.from_max = 0;
+        } else {
+            self.from_max += 1;
+        }
+        self.errors.push_front(e);
+        if self.errors.len() > 2000 {
+            self.errors.pop_back();
+        }
+        self.expected_inc *= 0.99;
+        let mut mult = 1.0;
+        for &x in &self.errors {
+            self.expected_inc = self.expected_inc.max(mult * (e - x));
+            mult *= 0.99;
+        }
+        let p_value = if self.from_max >= self.wait {
+            let ratio = self.expected_inc / (self.local_max - e).max(1e-10);
+            (-0.5 / ratio.max(1e-10)).exp()
+        } else {
+            1.0
+        };
+        !self.empty && p_value < self.threshold
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn boost(
     q: &Quantized,
     target: &[f64],
@@ -3077,7 +3774,8 @@ fn boost(
     loss: Loss,
     p: TrainParams,
     mut rng: CatRng,
-) -> (Vec<ObliviousTree>, CtrModel, Vec<f64>) {
+    eval: Option<&EvalSet<'_>>,
+) -> Boosted {
     let n = target.len();
     let k = loss.dims();
     let has_ctrs = q.ctr.is_some();
@@ -3145,6 +3843,12 @@ fn boost(
     let mut shrink_history: Vec<f64> = Vec::new();
     let mut bias = bias.to_vec();
     let unit_weights = vec![1.0; n];
+    // CatBoost's `TestApprox`: the bias plus the trees so far.
+    let mut eval_approx: Vec<f64> = eval.map_or_else(Vec::new, |e| {
+        bias.iter().copied().cycle().take(e.x.nrows() * k).collect()
+    });
+    let mut eval_metrics = Vec::new();
+    let mut tracker = ErrorTracker::new(p.od_threshold, p.od_wait);
     for iteration in 0..p.iterations {
         if shrink_rate > 0.0 {
             let factor = if iteration == 0 {
@@ -3169,6 +3873,9 @@ fn boost(
                 }
                 for b in &mut bias {
                     *b *= factor;
+                }
+                for v in &mut eval_approx {
+                    *v *= factor;
                 }
             }
             shrink_history.push(factor);
@@ -3210,24 +3917,57 @@ fn boost(
                 scaled_l2: p.l2_leaf_reg * (bw / body as f64),
             })
             .collect();
-        let (splits, _) = grow_tree(
-            &fold.q,
-            &parts,
-            k,
-            &fold.weights,
-            p.ordered,
-            p.depth,
-            p.score_function,
-            p.model_size_reg,
-            &mut used_ctrs,
-            &mut fold.cache,
-            &mut rng,
-            score_std(&ders, &fold.tails, p.ordered, n, iteration, &p),
-            &sample,
-            &p.monotone,
-        );
+        let std = score_std(&ders, &fold.tails, p.ordered, n, iteration, &p);
+        let (splits, children) = if p.grow_policy == CatBoostGrowPolicy::Lossguide {
+            grow_lossguide(
+                &fold.q,
+                &parts[0],
+                k,
+                p.depth,
+                p.max_leaves,
+                p.score_function,
+                &mut rng,
+                std,
+                &sample,
+                p.min_data_in_leaf,
+            )
+        } else if p.grow_policy == CatBoostGrowPolicy::Depthwise {
+            grow_depthwise(
+                &fold.q,
+                &parts[0],
+                k,
+                p.depth,
+                p.score_function,
+                &mut rng,
+                std,
+                &sample,
+                p.min_data_in_leaf,
+            )
+        } else {
+            let (splits, _) = grow_tree(
+                &fold.q,
+                &parts,
+                k,
+                &fold.weights,
+                p.ordered,
+                p.depth,
+                p.score_function,
+                p.model_size_reg,
+                &mut used_ctrs,
+                &mut fold.cache,
+                &mut rng,
+                std,
+                &sample,
+                &p.monotone,
+            );
+            (splits, Vec::new())
+        };
         rng.gen(); // the folds' seeds
-        let n_leaves = 1usize << splits.len();
+        let n_leaves = if p.grow_policy == CatBoostGrowPolicy::SymmetricTree {
+            1usize << splits.len()
+        } else {
+            children.len() + 1
+        };
         let tree_monotone: Vec<i8> = splits
             .iter()
             .map(|(c, _)| c.get(&fold.q).monotone(&p.monotone))
@@ -3239,7 +3979,9 @@ fn boost(
         };
 
         // The model's leaves, from the averaging fold.
-        let leaf_of = average.q.leaves(&splits, &mut average.cache);
+        let leaf_of = average
+            .q
+            .tree_leaves(&splits, &children, &mut average.cache);
         let lp = LeafProblem {
             loss,
             target: &average.target,
@@ -3273,7 +4015,7 @@ fn boost(
                 fold.approx[0].clone_from(&approx);
                 continue;
             }
-            let leaf_of = fold.q.leaves(&splits, &mut fold.cache);
+            let leaf_of = fold.q.tree_leaves(&splits, &children, &mut fold.cache);
             update_fold(fold, &leaf_of, n_leaves, loss, &p, &orders);
         }
         let source = &folds[taken];
@@ -3281,10 +4023,36 @@ fn boost(
             .iter()
             .map(|(c, s)| c.get(&source.q).tree_split(*s, &mut ctrs))
             .collect();
-        trees.push(ObliviousTree {
+        let tree = ObliviousTree {
             splits: tree_splits,
             leaf_values,
-        });
+            children,
+        };
+        if let Some(e) = eval {
+            for (i, row) in e.x.rows().into_iter().enumerate() {
+                let leaf = tree.leaf(row, &ctrs);
+                for d in 0..k {
+                    eval_approx[i * k + d] += tree.leaf_values[leaf * k + d];
+                }
+            }
+            let metric = loss.eval_metric(&e.target, &eval_approx, &e.weights);
+            eval_metrics.push(metric);
+            trees.push(tree);
+            if tracker.add(metric, iteration) {
+                break;
+            }
+            continue;
+        }
+        trees.push(tree);
+    }
+    // `use_best_model`: the model up to the best iteration (the bias keeps
+    // the shrinkage of every iteration, as CatBoost's does).
+    let best_iteration = tracker.best_iteration;
+    if p.use_best_model {
+        if let Some(b) = best_iteration {
+            trees.truncate(b + 1);
+            shrink_history.truncate(b + 1);
+        }
     }
     let mut accumulated = 1.0;
     for (tree, &factor) in trees.iter_mut().zip(&shrink_history).rev() {
@@ -3293,7 +4061,13 @@ fn boost(
         }
         accumulated *= factor;
     }
-    (trees, ctrs, bias)
+    Boosted {
+        trees,
+        ctrs,
+        bias,
+        eval_metrics,
+        best_iteration,
+    }
 }
 
 /// Raw scores `bias + Σ leaf values` of the rows of `x`, one column per
@@ -3527,6 +4301,25 @@ macro_rules! catboost_config {
             pub model_shrink_rate: Option<f64>,
             /// CatBoost's `model_shrink_mode` (default `Constant`).
             pub model_shrink_mode: CatBoostShrinkMode,
+            /// Keep the trees up to the best iteration on the eval set
+            /// (`fit_with_eval`). Default (`None`): on with an eval set.
+            pub use_best_model: Option<bool>,
+            /// CatBoost's overfitting detector on the eval set. Default
+            /// (`None`): `IncToDec` with `od_pval`, else `Iter` with
+            /// `od_wait`, else none.
+            pub od_type: Option<CatBoostOdType>,
+            /// Iterations to wait after the best one (default 20).
+            pub od_wait: Option<usize>,
+            /// `IncToDec`'s p-value threshold (default 0: off).
+            pub od_pval: Option<f64>,
+            /// CatBoost's `grow_policy`: oblivious trees (default) or
+            /// Depthwise ones (plain boosting, numeric and one-hot features).
+            pub grow_policy: CatBoostGrowPolicy,
+            /// Depthwise: leaves with fewer sampled rows are not split
+            /// (CatBoost's `min_data_in_leaf`, default 1).
+            pub min_data_in_leaf: usize,
+            /// Lossguide: the most leaves of a tree (default 31).
+            pub max_leaves: usize,
             $($($(#[$fdoc])* pub $field: $fty,)*)?
         }
 
@@ -3560,6 +4353,13 @@ macro_rules! catboost_config {
                     monotone_constraints: Vec::new(),
                     model_shrink_rate: None,
                     model_shrink_mode: CatBoostShrinkMode::Constant,
+                    use_best_model: None,
+                    od_type: None,
+                    od_wait: None,
+                    od_pval: None,
+                    grow_policy: CatBoostGrowPolicy::SymmetricTree,
+                    min_data_in_leaf: 1,
+                    max_leaves: 31,
                     $($($field: $fdef,)*)?
                 }
             }
@@ -3696,6 +4496,41 @@ macro_rules! catboost_config {
                 self.model_shrink_mode = m;
                 self
             }
+            pub fn with_use_best_model(mut self, b: bool) -> Self {
+                self.use_best_model = Some(b);
+                self
+            }
+            /// Stop `n` iterations after the best one on the eval set
+            /// (CatBoost's `early_stopping_rounds`: `Iter` with `od_wait`).
+            pub fn with_early_stopping_rounds(mut self, n: usize) -> Self {
+                self.od_type = Some(CatBoostOdType::Iter);
+                self.od_wait = Some(n);
+                self
+            }
+            pub fn with_od_type(mut self, t: CatBoostOdType) -> Self {
+                self.od_type = Some(t);
+                self
+            }
+            pub fn with_od_wait(mut self, n: usize) -> Self {
+                self.od_wait = Some(n);
+                self
+            }
+            pub fn with_grow_policy(mut self, g: CatBoostGrowPolicy) -> Self {
+                self.grow_policy = g;
+                self
+            }
+            pub fn with_max_leaves(mut self, n: usize) -> Self {
+                self.max_leaves = n;
+                self
+            }
+            pub fn with_min_data_in_leaf(mut self, n: usize) -> Self {
+                self.min_data_in_leaf = n;
+                self
+            }
+            pub fn with_od_pval(mut self, p: f64) -> Self {
+                self.od_pval = Some(p);
+                self
+            }
             pub fn with_mvs_reg(mut self, r: f64) -> Self {
                 self.mvs_reg = Some(r);
                 self
@@ -3705,7 +4540,7 @@ macro_rules! catboost_config {
             /// one, else `TAutoLRParamsGuesser` (CPU, no best model),
             /// `exp(A ln n + B) · exp(C ln iterations) / exp(C ln 1000)`
             /// capped at 0.5 and rounded to 6 digits.
-            fn learning_rate_for(&self, loss: Loss, n: usize) -> f64 {
+            fn learning_rate_for(&self, loss: Loss, n: usize, use_best: bool) -> f64 {
                 if let Some(lr) = self.learning_rate {
                     return lr;
                 }
@@ -3713,12 +4548,22 @@ macro_rules! catboost_config {
                     && self.leaf_estimation_method.is_none()
                     && self.leaf_estimation_iterations.is_none();
                 // (A, B, C, D): dataset size and iteration coefficients.
-                let coeffs = match (loss, self.boost_from_average_for(loss)) {
-                    (Loss::Logloss, true) => (0.408, -7.299, -0.928, 2.701),
-                    (Loss::Logloss, false) => (0.427, -7.525, -0.917, 2.63),
-                    (Loss::MultiClass(_), false) => (0.051, -2.889, -0.845, 2.928),
-                    (Loss::Rmse, true) => (0.158, -4.287, -0.813, 2.571),
-                    (Loss::Rmse, false) => (0.178, -4.473, -0.76, 2.133),
+                let bfa = if matches!(loss, Loss::Logloss | Loss::MultiClass(_)) {
+                    self.boost_from_average.unwrap_or(false)
+                } else {
+                    self.boost_from_average_for(loss)
+                };
+                let coeffs = match (loss, bfa, use_best) {
+                    (Loss::Logloss, true, true) => (0.246, -5.127, -0.451, 0.978),
+                    (Loss::Logloss, true, false) => (0.408, -7.299, -0.928, 2.701),
+                    (Loss::Logloss, false, true) => (0.247, -5.158, -0.435, 0.934),
+                    (Loss::Logloss, false, false) => (0.427, -7.525, -0.917, 2.63),
+                    (Loss::MultiClass(_), false, true) => (0.02, -2.364, -0.382, 0.924),
+                    (Loss::MultiClass(_), false, false) => (0.051, -2.889, -0.845, 2.928),
+                    (Loss::Rmse, true, true) => (0.157, -4.062, -0.61, 1.557),
+                    (Loss::Rmse, true, false) => (0.158, -4.287, -0.813, 2.571),
+                    (Loss::Rmse, false, true) => (0.189, -4.383, -0.623, 1.439),
+                    (Loss::Rmse, false, false) => (0.178, -4.473, -0.76, 2.133),
                     _ => return 0.03,
                 };
                 if !defaults {
@@ -3793,6 +4638,59 @@ macro_rules! catboost_config {
 
             /// CatBoost keeps the learning rate and the L2 regularization
             /// as float32.
+            /// `use_best_model` for a fit with or without an eval set (whose
+            /// shape is checked).
+            fn use_best_model_with(
+                &self,
+                eval: Option<&CatBoostEvalSet<'_>>,
+                n_features: usize,
+            ) -> Result<bool> {
+                let invalid = |m: String| Err(RustMlError::InvalidParameter(m));
+                let Some(e) = eval else {
+                    if self.use_best_model == Some(true) {
+                        return invalid("use_best_model needs an eval set".into());
+                    }
+                    return Ok(false);
+                };
+                if e.x.nrows() == 0 || e.x.nrows() != e.y.len() {
+                    return invalid("the eval set needs as many rows as targets, at least one".into());
+                }
+                if e.x.ncols() != n_features {
+                    return invalid(format!(
+                        "the eval set has {} features, X {n_features}",
+                        e.x.ncols()
+                    ));
+                }
+                if e.sample_weight.is_some_and(|w| w.len() != e.y.len()) {
+                    return invalid("the eval set's sample_weight does not match its rows".into());
+                }
+                Ok(self.use_best_model.unwrap_or(true))
+            }
+
+            /// What Depthwise trees support here.
+            fn check_grow_policy(&self, has_ctrs: bool) -> Result<()> {
+                if self.grow_policy == CatBoostGrowPolicy::SymmetricTree {
+                    return Ok(());
+                }
+                let invalid = |m: &str| Err(RustMlError::InvalidParameter(m.into()));
+                if self.boosting_type == CatBoostBoostingType::Ordered {
+                    return invalid("Depthwise / Lossguide trees need plain boosting");
+                }
+                if has_ctrs {
+                    return invalid("Depthwise / Lossguide trees support numeric and one-hot features only");
+                }
+                if self.monotone_constraints.iter().any(|&m| m != 0) {
+                    return invalid("Depthwise / Lossguide trees do not support monotone constraints");
+                }
+                if self.min_data_in_leaf == 0 {
+                    return invalid("min_data_in_leaf must be at least 1");
+                }
+                if self.max_leaves == 0 {
+                    return invalid("max_leaves must be at least 1");
+                }
+                Ok(())
+            }
+
             /// CatBoost's checks of `monotone_constraints` and the shrinkage.
             fn check_monotone(&self, n_features: usize) -> Result<()> {
                 let invalid = |m: String| Err(RustMlError::InvalidParameter(m));
@@ -3854,6 +4752,22 @@ macro_rules! catboost_config {
                         },
                     ),
                     shrink_mode: self.model_shrink_mode,
+                    od_threshold: match self.od_type.unwrap_or(if self.od_pval.is_some() {
+                        CatBoostOdType::IncToDec
+                    } else if self.od_wait.is_some() {
+                        CatBoostOdType::Iter
+                    } else {
+                        CatBoostOdType::None
+                    }) {
+                        CatBoostOdType::None => 0.0,
+                        CatBoostOdType::Iter => 1.0,
+                        CatBoostOdType::IncToDec => self.od_pval.unwrap_or(0.0),
+                    },
+                    od_wait: self.od_wait.unwrap_or(20),
+                    use_best_model: false,
+                    grow_policy: self.grow_policy,
+                    min_data_in_leaf: self.min_data_in_leaf,
+                    max_leaves: self.max_leaves,
                 }
             }
         }
@@ -3963,13 +4877,15 @@ impl CatBoostClassifier {
 
     /// The sample weights with the class weights (CatBoost's
     /// `MakeClassificationWeights`: float32 products).
-    fn class_adjusted_weights(
+    /// The class weights: given, or CatBoost's automatic ones from the
+    /// training rows (which also weight an eval set).
+    fn class_weight_vector(
         &self,
         classes_of: &[u8],
         n_classes: usize,
-        weights: Vec<f64>,
-    ) -> Result<Vec<f64>> {
-        let class_weights: Vec<f32> = match (&self.class_weights, self.auto_class_weights) {
+        weights: &[f64],
+    ) -> Result<Option<Vec<f32>>> {
+        Ok(Some(match (&self.class_weights, self.auto_class_weights) {
             (Some(w), _) => {
                 if w.len() != n_classes {
                     return Err(RustMlError::InvalidParameter(format!(
@@ -3984,14 +4900,26 @@ impl CatBoostClassifier {
                 }
                 w.iter().map(|&v| v as f32).collect()
             }
-            (None, Some(auto)) => auto_class_weights(classes_of, n_classes, &weights, auto),
-            (None, None) => return Ok(weights),
-        };
-        Ok(weights
+            (None, Some(auto)) => auto_class_weights(classes_of, n_classes, weights, auto),
+            (None, None) => return Ok(None),
+        }))
+    }
+}
+
+/// Sample weights times the class weights (CatBoost's
+/// `MakeClassificationWeights`: float32 products).
+fn apply_class_weights(
+    weights: Vec<f64>,
+    classes_of: &[u8],
+    class_weights: Option<&[f32]>,
+) -> Vec<f64> {
+    match class_weights {
+        None => weights,
+        Some(cw) => weights
             .iter()
             .zip(classes_of)
-            .map(|(&w, &c)| f64::from(w as f32 * class_weights[c as usize]))
-            .collect())
+            .map(|(&w, &c)| f64::from(w as f32 * cw[c as usize]))
+            .collect(),
     }
 }
 
@@ -4005,6 +4933,10 @@ pub struct FittedCatBoostRegressor {
     /// Predictions are `exp(raw)` (Poisson, Tweedie).
     #[serde(default)]
     exp_prediction: bool,
+    #[serde(default)]
+    eval_metrics: Vec<f64>,
+    #[serde(default)]
+    best_iteration: Option<usize>,
     borders: Vec<Vec<f32>>,
     n_features: usize,
 }
@@ -4012,6 +4944,14 @@ pub struct FittedCatBoostRegressor {
 impl FittedCatBoostRegressor {
     pub fn n_estimators(&self) -> usize {
         self.trees.len()
+    }
+    /// The eval set's metric after every iteration (`fit_with_eval`).
+    pub fn eval_metrics(&self) -> &[f64] {
+        &self.eval_metrics
+    }
+    /// The iteration with the best eval metric (0-based).
+    pub fn best_iteration(&self) -> Option<usize> {
+        self.best_iteration
     }
     /// Quantization borders per feature.
     pub fn borders(&self) -> &[Vec<f32>] {
@@ -4028,7 +4968,40 @@ impl FitWeighted<f64> for CatBoostRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.fit_inner(x, y, sample_weight, None)
+    }
+}
+
+impl CatBoostRegressor {
+    /// Fit with an eval set (CatBoost's `eval_set`): its metric after every
+    /// iteration, the overfitting detector and `use_best_model` (default
+    /// on).
+    pub fn fit_with_eval(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: CatBoostEvalSet<'_>,
+    ) -> Result<FittedCatBoostRegressor> {
+        self.fit_inner(x, y, sample_weight, Some(eval))
+    }
+
+    fn fit_inner(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: Option<CatBoostEvalSet<'_>>,
+    ) -> Result<FittedCatBoostRegressor> {
         let p = self.train_params();
+        let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
+        let eval_set = eval.map(|e| EvalSet {
+            x: e.x,
+            target: f32_values(e.y),
+            weights: e
+                .sample_weight
+                .map_or_else(|| vec![1.0; e.y.len()], f32_values),
+        });
         validate(x, y, sample_weight, &p, self.border_count)?;
         self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
@@ -4074,20 +5047,33 @@ impl FitWeighted<f64> for CatBoostRegressor {
             max_ctr_complexity: self.max_ctr_complexity(),
         };
         let q = quantize(x, self.border_count, cat)?;
+        self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         let p = TrainParams {
-            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows()) as f32),
+            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             leaf_estimation: self.leaf_method(loss),
             bootstrap,
             subsample,
+            use_best_model: use_best,
             ..p
         };
-        let (trees, ctrs, bias) = boost(&q, &target, &weights, &[bias], loss, p, rng);
+        let b = boost(
+            &q,
+            &target,
+            &weights,
+            &[bias],
+            loss,
+            p,
+            rng,
+            eval_set.as_ref(),
+        );
         Ok(FittedCatBoostRegressor {
-            trees,
-            ctrs,
-            bias: bias[0],
+            trees: b.trees,
+            ctrs: b.ctrs,
+            bias: b.bias[0],
+            eval_metrics: b.eval_metrics,
+            best_iteration: b.best_iteration,
             exp_prediction: loss.exp_prediction(),
             borders: q.borders,
             n_features: x.ncols(),
@@ -4128,9 +5114,21 @@ pub struct FittedCatBoostClassifier {
     borders: Vec<Vec<f32>>,
     classes: Vec<f64>,
     n_features: usize,
+    #[serde(default)]
+    eval_metrics: Vec<f64>,
+    #[serde(default)]
+    best_iteration: Option<usize>,
 }
 
 impl FittedCatBoostClassifier {
+    /// The eval set's metric after every iteration (`fit_with_eval`).
+    pub fn eval_metrics(&self) -> &[f64] {
+        &self.eval_metrics
+    }
+    /// The iteration with the best eval metric (0-based).
+    pub fn best_iteration(&self) -> Option<usize> {
+        self.best_iteration
+    }
     pub fn classes(&self) -> &[f64] {
         &self.classes
     }
@@ -4192,7 +5190,33 @@ impl FitWeighted<f64> for CatBoostClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
+        self.fit_inner(x, y, sample_weight, None)
+    }
+}
+
+impl CatBoostClassifier {
+    /// Fit with an eval set (CatBoost's `eval_set`): see
+    /// [`CatBoostRegressor::fit_with_eval`]. Its labels must be classes of
+    /// `y`; the class weights weight it too.
+    pub fn fit_with_eval(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: CatBoostEvalSet<'_>,
+    ) -> Result<FittedCatBoostClassifier> {
+        self.fit_inner(x, y, sample_weight, Some(eval))
+    }
+
+    fn fit_inner(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: Option<CatBoostEvalSet<'_>>,
+    ) -> Result<FittedCatBoostClassifier> {
         let p = self.train_params();
+        let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
         validate(x, y, sample_weight, &p, self.border_count)?;
         self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
@@ -4249,11 +5273,34 @@ impl FitWeighted<f64> for CatBoostClassifier {
             .map(|v| classes.partition_point(|c| c < v) as f64)
             .collect();
         let classes_of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
-        let weights = self.class_adjusted_weights(
-            &classes_of,
-            classes.len(),
-            sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values),
-        )?;
+        let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
+        let class_weights = self.class_weight_vector(&classes_of, classes.len(), &weights)?;
+        let weights = apply_class_weights(weights, &classes_of, class_weights.as_deref());
+        let eval_set = match eval {
+            None => None,
+            Some(e) => {
+                let mut target = Vec::with_capacity(e.y.len());
+                for &v in e.y.iter() {
+                    match classes.binary_search_by(|c| c.total_cmp(&v)) {
+                        Ok(c) => target.push(c as f64),
+                        Err(_) => {
+                            return Err(RustMlError::InvalidParameter(format!(
+                                "the eval set has the label {v}, not in y"
+                            )))
+                        }
+                    }
+                }
+                let of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
+                let w = e
+                    .sample_weight
+                    .map_or_else(|| vec![1.0; e.y.len()], f32_values);
+                Some(EvalSet {
+                    x: e.x,
+                    weights: apply_class_weights(w, &of, class_weights.as_deref()),
+                    target,
+                })
+            }
+        };
         let (loss, bias) = if multiclass {
             (Loss::MultiClass(classes.len()), vec![0.0; classes.len()])
         } else if boost_from_average {
@@ -4269,19 +5316,35 @@ impl FitWeighted<f64> for CatBoostClassifier {
             max_ctr_complexity: self.max_ctr_complexity(),
         };
         let q = quantize(x, self.border_count, cat)?;
+        self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         let p = TrainParams {
-            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows()) as f32),
+            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             bootstrap,
             subsample,
             ..p
         };
-        let (trees, ctrs, bias) = boost(&q, &target, &weights, &bias, loss, p, rng);
+        let p = TrainParams {
+            use_best_model: use_best,
+            ..p
+        };
+        let b = boost(
+            &q,
+            &target,
+            &weights,
+            &bias,
+            loss,
+            p,
+            rng,
+            eval_set.as_ref(),
+        );
         Ok(FittedCatBoostClassifier {
-            trees,
-            ctrs,
-            bias,
+            trees: b.trees,
+            ctrs: b.ctrs,
+            bias: b.bias,
+            eval_metrics: b.eval_metrics,
+            best_iteration: b.best_iteration,
             borders: q.borders,
             classes,
             n_features: x.ncols(),
@@ -4625,6 +5688,24 @@ mod tests {
             .with_boost_from_average(true)
             .fit(&x, &y)
             .is_err());
+        // Depthwise / Lossguide: plain boosting, numeric and one-hot features.
+        for g in [CatBoostGrowPolicy::Depthwise, CatBoostGrowPolicy::Lossguide] {
+            assert!(CatBoostRegressor::new()
+                .with_iterations(2)
+                .with_grow_policy(g)
+                .with_boosting_type(CatBoostBoostingType::Ordered)
+                .fit(&x, &y)
+                .is_err());
+            let m = CatBoostRegressor::new()
+                .with_iterations(3)
+                .with_grow_policy(g)
+                .fit(&x, &y)
+                .unwrap();
+            let bytes = anofox_ml_core::persistence::to_binary_bytes(&m).unwrap();
+            let back: FittedCatBoostRegressor =
+                anofox_ml_core::persistence::from_binary_bytes(&bytes).unwrap();
+            assert_eq!(back.predict(&x).unwrap(), m.predict(&x).unwrap());
+        }
         let counts = y.mapv(|v| (v * 3.0).abs().round());
         let m = fit(CatBoostRegressionLoss::Poisson, &counts).unwrap();
         assert!(m.predict(&x).unwrap().iter().all(|&p| p > 0.0));
