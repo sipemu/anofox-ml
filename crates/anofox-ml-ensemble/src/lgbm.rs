@@ -613,6 +613,27 @@ fn add_tree_scores(scores: &mut [f64], tree: &TreeNode, binned_rows: &Array2<u8>
         .for_each(|(i, s)| *s += factor * tree.predict_bins(row_of(binned_rows, i)));
 }
 
+/// `add_tree_scores` from the rows of the tree's leaves (as built), when
+/// they hold every row (no bagging or GOSS): each leaf's value is read once.
+fn add_leaf_scores(
+    scores: &mut [f64],
+    tree: &TreeNode,
+    leaf_rows: &[Vec<usize>],
+    binned_rows: &Array2<u8>,
+    factor: f64,
+) {
+    if leaf_rows.iter().map(Vec::len).sum::<usize>() != scores.len() {
+        return add_tree_scores(scores, tree, binned_rows, factor);
+    }
+    for rows in leaf_rows {
+        let Some(&first) = rows.first() else { continue };
+        let value = tree.predict_bins(row_of(binned_rows, first));
+        for &i in rows {
+            scores[i] += factor * value;
+        }
+    }
+}
+
 /// Row `i` of a row-major binned matrix.
 #[inline]
 fn row_of(binned: &Array2<u8>, i: usize) -> &[u8] {
@@ -706,23 +727,19 @@ impl Histogram {
         }
     }
 
-    /// `self - child` (histogram subtraction: the larger child's histogram
-    /// from the parent's and the smaller child's).
-    fn minus(&self, child: &Histogram) -> Histogram {
-        let sub = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a - b).collect();
-        Histogram {
-            grad_sum: sub(&self.grad_sum, &child.grad_sum),
-            hess_sum: sub(&self.hess_sum, &child.hess_sum),
-            count: self
-                .count
-                .iter()
-                .zip(&child.count)
-                .map(|(a, b)| a - b)
-                .collect(),
-            missing_grad: self.missing_grad - child.missing_grad,
-            missing_hess: self.missing_hess - child.missing_hess,
-            missing_count: self.missing_count - child.missing_count,
-        }
+    /// `self -= child` (histogram subtraction: the larger child's
+    /// histogram from the parent's and the smaller child's).
+    fn subtract(&mut self, child: &Histogram) {
+        let sub = |a: &mut [f64], b: &[f64]| a.iter_mut().zip(b).for_each(|(a, b)| *a -= b);
+        sub(&mut self.grad_sum, &child.grad_sum);
+        sub(&mut self.hess_sum, &child.hess_sum);
+        self.count
+            .iter_mut()
+            .zip(&child.count)
+            .for_each(|(a, b)| *a -= b);
+        self.missing_grad -= child.missing_grad;
+        self.missing_hess -= child.missing_hess;
+        self.missing_count -= child.missing_count;
     }
 }
 
@@ -958,29 +975,35 @@ fn lgbm_fixed_bins(
 /// `build_lgbm_tree`).
 const PARTITION_CHUNK_ROWS: usize = 16_384;
 
-/// Rows going left / right (in order) and their gradient / hessian totals,
-/// summed in row order (as `node_totals`).
-type Partition = (Vec<usize>, Vec<usize>, (f64, f64), (f64, f64));
+/// Gradient / hessian totals of `rows`, summed in row order (as
+/// `node_totals`).
+fn row_totals(rows: &[usize], gradients: &[f64], hessians: &[f64]) -> (f64, f64) {
+    rows.iter().fold((-0.0, -0.0), |t, &i| {
+        (t.0 + gradients[i], t.1 + hessians[i])
+    })
+}
 
-fn partition_rows(
-    rows: &[usize],
+/// Partitions `rows` in place and stably, the rows going left first, and
+/// returns their number. Branch-free: every row is written to both sides
+/// (the right ones to `scratch`), and only the side it goes to advances.
+fn partition_in_place(
+    rows: &mut [usize],
     goes_left: impl Fn(usize) -> bool,
-    gradients: &[f64],
-    hessians: &[f64],
-) -> Partition {
-    let (mut left, mut right) = (Vec::new(), Vec::new());
-    let (mut lt, mut rt) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
-    for &i in rows {
-        let (side, totals) = if goes_left(i) {
-            (&mut left, &mut lt)
-        } else {
-            (&mut right, &mut rt)
-        };
-        side.push(i);
-        totals.0 += gradients[i];
-        totals.1 += hessians[i];
+    scratch: &mut Vec<usize>,
+) -> usize {
+    scratch.clear();
+    scratch.resize(rows.len(), 0);
+    let (mut n_left, mut n_right) = (0, 0);
+    for k in 0..rows.len() {
+        let i = rows[k];
+        let l = goes_left(i);
+        rows[n_left] = i;
+        scratch[n_right] = i;
+        n_left += usize::from(l);
+        n_right += usize::from(!l);
     }
-    (left, right, lt, rt)
+    rows[n_left..].copy_from_slice(&scratch[..n_right]);
+    n_left
 }
 
 /// Below this many (sample, feature) pairs histograms are built serially.
@@ -2090,7 +2113,8 @@ enum BuildNode {
 /// Build a tree using leaf-wise (best-first) expansion.
 ///
 /// `feature_gain_out` and `feature_split_count_out` are accumulators that get
-/// updated with per-feature gain and split counts respectively.
+/// updated with per-feature gain and split counts respectively. Returns the
+/// tree and the rows of `root_indices` in each of its leaves.
 #[allow(clippy::too_many_arguments)]
 fn build_lgbm_tree(
     binned_x: &Array2<u8>,
@@ -2105,7 +2129,7 @@ fn build_lgbm_tree(
     feature_split_count_out: &mut [u32],
     feature_rng: &mut Option<Generator>,
     mut col_sampler: Option<&mut LgbmColSampler>,
-) -> TreeNode {
+) -> (TreeNode, Vec<Vec<usize>>) {
     let mut nodes: Vec<BuildNode> = Vec::new();
 
     // Root is initially a leaf with its value (0 in sklearn, whose root
@@ -2179,6 +2203,8 @@ fn build_lgbm_tree(
         })
         .flatten();
 
+    // The rows of the finished leaves.
+    let mut leaf_rows: Vec<Vec<usize>> = Vec::new();
     let mut heap: BinaryHeap<LeafCandidate> = BinaryHeap::new();
     if let Some(split) = root_split {
         heap.push(LeafCandidate {
@@ -2192,6 +2218,8 @@ fn build_lgbm_tree(
             groups: root_groups,
             totals: root_totals,
         });
+    } else {
+        leaf_rows.push(root_indices);
     }
 
     // Number of leaves = number of leaf nodes, starts at 1 (root as leaf).
@@ -2206,6 +2234,7 @@ fn build_lgbm_tree(
         // Depth check
         if let Some(max_d) = params.max_depth {
             if candidate.depth >= max_d {
+                leaf_rows.push(candidate.indices);
                 continue;
             }
         }
@@ -2228,32 +2257,55 @@ fn build_lgbm_tree(
                 mask.as_deref(),
             )
         };
-        let (left_idx, right_idx, left_totals, right_totals) =
+        // LightGBM's numeric scans give the children's totals (below).
+        let with_totals = split.lgbm_left_sums.is_none();
+        let (left_idx, right_idx, left_totals, right_totals) = {
+            let mut indices = indices;
+            let totals = |rows: &[usize]| {
+                if with_totals {
+                    row_totals(rows, gradients, hessians)
+                } else {
+                    (-0.0, -0.0)
+                }
+            };
             if params.sklearn_compat || indices.len() <= PARTITION_CHUNK_ROWS {
-                partition_rows(&indices, left, gradients, hessians)
+                let n_left = partition_in_place(&mut indices, left, &mut Vec::new());
+                let right = indices.split_off(n_left);
+                let (lt, rt) = (totals(&indices), totals(&right));
+                (indices, right, lt, rt)
             } else {
                 // Large nodes (LightGBM numerics): fixed chunks in parallel,
                 // joined in order; the totals are the chunks' sums added in
                 // chunk order (independent of the thread count).
                 use rayon::prelude::*;
                 let parts: Vec<_> = indices
-                    .par_chunks(PARTITION_CHUNK_ROWS)
-                    .map(|chunk| partition_rows(chunk, left, gradients, hessians))
+                    .par_chunks_mut(PARTITION_CHUNK_ROWS)
+                    .map_init(Vec::new, |scratch, chunk| {
+                        let n_left = partition_in_place(chunk, left, scratch);
+                        let (l, r) = chunk.split_at(n_left);
+                        (n_left, totals(l), totals(r))
+                    })
                     .collect();
-                let n_left = parts.iter().map(|p| p.0.len()).sum();
-                let (mut li, mut ri) = (
-                    Vec::with_capacity(n_left),
-                    Vec::with_capacity(indices.len() - n_left),
-                );
+                // The left rows are compacted in place (each chunk's move
+                // only overwrites rows already copied), the right ones
+                // copied out.
+                let n_left = parts.iter().map(|p| p.0).sum();
+                let mut right = Vec::with_capacity(indices.len() - n_left);
                 let (mut lt, mut rt) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
-                for (l, r, ls, rs) in parts {
-                    li.extend_from_slice(&l);
-                    ri.extend_from_slice(&r);
+                let mut at = 0;
+                for (k, (nl, ls, rs)) in parts.into_iter().enumerate() {
+                    let start = k * PARTITION_CHUNK_ROWS;
+                    let end = (start + PARTITION_CHUNK_ROWS).min(indices.len());
+                    right.extend_from_slice(&indices[start + nl..end]);
+                    indices.copy_within(start..start + nl, at);
+                    at += nl;
                     lt = (lt.0 + ls.0, lt.1 + ls.1);
                     rt = (rt.0 + rs.0, rt.1 + rs.1);
                 }
-                (li, ri, lt, rt)
-            };
+                indices.truncate(n_left);
+                (indices, right, lt, rt)
+            }
+        };
 
         // LightGBM takes the children's totals from its scan
         // (`SplitInfo::left_sum_gradient`, ...).
@@ -2321,6 +2373,7 @@ fn build_lgbm_tree(
         // Both finalize the children once the leaf budget is spent, without
         // evaluating them.
         if (!left_ok && !right_ok) || n_leaves >= params.num_leaves {
+            leaf_rows.extend([left_idx, right_idx]);
             continue;
         }
         // LightGBM evaluates both children once either has the data to be
@@ -2357,12 +2410,10 @@ fn build_lgbm_tree(
             feature_indices,
             &params.fixed_bins,
         );
-        let large: Vec<Histogram> = small
-            .iter()
-            .zip(&candidate.hists)
-            .map(|(s, parent)| parent.minus(s))
-            .collect();
-        drop(candidate.hists);
+        let mut large = candidate.hists;
+        for (parent, s) in large.iter_mut().zip(&small) {
+            parent.subtract(s);
+        }
         let (left_hists, right_hists) = if left_smaller {
             (small, large)
         } else {
@@ -2393,6 +2444,7 @@ fn build_lgbm_tree(
             ),
         ] {
             if !ok {
+                leaf_rows.push(child_indices);
                 continue;
             }
             if let Some(s) = best_for(
@@ -2415,12 +2467,15 @@ fn build_lgbm_tree(
                     groups: groups.clone(),
                     totals,
                 });
+            } else {
+                leaf_rows.push(child_indices);
             }
         }
     }
+    leaf_rows.extend(heap.into_iter().map(|c| c.indices));
 
     // Convert flat BuildNode tree to TreeNode tree
-    flatten_tree(&nodes, 0)
+    (flatten_tree(&nodes, 0), leaf_rows)
 }
 
 fn flatten_tree(nodes: &[BuildNode], id: usize) -> TreeNode {
@@ -4402,7 +4457,7 @@ impl LgbmRegressor {
             let row_indices = samplers.rows(iter, n, &mut [&mut gradients], &mut [&mut hessians]);
             let feature_indices = samplers.tree_features(p);
             let refit = refit_percentile(self.objective).map(|a| (a, row_indices.clone()));
-            let mut tree = build_lgbm_tree(
+            let (mut tree, leaf_rows) = build_lgbm_tree(
                 &binned_x,
                 bundles.as_ref(),
                 &gradients,
@@ -4433,7 +4488,7 @@ impl LgbmRegressor {
                 // The tree's leaves carry its weight; the first tree also
                 // carries the initial score (LightGBM's `AddBias`).
                 tree.scale(shrinkage);
-                add_tree_scores(&mut preds[..], &tree, &binned_rows, 1.0);
+                add_leaf_scores(&mut preds[..], &tree, &leaf_rows, &binned_rows, 1.0);
                 if iter == 0 && baseline.abs() > LGBM_EPSILON {
                     tree.add_bias(baseline);
                 }
@@ -4449,7 +4504,13 @@ impl LgbmRegressor {
                 continue;
             }
             // Update predictions (on ALL rows, not just sampled)
-            add_tree_scores(&mut preds[..], &tree, &binned_rows, self.learning_rate);
+            add_leaf_scores(
+                &mut preds[..],
+                &tree,
+                &leaf_rows,
+                &binned_rows,
+                self.learning_rate,
+            );
 
             if let Some(t) = tracker.as_mut() {
                 if let (Some(eb), Some(ep)) = (eval_binned.as_ref(), eval_preds.as_mut()) {
@@ -5467,7 +5528,7 @@ impl LgbmClassifier {
                     samplers.rows(iter, n, &mut [&mut gradients], &mut [&mut hessians]);
                 let feature_indices = samplers.tree_features(p);
 
-                let tree = build_lgbm_tree(
+                let (tree, leaf_rows) = build_lgbm_tree(
                     &binned_x,
                     bundles.as_ref(),
                     &gradients,
@@ -5485,7 +5546,7 @@ impl LgbmClassifier {
                 if let (Some(d), Some((drops, shrinkage))) = (dart.as_mut(), dart_step) {
                     let mut tree = tree;
                     tree.scale(shrinkage);
-                    add_tree_scores(&mut raw[..], &tree, &binned_rows, 1.0);
+                    add_leaf_scores(&mut raw[..], &tree, &leaf_rows, &binned_rows, 1.0);
                     if iter == 0 && baseline.abs() > LGBM_EPSILON {
                         tree.add_bias(baseline);
                     }
@@ -5499,7 +5560,13 @@ impl LgbmClassifier {
                     trees.push(tree);
                     continue;
                 }
-                add_tree_scores(&mut raw[..], &tree, &binned_rows, self.learning_rate);
+                add_leaf_scores(
+                    &mut raw[..],
+                    &tree,
+                    &leaf_rows,
+                    &binned_rows,
+                    self.learning_rate,
+                );
 
                 if let Some(t) = tracker.as_mut() {
                     if let (Some(eb), Some(er)) = (eval_binned.as_ref(), eval_raw.as_mut()) {
@@ -5687,7 +5754,7 @@ impl LgbmClassifier {
                     let row_indices = row_indices.clone();
                     let feature_indices = samplers.tree_features(p);
 
-                    let tree = build_lgbm_tree(
+                    let (tree, leaf_rows) = build_lgbm_tree(
                         &binned_x,
                         bundles.as_ref(),
                         gradients,
@@ -5705,14 +5772,21 @@ impl LgbmClassifier {
                     let mut tree = tree;
                     if let Some((_, shrinkage)) = &dart_step {
                         tree.scale(*shrinkage);
-                        add_tree_scores(&mut raw_scores[c][..], &tree, &binned_rows, 1.0);
+                        add_leaf_scores(
+                            &mut raw_scores[c][..],
+                            &tree,
+                            &leaf_rows,
+                            &binned_rows,
+                            1.0,
+                        );
                         if iter == 0 && baselines[c].abs() > LGBM_EPSILON {
                             tree.add_bias(baselines[c]);
                         }
                     } else {
-                        add_tree_scores(
+                        add_leaf_scores(
                             &mut raw_scores[c][..],
                             &tree,
+                            &leaf_rows,
                             &binned_rows,
                             self.learning_rate,
                         );
