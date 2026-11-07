@@ -643,7 +643,11 @@ class _CatBoost(BaseEstimator):
                  bagging_temperature=1.0, mvs_reg=None, monotone_constraints=None,
                  model_shrink_rate=None, model_shrink_mode="Constant", class_weights=None,
                  auto_class_weights=None, loss_function=None, use_best_model=None,
-                 early_stopping_rounds=None, od_type=None, od_wait=None, od_pval=None):
+                 early_stopping_rounds=None, od_type=None, od_wait=None, od_pval=None,
+                 grow_policy="SymmetricTree", min_data_in_leaf=1, max_leaves=31):
+        self.grow_policy = grow_policy
+        self.min_data_in_leaf = min_data_in_leaf
+        self.max_leaves = max_leaves
         self.use_best_model = use_best_model
         self.early_stopping_rounds = early_stopping_rounds
         self.od_type = od_type
@@ -724,6 +728,11 @@ class _CatBoost(BaseEstimator):
             self.leaf_estimation_backtracking, {"AnyImprovement": "AnyImprovement", "No": "No"},
             "leaf_estimation_backtracking")
         n_features = np.shape(X)[1]
+        params["grow_policy"] = _choice(
+            self.grow_policy, {"SymmetricTree": "SymmetricTree", "Depthwise": "Depthwise",
+                               "Lossguide": "Lossguide"}, "grow_policy")
+        params["min_data_in_leaf"] = int(self.min_data_in_leaf)
+        params["max_leaves"] = int(self.max_leaves)
         if self.use_best_model is not None:
             params["use_best_model"] = bool(self.use_best_model)
         if self.early_stopping_rounds is not None:

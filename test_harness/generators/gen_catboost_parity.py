@@ -446,6 +446,39 @@ def generate():
              dict(COMMON, iterations=120, depth=4, random_strength=1.0, has_time=False,
                   bootstrap_type="MVS"), X, y_reg, Xv, yv_reg,
              fit_kw=dict(early_stopping_rounds=10))
+
+    # Depthwise trees (#154; plain boosting, numeric and one-hot features).
+    dw = dict(base, grow_policy="Depthwise")
+    add("dw_rmse", "regressor", dw, X, y_reg)
+    add("dw_rmse_l2_depth6", "regressor", dict(dw, score_function="L2", depth=6), X, y_reg)
+    add("dw_rmse_min_data", "regressor", dict(dw, depth=6, min_data_in_leaf=15), X, y_reg)
+    add("dw_rmse_weighted", "regressor", dw, X, y_reg, sw=weights)
+    add("dw_rmse_nan", "regressor", dw, X_nan, y_reg)
+    add("dw_logloss", "classifier", dw, X, y_bin)
+    add("dw_logloss_leaf10", "classifier", dict(dw, leaf_estimation_iterations=10), X, y_bin)
+    add("dw_mc", "classifier", dict(mc, grow_policy="Depthwise"), X, y_mc.astype(float))
+    add("dw_quantile", "regressor", dict(dw, loss_function="Quantile:alpha=0.3"), X, y_reg)
+    add("dw_noise", "regressor", dict(dw, random_strength=1.0), X, y_reg)
+    add("dw_mvs", "regressor", dict(dw, random_strength=1.0, bootstrap_type="MVS"), X, y_reg)
+    add("dw_defaults", "regressor",
+        dict(COMMON, iterations=80, grow_policy="Depthwise", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
+    lg = dict(base, grow_policy="Lossguide")
+    add("lg_rmse", "regressor", lg, X, y_reg)
+    add("lg_rmse_leaves8_depth3", "regressor", dict(lg, max_leaves=8, depth=3), X, y_reg)
+    add("lg_rmse_l2_min_data", "regressor", dict(lg, score_function="L2", min_data_in_leaf=10),
+        X, y_reg)
+    add("lg_rmse_weighted", "regressor", dict(lg, max_leaves=12), X, y_reg, sw=weights)
+    add("lg_logloss", "classifier", lg, X, y_bin)
+    add("lg_mc", "classifier", dict(mc, grow_policy="Lossguide", max_leaves=10), X,
+        y_mc.astype(float))
+    add("lg_noise_mvs", "regressor", dict(lg, random_strength=1.0, bootstrap_type="MVS"), X,
+        y_reg)
+    add("lg_defaults", "regressor",
+        dict(COMMON, iterations=80, grow_policy="Lossguide", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
+    add_cat("dw_onehot", dict(cat, grow_policy="Depthwise", one_hot_max_size=255), y_cat_reg,
+            kind="regressor")
     return out
 
 

@@ -7,8 +7,9 @@ use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
-    CatBoostClassifier, CatBoostEvalSet, CatBoostLeafEstimation, CatBoostOdType,
-    CatBoostRegressionLoss, CatBoostRegressor, CatBoostScoreFunction, CatBoostShrinkMode,
+    CatBoostClassifier, CatBoostEvalSet, CatBoostGrowPolicy, CatBoostLeafEstimation,
+    CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -119,6 +120,18 @@ macro_rules! configure {
         }
         if let Some(n) = p["max_ctr_complexity"].as_u64() {
             m = m.with_max_ctr_complexity(n as usize);
+        }
+        if p["grow_policy"] == "Depthwise" {
+            m = m.with_grow_policy(CatBoostGrowPolicy::Depthwise);
+        }
+        if p["grow_policy"] == "Lossguide" {
+            m = m.with_grow_policy(CatBoostGrowPolicy::Lossguide);
+        }
+        if let Some(n) = p["max_leaves"].as_u64() {
+            m = m.with_max_leaves(n as usize);
+        }
+        if let Some(n) = p["min_data_in_leaf"].as_u64() {
+            m = m.with_min_data_in_leaf(n as usize);
         }
         if let Some(n) = p["early_stopping_rounds"].as_u64() {
             m = m.with_early_stopping_rounds(n as usize);

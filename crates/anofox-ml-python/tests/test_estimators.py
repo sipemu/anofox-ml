@@ -1055,3 +1055,18 @@ def test_catboost_eval_set_matches_catboost():
     np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
     explicit = am.CatBoostClassifier(iterations=5, class_weights={"no": 1.0, "yes": 2.0})
     explicit.fit(X[tr], labels[tr])
+
+
+def test_catboost_grow_policies_match_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(61)
+    X = rs.normal(size=(300, 4))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] + rs.normal(scale=0.3, size=300)
+    kw = dict(iterations=30, learning_rate=0.2, depth=5, random_strength=0, bootstrap_type="No",
+              has_time=True)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    for extra in (dict(grow_policy="Depthwise", min_data_in_leaf=5),
+                  dict(grow_policy="Lossguide", max_leaves=10)):
+        ref = cb.CatBoostRegressor(**kw, **extra, **ref_kw).fit(X, y)
+        ours = am.CatBoostRegressor(**kw, **extra).fit(X, y)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
