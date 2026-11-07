@@ -842,6 +842,18 @@ def generate():
     add_group("loss_yetirank_ordered_defaults", dict(COMMON, iterations=60, depth=4,
               loss_function="YetiRank", random_strength=1.0, has_time=False,
               boosting_type="Ordered", bootstrap_type="Bayesian"), X, y_rel, sizes)
+    # Non-symmetric trees with CTRs (#154), exact since Logloss runs on the
+    # stored exp(a) (#158).
+    add_cat("dw_ctr", dict(cat, grow_policy="Depthwise"), y_cat)
+    add_cat("dw_ctr_rmse", dict(cat, grow_policy="Depthwise"), y_cat_reg, kind="regressor")
+    add_cat("dw_ctr_perm", dict(cat, grow_policy="Depthwise", has_time=False, depth=5,
+                                iterations=60), y_cat)
+    add_cat("dw_ctr_defaults", dict(COMMON, iterations=60, grow_policy="Depthwise",
+                                    cat_features=cat_cols, random_strength=1.0,
+                                    has_time=False, bootstrap_type="Bayesian"), y_cat)
+    add_cat("lg_ctr_long", dict(cat, grow_policy="Lossguide", iterations=80, depth=6), y_cat)
+    add_cat("lg_ctr_long_perm", dict(cat, grow_policy="Lossguide", iterations=80,
+                                     has_time=False), y_cat)
     return out
 
 
