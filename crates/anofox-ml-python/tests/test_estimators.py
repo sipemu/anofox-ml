@@ -993,3 +993,30 @@ def test_catboost_defaults_match_catboost():
     ref = cb.CatBoostRegressor(**kw, **off).fit(X, y)
     ours = am.CatBoostRegressor(**kw).fit(X, y)
     np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-12)
+
+
+def test_lgbm_sampling_matches_lightgbm():
+    # LightGBM's own generator: bagging, GOSS and feature fractions (#152).
+    lgb = pytest.importorskip("lightgbm")
+    rs = np.random.RandomState(21)
+    X = rs.normal(size=(500, 5))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2] + rs.normal(scale=0.3, size=500)
+    yc = (y > 0).astype(int)
+    base = dict(n_estimators=25, learning_rate=0.2, num_leaves=8)
+    cases = [
+        dict(subsample=0.7, subsample_freq=2, colsample_bytree=0.8, random_state=3),
+        dict(boosting_type="goss", feature_fraction_bynode=0.6),
+        dict(subsample=0.8, subsample_freq=1, feature_fraction_bynode=0.7, random_state=9),
+    ]
+    ref_kw = dict(deterministic=True, force_row_wise=True, verbose=-1, n_jobs=1)
+    for kw in cases:
+        ref = lgb.LGBMRegressor(**base, **kw, **ref_kw).fit(X, y)
+        ours = am.LGBMRegressor(**base, **kw).fit(X, y)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-8)
+        ref = lgb.LGBMClassifier(**base, **kw, **ref_kw).fit(X, yc)
+        ours = am.LGBMClassifier(**base, **kw).fit(X, yc)
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-8)
+    kw = dict(subsample_freq=1, pos_bagging_fraction=0.5, neg_bagging_fraction=0.8)
+    ref = lgb.LGBMClassifier(**base, **kw, **ref_kw).fit(X, yc)
+    ours = am.LGBMClassifier(**base, **kw).fit(X, yc)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-8)
