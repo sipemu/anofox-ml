@@ -630,6 +630,46 @@ pub enum CatBoostLeafEstimation {
     Gradient,
 }
 
+/// CatBoost's `auto_class_weights`, from the classes' weight sums `S_c`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostAutoClassWeights {
+    /// `max S / S_c`.
+    Balanced,
+    /// `sqrt(max S / S_c)`.
+    SqrtBalanced,
+}
+
+/// CatBoost's `CalculateClassWeights` (one thread): the classes' weight
+/// sums in float64, stored as float32 and passed to the weight function
+/// as integers (its `std::function<float(ui64, ui64)>` truncates them).
+fn auto_class_weights(
+    classes_of: &[u8],
+    n_classes: usize,
+    weights: &[f64],
+    auto: CatBoostAutoClassWeights,
+) -> Vec<f32> {
+    let mut sums = vec![0.0f64; n_classes];
+    for (&c, &w) in classes_of.iter().zip(weights) {
+        sums[c as usize] += w;
+    }
+    let sums: Vec<f32> = sums.iter().map(|&s| s as f32).collect();
+    let max = sums.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let max_int = max as u64 as f32;
+    sums.iter()
+        .map(|&s| {
+            let s = s as u64 as f32;
+            if s > 1e-8 {
+                match auto {
+                    CatBoostAutoClassWeights::Balanced => max_int / s,
+                    CatBoostAutoClassWeights::SqrtBalanced => (max_int / s).sqrt(),
+                }
+            } else {
+                1.0
+            }
+        })
+        .collect()
+}
+
 /// CatBoost's `bootstrap_type`: how the rows a tree is scored on are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CatBoostBootstrap {
@@ -2877,7 +2917,10 @@ fn f32_values(v: ArrayView1<f64>) -> Vec<f64> {
 }
 
 macro_rules! catboost_config {
-    ($(#[$doc:meta])* $name:ident, boost_from_average: $bfa:expr) => {
+    (
+        $(#[$doc:meta])* $name:ident, boost_from_average: $bfa:expr
+        $(, extra: { $($(#[$fdoc:meta])* $field:ident: $fty:ty = $fdef:expr),* $(,)? })?
+    ) => {
         $(#[$doc])*
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         #[serde(default)]
@@ -2953,6 +2996,7 @@ macro_rules! catboost_config {
             /// MVS's regularization; default (`None`): from the last tree's
             /// leaves (the first tree: from the gradients).
             pub mvs_reg: Option<f64>,
+            $($($(#[$fdoc])* pub $field: $fty,)*)?
         }
 
         impl Default for $name {
@@ -2982,6 +3026,7 @@ macro_rules! catboost_config {
                     subsample: None,
                     bagging_temperature: 1.0,
                     mvs_reg: None,
+                    $($($field: $fdef,)*)?
                 }
             }
         }
@@ -3212,8 +3257,60 @@ catboost_config!(
     /// CatBoost-style classifier on oblivious trees: Logloss for two
     /// classes, MultiClass (softmax) for more, as CatBoost picks them.
     CatBoostClassifier,
-    boost_from_average: false
+    boost_from_average: false,
+    extra: {
+        /// Per-class weights (CatBoost's `class_weights`, by class in
+        /// ascending order of the labels), multiplied into the sample
+        /// weights.
+        class_weights: Option<Vec<f64>> = None,
+        /// CatBoost's `auto_class_weights` (used without `class_weights`).
+        auto_class_weights: Option<CatBoostAutoClassWeights> = None,
+    }
 );
+
+impl CatBoostClassifier {
+    pub fn with_class_weights(mut self, w: Vec<f64>) -> Self {
+        self.class_weights = Some(w);
+        self
+    }
+    pub fn with_auto_class_weights(mut self, a: CatBoostAutoClassWeights) -> Self {
+        self.auto_class_weights = Some(a);
+        self
+    }
+
+    /// The sample weights with the class weights (CatBoost's
+    /// `MakeClassificationWeights`: float32 products).
+    fn class_adjusted_weights(
+        &self,
+        classes_of: &[u8],
+        n_classes: usize,
+        weights: Vec<f64>,
+    ) -> Result<Vec<f64>> {
+        let class_weights: Vec<f32> = match (&self.class_weights, self.auto_class_weights) {
+            (Some(w), _) => {
+                if w.len() != n_classes {
+                    return Err(RustMlError::InvalidParameter(format!(
+                        "class_weights has {} entries for {n_classes} classes",
+                        w.len()
+                    )));
+                }
+                if w.iter().any(|&v| !(v >= 0.0) || !v.is_finite()) {
+                    return Err(RustMlError::InvalidParameter(
+                        "class_weights must be finite and non-negative".into(),
+                    ));
+                }
+                w.iter().map(|&v| v as f32).collect()
+            }
+            (None, Some(auto)) => auto_class_weights(classes_of, n_classes, &weights, auto),
+            (None, None) => return Ok(weights),
+        };
+        Ok(weights
+            .iter()
+            .zip(classes_of)
+            .map(|(&w, &c)| f64::from(w as f32 * class_weights[c as usize]))
+            .collect())
+    }
+}
 
 /// Fitted [`CatBoostRegressor`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3439,7 +3536,12 @@ impl FitWeighted<f64> for CatBoostClassifier {
             .iter()
             .map(|v| classes.partition_point(|c| c < v) as f64)
             .collect();
-        let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
+        let classes_of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
+        let weights = self.class_adjusted_weights(
+            &classes_of,
+            classes.len(),
+            sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values),
+        )?;
         let (loss, bias) = if multiclass {
             (Loss::MultiClass(classes.len()), vec![0.0; classes.len()])
         } else if self.boost_from_average {
@@ -3448,7 +3550,6 @@ impl FitWeighted<f64> for CatBoostClassifier {
         } else {
             (Loss::Logloss, vec![0.0])
         };
-        let classes_of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
         let cat = CategoricalParams {
             features: &self.cat_features,
             one_hot_max_size: self.one_hot_max_size,

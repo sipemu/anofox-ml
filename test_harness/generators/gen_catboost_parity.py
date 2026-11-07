@@ -291,6 +291,27 @@ def generate():
     add_cat("auto_lr_defaults", dict(COMMON, iterations=250, cat_features=cat_cols,
                                       random_strength=1.0, has_time=False,
                                       bootstrap_type="MVS"), y_cat)
+
+    # Class weights (#156): multiplied into the sample weights; the
+    # automatic ones from the classes' weight sums (truncated to integers).
+    y_imb = (eta + rng.logistic(size=n) > 1.2).astype(float)
+    add("cw_explicit", "classifier", dict(base, class_weights=[1.0, 2.5]), X, y_imb)
+    add("cw_balanced", "classifier", dict(base, auto_class_weights="Balanced"), X, y_imb)
+    add("cw_sqrt_balanced", "classifier", dict(base, auto_class_weights="SqrtBalanced"), X,
+        y_imb)
+    add("cw_balanced_weighted", "classifier", dict(base, auto_class_weights="Balanced"), X,
+        y_imb, sw=weights)
+    add("cw_balanced_average", "classifier",
+        dict(base, auto_class_weights="Balanced", boost_from_average=True), X, y_imb)
+    add("cw_ordered", "classifier",
+        dict(ordered, auto_class_weights="SqrtBalanced"), X, y_imb)
+    add("cw_mc_balanced", "classifier", dict(mc, auto_class_weights="Balanced"), X,
+        y_mc5.astype(float))
+    add("cw_mc_explicit", "classifier", dict(mc, class_weights=[0.5, 1.0, 3.0]), X,
+        y_mc.astype(float), sw=weights)
+    add_cat("cw_cat_defaults", dict(COMMON, iterations=80, depth=4, cat_features=cat_cols,
+                                     random_strength=1.0, has_time=False, bootstrap_type="MVS",
+                                     auto_class_weights="Balanced"), y_cat)
     return out
 
 
