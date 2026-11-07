@@ -1013,3 +1013,20 @@ def test_catboost_class_weights_and_monotone_match_catboost():
     ref = cb.CatBoostRegressor(**kw, **mono, **ref_kw).fit(X, y)
     ours = am.CatBoostRegressor(**kw, **mono).fit(X, y)
     np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
+
+
+def test_catboost_regression_losses_match_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(41)
+    X = rs.normal(size=(300, 4))
+    eta = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2]
+    y = eta + rs.normal(scale=0.3, size=300)
+    counts = rs.poisson(np.exp(0.5 * eta)).astype(float)
+    kw = dict(iterations=30, learning_rate=0.2, depth=4, random_strength=0, bootstrap_type="No",
+              has_time=True)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    for loss, target in (("MAE", y), ("Quantile:alpha=0.3", y), ("Expectile:alpha=0.7", y),
+                         ("Poisson", counts), ("Tweedie:variance_power=1.5", counts)):
+        ref = cb.CatBoostRegressor(loss_function=loss, **kw, **ref_kw).fit(X, target)
+        ours = am.CatBoostRegressor(loss_function=loss, **kw).fit(X, target)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10, err_msg=loss)

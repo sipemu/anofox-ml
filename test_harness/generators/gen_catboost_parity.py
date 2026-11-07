@@ -341,6 +341,48 @@ def generate():
     add("mono_defaults", "regressor",
         dict(COMMON, iterations=80, depth=4, monotone_constraints=mono, random_strength=1.0,
              has_time=False, bootstrap_type="MVS"), X, y_reg)
+
+    # More regression losses (#153), with CatBoost's per-loss defaults:
+    # Exact leaves for MAE / Quantile, boost_from_average for RMSE, MAE and
+    # Quantile, Newton steps for Expectile / Poisson (log scale, stored
+    # exp(a)) / Tweedie, Gradient for LogLinQuantile.
+    mu = np.exp(0.5 * eta)
+    y_count = rng.poisson(mu).astype(float)
+    y_tweedie = np.where(rng.uniform(size=n) < 0.3, 0.0, rng.gamma(2.0, mu / 2.0))
+    y_pos = np.exp(0.5 * eta + rng.normal(scale=0.3, size=n))
+    q3 = dict(base, loss_function="Quantile:alpha=0.3")
+    add("loss_mae", "regressor", dict(base, loss_function="MAE"), X, y_reg)
+    add("loss_quantile_03", "regressor", q3, X, y_reg)
+    add("loss_quantile_08_weighted", "regressor", dict(base, loss_function="Quantile:alpha=0.8"),
+        X, y_reg, sw=weights)
+    add("loss_quantile_ordered", "regressor", dict(q3, boosting_type="Ordered"), X, y_reg)
+    add("loss_quantile_gradient", "regressor", dict(q3, leaf_estimation_method="Gradient"), X,
+        y_reg)
+    add("loss_quantile_small", "regressor", q3, X[:80], y_reg[:80])
+    add("loss_quantile_no_average", "regressor", dict(q3, boost_from_average=False), X, y_reg)
+    add("loss_expectile", "regressor", dict(base, loss_function="Expectile:alpha=0.3"), X, y_reg)
+    add("loss_expectile_leaf5", "regressor",
+        dict(base, loss_function="Expectile:alpha=0.7", leaf_estimation_iterations=5), X, y_reg)
+    add("loss_poisson", "regressor", dict(base, loss_function="Poisson"), X, y_count)
+    add("loss_poisson_leaf10", "regressor",
+        dict(base, loss_function="Poisson", leaf_estimation_iterations=10), X, y_count)
+    add("loss_poisson_weighted", "regressor", dict(base, loss_function="Poisson"), X, y_count,
+        sw=weights)
+    add("loss_poisson_ordered", "regressor",
+        dict(base, loss_function="Poisson", boosting_type="Ordered"), X, y_count)
+    add("loss_tweedie", "regressor", dict(base, loss_function="Tweedie:variance_power=1.5"), X,
+        y_tweedie)
+    add("loss_tweedie_weighted", "regressor",
+        dict(base, loss_function="Tweedie:variance_power=1.2"), X, y_tweedie, sw=weights)
+    add("loss_loglinquantile", "regressor", dict(base, loss_function="LogLinQuantile:alpha=0.4"),
+        X, y_pos)
+    add("loss_mae_defaults", "regressor",
+        dict(COMMON, iterations=80, depth=4, loss_function="MAE", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
+    add("loss_poisson_200", "regressor",
+        dict(base, loss_function="Poisson", iterations=200, learning_rate=0.05), X, y_count)
+    add_cat("loss_quantile_cat", dict(cat, loss_function="Quantile:alpha=0.6"), y_cat_reg,
+            kind="regressor")
     return out
 
 

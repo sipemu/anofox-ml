@@ -7,8 +7,8 @@ use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
-    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
-    CatBoostShrinkMode,
+    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressionLoss, CatBoostRegressor,
+    CatBoostScoreFunction, CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -149,9 +149,24 @@ fn catboost_models_match_catboost() {
             (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
         let x_test = array2_with_nan(&case["X_test"]);
         let err = if case["kind"] == "regressor" {
-            let f = configure!(CatBoostRegressor::new(), &case["params"])
-                .fit_weighted(&x, &y, sw.as_ref())
-                .unwrap();
+            let p = &case["params"];
+            let mut m = configure!(CatBoostRegressor::new(), p);
+            if let Some(l) = p["loss_function"].as_str() {
+                let (name, param) = l.split_once(':').unwrap_or((l, ""));
+                let value = || param.split_once('=').unwrap().1.parse::<f64>().unwrap();
+                m = m.with_loss_function(match name {
+                    "MAE" => CatBoostRegressionLoss::Mae,
+                    "Quantile" => CatBoostRegressionLoss::Quantile { alpha: value() },
+                    "Expectile" => CatBoostRegressionLoss::Expectile { alpha: value() },
+                    "Poisson" => CatBoostRegressionLoss::Poisson,
+                    "Tweedie" => CatBoostRegressionLoss::Tweedie {
+                        variance_power: value(),
+                    },
+                    "LogLinQuantile" => CatBoostRegressionLoss::LogLinQuantile { alpha: value() },
+                    other => panic!("unknown loss {other}"),
+                });
+            }
+            let f = m.fit_weighted(&x, &y, sw.as_ref()).unwrap();
             worst(
                 f.predict(&x_test).unwrap(),
                 json_to_array1(&case["predictions"]),
