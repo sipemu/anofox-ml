@@ -492,6 +492,81 @@ impl MondrianRegFit {
     }
 }
 
+/// Bagging over a registered kind (sklearn's `BaggingRegressor(estimator=)`
+/// / `BaggingClassifier(estimator=)`): the sampling settings of the tree
+/// bagging kinds around `{estimator, estimator_params}`.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct BaggingEstimatorConfig {
+    estimator: String,
+    estimator_params: serde_json::Value,
+    n_estimators: usize,
+    max_samples: Option<f64>,
+    bootstrap: bool,
+    max_features: Option<trees::MaxFeatures>,
+    bootstrap_features: bool,
+    oob_score: bool,
+    seed: u64,
+}
+
+impl BaggingEstimatorConfig {
+    /// sklearn's defaults around the base kind `estimator`.
+    fn new(estimator: &str) -> Self {
+        let d = ensemble::BaggingRegressor::default();
+        Self {
+            estimator: estimator.into(),
+            estimator_params: serde_json::json!({}),
+            n_estimators: d.n_estimators,
+            max_samples: d.max_samples,
+            bootstrap: d.bootstrap,
+            max_features: d.max_features,
+            bootstrap_features: d.bootstrap_features,
+            oob_score: d.oob_score,
+            seed: d.seed,
+        }
+    }
+
+    fn base(&self) -> RegistryEstimator {
+        RegistryEstimator::new(&self.estimator, self.estimator_params.clone())
+    }
+
+    fn regressor(&self) -> ensemble::GenericBaggingRegressor<RegistryEstimator> {
+        ensemble::BaggingRegressor {
+            n_estimators: self.n_estimators,
+            max_samples: self.max_samples,
+            bootstrap: self.bootstrap,
+            max_features: self.max_features,
+            bootstrap_features: self.bootstrap_features,
+            oob_score: self.oob_score,
+            seed: self.seed,
+            ..Default::default()
+        }
+        .with_estimator(self.base())
+    }
+
+    fn classifier(&self) -> ensemble::GenericBaggingClassifier<RegistryEstimator> {
+        ensemble::BaggingClassifier {
+            n_estimators: self.n_estimators,
+            max_samples: self.max_samples,
+            bootstrap: self.bootstrap,
+            max_features: self.max_features,
+            bootstrap_features: self.bootstrap_features,
+            oob_score: self.oob_score,
+            seed: self.seed,
+            ..Default::default()
+        }
+        .with_estimator(self.base())
+    }
+}
+
+impl Default for BaggingEstimatorConfig {
+    fn default() -> Self {
+        Self::new("DecisionTreeRegressor")
+    }
+}
+
+type BaggingEstimatorFit = ensemble::FittedGenericBagging<RegistryFitted, f64>;
+
 /// `Cca` fitted on one matrix `[X | Y]`: its last `y_columns` columns are
 /// `Y`.
 #[derive(Serialize, Deserialize)]
@@ -725,6 +800,25 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         feature_importances: |m| m.feature_importances(),
+    }
+    BaggingEstimatorRegressor {
+        config: BaggingEstimatorConfig = BaggingEstimatorConfig::new("DecisionTreeRegressor"),
+        fitted: BaggingEstimatorFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.regressor().fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+    }
+    BaggingEstimatorClassifier {
+        config: BaggingEstimatorConfig = BaggingEstimatorConfig::new("DecisionTreeClassifier"),
+        fitted: BaggingEstimatorFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.classifier().fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
     }
     HistGradientBoostingClassifier {
         config: ensemble::HistGradientBoostingClassifier = Default::default(),
