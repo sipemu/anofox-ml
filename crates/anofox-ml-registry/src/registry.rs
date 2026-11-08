@@ -5,7 +5,7 @@
 
 use anofox_ml_core::{
     DecisionFunction, Fit, FitUnsupervised, FitUnsupervisedWeighted, FitWeighted, InverseTransform,
-    Predict, PredictProba, Result, Transform,
+    Predict, PredictLogProba, PredictProba, Result, Transform,
 };
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
@@ -959,6 +959,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
         decision_function: |m, x| DecisionFunction::decision_function(m, x),
     }
     NuSvc {
@@ -1102,6 +1103,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
         decision_function: |m, x| DecisionFunction::decision_function(m, x),
     }
     LogisticRegressionCV {
@@ -1186,6 +1188,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
     }
     MultinomialNB {
         config: nb::MultinomialNB = Default::default(),
@@ -1193,6 +1196,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
     }
     BernoulliNB {
         config: nb::BernoulliNB = Default::default(),
@@ -1200,6 +1204,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
     }
     ComplementNB {
         config: nb::ComplementNB = Default::default(),
@@ -1207,6 +1212,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
     }
     CategoricalNB {
         config: nb::CategoricalNB = Default::default(),
@@ -1214,6 +1220,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
     }
 
     // ------------------------------------------------------- neighbors
@@ -1258,6 +1265,7 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
         decision_function: |m, x| DecisionFunction::decision_function(m, x),
         transform: |m, x| Transform::transform(m, x),
     }
@@ -1267,6 +1275,7 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
         decision_function: |m, x| DecisionFunction::decision_function(m, x),
     }
 
@@ -1632,6 +1641,7 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
         score_samples: |m, x| m.score_samples(x),
     }
     BayesianGaussianMixture {
