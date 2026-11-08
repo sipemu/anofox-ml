@@ -1230,12 +1230,14 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
+        kneighbors: |m, x, k| m.kneighbors(&x.to_owned(), k),
     }
     KnnRegressor {
         config: neighbors::KnnRegressor = Default::default(),
         fitted: neighbors::FittedKnnRegressor<f64>,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        kneighbors: |m, x, k| m.kneighbors(&x.to_owned(), k),
     }
     RadiusNeighborsClassifier {
         config: neighbors::RadiusNeighborsClassifier = Default::default(),

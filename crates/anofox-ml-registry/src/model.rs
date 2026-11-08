@@ -102,6 +102,16 @@ pub trait DynModel: Send + Sync {
     fn predict_set(&self, _x: ArrayView2<f64>, _alpha: f64) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_set"))
     }
+    /// Distances and training-row indices of the `k` nearest training rows
+    /// of every row of `x` (`None`: the model's `n_neighbors`), each
+    /// `n × k`, nearest first (the kNN models).
+    fn kneighbors(
+        &self,
+        _x: ArrayView2<f64>,
+        _k: Option<usize>,
+    ) -> Result<(Array2<f64>, Array2<usize>)> {
+        Err(unsupported(self.kind(), "kneighbors"))
+    }
     /// Per-feature importances of the fitted model (trees, forests,
     /// boosting, bagging).
     fn feature_importances(&self) -> Result<Out> {
@@ -248,7 +258,8 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// `w: Option<&Array1>` and returns the fitted model; inside it `K` is the
 /// estimator's kind. Prediction methods receive the fitted model `m` and
 /// `x` and return `Result<Array1 | Array2>`; `predict_interval` /
-/// `predict_set` also receive `alpha` (`|m, x, alpha|`); `labels` /
+/// `predict_set` also receive `alpha` (`|m, x, alpha|`), `kneighbors`
+/// receives `|m, x, k|` and returns `(distances, indices)`; `labels` /
 /// `embedding` / `feature_importances` receive only `m` and return the
 /// array; `warm_start` receives `|c, prev, x, y, w|` (a copy of the fitted
 /// model as `prev`) and returns the new fitted model;
@@ -444,6 +455,16 @@ macro_rules! registry {
         fn embedding(&self) -> anofox_ml_core::Result<$crate::model::Out> {
             let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
             Ok($crate::model::Out::from($body))
+        }
+    };
+    (@cap $kind:ident, kneighbors, $m:ident, $x:ident, $k:ident, $body:expr) => {
+        fn kneighbors(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $k: Option<usize>,
+        ) -> anofox_ml_core::Result<(ndarray::Array2<f64>, ndarray::Array2<usize>)> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            $body
         }
     };
     (@cap $kind:ident, $cap:ident, $m:ident, $x:ident, $a:ident, $body:expr) => {
