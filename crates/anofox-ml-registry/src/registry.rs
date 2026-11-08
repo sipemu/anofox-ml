@@ -1301,6 +1301,8 @@ registry! {
         predict_proba: |m, x| m.predict_proba(x),
         partial_fit: |c, prev, x, y, w, cl| no_weight(K, w)
             .and_then(|_| PartialFit::partial_fit_view(c, prev, x, need_y(K, y)?, cl)),
+        warm_start: |c, prev, x, y, w| no_weight(K, w)
+            .and_then(|_| c.fit_warm_start(prev, &x.to_owned(), &need_y(K, y)?.to_owned())),
     }
     MlpRegressor {
         config: nn::MlpRegressor = Default::default(),
@@ -1309,6 +1311,8 @@ registry! {
         predict: |m, x| m.predict(x),
         partial_fit: |c, prev, x, y, w, cl| no_weight(K, w)
             .and_then(|_| PartialFit::partial_fit_view(c, prev, x, need_y(K, y)?, cl)),
+        warm_start: |c, prev, x, y, w| no_weight(K, w)
+            .and_then(|_| c.fit_warm_start(prev, &x.to_owned(), &need_y(K, y)?.to_owned())),
     }
 
     // --------------------------------------------------- preprocessing
