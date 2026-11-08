@@ -1199,6 +1199,12 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
+    IsotonicRegressor {
+        config: reg::IsotonicRegressor = Default::default(),
+        fitted: reg::FittedIsotonicRegressor,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+    }
     LassoLarsIC {
         config: reg::LassoLarsIC = reg::LassoLarsIC::new(reg::IcCriterion::Aic),
         fitted: reg::FittedLassoLarsIC,
@@ -1482,6 +1488,13 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
+    }
+    PlsRegression {
+        config: pre::PlsRegression = pre::PlsRegression::new(2),
+        fitted: pre::FittedPlsRegression,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        transform: |m, x| Transform::transform(m, x),
     }
     IncrementalPca {
         config: pre::IncrementalPca = Default::default(),

@@ -132,7 +132,12 @@ fn binomial_offset_shifts_the_logit() {
 
 #[test]
 fn new_kinds_are_listed_and_round_trip() {
-    for kind in ["LassoLarsIC", "BinomialRegressor"] {
+    for kind in [
+        "LassoLarsIC",
+        "BinomialRegressor",
+        "PlsRegression",
+        "IsotonicRegressor",
+    ] {
         assert!(anofox_ml_registry::kinds().contains(&kind), "{kind}");
         assert!(anofox_ml_registry::default_params(kind).is_ok(), "{kind}");
     }
@@ -153,4 +158,57 @@ fn new_kinds_are_listed_and_round_trip() {
         out1(back.predict(x.view()).unwrap()),
         out1(bin.predict(x.view()).unwrap())
     );
+
+    let (x, y) = lars_data();
+    let mut pls = make("PlsRegression", &json!({"n_components": 3})).unwrap();
+    pls.fit(x.view(), Some(y.view()), None).unwrap();
+    let back = anofox_ml_registry::load("PlsRegression", &pls.to_bytes().unwrap()).unwrap();
+    assert_eq!(
+        out1(back.predict(x.view()).unwrap()),
+        out1(pls.predict(x.view()).unwrap())
+    );
+}
+
+#[test]
+fn pls_regression_matches_scikit_learn() {
+    // scikit-learn 1.8.0 `PLSRegression()` (2 components, scaled):
+    // `predict(X[:3])` and `transform(X[:2])`.
+    let (x, y) = lars_data();
+    let mut m = make("PlsRegression", &json!({})).unwrap();
+    m.fit(x.view(), Some(y.view()), None).unwrap();
+    let pred = out1(m.predict(x.slice(ndarray::s![..3, ..])).unwrap());
+    for (o, e) in pred.iter().zip([
+        -1.4361550944624004,
+        -0.7828984543819724,
+        -1.6232061587213726,
+    ]) {
+        assert!((o - e).abs() < 1e-10, "predict {o} vs {e}");
+    }
+    let Out::A2(scores) = m.transform(x.slice(ndarray::s![..2, ..])).unwrap() else {
+        panic!("transform is 2-D")
+    };
+    let expected = array![
+        [-1.465341365059276, 0.5895988861781795],
+        [-0.745942918582265, 0.21042940830887322]
+    ];
+    for (o, e) in scores.iter().zip(&expected) {
+        assert!((o - e).abs() < 1e-10, "transform {o} vs {e}");
+    }
+}
+
+#[test]
+fn isotonic_regressor_pools_adjacent_violators() {
+    // y = 1, 3, 2, 4 at x = 1..4: the violating pair (3, 2) pools to 2.5.
+    // Predictions interpolate between the fitted points; outside the
+    // training range they are NaN (sklearn's out_of_bounds="nan").
+    let x = array![[1.0], [2.0], [3.0], [4.0]];
+    let y = array![1.0, 3.0, 2.0, 4.0];
+    let mut m = make("IsotonicRegressor", &json!({})).unwrap();
+    m.fit(x.view(), Some(y.view()), None).unwrap();
+    let p = out1(
+        m.predict(array![[1.0], [2.5], [3.5], [5.0]].view())
+            .unwrap(),
+    );
+    assert_eq!((p[0], p[1], p[2]), (1.0, 2.5, 3.25));
+    assert!(p[3].is_nan());
 }
