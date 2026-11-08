@@ -21,6 +21,7 @@ use faer::linalg::solvers::Svd;
 use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView2, AsArray, Axis, Ix2};
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cca {
     pub n_components: usize,
     /// Standardise X and Y (sklearn `scale`, default true).
@@ -218,6 +219,7 @@ fn power_method(
     Ok((w, c, n_iter))
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedCca {
     pub x_mean: Array1<f64>,
     pub y_mean: Array1<f64>,

@@ -80,6 +80,10 @@ pub trait DynModel: Send + Sync {
     fn transform(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "transform"))
     }
+    /// Scores of the second block (Cca's Y scores).
+    fn transform_y(&self, _y: ArrayView2<f64>) -> Result<Out> {
+        Err(unsupported(self.kind(), "transform_y"))
+    }
     fn inverse_transform(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "inverse_transform"))
     }

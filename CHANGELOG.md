@@ -37,6 +37,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   hyperparameters. The Gaussian process configs, kernels and fitted models
   are now `Serialize` (the Cholesky factors are stored, so a loaded model is
   bit-identical).
+- `Cca` in the registry (#125), fitted on `[X | Y]` with `y_columns` (the
+  last columns are `Y`); `transform` gives the X scores and the new
+  `DynModel::transform_y` the Y scores, matching scikit-learn 1.8. `Cca` and
+  `FittedCca` are now `Serialize`.
 
 ## [0.4.0] - 2026-11-06
 

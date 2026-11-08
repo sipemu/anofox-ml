@@ -492,6 +492,52 @@ impl MondrianRegFit {
     }
 }
 
+/// `Cca` fitted on one matrix `[X | Y]`: its last `y_columns` columns are
+/// `Y`.
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct CcaConfig {
+    n_components: usize,
+    scale: bool,
+    max_iter: usize,
+    tol: f64,
+    y_columns: usize,
+}
+
+impl Default for CcaConfig {
+    fn default() -> Self {
+        let d = pre::Cca::new(2);
+        Self {
+            n_components: d.n_components,
+            scale: d.scale,
+            max_iter: d.max_iter,
+            tol: d.tol,
+            y_columns: 1,
+        }
+    }
+}
+
+impl CcaConfig {
+    fn fit(&self, xy: ArrayView2<f64>) -> Result<pre::FittedCca> {
+        let p = xy.ncols();
+        if self.y_columns == 0 || self.y_columns >= p {
+            return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                "Cca: y_columns must be in 1..{p} for {p} columns, got {}",
+                self.y_columns
+            )));
+        }
+        let split = p - self.y_columns;
+        pre::Cca::new(self.n_components)
+            .with_scale(self.scale)
+            .with_max_iter(self.max_iter)
+            .with_tol(self.tol)
+            .fit(
+                &xy.slice(ndarray::s![.., ..split]).to_owned(),
+                &xy.slice(ndarray::s![.., split..]).to_owned(),
+            )
+    }
+}
+
 /// Mondrian `SplitConformalClassifier` over a registered classifier.
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -1518,6 +1564,16 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
+    }
+    Cca {
+        config: CcaConfig = Default::default(),
+        fitted: pre::FittedCca,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x)
+        },
+        transform: |m, x| m.transform_x(x),
+        transform_y: |m, y| m.transform_y(y),
     }
     PlsRegression {
         config: pre::PlsRegression = pre::PlsRegression::new(2),
