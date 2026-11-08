@@ -1131,18 +1131,39 @@ registry! {
         fitted: reg::FittedPoissonRegressor,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        fit_with_offset: |c, x, y, w, off| c.fit_weighted_with_offset(
+            x,
+            need_y(K, y)?,
+            w.map(|w| w.to_owned()).as_ref(),
+            Some(&off.to_owned()),
+        ),
+        predict_with_offset: |m, x, off| m.predict_with_offset(&x.to_owned(), &off.to_owned()),
     }
     GammaRegressor {
         config: reg::GammaRegressor = Default::default(),
         fitted: reg::FittedTweedieRegressor,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        fit_with_offset: |c, x, y, w, off| c.fit_weighted_with_offset(
+            &x.to_owned(),
+            &need_y(K, y)?.to_owned(),
+            w.map(|w| w.to_owned()).as_ref(),
+            Some(&off.to_owned()),
+        ),
+        predict_with_offset: |m, x, off| m.predict_with_offset(&x.to_owned(), &off.to_owned()),
     }
     TweedieRegressor {
         config: reg::TweedieRegressor = reg::TweedieRegressor::new(0.0),
         fitted: reg::FittedTweedieRegressor,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        fit_with_offset: |c, x, y, w, off| c.fit_weighted_with_offset(
+            x,
+            need_y(K, y)?,
+            w.map(|w| w.to_owned()).as_ref(),
+            Some(&off.to_owned()),
+        ),
+        predict_with_offset: |m, x, off| m.predict_with_offset(&x.to_owned(), &off.to_owned()),
     }
     BayesianRidge {
         config: reg::BayesianRidge = Default::default(),

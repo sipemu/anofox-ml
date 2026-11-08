@@ -355,6 +355,18 @@ impl GammaRegressor {
     ) -> Result<FittedTweedieRegressor> {
         self.inner.fit_with_offset(x.view(), y.view(), offset)
     }
+
+    /// See [`TweedieRegressor::fit_weighted_with_offset`].
+    pub fn fit_weighted_with_offset(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        sample_weight: Option<&Array1<f64>>,
+        offset: Option<&Array1<f64>>,
+    ) -> Result<FittedTweedieRegressor> {
+        self.inner
+            .fit_weighted_with_offset(x.view(), y.view(), sample_weight, offset)
+    }
 }
 
 impl Default for GammaRegressor {
