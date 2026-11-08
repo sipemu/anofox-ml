@@ -19,7 +19,7 @@ pub const DEFAULT_BOUNDS: ParamBounds = ParamBounds::Bounded {
 };
 
 /// Bounds of a single (linear-scale, positive) hyperparameter.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ParamBounds {
     /// Excluded from hyperparameter optimisation (sklearn `"fixed"`).
     Fixed,
@@ -53,7 +53,7 @@ impl Default for ParamBounds {
 /// Every parameter defaults to bounds `(1e-5, 1e5)`; wrap a kernel with
 /// [`GpKernel::fixed`], [`GpKernel::with_bounds`] or
 /// [`GpKernel::with_param_bounds`] to change that.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GpKernel {
     /// Squared exponential `σ² exp(-||x-x'||² / (2ℓ²))`
     /// (sklearn `ConstantKernel(σ²) * RBF(ℓ)`).

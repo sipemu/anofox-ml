@@ -69,6 +69,11 @@ pub trait DynModel: Send + Sync {
     fn predict_log_proba(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_log_proba"))
     }
+    /// Standard deviation of the predictive distribution (the Gaussian
+    /// process regressor; sklearn's `predict(return_std=True)`).
+    fn predict_std(&self, _x: ArrayView2<f64>) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_std"))
+    }
     fn decision_function(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "decision_function"))
     }

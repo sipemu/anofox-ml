@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use anofox_ml_cluster as cluster;
 use anofox_ml_discriminant as discriminant;
 use anofox_ml_ensemble as ensemble;
+use anofox_ml_gaussian_process as gp;
 use anofox_ml_linear as linear;
 use anofox_ml_manifold as manifold;
 use anofox_ml_naive_bayes as nb;
@@ -556,6 +557,18 @@ impl MondrianClfFit {
         self.model
             .predict_set_mondrian(x.view(), &groups, alpha)
             .map(membership)
+    }
+}
+
+/// scikit-learn's default Gaussian process kernel, `1.0 * RBF(1.0)` with
+/// both hyperparameters fixed.
+fn sklearn_gp_kernel() -> gp::GpKernel {
+    gp::GpKernel::Bounded {
+        kernel: Box::new(gp::GpKernel::Rbf {
+            length_scale: 1.0,
+            signal_var: 1.0,
+        }),
+        bounds: vec![gp::ParamBounds::Fixed; 2],
     }
 }
 
@@ -1228,6 +1241,23 @@ registry! {
         fitted: reg::FittedTheilSenRegressor,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+    }
+
+    // ------------------------------------------------ gaussian process
+    GaussianProcessRegressor {
+        config: gp::GaussianProcessRegressor = gp::GaussianProcessRegressor::new(sklearn_gp_kernel()),
+        fitted: gp::FittedGaussianProcessRegressor,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_std: |m, x| m.predict_std(x),
+    }
+    GaussianProcessClassifier {
+        config: gp::MulticlassGaussianProcessClassifier =
+            gp::MulticlassGaussianProcessClassifier::new(sklearn_gp_kernel()),
+        fitted: gp::FittedMulticlassGaussianProcessClassifier,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| PredictProba::predict_proba(m, x),
     }
 
     // ----------------------------------------------------- naive bayes
