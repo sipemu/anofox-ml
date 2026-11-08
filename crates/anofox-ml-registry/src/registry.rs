@@ -1139,6 +1139,16 @@ registry! {
         ),
         predict_with_offset: |m, x, off| m.predict_with_offset(&x.to_owned(), &off.to_owned()),
     }
+    BinomialRegressor {
+        config: reg::BinomialRegressor = Default::default(),
+        fitted: reg::FittedBinomialRegressor,
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        fit_with_offset: |c, x, y, w, off| {
+            c.fit_with_offset(x, need_y(K, y)?, w, Some(&off.to_owned()))
+        },
+        predict_with_offset: |m, x, off| m.predict_with_offset(&x.to_owned(), &off.to_owned()),
+    }
     GammaRegressor {
         config: reg::GammaRegressor = Default::default(),
         fitted: reg::FittedTweedieRegressor,
@@ -1186,6 +1196,12 @@ registry! {
     Lars {
         config: reg::Lars = reg::Lars::new(500),
         fitted: reg::FittedLars,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+    }
+    LassoLarsIC {
+        config: reg::LassoLarsIC = reg::LassoLarsIC::new(reg::IcCriterion::Aic),
+        fitted: reg::FittedLassoLarsIC,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
