@@ -971,3 +971,312 @@ impl VotingClassifierFit {
         Ok(weighted_average(&probas, &self.weights))
     }
 }
+
+// ============================================================
+// Stacking
+// ============================================================
+
+/// The output a classifier's base estimators feed the final one
+/// (sklearn's `stack_method`; `auto`: the first of `predict_proba`,
+/// `decision_function`, `predict` the estimator has).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StackMethod {
+    #[default]
+    Auto,
+    PredictProba,
+    DecisionFunction,
+    Predict,
+}
+
+impl StackMethod {
+    fn resolve(self, m: &RegistryFitted) -> Result<StackMethod> {
+        let method = match self {
+            StackMethod::Auto if has(m, "predict_proba") => StackMethod::PredictProba,
+            StackMethod::Auto if has(m, "decision_function") => StackMethod::DecisionFunction,
+            StackMethod::Auto => StackMethod::Predict,
+            other => other,
+        };
+        let name = match method {
+            StackMethod::PredictProba => "predict_proba",
+            StackMethod::DecisionFunction => "decision_function",
+            _ => "predict",
+        };
+        if !has(m, name) {
+            return Err(err(format!(
+                "StackingClassifier: {} has no {name}",
+                m.model().kind()
+            )));
+        }
+        Ok(method)
+    }
+
+    /// The meta-features of one base model (sklearn's
+    /// `_concatenate_predictions`: one column of a binary `predict_proba`).
+    fn features(
+        self,
+        m: &RegistryFitted,
+        x: ArrayView2<f64>,
+        n_classes: usize,
+    ) -> Result<Array2<f64>> {
+        let as_column = |a: Array1<f64>| a.insert_axis(Axis(1));
+        Ok(match self {
+            StackMethod::PredictProba => {
+                let p = m.predict_proba(x)?;
+                if n_classes == 2 {
+                    p.slice(ndarray::s![.., 1..]).to_owned()
+                } else {
+                    p
+                }
+            }
+            StackMethod::DecisionFunction => match m.model().decision_function(x)? {
+                Out::A1(a) => as_column(a),
+                Out::A2(a) => a,
+            },
+            _ => as_column(m.predict(x)?),
+        })
+    }
+}
+
+/// Out-of-fold meta-features of every base estimator and the estimators
+/// refitted on all rows (sklearn's `cross_val_predict` and `estimators_`;
+/// `full`: those refits, when the caller has them already).
+fn stack(
+    kind: &str,
+    specs: &[EstimatorSpec],
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    splits: &[anofox_ml_core::CvSplit],
+    full: Option<Vec<RegistryFitted>>,
+    features: impl Fn(usize, &RegistryFitted, ArrayView2<f64>) -> Result<Array2<f64>>,
+) -> Result<(Array2<f64>, Vec<RegistryFitted>)> {
+    if specs.is_empty() {
+        return Err(err(format!("{kind} needs at least one estimator")));
+    }
+    let models = match full {
+        Some(m) => m,
+        None => specs
+            .iter()
+            .map(|s| s.fit(x, y))
+            .collect::<Result<Vec<_>>>()?,
+    };
+    let mut blocks = Vec::with_capacity(specs.len());
+    for (k, spec) in specs.iter().enumerate() {
+        let mut block: Option<Array2<f64>> = None;
+        for (train, test) in splits {
+            let fold = spec.fit(
+                x.select(Axis(0), train).view(),
+                y.select(Axis(0), train).view(),
+            )?;
+            let f = features(k, &fold, x.select(Axis(0), test).view())?;
+            let b = block.get_or_insert_with(|| Array2::zeros((x.nrows(), f.ncols())));
+            if f.ncols() != b.ncols() {
+                return Err(err(format!(
+                    "{kind}: {} gave {} columns on one fold and {} on another",
+                    spec.estimator,
+                    f.ncols(),
+                    b.ncols()
+                )));
+            }
+            for (r, &i) in test.iter().enumerate() {
+                b.row_mut(i).assign(&f.row(r));
+            }
+        }
+        blocks.push(block.ok_or_else(|| err(format!("{kind}: no folds")))?);
+    }
+    let views: Vec<_> = blocks.iter().map(|b| b.view()).collect();
+    let meta = ndarray::concatenate(Axis(1), &views).map_err(|e| err(e.to_string()))?;
+    Ok((meta, models))
+}
+
+/// `[meta | x]` with `passthrough`.
+fn with_passthrough(
+    meta: Array2<f64>,
+    x: ArrayView2<f64>,
+    passthrough: bool,
+) -> Result<Array2<f64>> {
+    if !passthrough {
+        return Ok(meta);
+    }
+    ndarray::concatenate(Axis(1), &[meta.view(), x.view()]).map_err(|e| err(e.to_string()))
+}
+
+fn check_cv(kind: &str, cv: usize) -> Result<()> {
+    if cv < 2 {
+        return Err(err(format!("{kind}: cv must be at least 2, got {cv}")));
+    }
+    Ok(())
+}
+
+/// sklearn's `StackingRegressor`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct StackingRegressorConfig {
+    pub estimators: Vec<EstimatorSpec>,
+    pub final_estimator: EstimatorSpec,
+    pub cv: usize,
+    pub passthrough: bool,
+}
+
+impl Default for StackingRegressorConfig {
+    fn default() -> Self {
+        Self {
+            estimators: Vec::new(),
+            final_estimator: EstimatorSpec {
+                estimator: "RidgeCrossValidated".into(),
+                estimator_params: empty_params(),
+            },
+            cv: 5,
+            passthrough: false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StackingRegressorFit {
+    models: Vec<RegistryFitted>,
+    final_model: RegistryFitted,
+    passthrough: bool,
+}
+
+impl StackingRegressorConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<StackingRegressorFit> {
+        check_cv("StackingRegressor", self.cv)?;
+        let splits = anofox_ml_core::k_fold(x.nrows(), self.cv)?;
+        let (meta, models) = stack(
+            "StackingRegressor",
+            &self.estimators,
+            x,
+            y,
+            &splits,
+            None,
+            |_, m, xs| Ok(m.predict(xs)?.insert_axis(Axis(1))),
+        )?;
+        let meta = with_passthrough(meta, x, self.passthrough)?;
+        let final_model = self.final_estimator.fit(meta.view(), y)?;
+        Ok(StackingRegressorFit {
+            models,
+            final_model,
+            passthrough: self.passthrough,
+        })
+    }
+}
+
+impl StackingRegressorFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let cols = self
+            .models
+            .iter()
+            .map(|m| Ok(m.predict(x)?.insert_axis(Axis(1))))
+            .collect::<Result<Vec<_>>>()?;
+        let views: Vec<_> = cols.iter().map(|c| c.view()).collect();
+        let meta = ndarray::concatenate(Axis(1), &views).map_err(|e| err(e.to_string()))?;
+        self.final_model
+            .predict(with_passthrough(meta, x, self.passthrough)?.view())
+    }
+}
+
+/// sklearn's `StackingClassifier`: the labels are encoded `0..k` for the
+/// base and final estimators.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct StackingClassifierConfig {
+    pub estimators: Vec<EstimatorSpec>,
+    pub final_estimator: EstimatorSpec,
+    pub cv: usize,
+    pub passthrough: bool,
+    pub stack_method: StackMethod,
+}
+
+impl Default for StackingClassifierConfig {
+    fn default() -> Self {
+        Self {
+            estimators: Vec::new(),
+            final_estimator: EstimatorSpec {
+                estimator: "LogisticRegressor".into(),
+                estimator_params: empty_params(),
+            },
+            cv: 5,
+            passthrough: false,
+            stack_method: StackMethod::Auto,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StackingClassifierFit {
+    classes: Vec<f64>,
+    models: Vec<RegistryFitted>,
+    methods: Vec<StackMethod>,
+    final_model: RegistryFitted,
+    passthrough: bool,
+}
+
+impl StackingClassifierConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<StackingClassifierFit> {
+        check_cv("StackingClassifier", self.cv)?;
+        let (classes, idx) = encode(y)?;
+        let y_enc: Array1<f64> = idx.iter().map(|&i| i as f64).collect();
+        let splits = anofox_ml_core::stratified_k_fold_ordered(&y_enc, self.cv)?;
+        // The stack method of each base estimator, from its fit on all rows.
+        let full = self
+            .estimators
+            .iter()
+            .map(|s| s.fit(x, y_enc.view()))
+            .collect::<Result<Vec<_>>>()?;
+        let methods = full
+            .iter()
+            .map(|m| self.stack_method.resolve(m))
+            .collect::<Result<Vec<_>>>()?;
+        let n_classes = classes.len();
+        let (meta, models) = stack(
+            "StackingClassifier",
+            &self.estimators,
+            x,
+            y_enc.view(),
+            &splits,
+            Some(full),
+            |k, m, xs| methods[k].features(m, xs, n_classes),
+        )?;
+        let meta = with_passthrough(meta, x, self.passthrough)?;
+        let final_model = self.final_estimator.fit(meta.view(), y_enc.view())?;
+        Ok(StackingClassifierFit {
+            classes,
+            models,
+            methods,
+            final_model,
+            passthrough: self.passthrough,
+        })
+    }
+}
+
+impl StackingClassifierFit {
+    fn meta(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        let blocks = self
+            .models
+            .iter()
+            .zip(&self.methods)
+            .map(|(m, method)| method.features(m, x, self.classes.len()))
+            .collect::<Result<Vec<_>>>()?;
+        let views: Vec<_> = blocks.iter().map(|b| b.view()).collect();
+        let meta = ndarray::concatenate(Axis(1), &views).map_err(|e| err(e.to_string()))?;
+        with_passthrough(meta, x, self.passthrough)
+    }
+
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let encoded = self.final_model.predict(self.meta(x)?.view())?;
+        encoded
+            .iter()
+            .map(|&v| {
+                self.classes
+                    .get(v as usize)
+                    .copied()
+                    .ok_or_else(|| err(format!("final estimator predicted an unknown class {v}")))
+            })
+            .collect()
+    }
+
+    pub fn predict_proba(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        self.final_model.predict_proba(self.meta(x)?.view())
+    }
+}
