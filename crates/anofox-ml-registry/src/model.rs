@@ -135,6 +135,20 @@ pub trait DynModel: Send + Sync {
     ) -> Result<()> {
         Err(unsupported(self.kind(), "warm_start"))
     }
+    /// Fold the batch `(x, y)` into the model (sklearn's `partial_fit`): an
+    /// unfitted model starts from the batch, a fitted one continues, and
+    /// [`DynModel::fit`] starts over. `y` is `None` for the unsupervised
+    /// kinds; `classes` names a classifier's classes on its first batch. On
+    /// error the fitted model is unchanged.
+    fn partial_fit<'a>(
+        &mut self,
+        _x: ArrayView2<'a, f64>,
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
+        _classes: Option<&[f64]>,
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "partial_fit"))
+    }
     /// Fit with an explicit validation set for early stopping (sklearn's
     /// HistGradientBoosting `fit(X, y, sample_weight, X_val=, y_val=,
     /// sample_weight_val=)`).
@@ -262,7 +276,8 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// receives `|m, x, k|` and returns `(distances, indices)`; `labels` /
 /// `embedding` / `feature_importances` receive only `m` and return the
 /// array; `warm_start` receives `|c, prev, x, y, w|` (a copy of the fitted
-/// model as `prev`) and returns the new fitted model;
+/// model as `prev`) and returns the new fitted model; `partial_fit`
+/// receives `|c, prev, x, y, w, classes|` (`prev`: the fitted model, if any);
 /// `fit_with_validation` receives `|c, x, y, w, x_val, y_val, w_val|`.
 /// Every entry gets `set_params`.
 macro_rules! registry {
@@ -272,7 +287,7 @@ macro_rules! registry {
             config: $cfg:ty = $default:expr,
             fitted: $fitted:ty,
             fit: |$c:ident, $x:ident, $y:ident, $w:ident| $fit:expr,
-            $( $cap:ident : |$m:ident $(, $cx:ident $(, $ca:ident $(, $cy:ident, $cw:ident $(, $cvx:ident, $cvy:ident)?)?)?)?| $body:expr ),* $(,)?
+            $( $cap:ident : |$m:ident $(, $cx:ident $(, $ca:ident $(, $cy:ident, $cw:ident $(, $cvx:ident $(, $cvy:ident)?)?)?)?)?| $body:expr ),* $(,)?
         }
     )*) => {
         $(
@@ -329,7 +344,7 @@ macro_rules! registry {
                         $crate::model::config_from_params(stringify!($kind), current, params)?;
                     Ok(())
                 }
-                $( registry!(@cap $kind, $cap, $m $(, $cx $(, $ca $(, $cy, $cw $(, $cvx, $cvy)?)?)?)?, $body); )*
+                $( registry!(@cap $kind, $cap, $m $(, $cx $(, $ca $(, $cy, $cw $(, $cvx $(, $cvy)?)?)?)?)?, $body); )*
             }
         )*
 
@@ -427,6 +442,24 @@ macro_rules! registry {
                 .fitted
                 .clone()
                 .ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    (@cap $kind:ident, partial_fit, $c:ident, $prev:ident, $x:ident, $y:ident, $w:ident,
+     $cl:ident, $body:expr) => {
+        #[allow(unused_variables)]
+        fn partial_fit<'a>(
+            &mut self,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
+            $cl: Option<&[f64]>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $prev = self.0.fitted.clone();
             let $c = &self.0.config;
             self.0.fitted = Some($body?);
             Ok(())

@@ -15,6 +15,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 - `DynModel::kneighbors(x, k)` (#125) for KnnClassifier and KnnRegressor:
   distances and training-row indices, `n × k` each, nearest first
   (`k = None`: the model's `n_neighbors`).
+- `DynModel::partial_fit(x, y, sample_weight, classes)` (#125) for the five
+  naive Bayes kinds, StandardScaler, MinMaxScaler, MaxAbsScaler,
+  IncrementalPca (batches give the same model as one fit), SgdClassifier,
+  SgdRegressor, PassiveAggressiveRegressor, MlpClassifier and MlpRegressor
+  (one epoch per batch). A failed batch leaves the model unchanged.
 
 ## [0.4.0] - 2026-11-06
 

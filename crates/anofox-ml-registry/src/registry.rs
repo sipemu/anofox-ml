@@ -5,7 +5,7 @@
 
 use anofox_ml_core::{
     DecisionFunction, Fit, FitUnsupervised, FitUnsupervisedWeighted, FitWeighted, InverseTransform,
-    Predict, PredictLogProba, PredictProba, Result, Transform,
+    PartialFit, PartialFitUnsupervised, Predict, PredictLogProba, PredictProba, Result, Transform,
 };
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
@@ -1012,12 +1012,16 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         decision_function: |m, x| m.decision_function(x),
+        partial_fit: |c, prev, x, y, w, cl| no_weight(K, w)
+            .and_then(|_| PartialFit::partial_fit_view(c, prev, x, need_y(K, y)?, cl)),
     }
     SgdRegressor {
         config: linear::SgdRegressor = Default::default(),
         fitted: linear::FittedSgdRegressor<f64>,
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        partial_fit: |c, prev, x, y, w, cl| no_weight(K, w)
+            .and_then(|_| PartialFit::partial_fit_view(c, prev, x, need_y(K, y)?, cl)),
     }
     PassiveAggressiveClassifier {
         config: linear::PassiveAggressiveClassifier = Default::default(),
@@ -1031,6 +1035,8 @@ registry! {
         fitted: linear::FittedPassiveAggressiveRegressor,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        partial_fit: |c, prev, x, y, w, cl| no_weight(K, w)
+            .and_then(|_| PartialFit::partial_fit_view(c, prev, x, need_y(K, y)?, cl)),
     }
 
     // ------------------------------------------------------ regression
@@ -1189,6 +1195,7 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
+        partial_fit: |c, prev, x, y, w, cl| c.partial_fit_weighted(prev, x, need_y(K, y)?, cl, w),
     }
     MultinomialNB {
         config: nb::MultinomialNB = Default::default(),
@@ -1197,6 +1204,7 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
+        partial_fit: |c, prev, x, y, w, cl| c.partial_fit_weighted(prev, x, need_y(K, y)?, cl, w),
     }
     BernoulliNB {
         config: nb::BernoulliNB = Default::default(),
@@ -1205,6 +1213,7 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
+        partial_fit: |c, prev, x, y, w, cl| c.partial_fit_weighted(prev, x, need_y(K, y)?, cl, w),
     }
     ComplementNB {
         config: nb::ComplementNB = Default::default(),
@@ -1213,6 +1222,7 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
+        partial_fit: |c, prev, x, y, w, cl| c.partial_fit_weighted(prev, x, need_y(K, y)?, cl, w),
     }
     CategoricalNB {
         config: nb::CategoricalNB = Default::default(),
@@ -1221,6 +1231,7 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
+        partial_fit: |c, prev, x, y, w, cl| c.partial_fit_weighted(prev, x, need_y(K, y)?, cl, w),
     }
 
     // ------------------------------------------------------- neighbors
@@ -1288,12 +1299,16 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
+        partial_fit: |c, prev, x, y, w, cl| no_weight(K, w)
+            .and_then(|_| PartialFit::partial_fit_view(c, prev, x, need_y(K, y)?, cl)),
     }
     MlpRegressor {
         config: nn::MlpRegressor = Default::default(),
         fitted: nn::FittedMlpRegressor<f64>,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+        partial_fit: |c, prev, x, y, w, cl| no_weight(K, w)
+            .and_then(|_| PartialFit::partial_fit_view(c, prev, x, need_y(K, y)?, cl)),
     }
 
     // --------------------------------------------------- preprocessing
@@ -1303,6 +1318,7 @@ registry! {
         fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
+        partial_fit: |c, prev, x, y, w, cl| PartialFitUnsupervised::partial_fit_weighted_view(c, prev, x, w),
     }
     MinMaxScaler {
         config: pre::MinMaxScaler<f64> = Default::default(),
@@ -1310,6 +1326,7 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
+        partial_fit: |c, prev, x, y, w, cl| PartialFitUnsupervised::partial_fit_weighted_view(c, prev, x, w),
     }
     MaxAbsScaler {
         config: pre::MaxAbsScaler = Default::default(),
@@ -1317,6 +1334,7 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
+        partial_fit: |c, prev, x, y, w, cl| PartialFitUnsupervised::partial_fit_weighted_view(c, prev, x, w),
     }
     RobustScaler {
         config: pre::RobustScaler = Default::default(),
@@ -1430,6 +1448,7 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
+        partial_fit: |c, prev, x, y, w, cl| PartialFitUnsupervised::partial_fit_weighted_view(c, prev, x, w),
     }
     KernelPca {
         config: pre::KernelPca = pre::KernelPca::new(2, pre::KpcaKernel::Linear),
