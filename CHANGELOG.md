@@ -46,6 +46,9 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `{estimator, estimator_params}` (sklearn's `Bagging*(estimator=...)`),
   with the tree bagging kinds' sampling settings. The existing
   `BaggingRegressor` / `BaggingClassifier` kinds are unchanged.
+- `VotingRegressor` / `VotingClassifier` in the registry (#125), over a
+  list of `{estimator, estimator_params}` with optional `weights` and
+  (classifier) `voting: "hard" | "soft"`, matching scikit-learn 1.8.
 
 ## [0.4.0] - 2026-11-06
 

@@ -919,6 +919,25 @@ registry! {
     }
 
     // -------------------------------------------------- meta-estimators
+    VotingRegressor {
+        config: crate::meta::VotingRegressorConfig = Default::default(),
+        fitted: crate::meta::VotingRegressorFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+    }
+    VotingClassifier {
+        config: crate::meta::VotingClassifierConfig = Default::default(),
+        fitted: crate::meta::VotingClassifierFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+    }
     OneVsRestClassifier {
         config: crate::meta::OneVsRestConfig = Default::default(),
         fitted: crate::meta::OneVsRestFit,
