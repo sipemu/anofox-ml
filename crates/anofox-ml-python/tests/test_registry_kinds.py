@@ -349,3 +349,17 @@ def test_latent_dirichlet_allocation_matches_sklearn(method):
     np.testing.assert_allclose(ours.components_, ref.components_, rtol=1e-10)
     np.testing.assert_allclose(ours.transform(counts), ref.transform(counts), atol=1e-10)
     assert ours.bound_ == pytest.approx(ref.bound_, rel=1e-10)
+
+
+@pytest.mark.parametrize("init", ["random", "k-means++"])
+def test_bisecting_kmeans_matches_sklearn(init):
+    from sklearn.cluster import BisectingKMeans
+
+    kw = dict(n_clusters=4, init=init, random_state=6)
+    w = np.linspace(0.5, 1.5, 60)
+    ours = am.BisectingKMeans(**kw).fit(X, sample_weight=w)
+    ref = BisectingKMeans(**kw).fit(X, sample_weight=w)
+    np.testing.assert_array_equal(ours.labels_, ref.labels_)
+    np.testing.assert_allclose(ours.cluster_centers_, ref.cluster_centers_, atol=1e-10)
+    assert ours.inertia_ == pytest.approx(ref.inertia_, rel=1e-10)
+    np.testing.assert_array_equal(ours.predict(X + 0.1), ref.predict(X + 0.1))

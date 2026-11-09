@@ -8,6 +8,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `BisectingKMeans` (`anofox-ml-cluster`): sklearn's bisection tree
+  (`biggest_inertia` / `largest_cluster`) over sequential Lloyd 2-means on
+  the centred data, with `random` / `k-means++` inits from numpy's
+  `RandomState`; seeded (weighted) fits give scikit-learn 1.8's labels,
+  centres, inertia and `predict` (`gen_bisecting_kmeans.py`). Registry kind
+  and Python class.
+
 - `LatentDirichletAllocation` (`anofox-ml-preprocessing`): variational
   Bayes, batch and online, with sklearn's `RandomState` gamma draws and
   its Cython digamma, so seeded fits (components, `transform`, `bound_`,

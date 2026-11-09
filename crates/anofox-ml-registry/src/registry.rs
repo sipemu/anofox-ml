@@ -2082,6 +2082,13 @@ registry! {
         predict: |m, x| m.predict(x),
         labels: |m| m.labels().clone(),
     }
+    BisectingKMeans {
+        config: cluster::BisectingKMeans = Default::default(),
+        fitted: cluster::FittedBisectingKMeans,
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
+        predict: |m, x| m.predict(x).map(|l| l.mapv(|v| v as f64)),
+        labels: |m| m.labels.mapv(|v| v as f64),
+    }
     MiniBatchKMeans {
         config: cluster::MiniBatchKMeans = Default::default(),
         fitted: cluster::FittedMiniBatchKMeans<f64>,

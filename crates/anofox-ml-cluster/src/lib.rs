@@ -40,6 +40,7 @@ pub mod affinity_propagation;
 pub mod agglomerative;
 pub mod bgmm;
 pub mod birch;
+pub mod bisecting_kmeans;
 pub mod dbscan;
 pub mod gmm;
 pub mod hdbscan;
@@ -58,6 +59,9 @@ pub use agglomerative::{
 };
 pub use bgmm::{BayesianGaussianMixture, FittedBayesianGaussianMixture};
 pub use birch::{Birch, FittedBirch};
+pub use bisecting_kmeans::{
+    BisectingInit, BisectingKMeans, BisectingStrategy, FittedBisectingKMeans,
+};
 pub use dbscan::{Dbscan, FittedDbscan};
 pub use gmm::{CovarianceType, FittedGaussianMixture, GaussianMixture, MixtureInit};
 pub use hdbscan::{ClusterSelectionMethod, FittedHdbscan, Hdbscan};

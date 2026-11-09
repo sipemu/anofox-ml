@@ -4264,3 +4264,36 @@ class LatentDirichletAllocation(TransformerMixin, BaseEstimator):
     bound_ = property(lambda self: float(self._fitted_state()["bound"]))
     doc_topic_prior_ = property(lambda self: float(self._fitted_state()["doc_topic_prior"]))
     topic_word_prior_ = property(lambda self: float(self._fitted_state()["topic_word_prior"]))
+
+
+class BisectingKMeans(ClusterMixin, BaseEstimator):
+    """Divisive k-means: split the leaf with the largest inertia (or the
+    most rows) by 2-means until ``n_clusters`` leaves remain. A seeded fit
+    draws its inits from numpy's ``RandomState`` in sklearn's order and
+    equals sklearn's."""
+
+    _kind = "BisectingKMeans"
+
+    def __init__(self, n_clusters=8, *, init="random", n_init=1, random_state=None,
+                 max_iter=300, tol=1e-4, bisecting_strategy="biggest_inertia"):
+        self.n_clusters = n_clusters
+        self.init = init
+        self.n_init = n_init
+        self.random_state = random_state
+        self.max_iter = max_iter
+        self.tol = tol
+        self.bisecting_strategy = bisecting_strategy
+
+    def _rust_params(self, X, y):
+        return {"n_clusters": int(self.n_clusters),
+                "init": _choice(self.init, {"random": "Random",
+                                            "k-means++": "KMeansPlusPlus"}, "init"),
+                "n_init": int(self.n_init), "max_iter": int(self.max_iter),
+                "tol": float(self.tol),
+                "bisecting_strategy": _choice(self.bisecting_strategy, {
+                    "biggest_inertia": "BiggestInertia",
+                    "largest_cluster": "LargestCluster"}, "bisecting_strategy"),
+                "seed": _seed(self.random_state) % 2**32}
+
+    cluster_centers_ = property(lambda self: _nd(self._fitted_state()["cluster_centers"]))
+    inertia_ = property(lambda self: float(self._fitted_state()["inertia"]))
