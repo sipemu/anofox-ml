@@ -320,3 +320,19 @@ def test_nca_reaches_sklearns_objective():
         # be at least as good, to well within one row.
         assert objective(ours.components_) >= objective(ref.components_) - 0.5
         assert ours.transform(X).shape == (60, params.get("n_components", 4))
+
+
+def test_bernoulli_rbm_matches_sklearn():
+    from sklearn.neural_network import BernoulliRBM
+
+    V = (X > 0.3).astype(float)
+    kw = dict(n_components=5, batch_size=7, n_iter=4, random_state=2)
+    ours, ref = am.BernoulliRBM(**kw).fit(V), BernoulliRBM(**kw).fit(V)
+    np.testing.assert_allclose(ours.components_, ref.components_, atol=1e-12)
+    np.testing.assert_allclose(ours.transform(V), ref.transform(V), atol=1e-12)
+    np.testing.assert_allclose(ours.score_samples(V), ref.score_samples(V), atol=1e-10)
+    ours, ref = am.BernoulliRBM(**kw), BernoulliRBM(**kw)
+    for rows in np.array_split(np.arange(60), 4):
+        ours.partial_fit(V[rows])
+        ref.partial_fit(V[rows])
+    np.testing.assert_allclose(ours.components_, ref.components_, atol=1e-12)

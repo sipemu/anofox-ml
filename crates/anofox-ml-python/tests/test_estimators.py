@@ -60,6 +60,8 @@ SPECIAL = {
     "SparseRandomProjection": dict(params=dict(n_components=2)),
     "BinomialRegressor": dict(y=1 / (1 + np.exp(-y_reg))),
     "NeighborhoodComponentsAnalysis": dict(y=y_multi),
+    "BernoulliRBM": dict(X=(X > 0).astype(float), params=dict(n_components=3,
+                                                                 random_state=0)),
     "FeatureHasher": dict(X=[{"a": 1.0, "b": 2.0}, {"c": "x"}, {"a": -1.0}, {}],
                           params=dict(n_features=16)),
     "CountVectorizer": dict(X=["a fox", "the dog", "the fox ran", "dogs run"]),
