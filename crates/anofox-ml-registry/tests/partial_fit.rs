@@ -172,6 +172,7 @@ fn epoch_kinds_follow_the_crates_state_chain() {
 fn exactly_the_incremental_kinds_list_it() {
     let mut expected = vec![
         "BernoulliNB",
+        "BernoulliRbm",
         "CategoricalNB",
         "ComplementNB",
         "GaussianNB",
