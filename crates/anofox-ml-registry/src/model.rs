@@ -567,6 +567,7 @@ macro_rules! registry {
         }
     };
     (@cap $kind:ident, fit_text, $c:ident, $docs:ident, $body:expr) => {
+        #[allow(unused_variables)]
         fn fit_text(&mut self, $docs: &[&str]) -> anofox_ml_core::Result<()> {
             let $c = &self.0.config;
             self.0.fitted = Some($body?);
