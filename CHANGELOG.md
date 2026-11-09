@@ -18,6 +18,21 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   the default was a fixed 0.03. Python: `learning_rate=None` now means the
   automatic rate. Matches catboost 1.2.10 on 6 golden cases.
 
+### CatBoost-style boosting: faster Logloss leaf estimation (#157, part)
+
+- The Logloss leaf estimation (10 backtracked Newton steps by default from
+  200 iterations or 20 features on) caches `exp(a)` and `FastLogf(exp(a))`
+  of the current approximations for its metric and derivatives instead of
+  recomputing them every evaluation. Same results; a 20k × 10 Logloss fit
+  with 200 iterations went from 3.0 s to 1.95 s (catboost single-threaded:
+  0.76 s).
+- `thread_count` (CatBoost's name; Python `thread_count=-1`): a fit runs on
+  the physical cores by default, like the LGBM engine's `n_jobs`, instead
+  of every logical thread of the rayon pool (slower on SMT / hybrid CPUs).
+  With the plain-boosting histogram fast path, the same 20k × 10 fits now
+  take 0.56 s (RMSE; catboost single-threaded 0.60 s) and 1.32 s (Logloss).
+  The model does not depend on the thread count.
+
 ### CatBoost-style boosting: Depthwise and Lossguide trees (#154)
 
 - `grow_policy` (`SymmetricTree` default, `Depthwise`, `Lossguide`),
@@ -31,6 +46,9 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   generator's draws in CatBoost's order, Lossguide's libc++
   `priority_queue` by gain, and CatBoost's leaf numbering (the false side
   keeps the leaf's id).
+- Lossguide also takes categorical features with CTRs (simple CTRs, as
+  CatBoost scores non-symmetric trees without combinations, with its model
+  size penalty); Depthwise with CTRs is still rejected.
 - Trees serialize their nodes (`children`); oblivious models are
   unchanged.
 - Matches catboost 1.2.10 to 1.6e-15 on 21 golden cases (RMSE, Logloss,

@@ -644,7 +644,9 @@ class _CatBoost(BaseEstimator):
                  model_shrink_rate=None, model_shrink_mode="Constant", class_weights=None,
                  auto_class_weights=None, loss_function=None, use_best_model=None,
                  early_stopping_rounds=None, od_type=None, od_wait=None, od_pval=None,
-                 grow_policy="SymmetricTree", min_data_in_leaf=1, max_leaves=31):
+                 grow_policy="SymmetricTree", min_data_in_leaf=1, max_leaves=31,
+                 thread_count=-1):
+        self.thread_count = thread_count
         self.grow_policy = grow_policy
         self.min_data_in_leaf = min_data_in_leaf
         self.max_leaves = max_leaves
@@ -733,6 +735,10 @@ class _CatBoost(BaseEstimator):
                                "Lossguide": "Lossguide"}, "grow_policy")
         params["min_data_in_leaf"] = int(self.min_data_in_leaf)
         params["max_leaves"] = int(self.max_leaves)
+        # catboost's -1 (all cores): the physical ones here; the model does not
+        # depend on it.
+        params["thread_count"] = (None if self.thread_count is None or self.thread_count <= 0
+                                  else int(self.thread_count))
         if self.use_best_model is not None:
             params["use_best_model"] = bool(self.use_best_model)
         if self.early_stopping_rounds is not None:

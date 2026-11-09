@@ -1213,7 +1213,54 @@ fn logloss_metric_exp(
     weights: &[f64],
     rows: usize,
 ) -> f64 {
+    let point = exp_point(&approx[..rows]);
+    logloss_metric_exp_at(target, &point, leaves, leaf_of, weights)
+}
+
+/// Every row's `exp(a)` and `FastLogf(exp(a))` (what the Logloss metric
+/// needs of the approximations; cached while they do not move).
+fn exp_point(approx: &[f64]) -> Vec<(f64, f32)> {
+    approx
+        .iter()
+        .map(|a| {
+            let e = a.exp();
+            (e, fast_logf(e as f32))
+        })
+        .collect()
+}
+
+/// [`Loss::all_ders`] of Logloss at approximations given by
+/// [`exp_point`] (the same arithmetic on the cached `exp(a)`).
+fn logloss_ders_at(target: &[f64], point: &[(f64, f32)], weights: &[f64]) -> Ders {
+    let (der, der2) = point
+        .iter()
+        .zip(target)
+        .zip(weights)
+        .map(|((&(e, _), &t), &w)| {
+            let p = e / (1.0 + e);
+            let p = if p.is_nan() { 1.0 } else { p };
+            (w * (t - p), w * (-p * (1.0 - p)))
+        })
+        .unzip();
+    Ders {
+        k: 1,
+        h: 1,
+        der,
+        der2,
+    }
+}
+
+/// [`logloss_metric_exp`] of approximations given by [`exp_point`].
+fn logloss_metric_exp_at(
+    target: &[f64],
+    point: &[(f64, f32)],
+    leaves: &[f64],
+    leaf_of: &[u32],
+    weights: &[f64],
+) -> f64 {
+    let rows = point.len();
     let exp_leaves: Vec<f64> = leaves.iter().map(|v| v.exp()).collect();
+    let log_leaves: Vec<f32> = exp_leaves.iter().map(|&d| fast_logf(d as f32)).collect();
     let (mut s0, mut s1) = (0.0f64, 0.0f64);
     for start in (0..rows).step_by(4096) {
         let end = (start + 4096).min(rows);
@@ -1223,8 +1270,9 @@ fn logloss_metric_exp(
             for lane in 0..4 {
                 let r = i + lane;
                 let prob = if target[r] > 0.5 { 1.0f32 } else { 0.0 };
-                let (e, d) = (approx[r].exp(), exp_leaves[leaf_of[r] as usize]);
-                let non_exp = fast_logf(e as f32) + fast_logf(d as f32);
+                let leaf = leaf_of[r] as usize;
+                let ((e, le), d) = (point[r], exp_leaves[leaf]);
+                let non_exp = le + log_leaves[leaf];
                 let e = e * d;
                 let value = if e > f64::MAX {
                     (1.0 - prob) * non_exp
@@ -1242,10 +1290,11 @@ fn logloss_metric_exp(
         for r in i..end {
             let w = f64::from(weights[r] as f32);
             let prob = if target[r] > 0.5 { 1.0 } else { 0.0 };
-            let (e, d) = (approx[r].exp(), exp_leaves[leaf_of[r] as usize]);
-            let mut non_exp = f64::from(fast_logf(e as f32));
+            let leaf = leaf_of[r] as usize;
+            let ((e, le), d) = (point[r], exp_leaves[leaf]);
+            let mut non_exp = f64::from(le);
             let e = e * d;
-            non_exp += f64::from(fast_logf(d as f32));
+            non_exp += f64::from(log_leaves[leaf]);
             s0 += w * if e.is_finite() {
                 f64::from(fast_logf((1.0 + e) as f32)) - prob * non_exp
             } else {
@@ -2197,6 +2246,16 @@ fn grow_tree(
             .max()
             .unwrap_or(1)
             .max(1);
+        // Plain boosting with one approximation: the taken rows, their
+        // leaves and (weighted derivative, weight), gathered once per level.
+        let plain_rows: Option<(Vec<(u32, u32)>, Vec<(f64, f64)>)> =
+            (!ordered && k == 1 && parts.len() == 1).then(|| {
+                let part = &parts[0];
+                (0..part.tail)
+                    .filter(|&i| sample.taken[i])
+                    .map(|i| ((i as u32, leaf_of[i]), (part.swder[i], sample.weights[i])))
+                    .unzip()
+            });
         // The score of every split of every column.
         let per_column: Vec<Option<Vec<f64>>> = candidates
             .par_iter()
@@ -2210,7 +2269,16 @@ fn grow_tree(
                 }
                 // Per part and dimension: leaves × buckets.
                 let mut hist = vec![BucketStats::default(); parts.len() * k * leaves * nb];
-                for (pi, part) in parts.iter().enumerate() {
+                if let Some((rows, contrib)) = &plain_rows {
+                    // Plain boosting, one approximation: the taken rows in
+                    // order, as the general loop sums them.
+                    for (&(i, leaf), &(swd, sw)) in rows.iter().zip(contrib) {
+                        let h = &mut hist[leaf as usize * nb + column.buckets[i as usize] as usize];
+                        h.swd += swd;
+                        h.sw += sw;
+                    }
+                }
+                for (pi, part) in parts.iter().enumerate().filter(|_| plain_rows.is_none()) {
                     for i in 0..part.tail {
                         if !sample.taken[i] {
                             continue;
@@ -2472,6 +2540,7 @@ fn select_best(
     rng: &mut CatRng,
     score_std: f64,
     score_before: f64,
+    penalty: &dyn Fn(usize) -> f64,
 ) -> Option<(f64, usize, usize)> {
     let mut best: Option<(f64, usize, usize)> = None;
     let mut best_gain = f64::NEG_INFINITY;
@@ -2493,10 +2562,11 @@ fn select_best(
                     chosen = Some((c, s));
                 }
             }
-            let score = val + rng.std_normal() * score_std;
+            let mut score = val + rng.std_normal() * score_std;
             let Some((c, s)) = chosen else {
                 continue;
             };
+            score *= penalty(c);
             let gain = score - score_before;
             if gain > best_gain {
                 best_gain = gain;
@@ -2505,6 +2575,31 @@ fn select_best(
         }
     }
     best
+}
+
+/// CatBoost's `GetCatFeatureWeight` for the candidates: a CTR type not yet
+/// in the model scores `(1 + k / max k)^-model_size_reg` times less.
+fn ctr_penalties(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+    used_ctrs: &std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
+) -> Vec<f64> {
+    let max = candidates
+        .iter()
+        .filter_map(|c| c.get(q).ctr_key.as_ref().map(|(_, k)| *k))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    candidates
+        .iter()
+        .map(|c| match &c.get(q).ctr_key {
+            Some((key, k)) if !used_ctrs.contains(key) => {
+                (1.0 + *k as f64 / max as f64).powf(-model_size_reg)
+            }
+            _ => 1.0,
+        })
+        .collect()
 }
 
 /// A non-symmetric tree's nodes (CatBoost's `TNonSymmetricTreeStructure`):
@@ -2529,8 +2624,11 @@ fn grow_depthwise(
     score_std: f64,
     sample: &Sample,
     min_data: usize,
+    used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
+    let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -2559,7 +2657,11 @@ fn grow_depthwise(
             .collect()
     };
     // `CalcBestScoreAndCandidate`: (gain, best split) of a leaf's stats.
-    let score = |stats: &[Vec<BucketStats>], rows: &[usize], rng: &mut CatRng| {
+    let score = |stats: &[Vec<BucketStats>],
+                 rows: &[usize],
+                 rng: &mut CatRng,
+                 used: &std::collections::HashSet<(Projection, bool)>| {
+        let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
         let noise_seed = rng.gen();
         let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
         // `CalcScoreWithoutSplit`: the leaf's sums (all dimensions).
@@ -2577,7 +2679,15 @@ fn grow_depthwise(
             CatBoostScoreFunction::Cosine => (a * swd) / (1e-100 + a * a * sw).sqrt(),
             CatBoostScoreFunction::L2 => a * swd,
         };
-        let best = select_best(&entries, &scores, noise_seed, rng, score_std, before);
+        let best = select_best(
+            &entries,
+            &scores,
+            noise_seed,
+            rng,
+            score_std,
+            before,
+            &|c| penalties[c],
+        );
         best.map_or((0.0, None), |(s, c, sp)| (s - before, Some((c, sp))))
     };
     let subtract = |parent: &[Vec<BucketStats>], small: &[Vec<BucketStats>]| {
@@ -2600,7 +2710,7 @@ fn grow_depthwise(
     let mut parents: std::collections::VecDeque<Vec<Vec<BucketStats>>> = Default::default();
     let mut current: Vec<usize> = vec![0];
     for _ in 0..depth {
-        for _ in 0..q.draws.0 {
+        for _ in 0..level_draws {
             rng.real1();
         }
         let mut next_level = Vec::new();
@@ -2625,9 +2735,9 @@ fn grow_depthwise(
                 p
             } else if even && next_considered && trick && size <= next_size {
                 let small = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&small, &rows_of[current[id]], rng);
+                let (g, b) = score(&small, &rows_of[current[id]], rng, used_ctrs);
                 let large = subtract(&parents[0], &small);
-                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng);
+                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng, used_ctrs);
                 parents.pop_front();
                 push(&mut parents, g, &b, small);
                 push(&mut parents, g2, &b2, large);
@@ -2635,9 +2745,9 @@ fn grow_depthwise(
                 (g, b)
             } else if even && next_considered && trick {
                 let small = stats_of(&rows_of[current[id + 1]]);
-                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng);
+                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng, used_ctrs);
                 let large = subtract(&parents[0], &small);
-                let (g, b) = score(&large, &rows_of[current[id]], rng);
+                let (g, b) = score(&large, &rows_of[current[id]], rng, used_ctrs);
                 parents.pop_front();
                 push(&mut parents, g, &b, large);
                 push(&mut parents, g2, &b2, small);
@@ -2645,7 +2755,7 @@ fn grow_depthwise(
                 (g, b)
             } else {
                 let st = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&st, &rows_of[current[id]], rng);
+                let (g, b) = score(&st, &rows_of[current[id]], rng, used_ctrs);
                 parents.pop_front();
                 if trick {
                     push(&mut parents, g, &b, st);
@@ -2677,6 +2787,9 @@ fn grow_depthwise(
             leaf_parent.push(node);
             splits.push((candidates[c].clone(), s));
             let column = candidates[c].get(q);
+            if let Some((key, _)) = &column.ctr_key {
+                used_ctrs.insert(key.clone());
+            }
             let (right, left): (Vec<usize>, Vec<usize>) = rows_of[leaf]
                 .iter()
                 .partition(|&&i| column.goes_right(column.buckets[i], s));
@@ -2724,8 +2837,11 @@ fn grow_lossguide(
     score_std: f64,
     sample: &Sample,
     min_data: usize,
+    used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
+    let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -2754,7 +2870,11 @@ fn grow_lossguide(
             })
             .collect()
     };
-    let score = |stats: &[Vec<BucketStats>], rows: &[usize], rng: &mut CatRng| {
+    let score = |stats: &[Vec<BucketStats>],
+                 rows: &[usize],
+                 rng: &mut CatRng,
+                 used: &std::collections::HashSet<(Projection, bool)>| {
+        let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
         let noise_seed = rng.gen();
         let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
         let (mut swd, mut sw) = (0.0, 0.0);
@@ -2771,8 +2891,16 @@ fn grow_lossguide(
             CatBoostScoreFunction::Cosine => (a * swd) / (1e-100 + a * a * sw).sqrt(),
             CatBoostScoreFunction::L2 => a * swd,
         };
-        select_best(&entries, &scores, noise_seed, rng, score_std, before)
-            .map(|(s, c, sp)| (s - before, c, sp))
+        select_best(
+            &entries,
+            &scores,
+            noise_seed,
+            rng,
+            score_std,
+            before,
+            &|c| penalties[c],
+        )
+        .map(|(s, c, sp)| (s - before, c, sp))
     };
     let subtract = |parent: &[Vec<BucketStats>], small: &[Vec<BucketStats>]| {
         parent
@@ -2812,11 +2940,11 @@ fn grow_lossguide(
         }
     };
     if max_depth > 0 && rows_of[0].len() >= min_data {
-        for _ in 0..q.draws.0 {
+        for _ in 0..level_draws {
             rng.real1();
         }
         let st = stats_of(&rows_of[0]);
-        let best = score(&st, &rows_of[0], rng);
+        let best = score(&st, &rows_of[0], rng, used_ctrs);
         offer(&mut queue, &mut store, 0, best, st);
     }
     while !queue.0.is_empty() && children.len() + 1 < max_leaves {
@@ -2839,6 +2967,9 @@ fn grow_lossguide(
         leaf_parent.push(node);
         splits.push((candidates[cand.column].clone(), cand.split));
         let column = candidates[cand.column].get(q);
+        if let Some((key, _)) = &column.ctr_key {
+            used_ctrs.insert(key.clone());
+        }
         let (right, left): (Vec<usize>, Vec<usize>) = rows_of[leaf]
             .iter()
             .partition(|&&i| column.goes_right(column.buckets[i], cand.split));
@@ -2855,7 +2986,7 @@ fn grow_lossguide(
         if !need_l && !need_r {
             continue;
         }
-        for _ in 0..q.draws.0 {
+        for _ in 0..level_draws {
             rng.real1();
         }
         let direct = !trick || need_l != need_r;
@@ -2864,19 +2995,19 @@ fn grow_lossguide(
         let (mut lb, mut rb) = (None, None);
         if need_l && l_direct {
             ls = stats_of(&rows_of[l]);
-            lb = score(&ls, &rows_of[l], rng);
+            lb = score(&ls, &rows_of[l], rng, used_ctrs);
         }
         if need_r && r_direct {
             rs = stats_of(&rows_of[r]);
-            rb = score(&rs, &rows_of[r], rng);
+            rb = score(&rs, &rows_of[r], rng, used_ctrs);
         }
         if need_l && !l_direct {
             ls = subtract(&store[cand.stats], &rs);
-            lb = score(&ls, &rows_of[l], rng);
+            lb = score(&ls, &rows_of[l], rng, used_ctrs);
         }
         if need_r && !r_direct {
             rs = subtract(&store[cand.stats], &ls);
-            rb = score(&rs, &rows_of[r], rng);
+            rb = score(&rs, &rows_of[r], rng, used_ctrs);
         }
         if need_l {
             offer(&mut queue, &mut store, l, lb, ls);
@@ -3107,21 +3238,42 @@ fn estimate_leaves(
     }
     let mut steps = 0;
     let backtracking = p.backtracking && p.leaf_iterations > 1;
-    let metric = |approx: &[f64], leaves: &[f64]| {
-        lp.loss
-            .metric_with_leaves(lp.target, approx, leaves, lp.leaf_of, lp.weights, rows)
+    // Logloss: the approximations' exponentials and logarithms, cached for
+    // the base and the current point (the metric is evaluated many times).
+    let logloss = lp.loss == Loss::Logloss;
+    let base_exp = if logloss && !lp.moving {
+        exp_point(&lp.approx[..rows])
+    } else {
+        Vec::new()
+    };
+    let mut point_exp: Vec<(f64, f32)> = Vec::new();
+    let metric = |approx: &[f64], leaves: &[f64], cached: &[(f64, f32)]| {
+        if logloss {
+            logloss_metric_exp_at(lp.target, cached, leaves, lp.leaf_of, lp.weights)
+        } else {
+            lp.loss
+                .metric_with_leaves(lp.target, approx, leaves, lp.leaf_of, lp.weights, rows)
+        }
     };
     let mut total = vec![0.0; n_leaves * k];
     let mut point = lp.approx[..rows * k].to_vec();
+    if logloss && backtracking && lp.moving {
+        point_exp = exp_point(&point);
+    }
     let mut value = if backtracking {
-        metric(&point, &total)
+        let cached = if lp.moving { &point_exp } else { &base_exp };
+        metric(&point, &total, cached)
     } else {
         0.0
     };
     let mut it = 0;
     while it < p.leaf_iterations {
         steps += 1;
-        let ders = lp.loss.all_ders(lp.target, &point, lp.weights, rows);
+        let ders = if logloss && !point_exp.is_empty() {
+            logloss_ders_at(lp.target, &point_exp, lp.weights)
+        } else {
+            lp.loss.all_ders(lp.target, &point, lp.weights, rows)
+        };
         let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
         let mut step = vec![0.0; n_leaves * k];
         if lp.orders.is_empty() {
@@ -3178,14 +3330,17 @@ fn estimate_leaves(
         loop {
             let scaled: Vec<f64> = step.iter().map(|&v| scale * v).collect();
             let after = if lp.moving {
-                metric(&point, &scaled)
+                metric(&point, &scaled, &point_exp)
             } else {
                 let candidate: Vec<f64> = total.iter().zip(&scaled).map(|(t, s)| t + s).collect();
-                metric(lp.approx, &candidate)
+                metric(lp.approx, &candidate, &base_exp)
             };
             if after < value {
                 value = after;
                 take(&scaled, &mut total, &mut point);
+                if logloss && lp.moving {
+                    point_exp = exp_point(&point);
+                }
                 accepted(&scaled, &mut sums);
                 break;
             }
@@ -3930,6 +4085,8 @@ fn boost(
                 std,
                 &sample,
                 p.min_data_in_leaf,
+                &mut used_ctrs,
+                p.model_size_reg,
             )
         } else if p.grow_policy == CatBoostGrowPolicy::Depthwise {
             grow_depthwise(
@@ -3942,6 +4099,8 @@ fn boost(
                 std,
                 &sample,
                 p.min_data_in_leaf,
+                &mut used_ctrs,
+                p.model_size_reg,
             )
         } else {
             let (splits, _) = grow_tree(
@@ -4320,6 +4479,11 @@ macro_rules! catboost_config {
             pub min_data_in_leaf: usize,
             /// Lossguide: the most leaves of a tree (default 31).
             pub max_leaves: usize,
+            /// Threads of a fit (CatBoost's `thread_count`): `None` = the
+            /// physical cores (at most the current rayon pool's), which on
+            /// SMT / hybrid CPUs beats all logical ones. The model does not
+            /// depend on it.
+            pub thread_count: Option<usize>,
             $($($(#[$fdoc])* pub $field: $fty,)*)?
         }
 
@@ -4360,6 +4524,7 @@ macro_rules! catboost_config {
                     grow_policy: CatBoostGrowPolicy::SymmetricTree,
                     min_data_in_leaf: 1,
                     max_leaves: 31,
+                    thread_count: None,
                     $($($field: $fdef,)*)?
                 }
             }
@@ -4519,6 +4684,10 @@ macro_rules! catboost_config {
                 self.grow_policy = g;
                 self
             }
+            pub fn with_thread_count(mut self, n: Option<usize>) -> Self {
+                self.thread_count = n;
+                self
+            }
             pub fn with_max_leaves(mut self, n: usize) -> Self {
                 self.max_leaves = n;
                 self
@@ -4676,8 +4845,11 @@ macro_rules! catboost_config {
                 if self.boosting_type == CatBoostBoostingType::Ordered {
                     return invalid("Depthwise / Lossguide trees need plain boosting");
                 }
-                if has_ctrs {
-                    return invalid("Depthwise / Lossguide trees support numeric and one-hot features only");
+                // Depthwise with CTRs does not match CatBoost yet (#154).
+                if has_ctrs && self.grow_policy == CatBoostGrowPolicy::Depthwise {
+                    return invalid(
+                        "Depthwise trees support numeric and one-hot features only (Lossguide also CTRs)",
+                    );
                 }
                 if self.monotone_constraints.iter().any(|&m| m != 0) {
                     return invalid("Depthwise / Lossguide trees do not support monotone constraints");
@@ -5058,16 +5230,18 @@ impl CatBoostRegressor {
             use_best_model: use_best,
             ..p
         };
-        let b = boost(
-            &q,
-            &target,
-            &weights,
-            &[bias],
-            loss,
-            p,
-            rng,
-            eval_set.as_ref(),
-        );
+        let b = crate::lgbm::with_fit_threads(self.thread_count, || {
+            boost(
+                &q,
+                &target,
+                &weights,
+                &[bias],
+                loss,
+                p,
+                rng,
+                eval_set.as_ref(),
+            )
+        });
         Ok(FittedCatBoostRegressor {
             trees: b.trees,
             ctrs: b.ctrs,
@@ -5329,16 +5503,18 @@ impl CatBoostClassifier {
             use_best_model: use_best,
             ..p
         };
-        let b = boost(
-            &q,
-            &target,
-            &weights,
-            &bias,
-            loss,
-            p,
-            rng,
-            eval_set.as_ref(),
-        );
+        let b = crate::lgbm::with_fit_threads(self.thread_count, || {
+            boost(
+                &q,
+                &target,
+                &weights,
+                &bias,
+                loss,
+                p,
+                rng,
+                eval_set.as_ref(),
+            )
+        });
         Ok(FittedCatBoostClassifier {
             trees: b.trees,
             ctrs: b.ctrs,
