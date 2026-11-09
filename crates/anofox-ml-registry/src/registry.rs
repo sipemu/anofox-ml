@@ -1947,6 +1947,13 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    MiniBatchNmf {
+        config: pre::MiniBatchNmf = Default::default(),
+        fitted: pre::FittedMiniBatchNmf,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+        embedding: |m| m.w.clone(),
+    }
     Nmf {
         config: pre::Nmf = pre::Nmf::new(2),
         fitted: pre::FittedNmf,

@@ -8,6 +8,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `MiniBatchNmf` (`anofox-ml-preprocessing`, sklearn's `MiniBatchNMF`
+  without `fresh_restarts`): online multiplicative updates over contiguous
+  batches with the decayed `A / B` accumulators and sklearn's stopping
+  rules (`‖ΔH‖ / ‖H‖`, EWA cost); `transform` is `_solve_W`. With the
+  NNDSVDa init, `W`, `H`, `n_steps_`, the error and `transform` match
+  scikit-learn 1.8 (`gen_minibatch_nmf.py`, Frobenius and KL, with
+  regularisation). Registry kind (`transform`, training `W` as
+  `embedding`) and Python class. The NMF init moves into `nmf::initial_wh`.
+
 - `SparsePca` (`anofox-ml-preprocessing`, sklearn's `SparsePCA`,
   `method="lars"`): sklearn's dictionary learning (SVD start, LassoLars
   codes, in-place atom updates, closing `svd_flip`) and ridge `transform`.
