@@ -149,6 +149,21 @@ pub trait DynModel: Send + Sync {
     ) -> Result<()> {
         Err(unsupported(self.kind(), "partial_fit"))
     }
+    /// Fit with an offset on the link scale (the GLMs; `ln(exposure)` for a
+    /// log link). [`DynModel::predict`] then predicts at offset 0.
+    fn fit_with_offset<'a>(
+        &mut self,
+        _x: ArrayView2<'a, f64>,
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
+        _offset: ArrayView1<'a, f64>,
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "fit_with_offset"))
+    }
+    /// Predictions with an offset on the link scale (the GLMs).
+    fn predict_with_offset(&self, _x: ArrayView2<f64>, _offset: ArrayView1<f64>) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_with_offset"))
+    }
     /// Fit with an explicit validation set for early stopping (sklearn's
     /// HistGradientBoosting `fit(X, y, sample_weight, X_val=, y_val=,
     /// sample_weight_val=)`).
@@ -278,6 +293,8 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// array; `warm_start` receives `|c, prev, x, y, w|` (a copy of the fitted
 /// model as `prev`) and returns the new fitted model; `partial_fit`
 /// receives `|c, prev, x, y, w, classes|` (`prev`: the fitted model, if any);
+/// `fit_with_offset` receives `|c, x, y, w, offset|`, `predict_with_offset`
+/// `|m, x, offset|`;
 /// `fit_with_validation` receives `|c, x, y, w, x_val, y_val, w_val|`.
 /// Every entry gets `set_params`.
 macro_rules! registry {
@@ -463,6 +480,33 @@ macro_rules! registry {
             let $c = &self.0.config;
             self.0.fitted = Some($body?);
             Ok(())
+        }
+    };
+    (@cap $kind:ident, fit_with_offset, $c:ident, $x:ident, $y:ident, $w:ident, $off:ident,
+     $body:expr) => {
+        #[allow(unused_variables)]
+        fn fit_with_offset<'a>(
+            &mut self,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
+            $off: ndarray::ArrayView1<'a, f64>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    (@cap $kind:ident, predict_with_offset, $m:ident, $x:ident, $off:ident, $body:expr) => {
+        fn predict_with_offset(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $off: ndarray::ArrayView1<f64>,
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
         }
     };
     (@cap $kind:ident, fit_with_validation, $c:ident, $x:ident, $y:ident, $w:ident,

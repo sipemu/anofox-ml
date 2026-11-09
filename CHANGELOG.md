@@ -22,6 +22,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   (one epoch per batch). A failed batch leaves the model unchanged.
 - `warm_start` on `DynModel` for MlpClassifier and MlpRegressor (#125):
   up to `max_iter` further epochs from the fitted weights.
+- `DynModel::fit_with_offset(x, y, sample_weight, offset)` and
+  `predict_with_offset(x, offset)` (#125) for PoissonRegressor,
+  GammaRegressor and TweedieRegressor: an offset on the link scale, e.g.
+  `ln(exposure)`; `predict` predicts at offset 0.
+- `GammaRegressor::fit_weighted_with_offset`.
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /
