@@ -62,6 +62,7 @@ pub mod lgbm;
 pub mod perpetual;
 pub mod random_forest_classifier;
 pub mod random_forest_regressor;
+pub mod random_trees_embedding;
 pub mod stacking_classifier;
 pub mod stacking_regressor;
 mod util;
@@ -107,6 +108,7 @@ pub use lgbm::{
 };
 pub use random_forest_classifier::{FittedRandomForestClassifier, RandomForestClassifier};
 pub use random_forest_regressor::{FittedRandomForestRegressor, RandomForestRegressor};
+pub use random_trees_embedding::{FittedRandomTreesEmbedding, RandomTreesEmbedding};
 pub use stacking_classifier::{FittedStackingClassifier, StackingClassifier};
 pub use stacking_regressor::StackingRegressor;
 pub use voting_classifier::VotingClassifier;

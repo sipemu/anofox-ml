@@ -748,6 +748,25 @@ registry! {
         feature_importances: |m| m.feature_importances(),
     }
 
+    ExtraTreeRegressor {
+        config: trees::ExtraTreeRegressor = Default::default(),
+        fitted: trees::FittedExtraTreeRegressor,
+        fit: |c, x, y, w| c.fit(x, need_y(K, y)?, w),
+        predict: |m, x| m.predict(x),
+    }
+    ExtraTreeClassifier {
+        config: trees::ExtraTreeClassifier = Default::default(),
+        fitted: trees::FittedExtraTreeClassifier,
+        fit: |c, x, y, w| c.fit(x, need_y(K, y)?, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+    }
+    RandomTreesEmbedding {
+        config: ensemble::RandomTreesEmbedding = Default::default(),
+        fitted: ensemble::FittedRandomTreesEmbedding,
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     // -------------------------------------------------------- ensemble
     RandomForestClassifier {
         config: ensemble::RandomForestClassifier = Default::default(),

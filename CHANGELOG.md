@@ -8,6 +8,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `ExtraTreeRegressor`, `ExtraTreeClassifier` (`anofox-ml-trees`) and
+  `RandomTreesEmbedding` (`anofox-ml-ensemble`, dense one-hot output) on a
+  port of sklearn's random-splitter tree (`sk_random_tree`: `our_rand_r`,
+  `node_split_random` with its constant-feature bookkeeping, float32
+  thresholds, `DepthFirstTreeBuilder`, squared-error / Gini / entropy).
+  Seeded (weighted) fits have scikit-learn 1.8's node counts, leaf ids,
+  predictions and embedding columns (`gen_extra_tree.py`). Registry kinds
+  and Python classes.
+
 - `MiniBatchNmf` (`anofox-ml-preprocessing`, sklearn's `MiniBatchNMF`
   without `fresh_restarts`): online multiplicative updates over contiguous
   batches with the decayed `A / B` accumulators and sklearn's stopping

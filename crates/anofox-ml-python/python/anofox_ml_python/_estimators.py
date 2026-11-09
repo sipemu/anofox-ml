@@ -4383,3 +4383,97 @@ class MiniBatchNMF(TransformerMixin, BaseEstimator):
     reconstruction_err_ = property(lambda self: float(self._fitted_state()["reconstruction_err"]))
     n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
     n_steps_ = property(lambda self: int(self._fitted_state()["n_steps"]))
+
+
+def _tree_max_features(v):
+    if v is None:
+        return None
+    if v in ("sqrt", "log2"):
+        return _max_features(v)
+    if isinstance(v, (int, np.integer)) and not isinstance(v, bool):
+        return {"Fixed": int(v)}
+    if isinstance(v, float):
+        return {"Fraction": v}
+    raise ValueError(f"invalid max_features {v!r}")
+
+
+class _ExtraTree(BaseEstimator):
+    """sklearn's random-splitter tree, reproduced draw for draw: a seeded
+    fit has sklearn's nodes. ``min_samples_split`` / ``min_samples_leaf``
+    are counts."""
+
+    def _tree_params(self, X):
+        return {"max_depth": self.max_depth, "min_samples_split": int(self.min_samples_split),
+                "min_samples_leaf": int(self.min_samples_leaf),
+                "min_weight_fraction_leaf": float(self.min_weight_fraction_leaf),
+                "max_features": _tree_max_features(self.max_features),
+                "min_impurity_decrease": float(self.min_impurity_decrease),
+                "seed": _seed(self.random_state) % 2**32}
+
+
+class ExtraTreeRegressor(RegressorMixin, _ExtraTree):
+    _kind = "ExtraTreeRegressor"
+
+    def __init__(self, *, criterion="squared_error", max_depth=None, min_samples_split=2,
+                 min_samples_leaf=1, min_weight_fraction_leaf=0.0, max_features=1.0,
+                 random_state=None, min_impurity_decrease=0.0):
+        self.criterion = criterion
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.min_weight_fraction_leaf = min_weight_fraction_leaf
+        self.max_features = max_features
+        self.random_state = random_state
+        self.min_impurity_decrease = min_impurity_decrease
+
+    def _rust_params(self, X, y):
+        if self.criterion != "squared_error":
+            raise ValueError("only criterion='squared_error' is supported")
+        return self._tree_params(X)
+
+
+class ExtraTreeClassifier(ClassifierMixin, _ExtraTree):
+    _kind = "ExtraTreeClassifier"
+
+    def __init__(self, *, criterion="gini", max_depth=None, min_samples_split=2,
+                 min_samples_leaf=1, min_weight_fraction_leaf=0.0, max_features="sqrt",
+                 random_state=None, min_impurity_decrease=0.0):
+        self.criterion = criterion
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.min_weight_fraction_leaf = min_weight_fraction_leaf
+        self.max_features = max_features
+        self.random_state = random_state
+        self.min_impurity_decrease = min_impurity_decrease
+
+    def _rust_params(self, X, y):
+        crit = _choice(self.criterion, {"gini": "Gini", "entropy": "Entropy",
+                                        "log_loss": "Entropy"}, "criterion")
+        return {"criterion": crit, **self._tree_params(X)}
+
+
+class RandomTreesEmbedding(TransformerMixin, BaseEstimator):
+    """One-hot leaf indicators of totally random trees (dense output). A
+    seeded fit has sklearn's trees and columns."""
+
+    _kind = "RandomTreesEmbedding"
+
+    def __init__(self, n_estimators=100, *, max_depth=5, min_samples_split=2,
+                 min_samples_leaf=1, min_weight_fraction_leaf=0.0, min_impurity_decrease=0.0,
+                 random_state=None):
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.min_weight_fraction_leaf = min_weight_fraction_leaf
+        self.min_impurity_decrease = min_impurity_decrease
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"n_estimators": int(self.n_estimators), "max_depth": self.max_depth,
+                "min_samples_split": int(self.min_samples_split),
+                "min_samples_leaf": int(self.min_samples_leaf),
+                "min_weight_fraction_leaf": float(self.min_weight_fraction_leaf),
+                "min_impurity_decrease": float(self.min_impurity_decrease),
+                "seed": _seed(self.random_state) % 2**32}

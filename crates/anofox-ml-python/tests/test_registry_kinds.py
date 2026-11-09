@@ -385,3 +385,21 @@ def test_minibatch_nmf_matches_sklearn():
     np.testing.assert_allclose(ours.components_, ref.components_, rtol=1e-9)
     assert ours.n_steps_ == ref.n_steps_
     np.testing.assert_allclose(ours.transform(V[:7]), ref.transform(V[:7]), rtol=1e-9)
+
+
+def test_extra_trees_and_embedding_match_sklearn():
+    from sklearn.ensemble import RandomTreesEmbedding
+    from sklearn.tree import ExtraTreeClassifier, ExtraTreeRegressor
+
+    probe = X + 0.2
+    w = np.linspace(0.5, 2.0, 60)
+    ours = am.ExtraTreeRegressor(max_depth=6, random_state=3).fit(X, y, sample_weight=w)
+    ref = ExtraTreeRegressor(max_depth=6, random_state=3).fit(X, y, sample_weight=w)
+    np.testing.assert_allclose(ours.predict(probe), ref.predict(probe), atol=1e-12)
+    ours = am.ExtraTreeClassifier(criterion="entropy", random_state=4).fit(X, y_cls)
+    ref = ExtraTreeClassifier(criterion="entropy", random_state=4).fit(X, y_cls)
+    np.testing.assert_allclose(ours.predict_proba(probe), ref.predict_proba(probe), atol=1e-12)
+    np.testing.assert_array_equal(ours.predict(probe), ref.predict(probe))
+    ours = am.RandomTreesEmbedding(n_estimators=6, random_state=1).fit(X)
+    ref = RandomTreesEmbedding(n_estimators=6, random_state=1, sparse_output=False).fit(X)
+    np.testing.assert_array_equal(ours.transform(probe), ref.transform(probe))
