@@ -6,7 +6,8 @@ unchanged (``get_params`` / ``set_params`` / ``sklearn.base.clone`` work),
 and the heavy work runs in Rust with the GIL released.
 """
 
-from . import conformal, meta, metrics, model_selection, multiclass
+from . import conformal, encoders, meta, metrics, model_selection, multiclass
+from .encoders import DictVectorizer, LabelBinarizer, MultiLabelBinarizer
 from .meta import (
     RFE,
     RFECV,
@@ -29,6 +30,7 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    FeatureHasher,
     CountVectorizer,
     TfidfVectorizer,
     HashingVectorizer,
@@ -200,6 +202,8 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "DictVectorizer", "LabelBinarizer", "MultiLabelBinarizer", "encoders",
+    "FeatureHasher",
     "CountVectorizer", "TfidfVectorizer", "HashingVectorizer",
     "LarsCV", "LassoLarsCV",
     "MultiTaskLassoCV", "MultiTaskElasticNetCV",

@@ -8,6 +8,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `FeatureHasher` (`anofox-ml-text`, sklearn's
+  `feature_extraction.FeatureHasher`): signed MurmurHash3 columns for
+  `(name, value)` pairs; Python class with `input_type` `dict` / `pair` /
+  `string`, equal to scikit-learn 1.8.
+- Python `anofox_ml_python.encoders`: `LabelBinarizer`,
+  `MultiLabelBinarizer` and `DictVectorizer` (dense), equal to
+  scikit-learn 1.8.
+
 - `PlsCanonical` (sklearn's `PLSCanonical`: NIPALS, mode A, canonical
   deflation; shares Cca's code) and `PlsSvd` (`PLSSVD`), with registry
   kinds fitted on `[X | Y]` with `y_columns`. Both match scikit-learn 1.8

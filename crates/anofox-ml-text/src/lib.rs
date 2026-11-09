@@ -15,8 +15,9 @@
 //! that also holds the IDF weights), which can then encode unseen documents.
 //! Tokens that are not in the fitted vocabulary are ignored at transform time.
 //!
-//! `HashingVectorizer` uses sklearn's signed 32-bit MurmurHash3 (seed 0), so
-//! column indices and signs are identical to sklearn's.
+//! `HashingVectorizer` and `FeatureHasher` use sklearn's signed 32-bit
+//! MurmurHash3 (seed 0), so column indices and signs are identical to
+//! sklearn's.
 
 pub mod tfidf_transformer;
 pub use tfidf_transformer::{FittedTfidfTransformer, TfidfNorm, TfidfTransformer};
@@ -524,6 +525,82 @@ impl HashingVectorizer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FeatureHasher
+// ---------------------------------------------------------------------------
+
+/// The hashing trick on named features (sklearn's
+/// `feature_extraction.FeatureHasher`): each `(name, value)` pair adds
+/// `±value` to column `|h| % n_features` of its row, `h` the signed 32-bit
+/// MurmurHash3 of the name's UTF-8 bytes (seed 0), the sign that of `h`
+/// with `alternate_sign`. Zero values are skipped; collisions are summed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FeatureHasher {
+    pub n_features: usize,
+    pub alternate_sign: bool,
+}
+
+/// sklearn's default `n_features = 2**20`.
+impl Default for FeatureHasher {
+    fn default() -> Self {
+        Self {
+            n_features: 1 << 20,
+            alternate_sign: true,
+        }
+    }
+}
+
+impl FeatureHasher {
+    pub fn new(n_features: usize) -> Self {
+        Self {
+            n_features,
+            ..Self::default()
+        }
+    }
+
+    fn hashing(&self) -> Result<HashingVectorizer> {
+        if self.n_features == 0 || self.n_features > i32::MAX as usize {
+            return Err(RustMlError::InvalidParameter(format!(
+                "n_features must be in 1..=2^31-1, got {}",
+                self.n_features
+            )));
+        }
+        Ok(HashingVectorizer {
+            n_features: self.n_features,
+            alternate_sign: self.alternate_sign,
+            norm_l2: false,
+        })
+    }
+
+    /// Sparse output, shape `(samples.len(), n_features)`.
+    pub fn transform_sparse<S: AsRef<str>>(
+        &self,
+        samples: &[Vec<(S, f64)>],
+    ) -> Result<CsrMatrix<f64>> {
+        let h = self.hashing()?;
+        let rows = samples
+            .iter()
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .filter(|(_, v)| *v != 0.0)
+                    .map(|(name, v)| {
+                        let (col, sign) = h.hash_token(name.as_ref());
+                        (col, sign * v)
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(csr_from_rows(rows, self.n_features))
+    }
+
+    /// Dense output, shape `(samples.len(), n_features)`.
+    pub fn transform<S: AsRef<str>>(&self, samples: &[Vec<(S, f64)>]) -> Result<Array2<f64>> {
+        Ok(self.transform_sparse(samples)?.to_dense())
+    }
+}
+
 /// MurmurHash3 x86 32-bit (Austin Appleby) — the hash behind
 /// `sklearn.utils.murmurhash3_32`. Interpret the result as `i32` for
 /// sklearn's default `positive=False`.
@@ -558,6 +635,25 @@ fn murmurhash3_32(key: &[u8], seed: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    /// `FeatureHasher(16).transform([{"dog": 1, "cat": 2.5, "elephant": 4},
+    /// {"run": 5, "colour=brown": 1}])` from scikit-learn 1.8.
+    #[test]
+    fn feature_hasher_matches_sklearn() {
+        let samples = vec![
+            vec![("dog", 1.0), ("cat", 2.5), ("elephant", 4.0)],
+            vec![("run", 5.0), ("colour=brown", 1.0)],
+        ];
+        let got = super::FeatureHasher::new(16).transform(&samples).unwrap();
+        let mut want = ndarray::Array2::<f64>::zeros((2, 16));
+        want[[0, 5]] = -1.0;
+        want[[0, 7]] = 2.5;
+        want[[0, 14]] = -4.0;
+        want[[1, 8]] = -5.0;
+        want[[1, 14]] = 1.0;
+        assert_eq!(got, want);
+        assert!(super::FeatureHasher::new(0).transform(&samples).is_err());
+    }
+
     use super::*;
 
     #[test]

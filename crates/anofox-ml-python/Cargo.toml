@@ -19,5 +19,6 @@ ndarray = { workspace = true }
 anofox-ml-core = { workspace = true }
 anofox-ml-registry = { workspace = true }
 anofox-ml-metrics = { workspace = true }
+anofox-ml-text = { workspace = true }
 anofox-ml-tune = { path = "../anofox-ml-tune" }
 serde_json = { workspace = true }

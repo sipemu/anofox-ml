@@ -10,6 +10,7 @@ import json
 
 import numpy as np
 
+from . import _native
 from ._base import (
     BaseEstimator,
     ClassifierMixin,
@@ -4257,3 +4258,54 @@ class HashingVectorizer(_TextVectorizer):
         if "_model_" not in self.__dict__:
             self.fit([])
         return super().transform(raw_documents)
+
+
+class FeatureHasher(TransformerMixin, BaseEstimator):
+    """The hashing trick on named features (sklearn's signed MurmurHash3):
+    ``input_type="dict"`` (``{name: value}``; a string value ``v`` adds
+    ``name=v`` with value 1), ``"pair"`` (``(name, value)`` pairs) or
+    ``"string"`` (names, value 1). Stateless; ``transform`` is dense, so keep
+    ``n_features`` small."""
+
+    def __init__(self, n_features=2**20, *, input_type="dict", alternate_sign=True):
+        self.n_features = n_features
+        self.input_type = input_type
+        self.alternate_sign = alternate_sign
+
+    def fit(self, X=None, y=None):
+        self._validate()
+        return self
+
+    def _validate(self):
+        if self.input_type not in ("dict", "pair", "string"):
+            raise ValueError("input_type must be 'dict', 'pair' or 'string'")
+        n = self.n_features
+        if not isinstance(n, (int, np.integer)) or isinstance(n, bool) or not 1 <= n < 2**31:
+            raise ValueError(f"n_features must be an int in [1, 2**31 - 1], got {n!r}")
+
+    @staticmethod
+    def _pairs(items):
+        out = []
+        for name, value in items:
+            if isinstance(value, str):
+                name, value = f"{name}={value}", 1.0
+            if not isinstance(name, str):
+                raise TypeError(f"feature names must be strings, got {type(name).__name__}")
+            out.append((name, float(value)))
+        return out
+
+    def transform(self, raw_X):
+        self._validate()
+        if self.input_type == "dict":
+            samples = [self._pairs(d.items()) for d in raw_X]
+        elif self.input_type == "pair":
+            samples = [self._pairs(x) for x in raw_X]
+        else:
+            if isinstance(raw_X, str) or any(isinstance(x, str) for x in raw_X):
+                raise ValueError("Samples can not be a single string. The input must be an "
+                                 "iterable over iterables of strings.")
+            samples = [self._pairs((f, 1.0) for f in x) for x in raw_X]
+        return _native.feature_hash(samples, int(self.n_features), bool(self.alternate_sign))
+
+    def fit_transform(self, raw_X, y=None):
+        return self.fit(raw_X).transform(raw_X)

@@ -8,6 +8,7 @@
 mod helpers;
 mod metrics;
 mod native;
+mod text;
 mod tune;
 
 use pyo3::prelude::*;
@@ -23,6 +24,7 @@ macro_rules! register_functions {
 fn native_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<native::PyModel>()?;
     m.add_function(wrap_pyfunction!(tune::tune, m)?)?;
+    m.add_function(wrap_pyfunction!(text::feature_hash, m)?)?;
     register_functions!(
         m,
         metrics::accuracy_score,
