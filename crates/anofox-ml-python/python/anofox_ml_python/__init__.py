@@ -6,7 +6,20 @@ unchanged (``get_params`` / ``set_params`` / ``sklearn.base.clone`` work),
 and the heavy work runs in Rust with the GIL released.
 """
 
-from . import conformal, metrics, model_selection, multiclass
+from . import conformal, meta, metrics, model_selection, multiclass
+from .meta import (
+    RFE,
+    RFECV,
+    CalibratedClassifierCV,
+    MultiOutputRegressor,
+    RegressorChain,
+    SequentialFeatureSelector,
+    StackingClassifier,
+    StackingRegressor,
+    TransformedTargetRegressor,
+    VotingClassifier,
+    VotingRegressor,
+)
 from .multiclass import (
     FixedThresholdClassifier,
     OneVsOneClassifier,
@@ -180,10 +193,13 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "VotingRegressor", "VotingClassifier", "StackingRegressor", "StackingClassifier",
+    "CalibratedClassifierCV", "TransformedTargetRegressor", "MultiOutputRegressor",
+    "RegressorChain", "RFE", "RFECV", "SequentialFeatureSelector",
     "LassoLarsIC", "BinomialRegressor", "IsotonicRegression", "GaussianProcessRegressor",
     "GaussianProcessClassifier", "PLSRegression", "CCA", "PLSCanonical", "PLSSVD",
     "MultiTaskLasso", "MultiTaskElasticNet", "SpectralEmbedding", "RcsTransformer",
-    "BaseEstimator", "NotFittedError", "conformal", "metrics", "model_selection", "multiclass", "train_test_split",
+    "BaseEstimator", "NotFittedError", "conformal", "meta", "metrics", "model_selection", "multiclass", "train_test_split",
     "TuneSearchCV",
     "OneVsRestClassifier", "OneVsOneClassifier", "FixedThresholdClassifier",
     "TunedThresholdClassifierCV", "SelfTrainingClassifier",

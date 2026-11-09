@@ -37,6 +37,17 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `MinMaxScaler`, `MaxAbsScaler` and `IncrementalPCA`; `warm_start` for the
   MLPs; `kneighbors` for the k-NN estimators; `offset=` in `fit` / `predict`
   of the Poisson, Gamma, Tweedie and binomial GLMs.
+- `anofox_ml_python.meta`: `VotingRegressor`, `VotingClassifier`,
+  `StackingRegressor`, `StackingClassifier`, `CalibratedClassifierCV`,
+  `TransformedTargetRegressor`, `MultiOutputRegressor`, `RegressorChain`,
+  `RFE`, `RFECV` and `SequentialFeatureSelector` over this package's
+  estimators. Each meta-estimator is one Rust model, the registry's nested
+  `{kind, params}` specs, and is tested against scikit-learn 1.8
+  (`tests/test_meta.py`).
+- `BaggingRegressor` / `BaggingClassifier` take sklearn's `estimator=` (any
+  of this package's estimators) plus `max_features`, `bootstrap_features`
+  and `oob_score`. **Breaking:** `estimator` is now the first positional
+  argument, as in sklearn.
 - `predict_log_proba` is the model's own where it has one (naive Bayes,
   LDA / QDA, logistic regression, SVC, GMM) instead of `log(predict_proba)`,
   so it stays finite where the probabilities underflow.
