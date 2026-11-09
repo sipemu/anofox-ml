@@ -4543,8 +4543,10 @@ macro_rules! catboost_config {
             pub od_wait: Option<usize>,
             /// `IncToDec`'s p-value threshold (default 0: off).
             pub od_pval: Option<f64>,
-            /// CatBoost's `grow_policy`: oblivious trees (default) or
-            /// Depthwise ones (plain boosting, numeric and one-hot features).
+            /// CatBoost's `grow_policy`: oblivious trees (default), Depthwise
+            /// (plain boosting, numeric and one-hot features) or Lossguide
+            /// (also CTR features; classifiers with CTRs can differ from
+            /// CatBoost by picking another CTR in a leaf, #154).
             pub grow_policy: CatBoostGrowPolicy,
             /// Depthwise: leaves with fewer sampled rows are not split
             /// (CatBoost's `min_data_in_leaf`, default 1).

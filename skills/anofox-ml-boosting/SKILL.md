@@ -67,8 +67,9 @@ Builder names follow each reference library's parameter names (with a
   `with_random_strength`, `with_random_seed`, `with_has_time`,
   `with_monotone_constraints`, `with_model_shrink_rate`,
   `with_early_stopping_rounds`, `with_use_best_model`, `fit_with_eval`,
-  `with_grow_policy` (Depthwise / Lossguide: plain boosting, no CTR
-  features), `with_min_data_in_leaf`, `with_max_leaves`; classifier:
+  `with_grow_policy` (Depthwise / Lossguide: plain boosting; Lossguide
+  takes CTR features, exact for regression, close but not always exact
+  for classifiers, #154), `with_min_data_in_leaf`, `with_max_leaves`; classifier:
   `with_class_weights`, `with_auto_class_weights`.
 
 Check the docs (`cargo doc -p anofox-ml-ensemble --open`) before relying on
