@@ -363,3 +363,13 @@ def test_bisecting_kmeans_matches_sklearn(init):
     np.testing.assert_allclose(ours.cluster_centers_, ref.cluster_centers_, atol=1e-10)
     assert ours.inertia_ == pytest.approx(ref.inertia_, rel=1e-10)
     np.testing.assert_array_equal(ours.predict(X + 0.1), ref.predict(X + 0.1))
+
+
+def test_sparse_pca_matches_sklearn():
+    from sklearn.decomposition import SparsePCA
+
+    kw = dict(n_components=3, alpha=0.5, random_state=0)
+    ours, ref = am.SparsePCA(**kw).fit(X), SparsePCA(**kw).fit(X)
+    assert ours.n_iter_ == ref.n_iter_
+    np.testing.assert_allclose(ours.components_, ref.components_, atol=1e-7)
+    np.testing.assert_allclose(ours.transform(X), ref.transform(X), atol=1e-7)
