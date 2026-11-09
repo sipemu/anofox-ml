@@ -59,6 +59,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `ensemble` true (one calibrated model per fold, averaged) or false.
   Matches scikit-learn 1.8 (isotonic to 1e-12, sigmoid to 1e-7, its
   L-BFGS-B tolerance).
+- `TransformedTargetRegressor` in the registry (#125): a registered
+  regressor on `func(y)` (`identity`, `log`, `log1p`, `sqrt`) or on `y`
+  transformed by a registered transformer (StandardScaler,
+  PowerTransformer, …), its predictions mapped back; matches scikit-learn
+  1.8.
 
 ## [0.4.0] - 2026-11-06
 
