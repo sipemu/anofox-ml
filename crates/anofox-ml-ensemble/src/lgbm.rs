@@ -522,7 +522,10 @@ fn bin_matrix(x: ArrayView2<f64>, all_bins: &[FeatureBins]) -> Array2<u8> {
 /// Run a fit on `n_jobs` threads (`None`: the physical cores, at most the
 /// current pool's threads). Inside a rayon worker (e.g. parallel
 /// cross-validation) the fit stays in the caller's pool.
-fn with_fit_threads<T: Send>(n_jobs: Option<usize>, fit: impl FnOnce() -> T + Send) -> T {
+pub(crate) fn with_fit_threads<T: Send>(
+    n_jobs: Option<usize>,
+    fit: impl FnOnce() -> T + Send,
+) -> T {
     let current = rayon::current_num_threads();
     let threads = n_jobs
         .unwrap_or_else(|| num_cpus::get_physical().min(current))

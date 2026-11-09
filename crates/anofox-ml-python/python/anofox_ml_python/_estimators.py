@@ -648,16 +648,36 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
 
 class _CatBoost(BaseEstimator):
     """CatBoost-style boosting on oblivious trees; parameters follow
-    ``catboost.CatBoost`` (``learning_rate=None`` is 0.03)."""
+    ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""
 
     def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
-                 border_count=254, score_function="Cosine", leaf_estimation_method="Newton",
+                 border_count=254, score_function="Cosine", leaf_estimation_method=None,
                  boost_from_average=None, cat_features=None, one_hot_max_size=2,
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
                  max_ctr_complexity=None, leaf_estimation_iterations=None,
                  leaf_estimation_backtracking="AnyImprovement", has_time=False, random_seed=0,
                  random_strength=1.0, bootstrap_type=None, subsample=None,
-                 bagging_temperature=1.0, mvs_reg=None):
+                 bagging_temperature=1.0, mvs_reg=None, monotone_constraints=None,
+                 model_shrink_rate=None, model_shrink_mode="Constant", class_weights=None,
+                 auto_class_weights=None, loss_function=None, use_best_model=None,
+                 early_stopping_rounds=None, od_type=None, od_wait=None, od_pval=None,
+                 grow_policy="SymmetricTree", min_data_in_leaf=1, max_leaves=31,
+                 thread_count=-1):
+        self.thread_count = thread_count
+        self.grow_policy = grow_policy
+        self.min_data_in_leaf = min_data_in_leaf
+        self.max_leaves = max_leaves
+        self.use_best_model = use_best_model
+        self.early_stopping_rounds = early_stopping_rounds
+        self.od_type = od_type
+        self.od_wait = od_wait
+        self.od_pval = od_pval
+        self.loss_function = loss_function
+        self.monotone_constraints = monotone_constraints
+        self.model_shrink_rate = model_shrink_rate
+        self.model_shrink_mode = model_shrink_mode
+        self.class_weights = class_weights
+        self.auto_class_weights = auto_class_weights
         self.bootstrap_type = bootstrap_type
         self.subsample = subsample
         self.bagging_temperature = bagging_temperature
@@ -685,15 +705,16 @@ class _CatBoost(BaseEstimator):
     def _rust_params(self, X, y):
         params = {
             "iterations": int(self.iterations),
-            "learning_rate": 0.03 if self.learning_rate is None else float(self.learning_rate),
             "depth": int(self.depth), "l2_leaf_reg": float(self.l2_leaf_reg),
             "border_count": int(self.border_count),
             "score_function": _choice(self.score_function, {"Cosine": "Cosine", "L2": "L2"},
                                       "score_function"),
-            "leaf_estimation_method": _choice(self.leaf_estimation_method,
-                                              {"Newton": "Newton", "Gradient": "Gradient"},
-                                              "leaf_estimation_method"),
         }
+        if self.leaf_estimation_method is not None:
+            params["leaf_estimation_method"] = _choice(
+                self.leaf_estimation_method,
+                {"Newton": "Newton", "Gradient": "Gradient", "Exact": "Exact"},
+                "leaf_estimation_method")
         if self.boost_from_average is not None:
             params["boost_from_average"] = bool(self.boost_from_average)
         params["cat_features"] = self._cat_indices(np.shape(X)[1])
@@ -705,6 +726,8 @@ class _CatBoost(BaseEstimator):
         params["fold_len_multiplier"] = float(self.fold_len_multiplier)
         if self.max_ctr_complexity is not None:
             params["max_ctr_complexity"] = int(self.max_ctr_complexity)
+        if self.learning_rate is not None:
+            params["learning_rate"] = float(self.learning_rate)
         params["has_time"] = bool(self.has_time)
         params["random_seed"] = int(self.random_seed)
         params["random_strength"] = float(self.random_strength)
@@ -723,6 +746,54 @@ class _CatBoost(BaseEstimator):
         params["leaf_estimation_backtracking"] = _choice(
             self.leaf_estimation_backtracking, {"AnyImprovement": "AnyImprovement", "No": "No"},
             "leaf_estimation_backtracking")
+        n_features = np.shape(X)[1]
+        params["grow_policy"] = _choice(
+            self.grow_policy, {"SymmetricTree": "SymmetricTree", "Depthwise": "Depthwise",
+                               "Lossguide": "Lossguide"}, "grow_policy")
+        params["min_data_in_leaf"] = int(self.min_data_in_leaf)
+        params["max_leaves"] = int(self.max_leaves)
+        # catboost's -1 (all cores): the physical ones here; the model does not
+        # depend on it.
+        params["thread_count"] = (None if self.thread_count is None or self.thread_count <= 0
+                                  else int(self.thread_count))
+        if self.use_best_model is not None:
+            params["use_best_model"] = bool(self.use_best_model)
+        if self.early_stopping_rounds is not None:
+            params["od_type"] = "Iter"
+            params["od_wait"] = int(self.early_stopping_rounds)
+        if self.od_type is not None:
+            params["od_type"] = _choice(self.od_type, {"IncToDec": "IncToDec", "Iter": "Iter"},
+                                        "od_type")
+        if self.od_wait is not None:
+            params["od_wait"] = int(self.od_wait)
+        if self.od_pval is not None:
+            params["od_pval"] = float(self.od_pval)
+        if self.monotone_constraints is not None:
+            mc = self.monotone_constraints
+            if isinstance(mc, dict):
+                full = [0] * n_features
+                for j, v in mc.items():
+                    full[int(j)] = int(v)
+                mc = full
+            params["monotone_constraints"] = [int(v) for v in mc]
+        if self.model_shrink_rate is not None:
+            params["model_shrink_rate"] = float(self.model_shrink_rate)
+        params["model_shrink_mode"] = _choice(
+            self.model_shrink_mode, {"Constant": "Constant", "Decreasing": "Decreasing"},
+            "model_shrink_mode")
+        if self.class_weights is not None or self.auto_class_weights is not None:
+            if self._kind != "CatBoostClassifier":
+                raise ValueError("class weights apply to CatBoostClassifier only")
+            if self.class_weights is not None:
+                cw = self.class_weights
+                if isinstance(cw, dict):
+                    cw = [cw[c] for c in self.classes_.tolist()]
+                params["class_weights"] = [float(v) for v in cw]
+            if self.auto_class_weights is not None:
+                params["auto_class_weights"] = _choice(
+                    self.auto_class_weights,
+                    {"Balanced": "Balanced", "SqrtBalanced": "SqrtBalanced"},
+                    "auto_class_weights")
         return params
 
     def _cat_indices(self, n_features):
@@ -757,19 +828,95 @@ class _CatBoost(BaseEstimator):
                     col[i] = codes.get(key, -1.0)
         return out
 
-    def _fit_model(self, X, y=None, sample_weight=None):
-        return super()._fit_model(self._encode(X, fit=True), y, sample_weight)
+    def _fit_model(self, X, y=None, sample_weight=None, eval_set=None):
+        if eval_set is None:
+            return super()._fit_model(self._encode(X, fit=True), y, sample_weight)
+        X = self._encode(X, fit=True)
+        Xv, yv, wv = (tuple(eval_set) + (None,))[:3]
+        Xv = self._encode(Xv, fit=False)
+        if Xv.shape[1] != X.shape[1]:
+            raise ValueError("eval_set must have the features of X")
+        w = None if sample_weight is None else _check_1d(sample_weight, "sample_weight")
+        wv = None if wv is None else _check_1d(wv, "eval_set weight")
+        model = self._new_model(X, y)
+        model.fit_with_validation(X, y, w, Xv, self._eval_target(yv), wv)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def _eval_target(self, yv):
+        return _check_1d(yv, "eval_set y")
+
+    @property
+    def best_iteration_(self):
+        return self._fitted_state().get("best_iteration")
+
+    @property
+    def evals_result_(self):
+        return list(self._fitted_state().get("eval_metrics", []))
 
     def _call(self, method, X):
         return super()._call(method, self._encode(X, fit=False))
 
 
 class CatBoostRegressor(RegressorMixin, _CatBoost):
+    """``loss_function`` as in catboost: ``"RMSE"``, ``"MAE"``,
+    ``"Quantile:alpha=0.3"``, ``"Expectile:alpha=0.3"``, ``"Poisson"``,
+    ``"Tweedie:variance_power=1.5"`` or ``"LogLinQuantile:alpha=0.5"``."""
+
     _kind = "CatBoostRegressor"
+
+    def fit(self, X, y, sample_weight=None, eval_set=None):
+        """``eval_set``: ``(X_val, y_val)`` or ``(X_val, y_val, weight_val)``."""
+        return self._fit_model(X, _check_1d(y), sample_weight, eval_set)
+
+    def _rust_params(self, X, y):
+        params = super()._rust_params(X, y)
+        name, _, rest = str(self.loss_function or "RMSE").partition(":")
+        args = dict(kv.split("=", 1) for kv in rest.split(";") if kv)
+        param = {"Quantile": "alpha", "Expectile": "alpha", "LogLinQuantile": "alpha",
+                 "Tweedie": "variance_power"}
+        if name in ("RMSE", "MAE", "Poisson"):
+            if args:
+                raise ValueError(f"{name} takes no parameters")
+            params["loss_function"] = name
+        elif name in param:
+            key = param[name]
+            if key not in args and name != "Tweedie":
+                args[key] = "0.5"
+            if set(args) != {key}:
+                raise ValueError(f"{name} takes the parameter {key}")
+            params["loss_function"] = {name: {key: float(args[key])}}
+        else:
+            raise ValueError(f"unsupported loss_function {self.loss_function!r}")
+        return params
 
 
 class CatBoostClassifier(ClassifierMixin, _CatBoost):
+    """Logloss for two classes, MultiClass for more (``loss_function`` may
+    name them)."""
+
     _kind = "CatBoostClassifier"
+
+    def fit(self, X, y, sample_weight=None, eval_set=None):
+        """``eval_set``: ``(X_val, y_val)`` or ``(X_val, y_val, weight_val)``."""
+        y = np.asarray(y)
+        if y.ndim == 2 and y.shape[1] == 1:
+            y = y.ravel()
+        self.classes_, y_enc = np.unique(y, return_inverse=True)
+        return self._fit_model(X, y_enc.astype(np.float64), sample_weight, eval_set)
+
+    def _eval_target(self, yv):
+        yv = np.asarray(yv).ravel()
+        idx = np.searchsorted(self.classes_, yv)
+        if np.any(idx >= len(self.classes_)) or np.any(self.classes_[np.minimum(idx, len(self.classes_) - 1)] != yv):
+            raise ValueError("eval_set has labels that are not in y")
+        return idx.astype(np.float64)
+
+    def _rust_params(self, X, y):
+        if self.loss_function not in (None, "Logloss", "MultiClass"):
+            raise ValueError(f"unsupported loss_function {self.loss_function!r}")
+        return super()._rust_params(X, y)
 
 
 class IsolationForest(OutlierMixin, BaseEstimator):
