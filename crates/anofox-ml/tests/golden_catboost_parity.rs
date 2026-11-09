@@ -6,8 +6,10 @@ mod common;
 use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
-    CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap, CatBoostClassifier,
-    CatBoostLeafEstimation, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
+    CatBoostClassifier, CatBoostEvalSet, CatBoostGrowPolicy, CatBoostLeafEstimation,
+    CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -58,9 +60,13 @@ macro_rules! configure {
         let p = $p;
         let mut m = $m
             .with_iterations(p["iterations"].as_u64().unwrap() as usize)
-            .with_learning_rate(p["learning_rate"].as_f64().unwrap())
-            .with_depth(p["depth"].as_u64().unwrap() as usize)
-            .with_l2_leaf_reg(p["l2_leaf_reg"].as_f64().unwrap());
+            .with_depth(p["depth"].as_u64().unwrap_or(6) as usize);
+        if let Some(lr) = p["learning_rate"].as_f64() {
+            m = m.with_learning_rate(lr);
+        }
+        if let Some(l2) = p["l2_leaf_reg"].as_f64() {
+            m = m.with_l2_leaf_reg(l2);
+        }
         if let Some(b) = p["border_count"].as_u64() {
             m = m.with_border_count(b as usize);
         }
@@ -115,8 +121,44 @@ macro_rules! configure {
         if let Some(n) = p["max_ctr_complexity"].as_u64() {
             m = m.with_max_ctr_complexity(n as usize);
         }
+        if p["grow_policy"] == "Depthwise" {
+            m = m.with_grow_policy(CatBoostGrowPolicy::Depthwise);
+        }
+        if p["grow_policy"] == "Lossguide" {
+            m = m.with_grow_policy(CatBoostGrowPolicy::Lossguide);
+        }
+        if let Some(n) = p["max_leaves"].as_u64() {
+            m = m.with_max_leaves(n as usize);
+        }
+        if let Some(n) = p["min_data_in_leaf"].as_u64() {
+            m = m.with_min_data_in_leaf(n as usize);
+        }
+        if let Some(n) = p["early_stopping_rounds"].as_u64() {
+            m = m.with_early_stopping_rounds(n as usize);
+        }
+        if let Some(b) = p["use_best_model"].as_bool() {
+            m = m.with_use_best_model(b);
+        }
+        if p["od_type"] == "IncToDec" {
+            m = m.with_od_type(CatBoostOdType::IncToDec);
+        }
+        if let Some(v) = p["od_pval"].as_f64() {
+            m = m.with_od_pval(v);
+        }
+        if let Some(n) = p["od_wait"].as_u64() {
+            m = m.with_od_wait(n as usize);
+        }
         if let Some(n) = p["one_hot_max_size"].as_u64() {
             m = m.with_one_hot_max_size(n as usize);
+        }
+        if let Some(c) = p["monotone_constraints"].as_array() {
+            m = m.with_monotone_constraints(c.iter().map(|v| v.as_i64().unwrap() as i8).collect());
+        }
+        if let Some(r) = p["model_shrink_rate"].as_f64() {
+            m = m.with_model_shrink_rate(r);
+        }
+        if p["model_shrink_mode"] == "Decreasing" {
+            m = m.with_model_shrink_mode(CatBoostShrinkMode::Decreasing);
         }
         m
     }};
@@ -134,18 +176,84 @@ fn catboost_models_match_catboost() {
         let sw: Option<Array1<f64>> =
             (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
         let x_test = array2_with_nan(&case["X_test"]);
+        // An eval set: its data, and CatBoost's metrics and tree count.
+        let ev = &case["eval"];
+        let eval_data = (!ev.is_null()).then(|| {
+            let w: Option<Array1<f64>> =
+                (!ev["sample_weight"].is_null()).then(|| json_to_array1(&ev["sample_weight"]));
+            (array2_with_nan(&ev["X"]), json_to_array1(&ev["y"]), w)
+        });
+        let eval_set = eval_data.as_ref().map(|(x, y, w)| CatBoostEvalSet {
+            x: x.view(),
+            y: y.view(),
+            sample_weight: w.as_ref().map(|w| w.view()),
+        });
+        let mut check_eval = |metrics: &[f64], trees: usize| {
+            if ev.is_null() {
+                return;
+            }
+            let expected = json_to_array1(&ev["metrics"]);
+            let e = worst(metrics.iter().copied(), expected.iter().copied());
+            let n = ev["tree_count"].as_u64().unwrap() as usize;
+            if metrics.len() != expected.len() || e > TOL || trees != n {
+                failures.push(format!(
+                    "{name}: eval {} vs {} metrics (worst {e:e}), {trees} vs {n} trees",
+                    metrics.len(),
+                    expected.len()
+                ));
+            }
+        };
         let err = if case["kind"] == "regressor" {
-            let f = configure!(CatBoostRegressor::new(), &case["params"])
-                .fit_weighted(&x, &y, sw.as_ref())
-                .unwrap();
+            let p = &case["params"];
+            let mut m = configure!(CatBoostRegressor::new(), p);
+            if let Some(l) = p["loss_function"].as_str() {
+                let (name, param) = l.split_once(':').unwrap_or((l, ""));
+                let value = || param.split_once('=').unwrap().1.parse::<f64>().unwrap();
+                m = m.with_loss_function(match name {
+                    "MAE" => CatBoostRegressionLoss::Mae,
+                    "Quantile" => CatBoostRegressionLoss::Quantile { alpha: value() },
+                    "Expectile" => CatBoostRegressionLoss::Expectile { alpha: value() },
+                    "Poisson" => CatBoostRegressionLoss::Poisson,
+                    "Tweedie" => CatBoostRegressionLoss::Tweedie {
+                        variance_power: value(),
+                    },
+                    "LogLinQuantile" => CatBoostRegressionLoss::LogLinQuantile { alpha: value() },
+                    other => panic!("unknown loss {other}"),
+                });
+            }
+            let f = match eval_set {
+                Some(e) => m
+                    .fit_with_eval(x.view(), y.view(), sw.as_ref().map(|w| w.view()), e)
+                    .unwrap(),
+                None => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
+            };
+            check_eval(f.eval_metrics(), f.n_estimators());
             worst(
                 f.predict(&x_test).unwrap(),
                 json_to_array1(&case["predictions"]),
             )
         } else {
-            let f = configure!(CatBoostClassifier::new(), &case["params"])
-                .fit_weighted(&x, &y, sw.as_ref())
-                .unwrap();
+            let p = &case["params"];
+            let mut m = configure!(CatBoostClassifier::new(), p);
+            if let Some(w) = p["class_weights"].as_array() {
+                m = m.with_class_weights(w.iter().map(|v| v.as_f64().unwrap()).collect());
+            }
+            match p["auto_class_weights"].as_str() {
+                Some("Balanced") => {
+                    m = m.with_auto_class_weights(CatBoostAutoClassWeights::Balanced)
+                }
+                Some("SqrtBalanced") => {
+                    m = m.with_auto_class_weights(CatBoostAutoClassWeights::SqrtBalanced)
+                }
+                _ => {}
+            }
+            let f = match eval_set {
+                Some(e) => m
+                    .fit_with_eval(x.view(), y.view(), sw.as_ref().map(|w| w.view()), e)
+                    .unwrap(),
+                None => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
+            };
+            check_eval(f.eval_metrics(), f.n_estimators());
             worst(
                 f.predict_proba(&x_test).unwrap(),
                 array2_with_nan(&case["predictions"]),
