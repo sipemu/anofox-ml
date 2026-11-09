@@ -131,6 +131,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `TweedieRegressor` raised `KeyError`.
 
 ### Registry
+- `OneHotEncoder` kind (#125) on numeric category codes (`transform`,
+  `inverse_transform`, unknown categories → `NaN` on inversion) and a Python
+  `OneHotEncoder` (dense output), equal to scikit-learn 1.8 for `drop`,
+  `min_frequency`, `max_categories` and `handle_unknown`.
 - Full linear fits (#125): the registry's linear kinds keep the training
   R² (`r_squared`) and the CV kinds the selected `alpha`; `OlsRegressor` and
   `RidgeRegressor` keep their full fit, with the coefficient table

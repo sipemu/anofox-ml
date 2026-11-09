@@ -403,3 +403,22 @@ def test_extra_trees_and_embedding_match_sklearn():
     ours = am.RandomTreesEmbedding(n_estimators=6, random_state=1).fit(X)
     ref = RandomTreesEmbedding(n_estimators=6, random_state=1, sparse_output=False).fit(X)
     np.testing.assert_array_equal(ours.transform(probe), ref.transform(probe))
+
+
+@pytest.mark.parametrize("params", [{}, {"drop": "first"}, {"drop": "if_binary"},
+                                    {"min_frequency": 3}, {"max_categories": 2},
+                                    {"handle_unknown": "ignore"}])
+def test_one_hot_encoder_matches_sklearn(params):
+    from sklearn.preprocessing import OneHotEncoder
+
+    codes = np.column_stack([rng.randint(0, 4, 60), rng.randint(0, 2, 60) * 10,
+                             rng.choice([1.5, 2.5, 7.0], 60)])
+    ours = am.OneHotEncoder(**params).fit(codes)
+    ref = OneHotEncoder(sparse_output=False, **params).fit(codes)
+    np.testing.assert_array_equal(ours.transform(codes), ref.transform(codes))
+    for a, b in zip(ours.categories_, ref.categories_):
+        np.testing.assert_array_equal(a, b)
+    if params.get("handle_unknown") == "ignore":
+        new = codes[:3].copy()
+        new[0, 0] = 99
+        np.testing.assert_array_equal(ours.transform(new), ref.transform(new))

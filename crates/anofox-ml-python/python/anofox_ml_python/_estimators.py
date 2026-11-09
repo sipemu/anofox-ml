@@ -4641,3 +4641,40 @@ class RandomTreesEmbedding(TransformerMixin, BaseEstimator):
                 "min_weight_fraction_leaf": float(self.min_weight_fraction_leaf),
                 "min_impurity_decrease": float(self.min_impurity_decrease),
                 "seed": _seed(self.random_state) % 2**32}
+
+
+class OneHotEncoder(TransformerMixin, BaseEstimator):
+    """One-hot encoding of numeric category codes (dense output; sklearn's
+    default is sparse). ``drop`` is ``None``, ``"first"`` or
+    ``"if_binary"``; rare categories are grouped by ``min_frequency`` /
+    ``max_categories``."""
+
+    _kind = "OneHotEncoder"
+
+    def __init__(self, *, categories="auto", drop=None, sparse_output=False,
+                 handle_unknown="error", min_frequency=None, max_categories=None):
+        self.categories = categories
+        self.drop = drop
+        self.sparse_output = sparse_output
+        self.handle_unknown = handle_unknown
+        self.min_frequency = min_frequency
+        self.max_categories = max_categories
+
+    def _rust_params(self, X, y):
+        if self.categories != "auto":
+            raise ValueError("only categories='auto' is supported")
+        mf = self.min_frequency
+        if mf is not None:
+            mf = ({"Count": int(mf)} if isinstance(mf, (int, np.integer))
+                  else {"Fraction": float(mf)})
+        return {"handle_unknown": _choice(self.handle_unknown, {
+                    "error": "Error", "ignore": "Ignore",
+                    "infrequent_if_exist": "InfrequentIfExist"}, "handle_unknown"),
+                "drop": _choice(self.drop, {None: "None", "first": "First",
+                                            "if_binary": "IfBinary"}, "drop"),
+                "min_frequency": mf, "max_categories": self.max_categories}
+
+    @property
+    def categories_(self):
+        return [np.asarray(c["categories"], dtype=np.float64)
+                for c in self._fitted_state()["columns"]]

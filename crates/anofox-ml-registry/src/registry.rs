@@ -2088,6 +2088,18 @@ registry! {
         transform: |m, x| Transform::transform(m, x),
         embedding: |m| m.w.clone(),
     }
+    OneHotEncoder {
+        config: pre::OneHotEncoder = Default::default(),
+        fitted: pre::FittedOneHotEncoder<f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(&x.to_owned())
+        },
+        transform: |m, x| m.transform(&x.to_owned()),
+        inverse_transform: |m, x| m
+            .inverse_transform(&x.to_owned())
+            .map(|a| a.mapv(|v| v.unwrap_or(f64::NAN))),
+    }
     Nmf {
         config: pre::Nmf = pre::Nmf::new(2),
         fitted: pre::FittedNmf,
