@@ -101,6 +101,18 @@ default 1.5; zero-inflated counts / intermittent demand) and
 takes LightGBM's names: `objective="tweedie"`, `"cross_entropy"`,
 `"multiclassova"`. All match LightGBM 4.7 to ~1e-16.
 
+## LightGBM: large data and custom losses
+
+- Large or `f32` data: `let data = model.dataset(x_f32.view())?; drop(x);
+  model.fit_dataset(&data, y, &opts)`. Peak memory is the raw matrix plus
+  one byte per value. `data.subset(rows)` reuses the binning across folds.
+  `bin_sample_rows` + `dataset_builder` + `push_rows` stream rows without
+  the full matrix. Above 200 000 rows the bins come from LightGBM's
+  200 000-row sample, so the model is still LightGBM's.
+- Custom losses: implement `LgbmCustomObjective` (`n_outputs`,
+  `gradients`), then `fit_custom(x, &loss)` → `FittedLgbmBooster::predict_raw`
+  (`n × K`). Example: `examples/fforma_custom_objective.rs`.
+
 ## LightGBM: sampling and reproducibility
 
 LightGBM's random generator is reproduced draw for draw: bagging,

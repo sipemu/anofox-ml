@@ -6,6 +6,27 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM datasets: f32 input, binning once, large data (#214)
+
+- `LgbmDataset`: features binned once (one byte per value) from `f64` or
+  `f32` input (`LgbmRegressor::dataset`, `LgbmClassifier::dataset`), then
+  `fit_dataset` / `fit_custom_dataset`. The raw matrix can be dropped
+  before training, and `subset(rows)` reuses one binning across folds.
+  Row-major input is binned in place, without a column-major copy.
+- `LgbmDatasetBuilder` streams rows in blocks (`bin_sample_rows`,
+  `dataset_builder`, `push_rows`, `finish`), so the raw matrix never has
+  to exist in full.
+- Above 200 000 rows the bin edges and each feature's most frequent bin come
+  from a 200 000-row sample drawn as LightGBM draws it
+  (`bin_construct_sample_cnt`, `data_random_seed` from `seed`). Fits
+  above 200 000 rows now match LightGBM 4.7; they were up to 28 % off
+  (`gen_lgbm_large.py`, 260 000 rows, from f64 and f32).
+- `predict_f32`, and `predict_raw` / `predict_proba` from `f32`.
+- Memory: fitting from a 5M × 60 f32 matrix peaks at 1.45 GB, the raw
+  matrix (1.12 GB) plus its bins (0.28 GB); it used to be 2.95 GB.
+  Feature bundling no longer lists the rows of features that cannot share
+  a bundle (`examples/lgbm_memory.rs`).
+
 ### LightGBM custom objectives and raw scores (#213)
 
 - `LgbmRegressor::fit_custom(x, &objective)` boosts on any

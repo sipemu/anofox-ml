@@ -28,7 +28,10 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 mod custom;
+mod dataset;
 pub use custom::{FittedLgbmBooster, LgbmCustomObjective};
+use dataset::BinningSettings;
+pub use dataset::{LgbmDataset, LgbmDatasetBuilder, LgbmFloat};
 
 const DEFAULT_MAX_BINS: usize = 255;
 /// Special bin index reserved for NaN / missing values.
@@ -331,6 +334,7 @@ struct FeatureBins {
 /// default: 3).  Bins with fewer samples are merged with their neighbours,
 /// reducing the effective split resolution and preventing overfitting on small
 /// datasets.
+#[cfg(test)]
 fn compute_bins(
     x: ArrayView2<f64>,
     max_bins: usize,
@@ -339,88 +343,15 @@ fn compute_bins(
     method: BinningMethod,
     seed: u64,
 ) -> (Array2<u8>, Vec<FeatureBins>) {
-    let n = x.nrows();
-    let subsample: Option<Vec<usize>> =
-        (method == BinningMethod::Sklearn && n > SKLEARN_BIN_SUBSAMPLE).then(|| {
-            let mut rng = StdRng::seed_from_u64(seed);
-            rand::seq::index::sample(&mut rng, n, SKLEARN_BIN_SUBSAMPLE).into_vec()
-        });
-    let p = x.ncols();
-    let cat_set: std::collections::HashSet<usize> = categorical_features.iter().copied().collect();
-
-    // The columns are binned in parallel.
-    use rayon::prelude::*;
-    let columns: Vec<(Vec<u8>, FeatureBins)> = (0..p)
-        .into_par_iter()
-        .map(|j| {
-            let is_categorical = cat_set.contains(&j);
-
-            let mut edges = Vec::new();
-
-            if is_categorical && method == BinningMethod::Sklearn {
-                // sklearn ordinal-encodes every category (its estimators reject
-                // more than `max_bins` of them).
-                edges = x
-                    .column(j)
-                    .iter()
-                    .copied()
-                    .filter(|v| !v.is_nan())
-                    .collect();
-                edges.sort_by(f64::total_cmp);
-                edges.dedup();
-                edges.truncate(max_bins);
-            } else if is_categorical {
-                edges = categorical_edges(x.column(j), max_bins, min_data_in_bin);
-            } else if method == BinningMethod::Sklearn {
-                let mut raw: Vec<f64> = match &subsample {
-                    Some(rows) => rows.iter().map(|&i| x[[i, j]]).collect(),
-                    None => x.column(j).to_vec(),
-                };
-                raw.retain(|v| !v.is_nan());
-                raw.sort_by(f64::total_cmp);
-                if !raw.is_empty() {
-                    edges = sklearn_thresholds(&raw, max_bins);
-                }
-            } else {
-                edges = lightgbm_bin_edges(x.column(j), max_bins, min_data_in_bin);
-            }
-
-            let column: Vec<u8> = x
-                .column(j)
-                .iter()
-                .map(|&v| {
-                    if v.is_nan() {
-                        MISSING_BIN
-                    } else if is_categorical {
-                        // Categories without a bin share the "other" (missing) bin.
-                        categorical_bin(v, &edges).map_or(MISSING_BIN, |b| b as u8)
-                    } else {
-                        numeric_bin(v, &edges)
-                    }
-                })
-                .collect();
-            (
-                column,
-                FeatureBins {
-                    edges,
-                    is_categorical,
-                },
-            )
-        })
-        .collect();
-
-    // Column-major: histograms of bundles and row partitions read one
-    // feature at a time.
-    let mut binned = Array2::zeros((n, p).f());
-    let mut all_bins = Vec::with_capacity(p);
-    for (j, (column, bins)) in columns.into_iter().enumerate() {
-        binned
-            .column_mut(j)
-            .assign(&ndarray::ArrayView1::from(&column));
-        all_bins.push(bins);
-    }
-
-    (binned, all_bins)
+    let settings = BinningSettings {
+        max_bins,
+        min_data_in_bin,
+        categorical_features: categorical_features.to_vec(),
+        method,
+        seed: Some(seed),
+    };
+    let data = LgbmDataset::build(x, settings, None);
+    (data.binned, data.bins)
 }
 
 /// The categories of a categorical feature that get their own bin, sorted by
@@ -503,25 +434,8 @@ fn bin_value(v: f64, bins: &FeatureBins) -> u8 {
 /// Bin every row of `x` with *existing* (training) bin edges, row-major
 /// (prediction walks one row at a time), in parallel over blocks of rows.
 /// Works for any layout of `x`.
-fn bin_matrix(x: ArrayView2<f64>, all_bins: &[FeatureBins]) -> Array2<u8> {
-    use rayon::prelude::*;
-    let (n, p) = x.dim();
-    let mut out = Array2::<u8>::zeros((n, p));
-    if p > 0 {
-        out.as_slice_mut()
-            .expect("row-major")
-            .par_chunks_mut(PREDICT_BLOCK_ROWS * p)
-            .enumerate()
-            .for_each(|(block, out)| {
-                let first = block * PREDICT_BLOCK_ROWS;
-                for (j, bins) in all_bins.iter().enumerate() {
-                    for (k, o) in out.iter_mut().skip(j).step_by(p).enumerate() {
-                        *o = bin_value(x[[first + k, j]], bins);
-                    }
-                }
-            });
-    }
-    out
+fn bin_matrix<T: LgbmFloat>(x: ArrayView2<T>, all_bins: &[FeatureBins]) -> Array2<u8> {
+    dataset::bin_rows(x, all_bins)
 }
 
 /// Run a fit on `n_jobs` threads (`None`: the physical cores, at most the
@@ -596,15 +510,6 @@ struct WarmStartModel {
     early_stopping: bool,
     feature_fraction_per_split: f64,
     colsample_bynode: f64,
-}
-
-/// Bin `x` with the bins of a fitted model, column-major (as
-/// `compute_bins`).
-fn bin_with(x: ArrayView2<f64>, bins: &[FeatureBins]) -> Array2<u8> {
-    let rows = bin_matrix(x, bins);
-    let mut binned = Array2::zeros(rows.raw_dim().f());
-    binned.assign(&rows);
-    binned
 }
 
 /// Rows per parallel block of predictions.
@@ -930,12 +835,13 @@ fn fix_histogram(hist: &mut Histogram, bin: u8, (grad, hess): (f64, f64)) {
 /// The bins LightGBM derives with `FixHistogram`: per numeric feature its
 /// `most_freq_bin` (the bin of 0 unless another bin holds at least
 /// `kSparseThreshold` = 70% of the rows), unless that is its first bin.
-fn lgbm_fixed_bins(
+fn lgbm_fixed_bins_of(
     binned_x: &Array2<u8>,
     all_bins: &[FeatureBins],
     has_missing: &[bool],
+    rows: Option<&[usize]>,
 ) -> Vec<Option<u8>> {
-    let n = binned_x.nrows();
+    let n = rows.map_or(binned_x.nrows(), <[usize]>::len);
     all_bins
         .iter()
         .enumerate()
@@ -953,10 +859,15 @@ fn lgbm_fixed_bins(
                 }
             };
             let mut counts = vec![0usize; n_bins + usize::from(has_missing[j])];
-            for &bin in binned_x.column(j) {
+            let col = binned_x.column(j);
+            let mut count = |bin: u8| {
                 if let Some(c) = counts.get_mut(index(bin)) {
                     *c += 1;
                 }
+            };
+            match rows {
+                Some(rows) => rows.iter().for_each(|&i| count(col[i])),
+                None => col.iter().copied().for_each(count),
             }
             let mut most = 0;
             for (k, &c) in counts.iter().enumerate() {
@@ -1164,23 +1075,27 @@ struct FeatureBundles {
 }
 
 /// Rows of one feature off its most frequent bin, and that bin.
-fn non_default_rows(col: ArrayView1<u8>) -> (u8, Vec<usize>) {
+fn bin_counts(col: ArrayView1<u8>) -> (u8, [usize; 256]) {
     let mut counts = [0usize; 256];
     for &b in col {
         counts[b as usize] += 1;
     }
     // The first of the most frequent bins.
     let default_bin = (0..256).rev().max_by_key(|&b| counts[b]).unwrap() as u8;
-    let rows = (0..col.len()).filter(|&i| col[i] != default_bin).collect();
-    (default_bin, rows)
+    (default_bin, counts)
 }
 
 /// Greedy bundles of features in the order `order`: each feature joins the
 /// most recent bundle (of the last `MAX_SEARCH_BUNDLES`) it conflicts with
 /// in no row and whose bins it fits into.
+///
+/// `rows[f]` may be empty for a feature that conflicts with every other
+/// (`count[f]` plus the smallest other count exceeds `n`): the row-count
+/// test rejects it before its rows are read.
 fn greedy_bundles(
     order: &[usize],
     rows: &[Vec<usize>],
+    count: &[usize],
     n_bins: &[usize],
     n: usize,
 ) -> Vec<Vec<usize>> {
@@ -1191,7 +1106,7 @@ fn greedy_bundles(
     let mut total_bins: Vec<usize> = Vec::new();
     for &f in order {
         let fits = |g: usize| {
-            total_rows[g] + rows[f].len() <= n
+            total_rows[g] + count[f] <= n
                 && total_bins[g] + n_bins[f] <= 256
                 && rows[f]
                     .iter()
@@ -1209,7 +1124,7 @@ fn greedy_bundles(
             bundles.len() - 1
         });
         bundles[g].push(f);
-        total_rows[g] += rows[f].len();
+        total_rows[g] += count[f];
         total_bins[g] += n_bins[f];
         for &i in &rows[f] {
             used[g][i / 64] |= 1 << (i % 64);
@@ -1228,24 +1143,49 @@ impl FeatureBundles {
         if p < 2 {
             return None;
         }
-        let (defaults, rows): (Vec<u8>, Vec<Vec<usize>>) =
-            (0..p).map(|f| non_default_rows(binned_x.column(f))).unzip();
-        let mut present: Vec<Vec<u8>> = (0..p)
+        use rayon::prelude::*;
+        let stats: Vec<(u8, [usize; 256])> = (0..p)
+            .into_par_iter()
+            .map(|f| bin_counts(binned_x.column(f)))
+            .collect();
+        let defaults: Vec<u8> = stats.iter().map(|s| s.0).collect();
+        let count: Vec<usize> = stats.iter().map(|(d, c)| n - c[*d as usize]).collect();
+        let mut present: Vec<Vec<u8>> = stats
+            .iter()
+            .map(|(d, c)| {
+                (0..=255u8)
+                    .filter(|&b| b != *d && c[b as usize] > 0)
+                    .collect()
+            })
+            .collect();
+        // The non-default rows of the features that can share a bundle (on
+        // dense data none can, and their rows are never listed).
+        let smallest_two = {
+            let mut c = count.clone();
+            c.sort_unstable();
+            (c[0], c[1])
+        };
+        let rows: Vec<Vec<usize>> = (0..p)
+            .into_par_iter()
             .map(|f| {
-                let col = binned_x.column(f);
-                let mut seen = [false; 256];
-                for &i in &rows[f] {
-                    seen[col[i] as usize] = true;
+                let other = if count[f] == smallest_two.0 {
+                    smallest_two.1
+                } else {
+                    smallest_two.0
+                };
+                if count[f] + other > n {
+                    return Vec::new();
                 }
-                (0..=255u8).filter(|&b| seen[b as usize]).collect()
+                let col = binned_x.column(f);
+                (0..n).filter(|&i| col[i] != defaults[f]).collect()
             })
             .collect();
         let n_bins: Vec<usize> = present.iter().map(Vec::len).collect();
         let natural: Vec<usize> = (0..p).collect();
         let mut by_count = natural.clone();
-        by_count.sort_by_key(|&f| std::cmp::Reverse(rows[f].len()));
-        let first = greedy_bundles(&natural, &rows, &n_bins, n);
-        let second = greedy_bundles(&by_count, &rows, &n_bins, n);
+        by_count.sort_by_key(|&f| std::cmp::Reverse(count[f]));
+        let first = greedy_bundles(&natural, &rows, &count, &n_bins, n);
+        let second = greedy_bundles(&by_count, &rows, &count, &n_bins, n);
         let groups = if second.len() < first.len() {
             second
         } else {
@@ -2624,6 +2564,8 @@ impl LgbmRandom {
 /// seed its defaults (bagging 3, feature fraction 2, DART's `drop_seed`).
 #[derive(Debug, Clone, Copy)]
 struct LgbmSeeds {
+    /// `data_random_seed`: the sample of rows the bins come from.
+    data: u32,
     bagging: u32,
     feature_fraction: u32,
     drop: u32,
@@ -2633,6 +2575,7 @@ impl LgbmSeeds {
     fn new(seed: Option<u64>, drop_seed: u32) -> Self {
         let Some(seed) = seed else {
             return Self {
+                data: 1,
                 bagging: 3,
                 feature_fraction: 2,
                 drop: drop_seed,
@@ -2640,11 +2583,12 @@ impl LgbmSeeds {
         };
         let mut rng = LgbmRandom(seed as u32);
         let mut next = || rng.next_short(i16::MAX as usize) as u32;
-        let _data_random_seed = next();
+        let data = next();
         let bagging = next();
         let drop = next();
         let feature_fraction = next();
         Self {
+            data,
             bagging,
             feature_fraction,
             drop,
@@ -3660,15 +3604,6 @@ impl FittedLgbmRegressor {
     }
 }
 
-/// Per column of `x`: whether it has a missing value (all `false` unless
-/// `needed`).
-fn columns_with_missing(x: ArrayView2<f64>, needed: bool) -> Vec<bool> {
-    x.columns()
-        .into_iter()
-        .map(|c| needed && c.iter().any(|v| v.is_nan()))
-        .collect()
-}
-
 /// Round to float32, the precision sklearn keeps gradients and hessians in
 /// (their sums are float64 there too).
 fn round_to_f32(values: &mut [f64]) {
@@ -4270,8 +4205,71 @@ impl LgbmRegressor {
         stopping: Option<SklearnStopping>,
     ) -> Result<(FittedLgbmRegressor, EarlyStoppingScores)> {
         with_fit_threads(self.n_jobs, || {
-            self.fit_scored_inner(x, y, opts, stopping, None)
+            let data = self.bin(x, None);
+            self.fit_scored_inner(&data, y, opts, stopping, None)
         })
+    }
+
+    /// The binning settings of this estimator.
+    fn binning_settings(&self) -> BinningSettings {
+        BinningSettings {
+            max_bins: self.max_bins,
+            min_data_in_bin: self.min_data_in_bin,
+            categorical_features: self.categorical_features.clone(),
+            method: self.binning,
+            seed: self.seed,
+        }
+    }
+
+    /// Bin `x` with this estimator's settings, or with `bins`.
+    fn bin<T: LgbmFloat>(&self, x: ArrayView2<T>, bins: Option<&[FeatureBins]>) -> LgbmDataset {
+        LgbmDataset::build(x, self.binning_settings(), bins)
+    }
+
+    /// Bin `x` (`f64` or `f32`) once with this estimator's binning
+    /// settings, to fit on with [`fit_dataset`](Self::fit_dataset).
+    pub fn dataset<'a, T: LgbmFloat>(&self, x: impl AsArray<'a, T, Ix2>) -> Result<LgbmDataset> {
+        let x: ArrayView2<T> = x.into();
+        if x.is_empty() {
+            return Err(RustMlError::EmptyInput("training data is empty".into()));
+        }
+        validate_max_bins(self.max_bins)?;
+        Ok(with_fit_threads(self.n_jobs, || self.bin(x, None)))
+    }
+
+    /// The rows of an `n_rows` dataset that its bin edges come from (all of
+    /// them up to 200 000), for [`dataset_builder`](Self::dataset_builder).
+    pub fn bin_sample_rows(&self, n_rows: usize) -> Vec<usize> {
+        dataset::sample_rows(n_rows, &self.binning_settings())
+            .unwrap_or_else(|| (0..n_rows).collect())
+    }
+
+    /// A builder of an `n_rows` dataset whose rows are pushed in blocks;
+    /// `sample` holds the rows [`bin_sample_rows`](Self::bin_sample_rows)
+    /// names, in that order.
+    pub fn dataset_builder<'a, T: LgbmFloat>(
+        &self,
+        sample: impl AsArray<'a, T, Ix2>,
+        n_rows: usize,
+    ) -> Result<LgbmDatasetBuilder> {
+        validate_max_bins(self.max_bins)?;
+        LgbmDatasetBuilder::new(sample.into(), n_rows, self.binning_settings())
+    }
+
+    /// [`fit_with_eval`](Self::fit_with_eval) on a dataset binned by
+    /// [`dataset`](Self::dataset) with the same binning settings.
+    pub fn fit_dataset<'b>(
+        &self,
+        data: &LgbmDataset,
+        y: impl AsArray<'b, f64, Ix1>,
+        opts: &LgbmFitOptions<'_>,
+    ) -> Result<FittedLgbmRegressor> {
+        data.check_settings(&self.binning_settings())?;
+        let y = y.into();
+        with_fit_threads(self.n_jobs, || {
+            self.fit_scored_inner(data, y, opts, None, None)
+        })
+        .map(|(f, _)| f)
     }
 
     /// Continue `prev` on `(x, y)` up to `n_estimators` trees (sklearn's
@@ -4286,16 +4284,24 @@ impl LgbmRegressor {
         y: impl AsArray<'b, f64, Ix1>,
         opts: &LgbmFitOptions<'_>,
     ) -> Result<FittedLgbmRegressor> {
-        let (x, y) = (x.into(), y.into());
+        let (x, y): (ArrayView2<f64>, _) = (x.into(), y.into());
+        if x.ncols() != prev.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "warm start: X has {} features, the fitted model {}",
+                x.ncols(),
+                prev.n_features
+            )));
+        }
         with_fit_threads(self.n_jobs, || {
-            self.fit_scored_inner(x, y, opts, None, Some(prev))
+            let data = self.bin(x, Some(&prev.bins));
+            self.fit_scored_inner(&data, y, opts, None, Some(prev))
         })
         .map(|(f, _)| f)
     }
 
     fn fit_scored_inner(
         &self,
-        x: ArrayView2<f64>,
+        data: &LgbmDataset,
         y: ArrayView1<f64>,
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
@@ -4307,17 +4313,17 @@ impl LgbmRegressor {
             if !self.sklearn_compat && alpha32 != alpha {
                 let mut m = self.clone();
                 m.objective = LgbmObjective::Quantile { alpha: alpha32 };
-                return m.fit_scored_inner(x, y, opts, stopping, prev);
+                return m.fit_scored_inner(data, y, opts, stopping, prev);
             }
         }
-        if x.nrows() != y.len() {
+        if data.n_rows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
-                x.nrows(),
+                data.n_rows(),
                 y.len()
             )));
         }
-        if x.is_empty() {
+        if data.n_rows() == 0 || data.n_features() == 0 {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
         if let Some(sw) = opts.sample_weight {
@@ -4338,14 +4344,16 @@ impl LgbmRegressor {
                 )));
             }
         }
-        if !self.monotone_constraints.is_empty() && self.monotone_constraints.len() != x.ncols() {
+        if !self.monotone_constraints.is_empty()
+            && self.monotone_constraints.len() != data.n_features()
+        {
             return Err(RustMlError::InvalidParameter(format!(
                 "monotone_constraints has {} entries but X has {} features",
                 self.monotone_constraints.len(),
-                x.ncols()
+                data.n_features()
             )));
         }
-        validate_eval_opts(opts, x.ncols())?;
+        validate_eval_opts(opts, data.n_features())?;
         validate_max_bins(self.max_bins)?;
         self.sampling().validate()?;
         validate_regression_objective(self.objective, y)?;
@@ -4354,15 +4362,15 @@ impl LgbmRegressor {
                 f.trees.len(),
                 f.learning_rate,
                 f.n_features,
-                x.ncols(),
+                data.n_features(),
                 self.warm_start_model(),
                 opts,
                 stopping.is_some(),
             )?;
         }
 
-        let n = x.nrows();
-        let p = x.ncols();
+        let n = data.n_rows();
+        let p = data.n_features();
         // LightGBM stores labels and weights as float32 (`label_t`).
         let lgbm_f32 = |v: f64| {
             if self.sklearn_compat {
@@ -4372,17 +4380,7 @@ impl LgbmRegressor {
             }
         };
         let y_vec: Vec<f64> = y.iter().map(|&v| lgbm_f32(v)).collect();
-        let (binned_x, bins) = match prev {
-            Some(f) => (bin_with(x, &f.bins), f.bins.clone()),
-            None => compute_bins(
-                x,
-                self.max_bins,
-                &self.categorical_features,
-                self.min_data_in_bin,
-                self.binning,
-                self.seed.unwrap_or(0),
-            ),
-        };
+        let (binned_x, bins) = (&data.binned, data.bins.clone());
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
         // sklearn has no feature bundling (and its parity needs the plain
@@ -4431,11 +4429,11 @@ impl LgbmRegressor {
         samplers.replay(start, 1, n);
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
-        let has_missing = columns_with_missing(x, true);
+        let has_missing = data.has_missing.clone();
         let fixed_bins = if self.sklearn_compat {
             Vec::new()
         } else {
-            lgbm_fixed_bins(&binned_x, &bins, &has_missing)
+            data.fixed_bins.clone()
         };
         let params = LgbmParams {
             has_missing,
@@ -4815,12 +4813,30 @@ impl FittedLgbmRegressor {
 }
 
 impl FittedLgbmRegressor {
-    /// The raw scores (no `exp` / sigmoid link).
-    pub fn predict_raw<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+    /// The raw scores (no `exp` / sigmoid link), from `f64` or `f32`
+    /// features.
+    pub fn predict_raw<'a, T: LgbmFloat>(
+        &self,
+        x: impl AsArray<'a, T, Ix2>,
+    ) -> Result<Array1<f64>> {
         self.raw_scores(x.into())
     }
 
-    fn raw_scores(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+    /// [`predict`](Predict::predict) from `f32` features.
+    pub fn predict_f32<'a>(&self, x: impl AsArray<'a, f32, Ix2>) -> Result<Array1<f64>> {
+        Ok(self.link(self.raw_scores(x.into())?))
+    }
+
+    fn link(&self, mut preds: Array1<f64>) -> Array1<f64> {
+        if self.log_link {
+            preds.mapv_inplace(f64::exp);
+        } else if self.logistic {
+            preds.mapv_inplace(sigmoid);
+        }
+        preds
+    }
+
+    fn raw_scores<T: LgbmFloat>(&self, x: ArrayView2<T>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -4855,13 +4871,7 @@ impl FittedLgbmRegressor {
 
 impl Predict<f64> for FittedLgbmRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
-        let mut preds = self.raw_scores(x)?;
-        if self.log_link {
-            preds.mapv_inplace(f64::exp);
-        } else if self.logistic {
-            preds.mapv_inplace(sigmoid);
-        }
-        Ok(preds)
+        Ok(self.link(self.raw_scores(x)?))
     }
 }
 
@@ -5345,8 +5355,11 @@ impl FittedLgbmClassifier {
 
     /// The raw scores before the sigmoid / softmax: one column for two
     /// classes, one per class otherwise.
-    pub fn predict_raw<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
-        let x: ArrayView2<f64> = x.into();
+    pub fn predict_raw<'a, T: LgbmFloat>(
+        &self,
+        x: impl AsArray<'a, T, Ix2>,
+    ) -> Result<Array2<f64>> {
+        let x: ArrayView2<T> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -5364,8 +5377,12 @@ impl FittedLgbmClassifier {
         }))
     }
 
-    pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
-        let x: ArrayView2<f64> = x.into();
+    /// Class probabilities, from `f64` or `f32` features.
+    pub fn predict_proba<'a, T: LgbmFloat>(
+        &self,
+        x: impl AsArray<'a, T, Ix2>,
+    ) -> Result<Array2<f64>> {
+        let x: ArrayView2<T> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -5446,8 +5463,71 @@ impl LgbmClassifier {
         stopping: Option<SklearnStopping>,
     ) -> Result<(FittedLgbmClassifier, EarlyStoppingScores)> {
         with_fit_threads(self.n_jobs, || {
-            self.fit_scored_inner(x, y, opts, stopping, None)
+            let data = self.bin(x, None);
+            self.fit_scored_inner(&data, y, opts, stopping, None)
         })
+    }
+
+    /// The binning settings of this estimator.
+    fn binning_settings(&self) -> BinningSettings {
+        BinningSettings {
+            max_bins: self.max_bins,
+            min_data_in_bin: self.min_data_in_bin,
+            categorical_features: self.categorical_features.clone(),
+            method: self.binning,
+            seed: self.seed,
+        }
+    }
+
+    /// Bin `x` with this estimator's settings, or with `bins`.
+    fn bin<T: LgbmFloat>(&self, x: ArrayView2<T>, bins: Option<&[FeatureBins]>) -> LgbmDataset {
+        LgbmDataset::build(x, self.binning_settings(), bins)
+    }
+
+    /// Bin `x` (`f64` or `f32`) once with this estimator's binning
+    /// settings, to fit on with [`fit_dataset`](Self::fit_dataset).
+    pub fn dataset<'a, T: LgbmFloat>(&self, x: impl AsArray<'a, T, Ix2>) -> Result<LgbmDataset> {
+        let x: ArrayView2<T> = x.into();
+        if x.is_empty() {
+            return Err(RustMlError::EmptyInput("training data is empty".into()));
+        }
+        validate_max_bins(self.max_bins)?;
+        Ok(with_fit_threads(self.n_jobs, || self.bin(x, None)))
+    }
+
+    /// The rows of an `n_rows` dataset that its bin edges come from (all of
+    /// them up to 200 000), for [`dataset_builder`](Self::dataset_builder).
+    pub fn bin_sample_rows(&self, n_rows: usize) -> Vec<usize> {
+        dataset::sample_rows(n_rows, &self.binning_settings())
+            .unwrap_or_else(|| (0..n_rows).collect())
+    }
+
+    /// A builder of an `n_rows` dataset whose rows are pushed in blocks;
+    /// `sample` holds the rows [`bin_sample_rows`](Self::bin_sample_rows)
+    /// names, in that order.
+    pub fn dataset_builder<'a, T: LgbmFloat>(
+        &self,
+        sample: impl AsArray<'a, T, Ix2>,
+        n_rows: usize,
+    ) -> Result<LgbmDatasetBuilder> {
+        validate_max_bins(self.max_bins)?;
+        LgbmDatasetBuilder::new(sample.into(), n_rows, self.binning_settings())
+    }
+
+    /// [`fit_with_eval`](Self::fit_with_eval) on a dataset binned by
+    /// [`dataset`](Self::dataset) with the same binning settings.
+    pub fn fit_dataset<'b>(
+        &self,
+        data: &LgbmDataset,
+        y: impl AsArray<'b, f64, Ix1>,
+        opts: &LgbmFitOptions<'_>,
+    ) -> Result<FittedLgbmClassifier> {
+        data.check_settings(&self.binning_settings())?;
+        let y = y.into();
+        with_fit_threads(self.n_jobs, || {
+            self.fit_scored_inner(data, y, opts, None, None)
+        })
+        .map(|(f, _)| f)
     }
 
     /// Continue `prev` on `(x, y)` up to `n_estimators` rounds (sklearn's
@@ -5460,36 +5540,46 @@ impl LgbmClassifier {
         y: impl AsArray<'b, f64, Ix1>,
         opts: &LgbmFitOptions<'_>,
     ) -> Result<FittedLgbmClassifier> {
-        let (x, y) = (x.into(), y.into());
+        let (x, y): (ArrayView2<f64>, _) = (x.into(), y.into());
+        if x.ncols() != prev.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "warm start: X has {} features, the fitted model {}",
+                x.ncols(),
+                prev.n_features
+            )));
+        }
         with_fit_threads(self.n_jobs, || {
-            self.fit_scored_inner(x, y, opts, None, Some(prev))
+            let data = self.bin(x, Some(&prev.bins));
+            self.fit_scored_inner(&data, y, opts, None, Some(prev))
         })
         .map(|(f, _)| f)
     }
 
     fn fit_scored_inner(
         &self,
-        x: ArrayView2<f64>,
+        data: &LgbmDataset,
         y: ArrayView1<f64>,
         opts: &LgbmFitOptions<'_>,
         stopping: Option<SklearnStopping>,
         prev: Option<&FittedLgbmClassifier>,
     ) -> Result<(FittedLgbmClassifier, EarlyStoppingScores)> {
-        if x.nrows() != y.len() {
+        if data.n_rows() != y.len() {
             return Err(RustMlError::ShapeMismatch(format!(
                 "X has {} rows but y has {} elements",
-                x.nrows(),
+                data.n_rows(),
                 y.len()
             )));
         }
-        if x.is_empty() {
+        if data.n_rows() == 0 || data.n_features() == 0 {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
-        if !self.monotone_constraints.is_empty() && self.monotone_constraints.len() != x.ncols() {
+        if !self.monotone_constraints.is_empty()
+            && self.monotone_constraints.len() != data.n_features()
+        {
             return Err(RustMlError::InvalidParameter(format!(
                 "monotone_constraints has {} entries but X has {} features",
                 self.monotone_constraints.len(),
-                x.ncols()
+                data.n_features()
             )));
         }
         if let Some(sw) = opts.sample_weight {
@@ -5510,7 +5600,7 @@ impl LgbmClassifier {
                 )));
             }
         }
-        validate_eval_opts(opts, x.ncols())?;
+        validate_eval_opts(opts, data.n_features())?;
         validate_max_bins(self.max_bins)?;
         self.sampling().validate()?;
         if let Some(f) = prev {
@@ -5518,26 +5608,16 @@ impl LgbmClassifier {
                 f.n_estimators(),
                 f.learning_rate,
                 f.n_features,
-                x.ncols(),
+                data.n_features(),
                 self.warm_start_model(),
                 opts,
                 stopping.is_some(),
             )?;
         }
 
-        let n = x.nrows();
-        let p = x.ncols();
-        let (binned_x, bins) = match prev {
-            Some(f) => (bin_with(x, &f.bins), f.bins.clone()),
-            None => compute_bins(
-                x,
-                self.max_bins,
-                &self.categorical_features,
-                self.min_data_in_bin,
-                self.binning,
-                self.seed.unwrap_or(0),
-            ),
-        };
+        let n = data.n_rows();
+        let p = data.n_features();
+        let (binned_x, bins) = (&data.binned, data.bins.clone());
         // Row-major copy for the per-row score updates.
         let binned_rows = binned_x.as_standard_layout().into_owned();
         // sklearn has no feature bundling (and its parity needs the plain
@@ -5673,11 +5753,11 @@ impl LgbmClassifier {
             .then(|| DartState::new(self.dart, self.learning_rate, sampling.seeds.drop));
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
-        let has_missing = columns_with_missing(x, true);
+        let has_missing = data.has_missing.clone();
         let fixed_bins = if self.sklearn_compat {
             Vec::new()
         } else {
-            lgbm_fixed_bins(&binned_x, &bins, &has_missing)
+            data.fixed_bins.clone()
         };
         let params = LgbmParams {
             has_missing,

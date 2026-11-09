@@ -105,7 +105,8 @@ pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{
     BinningMethod, BoostingType, CategoricalSplitParams, DartParams, FittedLgbmBooster,
     FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassWeight, LgbmClassifier,
-    LgbmCustomObjective, LgbmFitOptions, LgbmObjective, LgbmRegressor,
+    LgbmCustomObjective, LgbmDataset, LgbmDatasetBuilder, LgbmFitOptions, LgbmFloat, LgbmObjective,
+    LgbmRegressor,
 };
 pub use random_forest_classifier::{FittedRandomForestClassifier, RandomForestClassifier};
 pub use random_forest_regressor::{FittedRandomForestRegressor, RandomForestRegressor};

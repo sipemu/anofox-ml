@@ -93,8 +93,11 @@ impl FittedLgbmBooster {
     }
 
     /// The raw scores, `n_rows × n_outputs`.
-    pub fn predict_raw<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
-        let x: ArrayView2<f64> = x.into();
+    pub fn predict_raw<'a, T: LgbmFloat>(
+        &self,
+        x: impl AsArray<'a, T, Ix2>,
+    ) -> Result<Array2<f64>> {
+        let x: ArrayView2<T> = x.into();
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -133,23 +136,34 @@ impl LgbmRegressor {
     /// objective owns the loss, so sample weights belong in its gradients).
     /// As in LightGBM, an output whose tree cannot split adds 0 that
     /// iteration, and training stops once no output's tree can split.
-    pub fn fit_custom<'a>(
+    pub fn fit_custom<'a, T: LgbmFloat>(
         &self,
-        x: impl AsArray<'a, f64, Ix2>,
+        x: impl AsArray<'a, T, Ix2>,
         objective: &dyn LgbmCustomObjective,
     ) -> Result<FittedLgbmBooster> {
-        let x: ArrayView2<f64> = x.into();
-        with_fit_threads(self.n_jobs, || self.fit_custom_inner(x, objective))
+        let data = self.dataset(x)?;
+        with_fit_threads(self.n_jobs, || self.fit_custom_inner(&data, objective))
+    }
+
+    /// [`fit_custom`](Self::fit_custom) on a dataset binned by
+    /// [`dataset`](Self::dataset) with the same binning settings.
+    pub fn fit_custom_dataset(
+        &self,
+        data: &LgbmDataset,
+        objective: &dyn LgbmCustomObjective,
+    ) -> Result<FittedLgbmBooster> {
+        data.check_settings(&self.binning_settings())?;
+        with_fit_threads(self.n_jobs, || self.fit_custom_inner(data, objective))
     }
 
     fn fit_custom_inner(
         &self,
-        x: ArrayView2<f64>,
+        data: &LgbmDataset,
         objective: &dyn LgbmCustomObjective,
     ) -> Result<FittedLgbmBooster> {
-        let (n, p) = x.dim();
+        let (n, p) = (data.n_rows(), data.n_features());
         let k = objective.n_outputs();
-        if x.is_empty() {
+        if n == 0 || p == 0 {
             return Err(RustMlError::EmptyInput("training data is empty".into()));
         }
         if k == 0 {
@@ -178,14 +192,7 @@ impl LgbmRegressor {
         validate_max_bins(self.max_bins)?;
         self.sampling().validate()?;
 
-        let (binned_x, bins) = compute_bins(
-            x,
-            self.max_bins,
-            &self.categorical_features,
-            self.min_data_in_bin,
-            self.binning,
-            self.seed.unwrap_or(0),
-        );
+        let (binned_x, bins) = (&data.binned, data.bins.clone());
         let binned_rows = binned_x.as_standard_layout().into_owned();
         let bundles = self
             .enable_bundle
@@ -193,11 +200,9 @@ impl LgbmRegressor {
             .flatten();
         let mut samplers = LgbmSamplers::new(self.sampling(), &binned_x, None);
         let mut feature_rng = feature_generator(1.0, 0);
-        let has_missing = columns_with_missing(x, true);
-        let fixed_bins = lgbm_fixed_bins(&binned_x, &bins, &has_missing);
         let params = LgbmParams {
-            has_missing,
-            fixed_bins,
+            has_missing: data.has_missing.clone(),
+            fixed_bins: data.fixed_bins.clone(),
             ..self.params()
         };
 
