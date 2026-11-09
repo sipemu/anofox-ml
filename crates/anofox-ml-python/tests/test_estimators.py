@@ -65,6 +65,8 @@ SPECIAL = {
     "PLSSVD": dict(y=Y_two),
     "MultiTaskLasso": dict(y=Y_two, params=dict(alpha=0.1)),
     "MultiTaskElasticNet": dict(y=Y_two, params=dict(alpha=0.1)),
+    "MultiTaskLassoCV": dict(y=Y_two, params=dict(alphas=10)),
+    "MultiTaskElasticNetCV": dict(y=Y_two, params=dict(alphas=10)),
 }
 
 

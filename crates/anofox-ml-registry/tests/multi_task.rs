@@ -51,3 +51,45 @@ fn multi_task_kinds_match_scikit_learn() {
         }
     }
 }
+
+#[test]
+fn multi_task_cv_kinds_match_scikit_learn() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../anofox-ml/tests/golden_data/multi_task_cv.json");
+    let data: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let (x, y) = (a2(&data["X"]), a2(&data["Y"]));
+    let xy = ndarray::concatenate(Axis(1), &[x.view(), y.view()]).unwrap();
+    for case in data["cases"].as_array().unwrap() {
+        let kind = case["kind"].as_str().unwrap();
+        let p = &case["params"];
+        let mut params = json!({"y_columns": 3, "cv": p["cv"], "eps": p.get("eps").unwrap_or(&json!(1e-3)),
+                                "fit_intercept": p.get("fit_intercept").unwrap_or(&json!(true))});
+        match &p["alphas"] {
+            Value::Array(a) => params["alphas"] = json!(a),
+            n => params["n_alphas"] = n.clone(),
+        }
+        if let Some(l1) = p.get("l1_ratio") {
+            params["l1_ratios"] = if l1.is_array() {
+                l1.clone()
+            } else {
+                json!([l1])
+            };
+        }
+        let mut m = make(kind, &params).unwrap();
+        m.fit(xy.view(), None, None).unwrap();
+        let m = load(kind, &m.to_bytes().unwrap()).unwrap();
+        let (Out::A2(p), Out::A2(c)) = (
+            m.predict(x.slice(ndarray::s![..3, ..])).unwrap(),
+            m.coef().unwrap(),
+        ) else {
+            panic!()
+        };
+        for (o, e) in p
+            .iter()
+            .zip(&a2(&case["predict"]))
+            .chain(c.iter().zip(&a2(&case["coef"])))
+        {
+            assert!((o - e).abs() < 1e-8, "{kind} {params}: {o} vs {e}");
+        }
+    }
+}

@@ -108,6 +108,24 @@ def test_multi_task_matches_sklearn(name):
     np.testing.assert_allclose(ours.score(X, Y), ref.score(X, Y), atol=1e-10)
 
 
+def test_multi_task_cv_matches_sklearn():
+    from sklearn import linear_model
+
+    tight = dict(tol=1e-12, max_iter=100_000)
+    ours = am.MultiTaskElasticNetCV(l1_ratio=[0.3, 0.8], alphas=20, cv=4).fit(X, Y)
+    ref = linear_model.MultiTaskElasticNetCV(l1_ratio=[0.3, 0.8], alphas=20, cv=4,
+                                             **tight).fit(X, Y)
+    assert ours.alpha_ == pytest.approx(ref.alpha_, rel=1e-12)
+    assert ours.l1_ratio_ == ref.l1_ratio_
+    np.testing.assert_allclose(ours.alphas_, ref.alphas_, rtol=1e-12)
+    np.testing.assert_allclose(ours.mse_path_, ref.mse_path_, rtol=1e-8)
+    np.testing.assert_allclose(ours.coef_, ref.coef_, atol=1e-8)
+    ours = am.MultiTaskLassoCV(alphas=[1.0, 0.3, 0.1, 0.01]).fit(X, Y)
+    ref = linear_model.MultiTaskLassoCV(alphas=[1.0, 0.3, 0.1, 0.01], **tight).fit(X, Y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), atol=1e-8)
+    np.testing.assert_allclose(ours.mse_path_, ref.mse_path_, rtol=1e-8)
+
+
 def test_spectral_embedding_matches_sklearn():
     from sklearn.manifold import SpectralEmbedding
 
