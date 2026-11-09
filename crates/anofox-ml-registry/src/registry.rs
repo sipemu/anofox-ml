@@ -2073,6 +2073,12 @@ registry! {
     }
 
     // -------------------------------------------------------- manifold
+    SpectralEmbedding {
+        config: manifold::SpectralEmbedding = Default::default(),
+        fitted: manifold::FittedSpectralEmbedding,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        embedding: |m| m.embedding.clone(),
+    }
     TSne {
         config: manifold::TSne = manifold::TSne::new(2),
         fitted: manifold::FittedTSne,

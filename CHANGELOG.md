@@ -12,6 +12,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   deflation; shares Cca's code) and `PlsSvd` (`PLSSVD`), with registry
   kinds fitted on `[X | Y]` with `y_columns`. Both match scikit-learn 1.8
   (`test_harness/generators/gen_pls.py`).
+- `SpectralEmbedding` (sklearn's `manifold.SpectralEmbedding`: k-NN or RBF
+  affinity, the training embedding) with a registry kind (`embedding`);
+  matches scikit-learn 1.8 (`gen_spectral_embedding.py`). `Affinity` and
+  the graph builder move to `anofox-ml-manifold` (re-exported by
+  `anofox-ml-cluster`).
 
 ### Registry
 

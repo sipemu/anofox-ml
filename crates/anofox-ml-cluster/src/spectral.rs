@@ -9,21 +9,11 @@
 
 use anofox_ml_core::Float;
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
-use anofox_ml_manifold::spectral_embedding;
-use anofox_ml_neighbors::{DistanceMetric, NeighborAlgorithm, NeighborIndex};
+pub use anofox_ml_manifold::Affinity;
+use anofox_ml_manifold::{build_affinity, spectral_embedding};
 use ndarray::{Array1, ArrayView2};
 
 use crate::kmeans::KMeans;
-
-/// How to build the affinity graph.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub enum Affinity {
-    /// `exp(-γ ||x_i - x_j||²)` with the given gamma (dense).
-    Rbf(f64),
-    /// k-NN connectivity including the sample itself, symmetrised as
-    /// `0.5·(C + Cᵀ)` (sparse).
-    KNearest(usize),
-}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectralClustering {
@@ -65,48 +55,6 @@ impl SpectralClustering {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedSpectralClustering {
     pub labels: Array1<f64>,
-}
-
-/// Affinity graph entries `(i, j, w)` (both triangles).
-fn build_affinity(x: ArrayView2<f64>, affinity: &Affinity) -> Result<Vec<(usize, usize, f64)>> {
-    let n = x.nrows();
-    match *affinity {
-        Affinity::Rbf(gamma) => {
-            let mut e = Vec::with_capacity(n * n);
-            for i in 0..n {
-                for j in 0..n {
-                    let sd: f64 = x
-                        .row(i)
-                        .iter()
-                        .zip(x.row(j))
-                        .map(|(a, b)| (a - b) * (a - b))
-                        .sum();
-                    e.push((i, j, (-gamma * sd).exp()));
-                }
-            }
-            Ok(e)
-        }
-        Affinity::KNearest(k) => {
-            // kneighbors_graph(X, k, include_self=True): each sample's k
-            // nearest samples, itself first.
-            let k = k.clamp(1, n);
-            let index = NeighborIndex::new(
-                x.view(),
-                DistanceMetric::Euclidean,
-                NeighborAlgorithm::Auto,
-                Some(k),
-            )?;
-            let (_, nbrs) = index.kneighbors(x.view(), k)?;
-            let mut e = Vec::with_capacity(2 * n * k);
-            for (i, row) in nbrs.rows().into_iter().enumerate() {
-                for &j in row {
-                    e.push((i, j, 0.5));
-                    e.push((j, i, 0.5));
-                }
-            }
-            Ok(e)
-        }
-    }
 }
 
 impl<F: Float> FitUnsupervised<F> for SpectralClustering {
