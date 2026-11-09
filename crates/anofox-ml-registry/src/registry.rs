@@ -1004,6 +1004,15 @@ registry! {
         predict: |m, x| m.predict(x),
         transform: |m, x| m.transform(x),
     }
+    SequentialFeatureSelector {
+        config: crate::meta::SfsConfig = Default::default(),
+        fitted: crate::meta::SfsFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        transform: |m, x| m.transform(x),
+    }
     OneVsRestClassifier {
         config: crate::meta::OneVsRestConfig = Default::default(),
         fitted: crate::meta::OneVsRestFit,
