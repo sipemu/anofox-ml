@@ -13,6 +13,23 @@ pub(crate) fn to_array2(m: MatRef<'_, f64>) -> Array2<f64> {
     Array2::from_shape_fn((m.nrows(), m.ncols()), |(i, j)| m[(i, j)])
 }
 
+/// Serde for the fitted models' faer matrices (the Cholesky factors), as
+/// ndarray arrays: a round trip restores them exactly.
+pub(crate) mod mat_serde {
+    use super::{to_array2, to_mat};
+    use faer::Mat;
+    use ndarray::Array2;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(m: &Mat<f64>, s: S) -> Result<S::Ok, S::Error> {
+        to_array2(m.as_ref()).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Mat<f64>, D::Error> {
+        Ok(to_mat(&Array2::<f64>::deserialize(d)?))
+    }
+}
+
 pub(crate) fn col_to_array1(m: &Mat<f64>) -> Array1<f64> {
     Array1::from_shape_fn(m.nrows(), |i| m[(i, 0)])
 }

@@ -31,6 +31,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   (predict and transform), both matching scikit-learn 1.8, `IsotonicRegressor`
   and `BinomialRegressor` (with offsets; weights as trial counts).
   `PlsRegression` and `IsotonicRegressor` configs are now `Serialize`.
+- `GaussianProcessRegressor` (with `DynModel::predict_std`) and
+  `GaussianProcessClassifier` (binary, or one-vs-rest) in the registry
+  (#125), defaulting to scikit-learn's `1.0 * RBF(1.0)` with fixed
+  hyperparameters. The Gaussian process configs, kernels and fitted models
+  are now `Serialize` (the Cholesky factors are stored, so a loaded model is
+  bit-identical).
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /

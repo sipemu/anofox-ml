@@ -23,7 +23,7 @@ use crate::linalg::{cholesky, col_to_array1, solve_lower, vec_to_col};
 use crate::{optimise_kernel, GpKernel};
 
 /// Binary Gaussian process classifier (Laplace approximation).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GaussianProcessClassifier {
     pub kernel: GpKernel,
     /// Maximum Newton iterations for the posterior mode (sklearn
@@ -76,12 +76,13 @@ impl GaussianProcessClassifier {
 }
 
 /// Fitted binary Gaussian process classifier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedGaussianProcessClassifier {
     pub x_train: Array2<f64>,
     /// `y_train - π̂` (the dual coefficient vector at the posterior mode).
     pub alpha: Array1<f64>,
     /// Cholesky factor `L` of `I + Wˢ K Wˢ`.
+    #[serde(with = "crate::linalg::mat_serde")]
     pub l_lower: Mat<f64>,
     /// `Wˢ = W^{1/2}` at the posterior mode.
     pub w_sqrt: Array1<f64>,
@@ -414,7 +415,7 @@ impl anofox_ml_core::ClassifierScore<f64> for FittedGaussianProcessClassifier {}
 /// binary `GaussianProcessClassifier` instances. Mirrors sklearn's
 /// `GaussianProcessClassifier(multi_class='one_vs_rest')`; with exactly two
 /// classes a single binary classifier is fitted, as in sklearn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MulticlassGaussianProcessClassifier {
     pub kernel: GpKernel,
     pub max_iter: usize,
@@ -458,7 +459,7 @@ impl MulticlassGaussianProcessClassifier {
 }
 
 /// Fitted one-vs-rest Gaussian process classifier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedMulticlassGaussianProcessClassifier {
     pub classes: Vec<f64>,
     /// One binary model per class (or a single one for two classes).

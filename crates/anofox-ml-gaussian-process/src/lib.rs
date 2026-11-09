@@ -61,7 +61,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 /// Gaussian process regressor (unfitted configuration).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GaussianProcessRegressor {
     /// Prior covariance; its free hyperparameters are optimised in `fit`.
     pub kernel: GpKernel,
@@ -115,12 +115,13 @@ impl GaussianProcessRegressor {
 }
 
 /// Fitted Gaussian process regressor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedGaussianProcessRegressor {
     pub x_train: Array2<f64>,
     /// Training targets (normalised if `normalize_y`).
     pub y_train: Array1<f64>,
     /// Lower Cholesky factor of `K + αI`.
+    #[serde(with = "crate::linalg::mat_serde")]
     pub l_lower: Mat<f64>,
     /// `α = (K + αI)⁻¹ y` — used in mean prediction.
     pub dual: Array1<f64>,
