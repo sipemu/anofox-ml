@@ -19,7 +19,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "anofox-ml"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-cluster",
  "anofox-ml-conformal",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-cluster"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-manifold",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-conformal"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-ensemble",
@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "approx",
  "bincode",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-discriminant"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-ensemble"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-neighbors",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-gaussian-process"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-io"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-linear"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-regression",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-manifold"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-neighbors",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-metrics"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-naive-bayes"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-neighbors"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-discriminant",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-neural-networks"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-preprocessing"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-regression",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-python"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-metrics",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-registry"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-cluster",
  "anofox-ml-conformal",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-regression"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-metrics",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-svm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-text"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-trees"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "approx",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-tune"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-metrics",

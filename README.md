@@ -43,7 +43,7 @@ Add anofox-ml to your project:
 
 ```toml
 [dependencies]
-anofox-ml = "0.4"
+anofox-ml = "0.5"
 ndarray = "0.16"
 ```
 
@@ -398,7 +398,7 @@ before submitting a pull request. All code should include tests and pass
 
 ## Releasing
 
-The workspace is split into 17 publishable crates plus an umbrella `anofox-ml`.
+The workspace is split into 19 publishable crates plus an umbrella `anofox-ml`.
 Versions are kept in lockstep via `[workspace.package].version` in the root
 `Cargo.toml` — bumping there moves every crate at once.
 
