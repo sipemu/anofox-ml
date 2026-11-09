@@ -121,6 +121,11 @@ pub trait DynModel: Send + Sync {
     ) -> Result<(Array2<f64>, Array2<usize>)> {
         Err(unsupported(self.kind(), "kneighbors"))
     }
+    /// Coefficients of a fitted linear model: one per feature, or
+    /// classes × features (sklearn's `coef_`).
+    fn coef(&self) -> Result<Out> {
+        Err(unsupported(self.kind(), "coef"))
+    }
     /// Per-feature importances of the fitted model (trees, forests,
     /// boosting, bagging).
     fn feature_importances(&self) -> Result<Out> {
@@ -443,6 +448,12 @@ macro_rules! registry {
 
     (@cap $kind:ident, labels, $m:ident, $body:expr) => {
         fn labels(&self) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body))
+        }
+    };
+    (@cap $kind:ident, coef, $m:ident, $body:expr) => {
+        fn coef(&self) -> anofox_ml_core::Result<$crate::model::Out> {
             let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
             Ok($crate::model::Out::from($body))
         }

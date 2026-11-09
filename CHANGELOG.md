@@ -68,6 +68,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   on `[X | Y]` with `y_columns` (the last columns are the targets, as Cca);
   `predict` returns one column per target. The chain takes `order` and
   matches scikit-learn 1.8 (`cv=None`).
+- `DynModel::coef` (#125) for OlsRegressor, RidgeRegressor, LassoRegressor,
+  ElasticNetRegressor and LogisticRegressor, and the `Rfe` kind: recursive
+  feature elimination by the squared `coef`, else `feature_importances`
+  (scikit-learn's `importance_getter="auto"`), with `n_features_to_select`
+  and `step`; `transform` keeps the selected columns, `predict` uses the
+  model refitted on them; `ranking` / `support` in `fitted_json`.
 
 ## [0.4.0] - 2026-11-06
 
