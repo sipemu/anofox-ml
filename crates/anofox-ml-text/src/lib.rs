@@ -130,7 +130,8 @@ fn df_bounds(min_df: usize, max_df_frac: f64, n_docs: usize) -> Result<(usize, u
 // ---------------------------------------------------------------------------
 
 /// Bag-of-words term counts (sklearn's `CountVectorizer`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CountVectorizer {
     /// Ignore terms that appear in fewer than `min_df` training documents.
     pub min_df: usize,
@@ -140,10 +141,32 @@ pub struct CountVectorizer {
 }
 
 /// A fitted [`CountVectorizer`]: the learned (sorted) vocabulary.
-#[derive(Debug, Clone)]
+/// The fitted vocabulary (serialised as the sorted term list; the lookup
+/// table is rebuilt on load).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(from = "Vocabulary", into = "Vocabulary")]
 pub struct FittedCountVectorizer {
     vocabulary: Vec<String>,
     term_to_col: HashMap<String, usize>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Vocabulary {
+    vocabulary: Vec<String>,
+}
+
+impl From<Vocabulary> for FittedCountVectorizer {
+    fn from(v: Vocabulary) -> Self {
+        Self::from_vocabulary(v.vocabulary)
+    }
+}
+
+impl From<FittedCountVectorizer> for Vocabulary {
+    fn from(f: FittedCountVectorizer) -> Self {
+        Self {
+            vocabulary: f.vocabulary,
+        }
+    }
 }
 
 impl CountVectorizer {
@@ -279,7 +302,8 @@ impl FittedCountVectorizer {
 
 /// TF-IDF features (sklearn's `TfidfVectorizer` with `smooth_idf=True`,
 /// `sublinear_tf=False`, `norm="l2"` when `norm_l2`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TfidfVectorizer {
     pub min_df: usize,
     pub max_df_frac: f64,
@@ -287,7 +311,7 @@ pub struct TfidfVectorizer {
 }
 
 /// A fitted [`TfidfVectorizer`]: vocabulary plus per-term IDF weights.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedTfidfVectorizer {
     counts: FittedCountVectorizer,
     idf: Vec<f64>,
@@ -434,11 +458,19 @@ impl FittedTfidfVectorizer {
 /// `+1` for `h >= 0` and `-1` otherwise. The sign comes from the hash's sign
 /// bit while the column comes from its magnitude, so colliding tokens cancel
 /// in expectation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct HashingVectorizer {
     pub n_features: usize,
     pub alternate_sign: bool,
     pub norm_l2: bool,
+}
+
+/// sklearn's default `n_features = 2**20`.
+impl Default for HashingVectorizer {
+    fn default() -> Self {
+        Self::new(1 << 20)
+    }
 }
 
 impl HashingVectorizer {

@@ -29,6 +29,13 @@ use anofox_ml_conformal as conformal;
 use crate::estimator::{RegistryEstimator, RegistryFitted};
 use crate::model::{need_y, no_weight, registry, stages_to_columns};
 
+/// The text vectorizers fit on documents ([`crate::DynModel::fit_text`]).
+fn text_only(kind: &str) -> anofox_ml_core::RustMlError {
+    anofox_ml_core::RustMlError::InvalidParameter(format!(
+        "{kind} is fitted on documents: use fit_text / transform_text"
+    ))
+}
+
 /// Compact fitted form of a linear model whose full fitted type holds
 /// non-serializable solver state: enough to predict and to pickle.
 /// Aliased (`NaN`) coefficients count as 0, as in the Rust `predict`.
@@ -2006,6 +2013,27 @@ registry! {
         fitted: pre::FittedSelectKBest<f64>,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         transform: |m, x| Transform::transform(m, x),
+    }
+    CountVectorizer {
+        config: anofox_ml_text::CountVectorizer = Default::default(),
+        fitted: anofox_ml_text::FittedCountVectorizer,
+        fit: |c, x, y, w| Err(text_only(K)),
+        fit_text: |c, docs| c.fit(docs),
+        transform_text: |m, docs| m.transform(docs),
+    }
+    TfidfVectorizer {
+        config: anofox_ml_text::TfidfVectorizer = Default::default(),
+        fitted: anofox_ml_text::FittedTfidfVectorizer,
+        fit: |c, x, y, w| Err(text_only(K)),
+        fit_text: |c, docs| c.fit(docs),
+        transform_text: |m, docs| m.transform(docs),
+    }
+    HashingVectorizer {
+        config: anofox_ml_text::HashingVectorizer = Default::default(),
+        fitted: anofox_ml_text::HashingVectorizer,
+        fit: |c, x, y, w| Err(text_only(K)),
+        fit_text: |c, docs| Ok::<_, anofox_ml_core::RustMlError>(c.clone()),
+        transform_text: |m, docs| Ok::<_, anofox_ml_core::RustMlError>(m.transform(docs)),
     }
     TfidfTransformer {
         config: anofox_ml_text::TfidfTransformer = Default::default(),

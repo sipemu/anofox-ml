@@ -2,6 +2,8 @@
 and of the DynModel methods behind them (partial_fit, warm_start,
 kneighbors, predict_log_proba, offsets) with scikit-learn 1.8."""
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -241,3 +243,41 @@ def test_poisson_offset_equals_rate_model():
     np.testing.assert_allclose(off.predict(X, offset=np.log(e)), e * rate.predict(X),
                                rtol=1e-7)
     np.testing.assert_allclose(off.predict(X), rate.predict(X), rtol=1e-7)
+
+
+# ------------------------------------------------------- text vectorizers
+
+DOCS = ["The quick brown fox jumps", "the lazy dog, the lazy cat!", "Quick quick fox",
+        "a dog and a fox", "Ünïcode wörds and_underscores 2024"]
+
+
+@pytest.mark.parametrize("name, params", [
+    ("CountVectorizer", {}), ("CountVectorizer", {"min_df": 2, "max_df": 0.8}),
+    ("TfidfVectorizer", {}), ("TfidfVectorizer", {"norm": None, "min_df": 2}),
+    ("HashingVectorizer", {"n_features": 64}),
+    ("HashingVectorizer", {"n_features": 32, "alternate_sign": False, "norm": None}),
+])
+def test_text_vectorizers_match_sklearn(name, params):
+    from sklearn.feature_extraction import text
+
+    ours = getattr(am, name)(**params)
+    ref = getattr(text, name)(**params)
+    got = ours.fit_transform(DOCS)
+    want = ref.fit_transform(DOCS).toarray()
+    np.testing.assert_allclose(got, want, atol=1e-12)
+    new = ["fox and the dog", "nothing known here"]
+    np.testing.assert_allclose(ours.transform(new), ref.transform(new).toarray(), atol=1e-12)
+    if name != "HashingVectorizer":
+        assert list(ours.get_feature_names_out()) == list(ref.get_feature_names_out())
+        assert ours.vocabulary_ == {k: int(v) for k, v in ref.vocabulary_.items()}
+    if name == "TfidfVectorizer":
+        np.testing.assert_allclose(ours.idf_, ref.idf_, atol=1e-12)
+    clone = pickle.loads(pickle.dumps(ours))
+    np.testing.assert_array_equal(clone.transform(new), ours.transform(new))
+
+
+def test_text_vectorizer_errors():
+    with pytest.raises(ValueError, match="string object"):
+        am.CountVectorizer().fit("one string")
+    with pytest.raises(ValueError, match="min_df"):
+        am.CountVectorizer(min_df=0.1).fit(DOCS)

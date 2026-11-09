@@ -178,6 +178,16 @@ pub trait DynModel: Send + Sync {
     fn predict_with_offset(&self, _x: ArrayView2<f64>, _offset: ArrayView1<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_with_offset"))
     }
+    /// Fit on documents, one string per row (the text vectorizers; their
+    /// numeric `fit` is unsupported).
+    fn fit_text(&mut self, _docs: &[&str]) -> Result<()> {
+        Err(unsupported(self.kind(), "fit_text"))
+    }
+    /// Encode documents as a dense `n × n_features` array (the text
+    /// vectorizers' `transform`).
+    fn transform_text(&self, _docs: &[&str]) -> Result<Out> {
+        Err(unsupported(self.kind(), "transform_text"))
+    }
     /// Fit with an explicit validation set for early stopping (sklearn's
     /// HistGradientBoosting `fit(X, y, sample_weight, X_val=, y_val=,
     /// sample_weight_val=)`).
@@ -309,7 +319,9 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// receives `|c, prev, x, y, w, classes|` (`prev`: the fitted model, if any);
 /// `fit_with_offset` receives `|c, x, y, w, offset|`, `predict_with_offset`
 /// `|m, x, offset|`;
-/// `fit_with_validation` receives `|c, x, y, w, x_val, y_val, w_val|`.
+/// `fit_with_validation` receives `|c, x, y, w, x_val, y_val, w_val|`;
+/// `fit_text` receives `|c, docs|` and returns the fitted model,
+/// `transform_text` `|m, docs|`.
 /// Every entry gets `set_params`.
 macro_rules! registry {
     ($(
@@ -552,6 +564,19 @@ macro_rules! registry {
         fn embedding(&self) -> anofox_ml_core::Result<$crate::model::Out> {
             let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
             Ok($crate::model::Out::from($body))
+        }
+    };
+    (@cap $kind:ident, fit_text, $c:ident, $docs:ident, $body:expr) => {
+        fn fit_text(&mut self, $docs: &[&str]) -> anofox_ml_core::Result<()> {
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    (@cap $kind:ident, transform_text, $m:ident, $docs:ident, $body:expr) => {
+        fn transform_text(&self, $docs: &[&str]) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
         }
     };
     (@cap $kind:ident, kneighbors, $m:ident, $x:ident, $k:ident, $body:expr) => {
