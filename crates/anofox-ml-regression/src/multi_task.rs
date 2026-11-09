@@ -47,7 +47,7 @@ impl MultiTaskElasticNet {
         if n == 0 || p == 0 || k == 0 {
             return Err(RustMlError::EmptyInput("X and Y must be non-empty".into()));
         }
-        if !(self.alpha >= 0.0) || !(0.0..=1.0).contains(&self.l1_ratio) {
+        if self.alpha.is_nan() || self.alpha < 0.0 || !(0.0..=1.0).contains(&self.l1_ratio) {
             return Err(RustMlError::InvalidParameter(format!(
                 "alpha must be >= 0 and l1_ratio in [0, 1], got {} and {}",
                 self.alpha, self.l1_ratio
