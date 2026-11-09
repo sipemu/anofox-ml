@@ -12,6 +12,9 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   BernoulliNB, ComplementNB, CategoricalNB (their joint log-likelihoods,
   finite where `predict_proba` underflows), LinearDiscriminantAnalysis,
   QuadraticDiscriminantAnalysis, LogisticRegressor, Svc and GaussianMixture.
+- `DynModel::kneighbors(x, k)` (#125) for KnnClassifier and KnnRegressor:
+  distances and training-row indices, `n × k` each, nearest first
+  (`k = None`: the model's `n_neighbors`).
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /
