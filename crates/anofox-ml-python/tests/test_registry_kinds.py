@@ -36,6 +36,19 @@ def test_lasso_lars_ic_matches_sklearn():
         np.testing.assert_allclose(ours.predict(X), ref.predict(X), atol=1e-10)
 
 
+@pytest.mark.parametrize("name", ["LarsCV", "LassoLarsCV"])
+def test_lars_cv_matches_sklearn(name):
+    from sklearn import linear_model
+
+    ours = getattr(am, name)(cv=4).fit(X, y)
+    ref = getattr(linear_model, name)(cv=4).fit(X, y)
+    assert ours.alpha_ == pytest.approx(ref.alpha_, rel=1e-10)
+    np.testing.assert_allclose(ours.cv_alphas_, ref.cv_alphas_, rtol=1e-10, atol=1e-14)
+    np.testing.assert_allclose(ours.mse_path_, ref.mse_path_, rtol=1e-9)
+    np.testing.assert_allclose(ours.coef_, ref.coef_, atol=1e-9)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), atol=1e-9)
+
+
 def test_isotonic_matches_sklearn():
     from sklearn.isotonic import IsotonicRegression
 

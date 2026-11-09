@@ -50,7 +50,9 @@ pub use glm::{
 pub use huber::{FittedHuberRegressor, HuberRegressor, HuberScale};
 pub use isotonic::{FittedIsotonicRegressor, IsotonicRegressor, OutOfBounds};
 pub use kernel_ridge::{FittedKernelRidge, KernelRidge};
-pub use lars::{FittedLars, FittedLassoLarsIC, IcCriterion, Lars, LassoLarsIC};
+pub use lars::{
+    FittedLars, FittedLarsCV, FittedLassoLarsIC, IcCriterion, Lars, LarsCV, LassoLarsIC,
+};
 pub use lasso::{FittedLassoRegressor, LassoRegressor};
 pub use lasso_cv::{FittedLassoCrossValidated, LassoCrossValidated};
 pub use logistic::{ClassWeight, FittedLogisticRegressor, LogisticRegressor, MultiClass};

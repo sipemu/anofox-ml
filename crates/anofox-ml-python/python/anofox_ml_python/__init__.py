@@ -29,6 +29,8 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    LarsCV,
+    LassoLarsCV,
     MultiTaskLassoCV,
     MultiTaskElasticNetCV,
     LassoLarsIC,
@@ -195,6 +197,7 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "LarsCV", "LassoLarsCV",
     "MultiTaskLassoCV", "MultiTaskElasticNetCV",
     "VotingRegressor", "VotingClassifier", "StackingRegressor", "StackingClassifier",
     "CalibratedClassifierCV", "TransformedTargetRegressor", "MultiOutputRegressor",

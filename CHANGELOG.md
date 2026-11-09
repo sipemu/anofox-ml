@@ -22,6 +22,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   with registry kinds fitted on `[X | Y]` with `y_columns` (`predict` and
   `coef` per target); converged coefficients match scikit-learn 1.8
   (`gen_multi_task.py`).
+- `LarsCV` / `LassoLarsCV` (`anofox-ml-regression`): per-fold paths on
+  the centred training rows, held-out residues interpolated onto the union
+  of the folds' knots (sklearn's `interp1d`, `max_n_alphas` thinning) and
+  the full path stopped at the best alpha (`lars_path(alpha_min=)`). With
+  registry kinds and Python classes; alphas, `mse_path_` and the refit
+  match scikit-learn 1.8 (`gen_lars_cv.py`). The last LARS knot is now
+  exactly 0 once every feature is active, as in sklearn.
 - `MultiTaskElasticNetCV` / `MultiTaskLassoCV` (`anofox-ml-regression`):
   sklearn's alpha grid per `l1_ratio`, held-out MSE averaged over targets
   and folds (contiguous `KFold`), paths solved with warm starts and the
