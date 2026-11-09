@@ -278,6 +278,213 @@ def generate():
     add_cat("boot_combo", dict(combo, **boot(bootstrap_type="MVS")), y_cat)
     add_cat("boot_ordered_combo", dict(combo, boosting_type="Ordered",
                                        **boot(bootstrap_type="MVS")), y_cat)
+
+    # CatBoost's automatic learning rate (no learning_rate, l2_leaf_reg,
+    # leaf estimation settings given): from the row and iteration counts.
+    auto = dict(iterations=60, depth=4, **COMMON)
+    add("auto_lr_rmse", "regressor", auto, X, y_reg)
+    add("auto_lr_rmse_no_average", "regressor", dict(auto, boost_from_average=False), X, y_reg)
+    add("auto_lr_logloss", "classifier", auto, X, y_bin)
+    add("auto_lr_mc", "classifier", dict(auto, loss_function="MultiClass"), X,
+        y_mc.astype(float))
+    add("auto_lr_l2_set", "regressor", dict(auto, l2_leaf_reg=1.0), X, y_reg)
+    add_cat("auto_lr_defaults", dict(COMMON, iterations=250, cat_features=cat_cols,
+                                      random_strength=1.0, has_time=False,
+                                      bootstrap_type="MVS"), y_cat)
+
+    # Class weights (#156): multiplied into the sample weights; the
+    # automatic ones from the classes' weight sums (truncated to integers).
+    y_imb = (eta + rng.logistic(size=n) > 1.2).astype(float)
+    add("cw_explicit", "classifier", dict(base, class_weights=[1.0, 2.5]), X, y_imb)
+    add("cw_balanced", "classifier", dict(base, auto_class_weights="Balanced"), X, y_imb)
+    add("cw_sqrt_balanced", "classifier", dict(base, auto_class_weights="SqrtBalanced"), X,
+        y_imb)
+    add("cw_balanced_weighted", "classifier", dict(base, auto_class_weights="Balanced"), X,
+        y_imb, sw=weights)
+    add("cw_balanced_average", "classifier",
+        dict(base, auto_class_weights="Balanced", boost_from_average=True), X, y_imb)
+    add("cw_ordered", "classifier",
+        dict(ordered, auto_class_weights="SqrtBalanced"), X, y_imb)
+    add("cw_mc_balanced", "classifier", dict(mc, auto_class_weights="Balanced"), X,
+        y_mc5.astype(float))
+    add("cw_mc_explicit", "classifier", dict(mc, class_weights=[0.5, 1.0, 3.0]), X,
+        y_mc.astype(float), sw=weights)
+    add_cat("cw_cat_defaults", dict(COMMON, iterations=80, depth=4, cat_features=cat_cols,
+                                     random_strength=1.0, has_time=False, bootstrap_type="MVS",
+                                     auto_class_weights="Balanced"), y_cat)
+
+    # Monotone constraints (#156): isotonic leaf values in the split scores
+    # and the leaf estimation, and model shrinkage (default 0.01 with them).
+    mono = [1, 1, -1, 0]
+    add("mono_rmse", "regressor", dict(base, monotone_constraints=mono), X, y_reg)
+    add("mono_rmse_l2_depth6", "regressor",
+        dict(base, monotone_constraints=mono, score_function="L2", depth=6, iterations=15),
+        X, y_reg)
+    add("mono_rmse_gradient", "regressor",
+        dict(base, monotone_constraints=mono, leaf_estimation_method="Gradient"), X, y_reg)
+    add("mono_rmse_weighted", "regressor", dict(base, monotone_constraints=mono), X, y_reg,
+        sw=weights)
+    add("mono_rmse_no_shrink", "regressor",
+        dict(base, monotone_constraints=mono, model_shrink_rate=0.0), X, y_reg)
+    add("mono_rmse_decreasing", "regressor",
+        dict(base, monotone_constraints=mono, model_shrink_mode="Decreasing"), X, y_reg)
+    add("mono_ordered_rmse", "regressor", dict(ordered, monotone_constraints=mono), X, y_reg)
+    add("mono_logloss", "classifier", dict(base, monotone_constraints=mono), X, y_bin)
+    add("mono_leaf10_logloss", "classifier",
+        dict(base, monotone_constraints=mono, leaf_estimation_iterations=10), X, y_bin)
+    add("mono_ordered_logloss", "classifier", dict(ordered, monotone_constraints=[0, 1, 0, 1]),
+        X, y_bin)
+    add("shrink_only_rmse", "regressor", dict(base, model_shrink_rate=0.05), X, y_reg)
+    add("shrink_decreasing_logloss", "classifier",
+        dict(base, model_shrink_rate=0.3, model_shrink_mode="Decreasing"), X, y_bin)
+    add_cat("mono_cat_logloss", dict(cat, monotone_constraints=[1, 0, 1, 0, 0]), y_cat)
+    add("mono_defaults", "regressor",
+        dict(COMMON, iterations=80, depth=4, monotone_constraints=mono, random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
+
+    # More regression losses (#153), with CatBoost's per-loss defaults:
+    # Exact leaves for MAE / Quantile, boost_from_average for RMSE, MAE and
+    # Quantile, Newton steps for Expectile / Poisson (log scale, stored
+    # exp(a)) / Tweedie, Gradient for LogLinQuantile.
+    mu = np.exp(0.5 * eta)
+    y_count = rng.poisson(mu).astype(float)
+    y_tweedie = np.where(rng.uniform(size=n) < 0.3, 0.0, rng.gamma(2.0, mu / 2.0))
+    y_pos = np.exp(0.5 * eta + rng.normal(scale=0.3, size=n))
+    q3 = dict(base, loss_function="Quantile:alpha=0.3")
+    add("loss_mae", "regressor", dict(base, loss_function="MAE"), X, y_reg)
+    add("loss_quantile_03", "regressor", q3, X, y_reg)
+    add("loss_quantile_08_weighted", "regressor", dict(base, loss_function="Quantile:alpha=0.8"),
+        X, y_reg, sw=weights)
+    add("loss_quantile_ordered", "regressor", dict(q3, boosting_type="Ordered"), X, y_reg)
+    add("loss_quantile_gradient", "regressor", dict(q3, leaf_estimation_method="Gradient"), X,
+        y_reg)
+    add("loss_quantile_small", "regressor", q3, X[:80], y_reg[:80])
+    add("loss_quantile_no_average", "regressor", dict(q3, boost_from_average=False), X, y_reg)
+    add("loss_expectile", "regressor", dict(base, loss_function="Expectile:alpha=0.3"), X, y_reg)
+    add("loss_expectile_leaf5", "regressor",
+        dict(base, loss_function="Expectile:alpha=0.7", leaf_estimation_iterations=5), X, y_reg)
+    add("loss_poisson", "regressor", dict(base, loss_function="Poisson"), X, y_count)
+    add("loss_poisson_leaf10", "regressor",
+        dict(base, loss_function="Poisson", leaf_estimation_iterations=10), X, y_count)
+    add("loss_poisson_weighted", "regressor", dict(base, loss_function="Poisson"), X, y_count,
+        sw=weights)
+    add("loss_poisson_ordered", "regressor",
+        dict(base, loss_function="Poisson", boosting_type="Ordered"), X, y_count)
+    add("loss_tweedie", "regressor", dict(base, loss_function="Tweedie:variance_power=1.5"), X,
+        y_tweedie)
+    add("loss_tweedie_weighted", "regressor",
+        dict(base, loss_function="Tweedie:variance_power=1.2"), X, y_tweedie, sw=weights)
+    add("loss_loglinquantile", "regressor", dict(base, loss_function="LogLinQuantile:alpha=0.4"),
+        X, y_pos)
+    add("loss_mae_defaults", "regressor",
+        dict(COMMON, iterations=80, depth=4, loss_function="MAE", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
+    add("loss_poisson_200", "regressor",
+        dict(base, loss_function="Poisson", iterations=200, learning_rate=0.05), X, y_count)
+    add_cat("loss_quantile_cat", dict(cat, loss_function="Quantile:alpha=0.6"), y_cat_reg,
+            kind="regressor")
+
+    # Eval sets (#155): the objective's metric per iteration, the
+    # overfitting detector and use_best_model (on by default with an eval
+    # set, which also switches the automatic learning rate's coefficients).
+    Xv = np.column_stack([rng.normal(size=150), rng.uniform(-2, 2, size=150),
+                          np.round(rng.normal(size=150) * 3), rng.exponential(size=150)])
+    eta_v = np.sin(2 * Xv[:, 0]) + 0.6 * Xv[:, 1] - 0.2 * Xv[:, 2] + 0.3 * Xv[:, 3]
+    yv_reg = eta_v + rng.normal(scale=0.4, size=150)
+    yv_bin = (eta_v + rng.logistic(size=150) > 0).astype(float)
+    yv_mc = np.digitize(eta_v + rng.logistic(size=150) * 0.5, [-0.5, 0.7]).astype(float)
+    wv = rng.uniform(0.2, 3.0, size=150)
+
+    def add_eval(name, kind, params, Xd, y, Xe, ye, sw=None, we=None, fit_kw=None):
+        cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
+        m = cls(**params).fit(Xd, y, sample_weight=sw, eval_set=cb.Pool(Xe, ye, weight=we),
+                              **(fit_kw or {}))
+        X_test = Xd[::4]
+        pred = m.predict(X_test) if kind == "regressor" else m.predict_proba(X_test)
+        evals = m.get_evals_result()["validation"]
+        metric = next(iter(evals))
+        out["models"].append({
+            "name": name, "kind": kind,
+            "params": dict({k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+                           **(fit_kw or {})),
+            "X": nulls(Xd), "y": y.tolist(),
+            "sample_weight": None if sw is None else sw.tolist(),
+            "eval": {"X": nulls(Xe), "y": ye.tolist(),
+                     "sample_weight": None if we is None else we.tolist(),
+                     "metrics": evals[metric], "best_iteration": m.get_best_iteration(),
+                     "tree_count": m.tree_count_},
+            "X_test": nulls(X_test), "predictions": pred.tolist(),
+        })
+
+    over = dict(base, iterations=80, learning_rate=0.4)
+    add_eval("eval_rmse_best", "regressor", over, X, y_reg, Xv, yv_reg)
+    add_eval("eval_rmse_early", "regressor", over, X, y_reg, Xv, yv_reg,
+             fit_kw=dict(early_stopping_rounds=5))
+    add_eval("eval_rmse_no_best", "regressor", over, X, y_reg, Xv, yv_reg,
+             fit_kw=dict(use_best_model=False))
+    add_eval("eval_rmse_inctodec", "regressor", dict(over, od_type="IncToDec", od_pval=0.01,
+                                                     od_wait=5), X, y_reg, Xv, yv_reg)
+    add_eval("eval_rmse_weighted", "regressor", over, X, y_reg, Xv, yv_reg, sw=weights, we=wv,
+             fit_kw=dict(early_stopping_rounds=8))
+    add_eval("eval_rmse_auto_lr", "regressor", dict(COMMON, iterations=60, depth=4), X, y_reg,
+             Xv, yv_reg)
+    add_eval("eval_logloss", "classifier", over, X, y_bin, Xv, yv_bin,
+             fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_logloss_auto_lr", "classifier", dict(COMMON, iterations=60, depth=4), X,
+             y_bin, Xv, yv_bin)
+    add_eval("eval_mc", "classifier", dict(mc, iterations=60, learning_rate=0.4), X,
+             y_mc.astype(float), Xv, yv_mc, fit_kw=dict(early_stopping_rounds=5))
+    add_eval("eval_quantile", "regressor", dict(over, loss_function="Quantile:alpha=0.3"), X,
+             y_reg, Xv, yv_reg, fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_poisson", "regressor", dict(over, loss_function="Poisson"), X, y_count, Xv,
+             np.round(np.exp(0.5 * eta_v)), fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_monotone_shrink", "regressor", dict(over, monotone_constraints=[1, 1, -1, 0]),
+             X, y_reg, Xv, yv_reg, fit_kw=dict(early_stopping_rounds=5))
+    add_eval("eval_class_weights", "classifier", dict(over, auto_class_weights="Balanced"), X,
+             y_imb, Xv, yv_bin, fit_kw=dict(early_stopping_rounds=6))
+    add_eval("eval_defaults", "regressor",
+             dict(COMMON, iterations=120, depth=4, random_strength=1.0, has_time=False,
+                  bootstrap_type="MVS"), X, y_reg, Xv, yv_reg,
+             fit_kw=dict(early_stopping_rounds=10))
+
+    # Depthwise trees (#154; plain boosting, numeric and one-hot features).
+    dw = dict(base, grow_policy="Depthwise")
+    add("dw_rmse", "regressor", dw, X, y_reg)
+    add("dw_rmse_l2_depth6", "regressor", dict(dw, score_function="L2", depth=6), X, y_reg)
+    add("dw_rmse_min_data", "regressor", dict(dw, depth=6, min_data_in_leaf=15), X, y_reg)
+    add("dw_rmse_weighted", "regressor", dw, X, y_reg, sw=weights)
+    add("dw_rmse_nan", "regressor", dw, X_nan, y_reg)
+    add("dw_logloss", "classifier", dw, X, y_bin)
+    add("dw_logloss_leaf10", "classifier", dict(dw, leaf_estimation_iterations=10), X, y_bin)
+    add("dw_mc", "classifier", dict(mc, grow_policy="Depthwise"), X, y_mc.astype(float))
+    add("dw_quantile", "regressor", dict(dw, loss_function="Quantile:alpha=0.3"), X, y_reg)
+    add("dw_noise", "regressor", dict(dw, random_strength=1.0), X, y_reg)
+    add("dw_mvs", "regressor", dict(dw, random_strength=1.0, bootstrap_type="MVS"), X, y_reg)
+    add("dw_defaults", "regressor",
+        dict(COMMON, iterations=80, grow_policy="Depthwise", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
+    lg = dict(base, grow_policy="Lossguide")
+    add("lg_rmse", "regressor", lg, X, y_reg)
+    add("lg_rmse_leaves8_depth3", "regressor", dict(lg, max_leaves=8, depth=3), X, y_reg)
+    add("lg_rmse_l2_min_data", "regressor", dict(lg, score_function="L2", min_data_in_leaf=10),
+        X, y_reg)
+    add("lg_rmse_weighted", "regressor", dict(lg, max_leaves=12), X, y_reg, sw=weights)
+    add("lg_logloss", "classifier", lg, X, y_bin)
+    add("lg_mc", "classifier", dict(mc, grow_policy="Lossguide", max_leaves=10), X,
+        y_mc.astype(float))
+    add("lg_noise_mvs", "regressor", dict(lg, random_strength=1.0, bootstrap_type="MVS"), X,
+        y_reg)
+    add("lg_defaults", "regressor",
+        dict(COMMON, iterations=80, grow_policy="Lossguide", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_reg)
+    add_cat("lg_ctr_rmse_perm", dict(cat, grow_policy="Lossguide", has_time=False, depth=5),
+            y_cat_reg, kind="regressor")
+    add_cat("lg_ctr", dict(cat, grow_policy="Lossguide", max_leaves=12), y_cat)
+    add_cat("lg_ctr_defaults", dict(COMMON, iterations=60, grow_policy="Lossguide",
+                                    cat_features=cat_cols, random_strength=1.0,
+                                    has_time=False, bootstrap_type="MVS"), y_cat)
+    add_cat("dw_onehot", dict(cat, grow_policy="Depthwise", one_hot_max_size=255), y_cat_reg,
+            kind="regressor")
     return out
 
 
