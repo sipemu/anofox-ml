@@ -53,6 +53,148 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   out-of-fold predictions of the base specs (KFold / StratifiedKFold, `cv`
   folds without shuffling) feed `final_estimator`; `passthrough` and
   `stack_method` as scikit-learn, whose predictions they match.
+### LightGBM's random generator (#152)
+
+- Bagging, GOSS and the feature fractions of `LgbmRegressor` /
+  `LgbmClassifier` reproduce LightGBM 4.7: its `Random` LCG (one generator
+  per 1024 rows for bagging and GOSS), the seeds it derives from `seed`,
+  GOSS's warm-up of `1 / learning_rate` iterations, and `ColSampler`'s
+  tree and node draws (smaller child first, non-trivial features only).
+- New: `subsample_freq` (LightGBM's `bagging_freq`), `colsample_bynode`
+  (`feature_fraction_bynode`), `pos_bagging_fraction` /
+  `neg_bagging_fraction` (balanced bagging, classifier) and
+  `LgbmClassifier::with_goss_rates`.
+- Tree growth follows LightGBM in the remaining tie-breaks that bagging
+  exposes: the most frequent bin's sums as the node totals minus the other
+  bins (`FixHistogram`), child totals taken from the split scan, LightGBM's
+  comparison of its two missing-value scans, and the softmax hessian in its
+  order of operations.
+- Matches lightgbm 4.7.0 to 6e-16 (quantile: 2e-10, as without bagging) on
+  20 new golden cases (bagging with
+  `subsample_freq` 1–3, balanced, weighted, quantile, multiclass and with
+  DART; GOSS for regression, binary and multiclass; feature fractions by
+  tree and by node; derived seeds; data larger than one generator block).
+  All 35 earlier cases are unchanged.
+- **Breaking:** `subsample` now needs `subsample_freq > 0` to bag, as in
+  LightGBM (before, it bagged every iteration). `seed` is an
+  `Option<u64>` (`None` = LightGBM's default seeds; `with_seed` is
+  unchanged). GOSS rejects `top_rate + other_rate > 1`, non-positive
+  rates and bagging, as LightGBM does.
+### CatBoost-style boosting: automatic learning rate (#151)
+
+- `learning_rate` is now `Option<f64>` on `CatBoostRegressor` /
+  `CatBoostClassifier`. When unset, it follows CatBoost's
+  `TAutoLRParamsGuesser` (CPU, no best model):
+  `exp(A ln n + B) · exp(C ln iterations) / exp(C ln 1000)`, capped at 0.5
+  and rounded to 6 digits, per loss and `boost_from_average`. As in CatBoost
+  it only applies while `l2_leaf_reg`, `leaf_estimation_method` and
+  `leaf_estimation_iterations` keep their defaults (else 0.03). Previously
+  the default was a fixed 0.03. Python: `learning_rate=None` now means the
+  automatic rate. Matches catboost 1.2.10 on 6 golden cases.
+
+### CatBoost-style boosting: faster Logloss leaf estimation (#157, part)
+
+- The Logloss leaf estimation (10 backtracked Newton steps by default from
+  200 iterations or 20 features on) caches `exp(a)` and `FastLogf(exp(a))`
+  of the current approximations for its metric and derivatives instead of
+  recomputing them every evaluation. Same results; a 20k × 10 Logloss fit
+  with 200 iterations went from 3.0 s to 1.95 s (catboost single-threaded:
+  0.76 s).
+- `thread_count` (CatBoost's name; Python `thread_count=-1`): a fit runs on
+  the physical cores by default, like the LGBM engine's `n_jobs`, instead
+  of every logical thread of the rayon pool (slower on SMT / hybrid CPUs).
+  With the plain-boosting histogram fast path, the same 20k × 10 fits now
+  take 0.56 s (RMSE; catboost single-threaded 0.60 s) and 1.32 s (Logloss).
+  The model does not depend on the thread count.
+
+### CatBoost-style boosting: Depthwise and Lossguide trees (#154)
+
+- `grow_policy` (`SymmetricTree` default, `Depthwise`, `Lossguide`),
+  `min_data_in_leaf` (default 1) and `max_leaves` (Lossguide, default 31),
+  for plain boosting with numeric and one-hot features (CTR features and
+  ordered boosting are rejected for now), as CatBoost's
+  `GreedyTensorSearchDepthwise` / `GreedyTensorSearchLossguide`: every
+  leaf scored on its own (`CalcScoreWithoutSplit`, gain ≥ 1e-9), the
+  smaller sibling's bucket statistics computed and the larger one's as the
+  parent's minus them (Depthwise: from CatBoost's FIFO of the parents), the
+  generator's draws in CatBoost's order, Lossguide's libc++
+  `priority_queue` by gain, and CatBoost's leaf numbering (the false side
+  keeps the leaf's id).
+- Lossguide also takes categorical features with CTRs (simple CTRs, as
+  CatBoost scores non-symmetric trees without combinations, with its model
+  size penalty); Depthwise with CTRs is still rejected.
+- Trees serialize their nodes (`children`); oblivious models are
+  unchanged.
+- Matches catboost 1.2.10 to 1.6e-15 on 21 golden cases (RMSE, Logloss,
+  MultiClass, Quantile; Cosine / L2, weights, missing values, one-hot,
+  score noise, MVS and full defaults).
+
+### CatBoost-style boosting: eval sets, early stopping, use_best_model (#155)
+
+- `fit_with_eval(x, y, w, CatBoostEvalSet { x, y, sample_weight })` on
+  both CatBoost estimators (registry: `fit_with_validation`; Python:
+  `fit(..., eval_set=(X_val, y_val[, w_val]))`). The eval set's objective
+  metric is tracked after every iteration on CatBoost's `TestApprox`
+  (shrunk with the model), `eval_metrics()` / `best_iteration()`
+  (Python `evals_result_`, `best_iteration_`).
+- CatBoost's overfitting detector: `od_type` (`IncToDec` with `od_pval`,
+  `Iter`), `od_wait` (default 20), `with_early_stopping_rounds(n)`; and
+  `use_best_model` (default on with an eval set), which keeps the trees up
+  to the first strictly best iteration. With it, the automatic learning
+  rate takes CatBoost's `use_best_model` coefficients.
+- Class weights also weight the eval set, as in CatBoost.
+- Python: the dict form of `class_weights` now keys on the original labels
+  (it used the encoded ones).
+- Matches catboost 1.2.10 on 14 golden cases: predictions to 1.5e-15 and the
+  per-iteration eval metrics and tree counts exactly.
+
+### CatBoost-style boosting: more regression losses (#153)
+
+- `CatBoostRegressor::loss_function` (`CatBoostRegressionLoss`): RMSE
+  (default), MAE, Quantile, Expectile, Poisson, Tweedie and LogLinQuantile,
+  with CatBoost's derivatives, metrics (for backtracking) and defaults:
+  - Exact leaves for MAE / Quantile (the weighted quantile of each leaf's
+    float32 residuals, CatBoost's `CalcSampleQuantile` with its bisection
+    and `delta` shift). Like CatBoost, the model's leaves are unweighted
+    (its averaging fold is never bootstrapped); the folds use the weights
+    of their last bootstrap.
+  - `boost_from_average` on for RMSE, MAE and Quantile (the weighted
+    quantile); Newton steps for Expectile (5), Poisson (10) and Tweedie,
+    Gradient for LogLinQuantile; the automatic learning rate only for RMSE.
+  - Poisson and LogLinQuantile store `exp(a)` as CatBoost does; Poisson and
+    Tweedie predict `exp(raw)` (CatBoost's `Exponent` prediction type).
+  - The error functions read `alpha` as float32, as CatBoost does.
+- **Breaking:** `leaf_estimation_method` and `boost_from_average` are now
+  `Option`s (`None` = CatBoost's default for the loss; the builders are
+  unchanged), and `CatBoostLeafEstimation` gains `Exact`. Python:
+  `loss_function` (catboost strings such as `"Quantile:alpha=0.3"`), and
+  `leaf_estimation_method=None` by default.
+- Matches catboost 1.2.10 to 3e-15 on 19 golden cases.
+
+### CatBoost-style boosting: class weights, monotone constraints, shrinkage (#156)
+
+- `CatBoostClassifier`: `class_weights` (per class, labels ascending) and
+  `auto_class_weights` (`Balanced`, `SqrtBalanced`), folded into the sample
+  weights as CatBoost's `MakeClassificationWeights` does (float32 products).
+  The automatic ones follow `CalculateClassWeights`, including its
+  truncation of the classes' weight sums to integers.
+- `monotone_constraints` (per feature, -1 / 0 / +1; numeric features, not
+  for more than two classes). As in CatBoost:
+  - every split candidate is scored on leaf values made monotone by
+    isotonic regression along the tree's leaf orders (`AddLeaf`);
+  - every Newton / Gradient step of the leaf estimation is monotonized (the
+    model's leaves from the summed steps, the folds' from 0).
+- `model_shrink_rate` / `model_shrink_mode` (`Constant`, `Decreasing`):
+  every learning approximation is shrunk before each iteration (stored
+  `exp(a)` for Logloss as CatBoost does), the trees and the bias at the
+  end. Default 0, or with monotone constraints CatBoost's 0.01 (`Constant`)
+  / 0.2 (`Decreasing`).
+- Python: `class_weights` (list or dict), `auto_class_weights`,
+  `monotone_constraints` (list or dict), `model_shrink_rate`,
+  `model_shrink_mode`.
+- Matches catboost 1.2.10 on 23 golden cases: to ~1e-15 (RMSE, class
+  weights) and ~5e-14 (Logloss with shrinkage: CatBoost's `fast_exp` on the
+  stored `exp(a)`).
 
 ## [0.4.0] - 2026-11-06
 

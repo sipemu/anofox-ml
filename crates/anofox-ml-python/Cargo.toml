@@ -13,8 +13,8 @@ name = "anofox_ml_python"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"] }
-numpy = "0.28"
+pyo3 = { version = "0.30", features = ["extension-module"] }
+numpy = "0.30"
 ndarray = { workspace = true }
 anofox-ml-core = { workspace = true }
 anofox-ml-registry = { workspace = true }
