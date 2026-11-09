@@ -63,6 +63,7 @@ pub mod robust_scaler;
 pub mod select_from_model;
 pub mod select_k_best;
 pub mod simple_imputer;
+pub mod sparse_pca;
 pub(crate) mod special;
 pub mod spline_transformer;
 pub mod standard_scaler;
@@ -125,6 +126,7 @@ pub use robust_scaler::{FittedRobustScaler, RobustScaler};
 pub use select_from_model::{FittedSelectFromModel, SelectFromModel, Threshold};
 pub use select_k_best::{FittedSelectKBest, SelectKBest};
 pub use simple_imputer::{FittedSimpleImputer, ImputeStrategy, SimpleImputer};
+pub use sparse_pca::{FittedSparsePca, SparsePca};
 pub use spline_transformer::{
     Extrapolation, FittedSplineTransformer, SplineKnots, SplineTransformer,
 };

@@ -4461,3 +4461,33 @@ class BisectingKMeans(ClusterMixin, BaseEstimator):
 
     cluster_centers_ = property(lambda self: _nd(self._fitted_state()["cluster_centers"]))
     inertia_ = property(lambda self: float(self._fitted_state()["inertia"]))
+
+
+class SparsePCA(TransformerMixin, BaseEstimator):
+    """Sparse components by dictionary learning (``method="lars"``);
+    ``transform`` is a ridge projection (``ridge_alpha``). Equals sklearn's
+    up to the LARS solver's rounding."""
+
+    _kind = "SparsePca"
+
+    def __init__(self, n_components=None, *, alpha=1, ridge_alpha=0.01, max_iter=1000,
+                 tol=1e-8, method="lars", random_state=None):
+        self.n_components = n_components
+        self.alpha = alpha
+        self.ridge_alpha = ridge_alpha
+        self.max_iter = max_iter
+        self.tol = tol
+        self.method = method
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        if self.method != "lars":
+            raise ValueError("only method='lars' is supported")
+        return {"n_components": self.n_components, "alpha": float(self.alpha),
+                "ridge_alpha": float(self.ridge_alpha), "max_iter": int(self.max_iter),
+                "tol": float(self.tol), "seed": _seed(self.random_state) % 2**32}
+
+    components_ = property(lambda self: _nd(self._fitted_state()["components"]))
+    mean_ = property(lambda self: _nd(self._fitted_state()["mean"]))
+    error_ = property(lambda self: np.asarray(self._fitted_state()["error"]))
+    n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))

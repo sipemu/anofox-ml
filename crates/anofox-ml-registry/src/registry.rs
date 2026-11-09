@@ -1957,6 +1957,12 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    SparsePca {
+        config: pre::SparsePca = Default::default(),
+        fitted: pre::FittedSparsePca,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     Nmf {
         config: pre::Nmf = pre::Nmf::new(2),
         fitted: pre::FittedNmf,

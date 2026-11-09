@@ -8,6 +8,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `SparsePca` (`anofox-ml-preprocessing`, sklearn's `SparsePCA`,
+  `method="lars"`): sklearn's dictionary learning (SVD start, LassoLars
+  codes, in-place atom updates, closing `svd_flip`) and ridge `transform`.
+  Iteration counts, cost path, components and `transform` match
+  scikit-learn 1.8 (`gen_sparse_pca.py`). Registry kind and Python class.
+
 - `BisectingKMeans` (`anofox-ml-cluster`): sklearn's bisection tree
   (`biggest_inertia` / `largest_cluster`) over sequential Lloyd 2-means on
   the centred data, with `random` / `k-means++` inits from numpy's
