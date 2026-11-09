@@ -6,6 +6,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### New estimators (#113)
+
+- `PlsCanonical` (sklearn's `PLSCanonical`: NIPALS, mode A, canonical
+  deflation; shares Cca's code) and `PlsSvd` (`PLSSVD`), with registry
+  kinds fitted on `[X | Y]` with `y_columns`. Both match scikit-learn 1.8
+  (`test_harness/generators/gen_pls.py`).
+
 ### Registry
 
 - `DynModel::predict_log_proba` (#125) for GaussianNB, MultinomialNB,

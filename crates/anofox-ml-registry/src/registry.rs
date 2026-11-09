@@ -593,23 +593,43 @@ impl Default for CcaConfig {
 }
 
 impl CcaConfig {
-    fn fit(&self, xy: ArrayView2<f64>) -> Result<pre::FittedCca> {
+    /// `[X | Y]` split at its last `y_columns` columns.
+    fn split(&self, kind: &str, xy: ArrayView2<f64>) -> Result<(Array2<f64>, Array2<f64>)> {
         let p = xy.ncols();
         if self.y_columns == 0 || self.y_columns >= p {
             return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
-                "Cca: y_columns must be in 1..{p} for {p} columns, got {}",
+                "{kind}: y_columns must be in 1..{p} for {p} columns, got {}",
                 self.y_columns
             )));
         }
         let split = p - self.y_columns;
+        Ok((
+            xy.slice(ndarray::s![.., ..split]).to_owned(),
+            xy.slice(ndarray::s![.., split..]).to_owned(),
+        ))
+    }
+
+    fn fit(&self, xy: ArrayView2<f64>) -> Result<pre::FittedCca> {
+        let (x, y) = self.split("Cca", xy)?;
         pre::Cca::new(self.n_components)
             .with_scale(self.scale)
             .with_max_iter(self.max_iter)
             .with_tol(self.tol)
-            .fit(
-                &xy.slice(ndarray::s![.., ..split]).to_owned(),
-                &xy.slice(ndarray::s![.., split..]).to_owned(),
-            )
+            .fit(&x, &y)
+    }
+
+    fn fit_pls_canonical(&self, xy: ArrayView2<f64>) -> Result<pre::FittedCca> {
+        let (x, y) = self.split("PlsCanonical", xy)?;
+        let mut m = pre::PlsCanonical::new(self.n_components).with_scale(self.scale);
+        (m.max_iter, m.tol) = (self.max_iter, self.tol);
+        m.fit(&x, &y)
+    }
+
+    fn fit_pls_svd(&self, xy: ArrayView2<f64>) -> Result<pre::FittedPlsSvd> {
+        let (x, y) = self.split("PlsSvd", xy)?;
+        pre::PlsSvd::new(self.n_components)
+            .with_scale(self.scale)
+            .fit(&x, &y)
     }
 }
 
@@ -1790,6 +1810,26 @@ registry! {
         fit: |c, x, y, w| {
             no_weight(K, w)?;
             c.fit(x)
+        },
+        transform: |m, x| m.transform_x(x),
+        transform_y: |m, y| m.transform_y(y),
+    }
+    PlsCanonical {
+        config: CcaConfig = Default::default(),
+        fitted: pre::FittedCca,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit_pls_canonical(x)
+        },
+        transform: |m, x| m.transform_x(x),
+        transform_y: |m, y| m.transform_y(y),
+    }
+    PlsSvd {
+        config: CcaConfig = Default::default(),
+        fitted: pre::FittedPlsSvd,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit_pls_svd(x)
         },
         transform: |m, x| m.transform_x(x),
         transform_y: |m, y| m.transform_y(y),
