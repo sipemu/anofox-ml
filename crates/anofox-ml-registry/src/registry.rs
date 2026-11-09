@@ -1012,6 +1012,26 @@ registry! {
         },
         predict: |m, x| m.predict(x),
     }
+    MultiTaskLasso {
+        config: crate::meta::MultiTaskConfig = crate::meta::MultiTaskConfig::lasso(),
+        fitted: reg::FittedMultiTask,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(K, x)
+        },
+        predict: |m, x| m.predict(x),
+        coef: |m| m.coef.clone(),
+    }
+    MultiTaskElasticNet {
+        config: crate::meta::MultiTaskConfig = Default::default(),
+        fitted: reg::FittedMultiTask,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(K, x)
+        },
+        predict: |m, x| m.predict(x),
+        coef: |m| m.coef.clone(),
+    }
     MultiOutputRegressor {
         config: crate::meta::MultiOutputConfig = Default::default(),
         fitted: crate::meta::MultiOutputFit,

@@ -17,6 +17,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   matches scikit-learn 1.8 (`gen_spectral_embedding.py`). `Affinity` and
   the graph builder move to `anofox-ml-manifold` (re-exported by
   `anofox-ml-cluster`).
+- `MultiTaskElasticNet` / `MultiTaskLasso` (`anofox-ml-regression`): block
+  coordinate descent on the ℓ2,1-penalised multi-target least squares,
+  with registry kinds fitted on `[X | Y]` with `y_columns` (`predict` and
+  `coef` per target); converged coefficients match scikit-learn 1.8
+  (`gen_multi_task.py`).
 
 ### Registry
 
