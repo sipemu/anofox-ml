@@ -1013,6 +1013,16 @@ registry! {
         },
         transform: |m, x| m.transform(x),
     }
+    Rfecv {
+        config: crate::meta::RfecvConfig = Default::default(),
+        fitted: crate::meta::RfecvFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        transform: |m, x| m.transform(x),
+    }
     OneVsRestClassifier {
         config: crate::meta::OneVsRestConfig = Default::default(),
         fitted: crate::meta::OneVsRestFit,

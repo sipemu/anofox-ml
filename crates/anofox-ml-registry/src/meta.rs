@@ -2042,6 +2042,42 @@ fn rfe_importances(m: &RegistryFitted) -> Result<Array1<f64>> {
     })
 }
 
+/// sklearn's `RFE._fit`: eliminate `step` features per round down to
+/// `keep`; `on_fit` sees every fitted model with its features (each round's
+/// and the final one, sklearn's `step_score`).
+fn rfe_path(
+    spec: &EstimatorSpec,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    keep: usize,
+    step: usize,
+    mut on_fit: impl FnMut(&[usize], &RegistryFitted) -> Result<()>,
+) -> Result<(Vec<bool>, Vec<usize>, RegistryFitted)> {
+    let p = x.ncols();
+    let mut support = vec![true; p];
+    let mut ranking = vec![1usize; p];
+    loop {
+        let features: Vec<usize> = (0..p).filter(|&j| support[j]).collect();
+        let model = spec.fit(x.select(Axis(1), &features).view(), y)?;
+        on_fit(&features, &model)?;
+        if features.len() <= keep {
+            return Ok((support, ranking, model));
+        }
+        let imp = rfe_importances(&model)?;
+        let mut order: Vec<usize> = (0..features.len()).collect();
+        order.sort_by(|&a, &b| imp[a].total_cmp(&imp[b]));
+        let drop = step.min(features.len() - keep);
+        for &k in &order[..drop] {
+            support[features[k]] = false;
+        }
+        for j in 0..p {
+            if !support[j] {
+                ranking[j] += 1;
+            }
+        }
+    }
+}
+
 impl RfeConfig {
     pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<RfeFit> {
         let p = x.ncols();
@@ -2058,29 +2094,7 @@ impl RfeConfig {
             estimator: self.estimator.clone(),
             estimator_params: self.estimator_params.clone(),
         };
-        let mut support = vec![true; p];
-        let mut ranking = vec![1usize; p];
-        loop {
-            let features: Vec<usize> = (0..p).filter(|&j| support[j]).collect();
-            if features.len() <= keep {
-                break;
-            }
-            let model = spec.fit(x.select(Axis(1), &features).view(), y)?;
-            let imp = rfe_importances(&model)?;
-            let mut order: Vec<usize> = (0..features.len()).collect();
-            order.sort_by(|&a, &b| imp[a].total_cmp(&imp[b]));
-            let drop = self.step.min(features.len() - keep);
-            for &k in &order[..drop] {
-                support[features[k]] = false;
-            }
-            for j in 0..p {
-                if !support[j] {
-                    ranking[j] += 1;
-                }
-            }
-        }
-        let features: Vec<usize> = (0..p).filter(|&j| support[j]).collect();
-        let model = spec.fit(x.select(Axis(1), &features).view(), y)?;
+        let (support, ranking, model) = rfe_path(&spec, x, y, keep, self.step, |_, _| Ok(()))?;
         Ok(RfeFit {
             support,
             ranking,
@@ -2250,5 +2264,124 @@ impl SfsFit {
             .filter(|&j| self.support[j])
             .collect();
         Ok(x.select(Axis(1), &features))
+    }
+}
+
+/// sklearn's `RFECV`: RFE down to `min_features_to_select` on each of `cv`
+/// folds (StratifiedKFold for classifiers, else KFold), scored on the test
+/// rows at every step (R² or accuracy); the number of features with the
+/// largest summed score (the fewest on ties) is then selected by RFE on
+/// all rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct RfecvConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub step: usize,
+    pub min_features_to_select: usize,
+    pub cv: usize,
+}
+
+impl Default for RfecvConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "OlsRegressor".into(),
+            estimator_params: empty_params(),
+            step: 1,
+            min_features_to_select: 1,
+            cv: 5,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RfecvFit {
+    rfe: RfeFit,
+    /// Mean test score per number of features, fewest first (sklearn's
+    /// `cv_results_["mean_test_score"]`).
+    mean_test_score: Vec<f64>,
+    n_features: Vec<usize>,
+}
+
+impl RfecvConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<RfecvFit> {
+        check_cv("Rfecv", self.cv)?;
+        if self.step == 0 {
+            return Err(err("Rfecv: step must be at least 1"));
+        }
+        let p = x.ncols();
+        let keep = self.min_features_to_select.clamp(1, p);
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let caps = crate::make(&self.estimator, &self.estimator_params)?.capabilities();
+        let classifier = caps.contains(&"predict_proba") || caps.contains(&"decision_function");
+        let splits = if classifier {
+            let (_, idx) = encode(y)?;
+            let y_enc: Array1<f64> = idx.iter().map(|&i| i as f64).collect();
+            anofox_ml_core::stratified_k_fold_ordered(&y_enc, self.cv)?
+        } else {
+            anofox_ml_core::k_fold(x.nrows(), self.cv)?
+        };
+        let mut sums: Vec<f64> = Vec::new();
+        let mut counts: Vec<usize> = Vec::new();
+        for (train, test) in &splits {
+            let (xt, yt) = (x.select(Axis(0), train), y.select(Axis(0), train));
+            let (xv, yv) = (x.select(Axis(0), test), y.select(Axis(0), test));
+            let mut step = 0;
+            rfe_path(
+                &spec,
+                xt.view(),
+                yt.view(),
+                keep,
+                self.step,
+                |features, m| {
+                    let pred = m.predict(xv.select(Axis(1), features).view())?;
+                    let s = if classifier {
+                        yv.iter().zip(&pred).filter(|(a, b)| a == b).count() as f64
+                            / yv.len() as f64
+                    } else {
+                        r2(yv.view(), &pred)
+                    };
+                    if step == sums.len() {
+                        sums.push(0.0);
+                        counts.push(features.len());
+                    }
+                    sums[step] += s;
+                    step += 1;
+                    Ok(())
+                },
+            )?;
+        }
+        // Fewest features first; the first maximum wins.
+        sums.reverse();
+        counts.reverse();
+        let best = sums
+            .iter()
+            .enumerate()
+            .fold(0, |b, (i, &v)| if v > sums[b] { i } else { b });
+        let n = splits.len() as f64;
+        let (support, ranking, model) =
+            rfe_path(&spec, x, y, counts[best], self.step, |_, _| Ok(()))?;
+        Ok(RfecvFit {
+            rfe: RfeFit {
+                support,
+                ranking,
+                model,
+            },
+            mean_test_score: sums.iter().map(|s| s / n).collect(),
+            n_features: counts,
+        })
+    }
+}
+
+impl RfecvFit {
+    pub fn transform(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        self.rfe.transform(x)
+    }
+
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        self.rfe.predict(x)
     }
 }

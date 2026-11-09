@@ -77,6 +77,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 - `SequentialFeatureSelector` in the registry (#125): greedy forward or
   backward selection by the mean `cv`-fold R² (regressors) or accuracy
   (classifiers), matching scikit-learn 1.8's selections.
+- `Rfecv` in the registry (#125): RFE with the number of features chosen by
+  the summed `cv`-fold score at every elimination step (the fewest
+  features on ties), as scikit-learn 1.8; `mean_test_score` in
+  `fitted_json`.
 
 ## [0.4.0] - 2026-11-06
 
