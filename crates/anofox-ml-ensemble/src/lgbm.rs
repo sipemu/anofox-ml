@@ -6,20 +6,21 @@
 //! - **NaN handling**: learns the best missing direction per split
 //! - **GOSS** (Gradient-based One-Side Sampling)
 //! - **L1 + L2 regularization**
-//! - **Row and column subsampling** (`subsample`, `colsample_bytree`)
+//! - **Bagging and feature fractions** (`subsample` with `subsample_freq`,
+//!   `colsample_bytree`, `colsample_bynode`), drawn from LightGBM's own
+//!   generator and seeds
 //! - **Early stopping** with an evaluation set
 //! - **Categorical features** (Fisher method: sort by grad/hess, then split)
 //! - **Custom objectives** (user-provided gradient/hessian)
 //! - **Feature importance** (split count and total gain)
 //!
-//! Not included: EFB, distributed training.
+//! Not included: distributed training.
 
 use crate::hist_gradient_boosting::EarlyStoppingScoring;
 use anofox_ml_core::numpy_random::Generator;
 use anofox_ml_core::{Fit, FitWeighted, Predict, Result, RustMlError};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, AsArray, Ix1, Ix2, ShapeBuilder};
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -521,7 +522,10 @@ fn bin_matrix(x: ArrayView2<f64>, all_bins: &[FeatureBins]) -> Array2<u8> {
 /// Run a fit on `n_jobs` threads (`None`: the physical cores, at most the
 /// current pool's threads). Inside a rayon worker (e.g. parallel
 /// cross-validation) the fit stays in the caller's pool.
-fn with_fit_threads<T: Send>(n_jobs: Option<usize>, fit: impl FnOnce() -> T + Send) -> T {
+pub(crate) fn with_fit_threads<T: Send>(
+    n_jobs: Option<usize>,
+    fit: impl FnOnce() -> T + Send,
+) -> T {
     let current = rayon::current_num_threads();
     let threads = n_jobs
         .unwrap_or_else(|| num_cpus::get_physical().min(current))
@@ -573,6 +577,9 @@ fn check_warm_start(
     if model.feature_fraction_per_split < 1.0 {
         return invalid("max_features < 1 is not supported");
     }
+    if model.colsample_bynode < 1.0 {
+        return invalid("colsample_bynode < 1 is not supported");
+    }
     Ok(())
 }
 
@@ -583,6 +590,7 @@ struct WarmStartModel {
     boosting_type: BoostingType,
     early_stopping: bool,
     feature_fraction_per_split: f64,
+    colsample_bynode: f64,
 }
 
 /// Bin `x` with the bins of a fitted model, column-major (as
@@ -592,23 +600,6 @@ fn bin_with(x: ArrayView2<f64>, bins: &[FeatureBins]) -> Array2<u8> {
     let mut binned = Array2::zeros(rows.raw_dim().f());
     binned.assign(&rows);
     binned
-}
-
-/// Replay the row and feature draws of `rounds` earlier boosting rounds
-/// (they do not depend on the data), so that a continuation draws what a
-/// single fit would.
-fn replay_draws(
-    rng: &mut StdRng,
-    rounds: usize,
-    n: usize,
-    p: usize,
-    subsample: f64,
-    colsample: f64,
-) {
-    for _ in 0..rounds {
-        sample_rows(n, subsample, rng);
-        sample_features(p, colsample, rng);
-    }
 }
 
 /// Rows per parallel block of predictions.
@@ -623,6 +614,27 @@ fn add_tree_scores(scores: &mut [f64], tree: &TreeNode, binned_rows: &Array2<u8>
         .with_min_len(4096)
         .enumerate()
         .for_each(|(i, s)| *s += factor * tree.predict_bins(row_of(binned_rows, i)));
+}
+
+/// `add_tree_scores` from the rows of the tree's leaves (as built), when
+/// they hold every row (no bagging or GOSS): each leaf's value is read once.
+fn add_leaf_scores(
+    scores: &mut [f64],
+    tree: &TreeNode,
+    leaf_rows: &[Vec<usize>],
+    binned_rows: &Array2<u8>,
+    factor: f64,
+) {
+    if leaf_rows.iter().map(Vec::len).sum::<usize>() != scores.len() {
+        return add_tree_scores(scores, tree, binned_rows, factor);
+    }
+    for rows in leaf_rows {
+        let Some(&first) = rows.first() else { continue };
+        let value = tree.predict_bins(row_of(binned_rows, first));
+        for &i in rows {
+            scores[i] += factor * value;
+        }
+    }
 }
 
 /// Row `i` of a row-major binned matrix.
@@ -718,23 +730,19 @@ impl Histogram {
         }
     }
 
-    /// `self - child` (histogram subtraction: the larger child's histogram
-    /// from the parent's and the smaller child's).
-    fn minus(&self, child: &Histogram) -> Histogram {
-        let sub = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(a, b)| a - b).collect();
-        Histogram {
-            grad_sum: sub(&self.grad_sum, &child.grad_sum),
-            hess_sum: sub(&self.hess_sum, &child.hess_sum),
-            count: self
-                .count
-                .iter()
-                .zip(&child.count)
-                .map(|(a, b)| a - b)
-                .collect(),
-            missing_grad: self.missing_grad - child.missing_grad,
-            missing_hess: self.missing_hess - child.missing_hess,
-            missing_count: self.missing_count - child.missing_count,
-        }
+    /// `self -= child` (histogram subtraction: the larger child's
+    /// histogram from the parent's and the smaller child's).
+    fn subtract(&mut self, child: &Histogram) {
+        let sub = |a: &mut [f64], b: &[f64]| a.iter_mut().zip(b).for_each(|(a, b)| *a -= b);
+        sub(&mut self.grad_sum, &child.grad_sum);
+        sub(&mut self.hess_sum, &child.hess_sum);
+        self.count
+            .iter_mut()
+            .zip(&child.count)
+            .for_each(|(a, b)| *a -= b);
+        self.missing_grad -= child.missing_grad;
+        self.missing_hess -= child.missing_hess;
+        self.missing_count -= child.missing_count;
     }
 }
 
@@ -757,6 +765,10 @@ struct BestSplit {
     /// For categorical features: the ordered permutation used.
     /// For numeric: None.
     categorical_order: Option<Vec<u8>>,
+    /// LightGBM's numeric scans: the left child's gradient and hessian sums
+    /// as scanned (the hessian with `kEpsilon`), from which LightGBM derives
+    /// the children's totals.
+    lgbm_left_sums: Option<(f64, f64)>,
 }
 
 /// Compute the leaf value with L1 + L2 regularization.
@@ -891,33 +903,110 @@ fn histogram_of(s: &BinSums, n_bins: usize) -> Histogram {
     }
 }
 
+/// LightGBM's `FixHistogram`: the sums of bin `bin` (`MISSING_BIN` for the
+/// missing values) as the node's totals minus the other bins, in bin order.
+fn fix_histogram(hist: &mut Histogram, bin: u8, (grad, hess): (f64, f64)) {
+    let (mut g, mut h) = (grad, hess);
+    for (i, (bg, bh)) in hist.grad_sum.iter().zip(&hist.hess_sum).enumerate() {
+        if i != bin as usize {
+            g -= bg;
+            h -= bh;
+        }
+    }
+    if bin == MISSING_BIN {
+        (hist.missing_grad, hist.missing_hess) = (g, h);
+    } else {
+        g -= hist.missing_grad;
+        h -= hist.missing_hess;
+        (hist.grad_sum[bin as usize], hist.hess_sum[bin as usize]) = (g, h);
+    }
+}
+
+/// The bins LightGBM derives with `FixHistogram`: per numeric feature its
+/// `most_freq_bin` (the bin of 0 unless another bin holds at least
+/// `kSparseThreshold` = 70% of the rows), unless that is its first bin.
+fn lgbm_fixed_bins(
+    binned_x: &Array2<u8>,
+    all_bins: &[FeatureBins],
+    has_missing: &[bool],
+) -> Vec<Option<u8>> {
+    let n = binned_x.nrows();
+    all_bins
+        .iter()
+        .enumerate()
+        .map(|(j, b)| {
+            if b.is_categorical || n == 0 {
+                return None;
+            }
+            let n_bins = n_value_bins(b);
+            // LightGBM's bin order: the value bins, then the missing one.
+            let index = |bin: u8| {
+                if bin == MISSING_BIN {
+                    n_bins
+                } else {
+                    bin as usize
+                }
+            };
+            let mut counts = vec![0usize; n_bins + usize::from(has_missing[j])];
+            for &bin in binned_x.column(j) {
+                if let Some(c) = counts.get_mut(index(bin)) {
+                    *c += 1;
+                }
+            }
+            let mut most = 0;
+            for (k, &c) in counts.iter().enumerate() {
+                if c > counts[most] {
+                    most = k;
+                }
+            }
+            let default = numeric_bin(0.0, &b.edges) as usize;
+            if most != default && (counts[most] as f64 / n as f64) < 0.7 {
+                most = default;
+            }
+            (most > 0).then(|| {
+                if most == n_bins {
+                    MISSING_BIN
+                } else {
+                    most as u8
+                }
+            })
+        })
+        .collect()
+}
+
 /// Rows per chunk of a large node's parallel partition (LightGBM mode; see
 /// `build_lgbm_tree`).
 const PARTITION_CHUNK_ROWS: usize = 16_384;
 
-/// Rows going left / right (in order) and their gradient / hessian totals,
-/// summed in row order (as `node_totals`).
-type Partition = (Vec<usize>, Vec<usize>, (f64, f64), (f64, f64));
+/// Gradient / hessian totals of `rows`, summed in row order (as
+/// `node_totals`).
+fn row_totals(rows: &[usize], gradients: &[f64], hessians: &[f64]) -> (f64, f64) {
+    rows.iter().fold((-0.0, -0.0), |t, &i| {
+        (t.0 + gradients[i], t.1 + hessians[i])
+    })
+}
 
-fn partition_rows(
-    rows: &[usize],
+/// Partitions `rows` in place and stably, the rows going left first, and
+/// returns their number. Branch-free: every row is written to both sides
+/// (the right ones to `scratch`), and only the side it goes to advances.
+fn partition_in_place(
+    rows: &mut [usize],
     goes_left: impl Fn(usize) -> bool,
-    gradients: &[f64],
-    hessians: &[f64],
-) -> Partition {
-    let (mut left, mut right) = (Vec::new(), Vec::new());
-    let (mut lt, mut rt) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
-    for &i in rows {
-        let (side, totals) = if goes_left(i) {
-            (&mut left, &mut lt)
-        } else {
-            (&mut right, &mut rt)
-        };
-        side.push(i);
-        totals.0 += gradients[i];
-        totals.1 += hessians[i];
+    scratch: &mut Vec<usize>,
+) -> usize {
+    scratch.clear();
+    scratch.resize(rows.len(), 0);
+    let (mut n_left, mut n_right) = (0, 0);
+    for k in 0..rows.len() {
+        let i = rows[k];
+        let l = goes_left(i);
+        rows[n_left] = i;
+        scratch[n_right] = i;
+        n_left += usize::from(l);
+        n_right += usize::from(!l);
     }
-    (left, right, lt, rt)
+    rows[n_left..].copy_from_slice(&scratch[..n_right]);
+    n_left
 }
 
 /// Below this many (sample, feature) pairs histograms are built serially.
@@ -944,6 +1033,7 @@ fn build_histograms(
     indices: &[usize],
     totals: (f64, f64),
     feature_indices: &[usize],
+    fixed_bins: &[Option<u8>],
 ) -> Vec<Histogram> {
     use rayon::prelude::*;
     let n_rows = binned_x.nrows();
@@ -1014,7 +1104,11 @@ fn build_histograms(
                 &owned
             }
         };
-        histogram_of(&sums(col), n_bins)
+        let mut hist = histogram_of(&sums(col), n_bins);
+        if let Some(bin) = fixed_bins.get(feat).copied().flatten() {
+            fix_histogram(&mut hist, bin, (totals.0, totals.1));
+        }
+        hist
     };
     if parallel {
         feature_indices.par_iter().map(|&f| one(f)).collect()
@@ -1351,6 +1445,7 @@ fn best_categorical_split(
             right_count: total_count - left_count,
             missing_left: false,
             categorical_order: Some(left),
+            lgbm_left_sums: None,
         },
     )
 }
@@ -1454,6 +1549,7 @@ fn sklearn_categorical_split(
             right_count: total_count - left_count,
             missing_left,
             categorical_order: Some(order),
+            lgbm_left_sums: None,
         }
     })
 }
@@ -1483,6 +1579,7 @@ fn find_best_split(
     parent_value: f64,
     groups: &[usize],
     feature_rng: Option<&mut Generator>,
+    node_features: Option<&[usize]>,
 ) -> Option<BestSplit> {
     let LgbmParams {
         min_child_samples,
@@ -1525,6 +1622,10 @@ fn find_best_split(
         positions.sort_by_key(|&k| !all_bins[feature_indices[k]].is_categorical);
     }
     positions.retain(|&k| allowed(feature_indices[k]));
+    // LightGBM's `feature_fraction_bynode` (drawn by the caller).
+    if let Some(sub) = node_features {
+        positions.retain(|&k| sub.contains(&feature_indices[k]));
+    }
     // sklearn's `max_features`: a random subset of the allowed features for
     // every node it evaluates (a shuffled mask, drawn from the fit's
     // generator).
@@ -1544,9 +1645,14 @@ fn find_best_split(
     // then the first best over the features in order: the outcome of one
     // sequential scan.
     let feature_best = |feat: usize, hist: &Histogram| -> Option<BestSplit> {
-        let mut best: Option<BestSplit> = None;
+        let best: std::cell::RefCell<Option<BestSplit>> = std::cell::RefCell::new(None);
         // Gain of the best candidate so far (read by the scans' fast path).
         let best_gain = std::cell::Cell::new(0.0f64);
+        // LightGBM compares the unshifted gains `G_L²/H_L + G_R²/H_R` within
+        // a scan (`scan_raw`: the scan's best so far) with `lgbm_shift`
+        // (its `min_gain_shift`; the engine's `min_split_gain` is halved).
+        let scan_raw = std::cell::Cell::new(f64::NEG_INFINITY);
+        let lgbm_shift = parent_gain + 2.0 * min_split_gain;
         if all_bins[feat].is_categorical {
             let estimated;
             let hist = if params.sklearn_compat {
@@ -1580,18 +1686,18 @@ fn find_best_split(
                 )
             };
             if let Some(split) = candidate {
-                if split.gain > best.as_ref().map_or(0.0, |b| b.gain) {
-                    best = Some(split);
+                if split.gain > best.borrow().as_ref().map_or(0.0, |b| b.gain) {
+                    *best.borrow_mut() = Some(split);
                 }
             }
-            return best;
+            return best.into_inner();
         }
         // Gain of sending `left` left (`right = totals - left`); keeps the
         // candidate if it is strictly better than the best so far.
-        let mut consider = |(left_grad, left_hess, left_count): (f64, f64, usize),
-                            (right_grad, right_hess, right_count): (f64, f64, usize),
-                            bin: u8,
-                            missing_left: bool| {
+        let consider = |(left_grad, left_hess, left_count): (f64, f64, usize),
+                        (right_grad, right_hess, right_count): (f64, f64, usize),
+                        bin: u8,
+                        missing_left: bool| {
             if left_count < min_child_samples || left_hess < min_child_weight {
                 return;
             }
@@ -1629,22 +1735,30 @@ fn find_best_split(
                 }
                 let left_g = leaf_gain_given_output(left_grad, left_hess, l1, l2, left_val);
                 let right_g = leaf_gain_given_output(right_grad, right_hess, l1, l2, right_val);
-                gain = 0.5 * (left_g + right_g - parent_gain);
-            } else {
-                let left_g = leaf_gain(left_grad, left_hess, l1, l2);
-                let right_g = leaf_gain(right_grad, right_hess, l1, l2);
-                gain = 0.5 * (left_g + right_g - parent_gain);
-                // The outputs only for a new best candidate.
-                if !(gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain)) {
+                let raw = left_g + right_g;
+                if !(raw > lgbm_shift && raw > scan_raw.get()) {
                     return;
                 }
+                scan_raw.set(raw);
+                gain = 0.5 * (raw - parent_gain);
+            } else {
+                let raw = leaf_gain(left_grad, left_hess, l1, l2)
+                    + leaf_gain(right_grad, right_hess, l1, l2);
+                // The outputs only for a new best candidate.
+                if !(raw > lgbm_shift && raw > scan_raw.get()) {
+                    return;
+                }
+                scan_raw.set(raw);
+                gain = 0.5 * (raw - parent_gain);
                 left_val = leaf_value(left_grad, left_hess, l1, l2);
                 right_val = leaf_value(right_grad, right_hess, l1, l2);
             }
 
-            if gain > min_split_gain && gain > best.as_ref().map_or(0.0, |b| b.gain) {
+            if !params.sklearn_compat
+                || (gain > min_split_gain && gain > best.borrow().as_ref().map_or(0.0, |b| b.gain))
+            {
                 best_gain.set(gain);
-                best = Some(BestSplit {
+                *best.borrow_mut() = Some(BestSplit {
                     feature: feat,
                     bin_threshold: bin,
                     gain,
@@ -1654,12 +1768,13 @@ fn find_best_split(
                     right_count,
                     missing_left,
                     categorical_order: None,
+                    lgbm_left_sums: (!params.sklearn_compat).then_some((left_grad, left_hess)),
                 });
             }
         };
         // Left sums of the bins up to `bin`, plus the missing values when
         // they go left.
-        let mut scan_ascending = |missing_left: bool, thresholds: &[u8]| {
+        let scan_ascending = |missing_left: bool, thresholds: &[u8]| {
             let mut left = if missing_left {
                 (
                     hist.missing_grad,
@@ -1736,9 +1851,8 @@ fn find_best_split(
                 {
                     return false;
                 }
-                let gain =
-                    0.5 * (leaf_gain(lg, lh, l1, l2) + leaf_gain(rg, rh, l1, l2) - parent_gain);
-                gain > min_split_gain && gain > best_gain.get()
+                let raw = leaf_gain(lg, lh, l1, l2) + leaf_gain(rg, rh, l1, l2);
+                raw > lgbm_shift && raw > scan_raw.get()
             };
             // LightGBM's `num_bin` counts the missing bin.
             if has_nan && n_bins < 2 {
@@ -1766,6 +1880,12 @@ fn find_best_split(
                     }
                 }
                 if has_nan {
+                    // A scan of its own; it replaces the first one's split
+                    // only if better than that one's shifted gain shifted
+                    // back (LightGBM's `best_gain > output->gain +
+                    // min_gain_shift`, which rounds).
+                    let first = best.take();
+                    let first_raw = scan_raw.replace(f64::NEG_INFINITY);
                     let mut left = (0.0, LGBM_EPSILON, 0usize);
                     for b in 0..n_bins {
                         left.0 += hist.grad_sum[b];
@@ -1779,10 +1899,19 @@ fn find_best_split(
                             consider(left, right, b as u8, false);
                         }
                     }
+                    let second = best.take();
+                    *best.borrow_mut() = match (first, second) {
+                        (Some(f), Some(_))
+                            if scan_raw.get() <= (first_raw - lgbm_shift) + lgbm_shift =>
+                        {
+                            Some(f)
+                        }
+                        (f, s) => s.or(f),
+                    };
                 }
             }
         }
-        best
+        best.into_inner()
     };
     let n_bins: usize = positions
         .iter()
@@ -1946,6 +2075,8 @@ struct LeafCandidate {
     bounds: OutputBounds,
     /// Interaction groups still open to this node's descendants.
     groups: Vec<usize>,
+    /// The node's gradient and hessian totals.
+    totals: (f64, f64),
 }
 
 impl PartialEq for LeafCandidate {
@@ -1985,7 +2116,8 @@ enum BuildNode {
 /// Build a tree using leaf-wise (best-first) expansion.
 ///
 /// `feature_gain_out` and `feature_split_count_out` are accumulators that get
-/// updated with per-feature gain and split counts respectively.
+/// updated with per-feature gain and split counts respectively. Returns the
+/// tree and the rows of `root_indices` in each of its leaves.
 #[allow(clippy::too_many_arguments)]
 fn build_lgbm_tree(
     binned_x: &Array2<u8>,
@@ -1999,7 +2131,8 @@ fn build_lgbm_tree(
     feature_gain_out: &mut [f64],
     feature_split_count_out: &mut [u32],
     feature_rng: &mut Option<Generator>,
-) -> TreeNode {
+    mut col_sampler: Option<&mut LgbmColSampler>,
+) -> (TreeNode, Vec<Vec<usize>>) {
     let mut nodes: Vec<BuildNode> = Vec::new();
 
     // Root is initially a leaf with its value (0 in sklearn, whose root
@@ -2017,7 +2150,13 @@ fn build_lgbm_tree(
     };
     nodes.push(BuildNode::Leaf { value: root_value });
 
-    let mut best_for = |hists: &[Histogram], totals, count, bounds, value, groups: &[usize]| {
+    let mut best_for = |hists: &[Histogram],
+                        totals,
+                        count,
+                        bounds,
+                        value,
+                        groups: &[usize],
+                        node_features: Option<&[usize]>| {
         find_best_split(
             hists,
             totals,
@@ -2029,8 +2168,10 @@ fn build_lgbm_tree(
             value,
             groups,
             feature_rng.as_mut(),
+            node_features,
         )
     };
+    let mut draw_node_features = || col_sampler.as_mut().and_then(|c| c.node_features());
     let root_groups: Vec<usize> = (0..params.interaction_cst.len()).collect();
 
     // Try to split the root.
@@ -2044,14 +2185,15 @@ fn build_lgbm_tree(
         &root_indices,
         root_totals,
         feature_indices,
+        &params.fixed_bins,
     );
-    // sklearn does not evaluate a root it cannot split (which matters for
-    // the draws of its feature subsampling).
-    let root_splittable = !params.sklearn_compat
-        || (root_indices.len() >= 2 * params.min_child_samples
-            && root_totals.1 >= params.min_child_weight);
+    // Neither sklearn nor LightGBM evaluates a root it cannot split (which
+    // matters for the draws of their feature subsampling).
+    let root_splittable = root_indices.len() >= 2 * params.min_child_samples
+        && (!params.sklearn_compat || root_totals.1 >= params.min_child_weight);
     let root_split = root_splittable
         .then(|| {
+            let node_features = draw_node_features();
             best_for(
                 &root_hists,
                 root_totals,
@@ -2059,10 +2201,13 @@ fn build_lgbm_tree(
                 UNBOUNDED,
                 root_value,
                 &root_groups,
+                node_features.as_deref(),
             )
         })
         .flatten();
 
+    // The rows of the finished leaves.
+    let mut leaf_rows: Vec<Vec<usize>> = Vec::new();
     let mut heap: BinaryHeap<LeafCandidate> = BinaryHeap::new();
     if let Some(split) = root_split {
         heap.push(LeafCandidate {
@@ -2074,7 +2219,10 @@ fn build_lgbm_tree(
             depth: 0,
             bounds: UNBOUNDED,
             groups: root_groups,
+            totals: root_totals,
         });
+    } else {
+        leaf_rows.push(root_indices);
     }
 
     // Number of leaves = number of leaf nodes, starts at 1 (root as leaf).
@@ -2089,6 +2237,7 @@ fn build_lgbm_tree(
         // Depth check
         if let Some(max_d) = params.max_depth {
             if candidate.depth >= max_d {
+                leaf_rows.push(candidate.indices);
                 continue;
             }
         }
@@ -2111,32 +2260,68 @@ fn build_lgbm_tree(
                 mask.as_deref(),
             )
         };
-        let (left_idx, right_idx, left_totals, right_totals) =
+        // LightGBM's numeric scans give the children's totals (below).
+        let with_totals = split.lgbm_left_sums.is_none();
+        let (left_idx, right_idx, left_totals, right_totals) = {
+            let mut indices = indices;
+            let totals = |rows: &[usize]| {
+                if with_totals {
+                    row_totals(rows, gradients, hessians)
+                } else {
+                    (-0.0, -0.0)
+                }
+            };
             if params.sklearn_compat || indices.len() <= PARTITION_CHUNK_ROWS {
-                partition_rows(&indices, left, gradients, hessians)
+                let n_left = partition_in_place(&mut indices, left, &mut Vec::new());
+                let right = indices.split_off(n_left);
+                let (lt, rt) = (totals(&indices), totals(&right));
+                (indices, right, lt, rt)
             } else {
                 // Large nodes (LightGBM numerics): fixed chunks in parallel,
                 // joined in order; the totals are the chunks' sums added in
                 // chunk order (independent of the thread count).
                 use rayon::prelude::*;
                 let parts: Vec<_> = indices
-                    .par_chunks(PARTITION_CHUNK_ROWS)
-                    .map(|chunk| partition_rows(chunk, left, gradients, hessians))
+                    .par_chunks_mut(PARTITION_CHUNK_ROWS)
+                    .map_init(Vec::new, |scratch, chunk| {
+                        let n_left = partition_in_place(chunk, left, scratch);
+                        let (l, r) = chunk.split_at(n_left);
+                        (n_left, totals(l), totals(r))
+                    })
                     .collect();
-                let n_left = parts.iter().map(|p| p.0.len()).sum();
-                let (mut li, mut ri) = (
-                    Vec::with_capacity(n_left),
-                    Vec::with_capacity(indices.len() - n_left),
-                );
+                // The left rows are compacted in place (each chunk's move
+                // only overwrites rows already copied), the right ones
+                // copied out.
+                let n_left = parts.iter().map(|p| p.0).sum();
+                let mut right = Vec::with_capacity(indices.len() - n_left);
                 let (mut lt, mut rt) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
-                for (l, r, ls, rs) in parts {
-                    li.extend_from_slice(&l);
-                    ri.extend_from_slice(&r);
+                let mut at = 0;
+                for (k, (nl, ls, rs)) in parts.into_iter().enumerate() {
+                    let start = k * PARTITION_CHUNK_ROWS;
+                    let end = (start + PARTITION_CHUNK_ROWS).min(indices.len());
+                    right.extend_from_slice(&indices[start + nl..end]);
+                    indices.copy_within(start..start + nl, at);
+                    at += nl;
                     lt = (lt.0 + ls.0, lt.1 + ls.1);
                     rt = (rt.0 + rs.0, rt.1 + rs.1);
                 }
-                (li, ri, lt, rt)
-            };
+                indices.truncate(n_left);
+                (indices, right, lt, rt)
+            }
+        };
+
+        // LightGBM takes the children's totals from its scan
+        // (`SplitInfo::left_sum_gradient`, ...).
+        let (left_totals, right_totals) = match split.lgbm_left_sums {
+            Some((lg, lh)) => {
+                let (g, h) = candidate.totals;
+                (
+                    (lg, lh - LGBM_EPSILON),
+                    (g - lg, h + 2.0 * LGBM_EPSILON - lh - LGBM_EPSILON),
+                )
+            }
+            None => (left_totals, right_totals),
+        };
 
         // Create left and right leaf nodes
         let left_id = nodes.len();
@@ -2187,12 +2372,26 @@ fn build_lgbm_tree(
         let splittable = |n: usize| {
             n >= 2 * params.min_child_samples && params.max_depth.is_none_or(|d| depth < d)
         };
-        let (left_ok, right_ok) = (splittable(left_idx.len()), splittable(right_idx.len()));
-        // sklearn finalizes both children once the leaf budget is spent,
-        // without evaluating them.
-        if (!left_ok && !right_ok) || (params.sklearn_compat && n_leaves >= params.num_leaves) {
+        let (mut left_ok, mut right_ok) = (splittable(left_idx.len()), splittable(right_idx.len()));
+        // Both finalize the children once the leaf budget is spent, without
+        // evaluating them.
+        if (!left_ok && !right_ok) || n_leaves >= params.num_leaves {
+            leaf_rows.extend([left_idx, right_idx]);
             continue;
         }
+        // LightGBM evaluates both children once either has the data to be
+        // split (its counts in the split search are estimated).
+        if !params.sklearn_compat {
+            (left_ok, right_ok) = (true, true);
+        }
+        // LightGBM draws the node features of the smaller child first.
+        let (left_features, right_features) = if left_idx.len() < right_idx.len() {
+            let l = draw_node_features();
+            (l, draw_node_features())
+        } else {
+            let r = draw_node_features();
+            (draw_node_features(), r)
+        };
 
         // Histogram subtraction: build the smaller child's histograms and
         // derive the larger child's from the parent's.
@@ -2212,13 +2411,12 @@ fn build_lgbm_tree(
             small_idx,
             small_totals,
             feature_indices,
+            &params.fixed_bins,
         );
-        let large: Vec<Histogram> = small
-            .iter()
-            .zip(&candidate.hists)
-            .map(|(s, parent)| parent.minus(s))
-            .collect();
-        drop(candidate.hists);
+        let mut large = candidate.hists;
+        for (parent, s) in large.iter_mut().zip(&small) {
+            parent.subtract(s);
+        }
         let (left_hists, right_hists) = if left_smaller {
             (small, large)
         } else {
@@ -2226,7 +2424,7 @@ fn build_lgbm_tree(
         };
 
         // Try to split the new children
-        for (ok, child_id, child_indices, hists, bounds, value, totals) in [
+        for (ok, child_id, child_indices, hists, bounds, value, totals, node_features) in [
             (
                 left_ok,
                 left_id,
@@ -2235,6 +2433,7 @@ fn build_lgbm_tree(
                 left_bounds,
                 split.left_value,
                 left_totals,
+                left_features,
             ),
             (
                 right_ok,
@@ -2244,12 +2443,22 @@ fn build_lgbm_tree(
                 right_bounds,
                 split.right_value,
                 right_totals,
+                right_features,
             ),
         ] {
             if !ok {
+                leaf_rows.push(child_indices);
                 continue;
             }
-            if let Some(s) = best_for(&hists, totals, child_indices.len(), bounds, value, &groups) {
+            if let Some(s) = best_for(
+                &hists,
+                totals,
+                child_indices.len(),
+                bounds,
+                value,
+                &groups,
+                node_features.as_deref(),
+            ) {
                 heap.push(LeafCandidate {
                     node_id: child_id,
                     gain: s.gain,
@@ -2259,13 +2468,17 @@ fn build_lgbm_tree(
                     depth,
                     bounds,
                     groups: groups.clone(),
+                    totals,
                 });
+            } else {
+                leaf_rows.push(child_indices);
             }
         }
     }
+    leaf_rows.extend(heap.into_iter().map(|c| c.indices));
 
     // Convert flat BuildNode tree to TreeNode tree
-    flatten_tree(&nodes, 0)
+    (flatten_tree(&nodes, 0), leaf_rows)
 }
 
 fn flatten_tree(nodes: &[BuildNode], id: usize) -> TreeNode {
@@ -2293,57 +2506,6 @@ fn flatten_tree(nodes: &[BuildNode], id: usize) -> TreeNode {
 // ============================================================
 // GOSS sampling
 // ============================================================
-
-/// Gradient-based One-Side Sampling (GOSS).
-///
-/// Keeps the top `top_rate * n` samples by `|gradient|` and randomly samples
-/// `other_rate * n` from the rest. To maintain an unbiased estimate of the
-/// full gradient sum, the "other" samples' gradients and hessians are
-/// amplified by `(1 - top_rate) / other_rate`.
-///
-/// Returns the selected indices and a parallel vector of amplification weights
-/// (1.0 for top rows, `(1-top_rate)/other_rate` for random rows).
-fn goss_sample(
-    gradients: &[f64],
-    indices: &[usize],
-    top_rate: f64,
-    other_rate: f64,
-    rng: &mut StdRng,
-) -> (Vec<usize>, Vec<f64>) {
-    let n = indices.len();
-    let top_n = (n as f64 * top_rate) as usize;
-    let other_n = (n as f64 * other_rate) as usize;
-
-    let mut sorted: Vec<usize> = indices.to_vec();
-    sorted.sort_by(|&a, &b| {
-        gradients[b]
-            .abs()
-            .partial_cmp(&gradients[a].abs())
-            .unwrap_or(Ordering::Equal)
-    });
-
-    let mut selected: Vec<usize> = sorted[..top_n.min(n)].to_vec();
-    let mut weights: Vec<f64> = vec![1.0; selected.len()];
-
-    if sorted.len() > top_n && other_n > 0 {
-        let rest = &sorted[top_n..];
-        let mut shuffled: Vec<usize> = rest.to_vec();
-        shuffled.shuffle(rng);
-        let take = other_n.min(shuffled.len());
-        // Amplification factor to unbias the sampled gradients:
-        // E[grad_other] * (1 - top_rate) should equal the true sum of "other" gradients,
-        // so each sampled row gets multiplied by (1 - top_rate) / other_rate.
-        let amp = if other_rate > 0.0 {
-            (1.0 - top_rate) / other_rate
-        } else {
-            0.0
-        };
-        selected.extend_from_slice(&shuffled[..take]);
-        weights.extend(std::iter::repeat(amp).take(take));
-    }
-
-    (selected, weights)
-}
 
 // ============================================================
 // Parameters
@@ -2393,16 +2555,497 @@ impl Default for DartParams {
     }
 }
 
-/// LightGBM's `Random` (utils/random.h): the LCG behind DART's dropping.
+/// LightGBM's `Random` (utils/random.h): the LCG behind its bagging, GOSS,
+/// feature fractions and DART's dropping.
 #[derive(Debug, Clone)]
 struct LgbmRandom(u32);
 
 impl LgbmRandom {
+    fn step(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(214_013).wrapping_add(2_531_011);
+        self.0
+    }
+
+    fn rand_int16(&mut self) -> usize {
+        ((self.step() >> 16) & 0x7fff) as usize
+    }
+
+    /// `NextShort(0, upper)`.
+    fn next_short(&mut self, upper: usize) -> usize {
+        self.rand_int16() % upper
+    }
+
+    /// `NextInt(0, upper)`.
+    fn next_int(&mut self, upper: usize) -> usize {
+        (self.step() & 0x7fff_ffff) as usize % upper
+    }
+
     /// `NextFloat`: a float in [0, 1).
     fn next_float(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(214_013).wrapping_add(2_531_011);
-        ((self.0 >> 16) & 0x7fff) as f32 / 32768.0
+        self.rand_int16() as f32 / 32768.0
     }
+
+    /// `Sample(n, k)`: `k` of `0..n`, ascending.
+    fn sample(&mut self, n: usize, k: usize) -> Vec<usize> {
+        if k > n || k == 0 {
+            return Vec::new();
+        }
+        if k == n {
+            return (0..n).collect();
+        }
+        if k > 1 && k as f64 > n as f64 / (k as f64).log2() {
+            let mut picked = Vec::with_capacity(k);
+            for i in 0..n {
+                let prob = (k - picked.len()) as f64 / (n - i) as f64;
+                if f64::from(self.next_float()) < prob {
+                    picked.push(i);
+                }
+            }
+            picked
+        } else {
+            let mut set = std::collections::BTreeSet::new();
+            for r in n - k..n {
+                let v = self.next_int(r + 1);
+                if !set.insert(v) {
+                    set.insert(r);
+                }
+            }
+            set.into_iter().collect()
+        }
+    }
+}
+
+/// The seeds LightGBM derives from `seed` (its `Config::Set`); without a
+/// seed its defaults (bagging 3, feature fraction 2, DART's `drop_seed`).
+#[derive(Debug, Clone, Copy)]
+struct LgbmSeeds {
+    bagging: u32,
+    feature_fraction: u32,
+    drop: u32,
+}
+
+impl LgbmSeeds {
+    fn new(seed: Option<u64>, drop_seed: u32) -> Self {
+        let Some(seed) = seed else {
+            return Self {
+                bagging: 3,
+                feature_fraction: 2,
+                drop: drop_seed,
+            };
+        };
+        let mut rng = LgbmRandom(seed as u32);
+        let mut next = || rng.next_short(i16::MAX as usize) as u32;
+        let _data_random_seed = next();
+        let bagging = next();
+        let drop = next();
+        let feature_fraction = next();
+        Self {
+            bagging,
+            feature_fraction,
+            drop,
+        }
+    }
+}
+
+/// Rows per generator of LightGBM's bagging and GOSS (`bagging_rand_block_`).
+const LGBM_BAGGING_BLOCK: usize = 1024;
+
+/// One LightGBM generator per block of rows, seeded `seed + block`.
+fn block_generators(seed: u32, n: usize) -> Vec<LgbmRandom> {
+    (0..n.div_ceil(LGBM_BAGGING_BLOCK))
+        .map(|b| LgbmRandom(seed.wrapping_add(b as u32)))
+        .collect()
+}
+
+/// LightGBM's bagging (`BaggingSampleStrategy`): every `freq` iterations
+/// each row is kept with probability `fraction`; with balanced bagging
+/// (binary labels) the positive and negative rows with their own fractions.
+struct LgbmBagging {
+    rands: Vec<LgbmRandom>,
+    fraction: f64,
+    freq: usize,
+    /// `(is positive, pos_fraction, neg_fraction)` for balanced bagging.
+    balanced: Option<(Vec<bool>, f64, f64)>,
+    bag: Option<Vec<usize>>,
+}
+
+impl LgbmBagging {
+    /// `None` when LightGBM does not bag.
+    fn new(
+        seed: u32,
+        n: usize,
+        fraction: f64,
+        freq: usize,
+        balanced: Option<(Vec<bool>, f64, f64)>,
+    ) -> Option<Self> {
+        let balanced =
+            balanced.filter(|(pos, p, q)| (*p < 1.0 || *q < 1.0) && pos.iter().any(|&b| b));
+        (freq > 0 && (fraction < 1.0 || balanced.is_some())).then(|| Self {
+            rands: block_generators(seed, n),
+            fraction,
+            freq,
+            balanced,
+            bag: None,
+        })
+    }
+
+    /// The bag of iteration `iter` (re-drawn on the first iteration and
+    /// every `freq` iterations while it is not the whole data).
+    fn rows(&mut self, iter: usize, n: usize) -> Vec<usize> {
+        let redraw = match &self.bag {
+            None => true,
+            Some(bag) => bag.len() < n && iter % self.freq == 0,
+        };
+        if redraw {
+            let mut bag = Vec::new();
+            for i in 0..n {
+                let fraction = match &self.balanced {
+                    Some((pos, p, q)) => {
+                        if pos[i] {
+                            *p
+                        } else {
+                            *q
+                        }
+                    }
+                    None => self.fraction,
+                };
+                if f64::from(self.rands[i / LGBM_BAGGING_BLOCK].next_float()) < fraction {
+                    bag.push(i);
+                }
+            }
+            self.bag = Some(bag);
+        }
+        self.bag.clone().unwrap_or_default()
+    }
+}
+
+/// LightGBM's GOSS (`GOSSStrategy`, one thread): after the first
+/// `1 / learning_rate` iterations, keeps the rows of the `top_rate` largest
+/// `Σ |g·h|` (over the trees of the iteration) and samples `other_rate · n`
+/// of the others, whose gradients and hessians it amplifies by
+/// `(n - top_k) / other_k` (float32). Returns the rows, ascending.
+fn lgbm_goss(
+    rands: &mut [LgbmRandom],
+    gradients: &mut [&mut [f64]],
+    hessians: &mut [&mut [f64]],
+    top_rate: f64,
+    other_rate: f64,
+) -> Vec<usize> {
+    let n = gradients[0].len();
+    let weight = |g: &[&mut [f64]], h: &[&mut [f64]], i: usize| {
+        g.iter().zip(h).fold(0.0f32, |acc, (g, h)| {
+            acc + (g[i] as f32 * h[i] as f32).abs()
+        })
+    };
+    let mut weights: Vec<f32> = (0..n).map(|i| weight(gradients, hessians, i)).collect();
+    let top_k = ((n as f64 * top_rate) as usize).max(1);
+    let other_k = (n as f64 * other_rate) as usize;
+    // LightGBM reads the threshold at `top_k - 1` after its partial sort
+    // (not always the `top_k`-th largest weight).
+    lgbm_arg_max_at_k(&mut weights, top_k - 1);
+    let threshold = weights[top_k - 1];
+    let multiply = (n - top_k) as f32 / other_k as f32;
+    let mut rows = Vec::new();
+    let mut big = 0usize;
+    for i in 0..n {
+        if weight(gradients, hessians, i) >= threshold {
+            rows.push(i);
+            big += 1;
+            continue;
+        }
+        let rest_need = other_k as f64 - (rows.len() - big) as f64;
+        let rest_all = (n - i) as f64 - (top_k as f64 - big as f64);
+        if f64::from(rands[i / LGBM_BAGGING_BLOCK].next_float()) < rest_need / rest_all {
+            rows.push(i);
+            for (g, h) in gradients.iter_mut().zip(hessians.iter_mut()) {
+                g[i] = f64::from(g[i] as f32 * multiply);
+                h[i] = f64::from(h[i] as f32 * multiply);
+            }
+        }
+    }
+    rows
+}
+
+/// LightGBM's `ArrayArgs::Partition`: a three-way partition of
+/// `a[start..end]` around its last value, descending; returns the ends of
+/// the larger and the smaller part.
+fn lgbm_partition(a: &mut [f32], start: isize, end: isize) -> (isize, isize) {
+    if start >= end - 1 {
+        return (start - 1, end);
+    }
+    let at = |k: isize| k as usize;
+    let (mut i, mut j) = (start - 1, end - 1);
+    let (mut p, mut q) = (i, j);
+    let v = a[at(end - 1)];
+    loop {
+        loop {
+            i += 1;
+            if a[at(i)] <= v {
+                break;
+            }
+        }
+        loop {
+            j -= 1;
+            if v <= a[at(j)] || j == start {
+                break;
+            }
+        }
+        if i >= j {
+            break;
+        }
+        a.swap(at(i), at(j));
+        if a[at(i)] == v {
+            p += 1;
+            a.swap(at(p), at(i));
+        }
+        if v == a[at(j)] {
+            q -= 1;
+            a.swap(at(j), at(q));
+        }
+    }
+    a.swap(at(i), at(end - 1));
+    j = i - 1;
+    i += 1;
+    for k in start..=p {
+        a.swap(at(k), at(j));
+        j -= 1;
+    }
+    let mut k = end - 2;
+    while k >= q {
+        a.swap(at(i), at(k));
+        k -= 1;
+        i += 1;
+    }
+    (j, i)
+}
+
+/// LightGBM's `ArrayArgs::ArgMaxAtK`: partially sorts `a` (descending)
+/// towards index `k`.
+fn lgbm_arg_max_at_k(a: &mut [f32], k: usize) {
+    let k = k as isize;
+    let (mut start, mut end) = (0isize, a.len() as isize);
+    while start < end - 1 {
+        let (l, r) = lgbm_partition(a, start, end);
+        if (k > l && k < r) || (l == start - 1 && r == end - 1) {
+            return;
+        } else if k <= l {
+            end = l + 1;
+        } else {
+            start = r;
+        }
+    }
+}
+
+/// LightGBM's `ColSampler`: the features of a tree (`feature_fraction`, a
+/// subset of the non-trivial features) and of a node
+/// (`feature_fraction_bynode`, a subset of the tree's), from one generator.
+#[derive(Debug, Clone)]
+struct LgbmColSampler {
+    rng: LgbmRandom,
+    bytree: f64,
+    bynode: f64,
+    /// The features LightGBM can split on (more than one bin).
+    valid: Vec<usize>,
+    /// The tree's features (`valid` without `feature_fraction`).
+    used: Vec<usize>,
+}
+
+impl LgbmColSampler {
+    /// Like LightGBM, the constructor draws a first (unused) tree subset.
+    fn new(seed: u32, bytree: f64, bynode: f64, valid: Vec<usize>) -> Self {
+        let mut s = Self {
+            rng: LgbmRandom(seed),
+            bytree,
+            bynode,
+            used: valid.clone(),
+            valid,
+        };
+        s.reset_by_tree();
+        s
+    }
+
+    /// `GetCnt`: `round(total · fraction)`, at least one.
+    fn count(total: usize, fraction: f64) -> usize {
+        ((total as f64 * fraction + 0.5) as usize).max(total.min(1))
+    }
+
+    /// `ResetByTree`: draw the next tree's features.
+    fn reset_by_tree(&mut self) {
+        if self.bytree < 1.0 {
+            let k = Self::count(self.valid.len(), self.bytree);
+            let valid = &self.valid;
+            self.used = self
+                .rng
+                .sample(valid.len(), k)
+                .into_iter()
+                .map(|i| valid[i])
+                .collect();
+        }
+    }
+
+    /// The features of a tree: every feature without `feature_fraction`.
+    fn tree_features(&self, p: usize) -> Vec<usize> {
+        if self.bytree < 1.0 {
+            self.used.clone()
+        } else {
+            (0..p).collect()
+        }
+    }
+
+    /// `GetByNode`: the features a node may split on, if subsampled.
+    fn node_features(&mut self) -> Option<Vec<usize>> {
+        (self.bynode < 1.0).then(|| {
+            let k = Self::count(self.used.len(), self.bynode);
+            let used = &self.used;
+            self.rng
+                .sample(used.len(), k)
+                .into_iter()
+                .map(|i| used[i])
+                .collect()
+        })
+    }
+}
+
+/// The sampling parameters of a fit.
+#[derive(Debug, Clone, Copy)]
+struct SamplingParams {
+    boosting_type: BoostingType,
+    learning_rate: f64,
+    subsample: f64,
+    subsample_freq: usize,
+    colsample_bytree: f64,
+    colsample_bynode: f64,
+    goss_top_rate: f64,
+    goss_other_rate: f64,
+    seeds: LgbmSeeds,
+}
+
+impl SamplingParams {
+    fn validate(&self) -> Result<()> {
+        let invalid = |m: &str| Err(RustMlError::InvalidParameter(m.into()));
+        let fraction = |f: f64| f > 0.0 && f <= 1.0;
+        if !fraction(self.subsample) {
+            return invalid("subsample must be in (0, 1]");
+        }
+        if !fraction(self.colsample_bytree) || !fraction(self.colsample_bynode) {
+            return invalid("colsample_bytree and colsample_bynode must be in (0, 1]");
+        }
+        if self.boosting_type == BoostingType::Goss {
+            if !(self.goss_top_rate > 0.0 && self.goss_other_rate > 0.0)
+                || self.goss_top_rate + self.goss_other_rate > 1.0
+            {
+                return invalid("GOSS needs top_rate, other_rate > 0 with a sum of at most 1");
+            }
+            if self.subsample_freq > 0 && self.subsample < 1.0 {
+                return invalid("GOSS cannot be combined with bagging");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// LightGBM's row and feature samplers of a fit.
+struct LgbmSamplers {
+    bagging: Option<LgbmBagging>,
+    goss: Option<Vec<LgbmRandom>>,
+    goss_warmup: usize,
+    cols: LgbmColSampler,
+    p: SamplingParams,
+}
+
+impl LgbmSamplers {
+    /// `positives`: the binary labels, for balanced bagging with
+    /// `(pos, neg)` fractions.
+    fn new(
+        p: SamplingParams,
+        binned_x: &Array2<u8>,
+        balanced: Option<(Vec<bool>, f64, f64)>,
+    ) -> Self {
+        let n = binned_x.nrows();
+        let bagging = (p.boosting_type != BoostingType::Goss)
+            .then(|| LgbmBagging::new(p.seeds.bagging, n, p.subsample, p.subsample_freq, balanced))
+            .flatten();
+        let goss =
+            (p.boosting_type == BoostingType::Goss).then(|| block_generators(p.seeds.bagging, n));
+        let valid = if p.colsample_bytree < 1.0 || p.colsample_bynode < 1.0 {
+            valid_features(binned_x)
+        } else {
+            Vec::new()
+        };
+        Self {
+            bagging,
+            goss,
+            // LightGBM's `static_cast<int>(1.0f / learning_rate)`.
+            goss_warmup: (1.0 / p.learning_rate) as usize,
+            cols: LgbmColSampler::new(
+                p.seeds.feature_fraction,
+                p.colsample_bytree,
+                p.colsample_bynode,
+                valid,
+            ),
+            p,
+        }
+    }
+
+    /// The rows of iteration `iter`; GOSS amplifies the gradients and
+    /// hessians (of all trees of the iteration) of its sampled rows.
+    fn rows(
+        &mut self,
+        iter: usize,
+        n: usize,
+        gradients: &mut [&mut [f64]],
+        hessians: &mut [&mut [f64]],
+    ) -> Vec<usize> {
+        if let Some(b) = self.bagging.as_mut() {
+            return b.rows(iter, n);
+        }
+        match self.goss.as_mut() {
+            Some(rands) if iter >= self.goss_warmup => lgbm_goss(
+                rands,
+                gradients,
+                hessians,
+                self.p.goss_top_rate,
+                self.p.goss_other_rate,
+            ),
+            _ => (0..n).collect(),
+        }
+    }
+
+    /// The features of the next tree.
+    fn tree_features(&mut self, n_features: usize) -> Vec<usize> {
+        self.cols.reset_by_tree();
+        self.cols.tree_features(n_features)
+    }
+
+    /// The node sampler for the tree builder, if nodes are subsampled.
+    fn node_sampler(&mut self) -> Option<&mut LgbmColSampler> {
+        (self.p.colsample_bynode < 1.0).then_some(&mut self.cols)
+    }
+
+    /// Replay the draws of `rounds` fitted rounds of `trees_per_round`
+    /// trees (a warm start; GOSS and node sampling, whose draws depend on
+    /// the data, cannot be continued).
+    fn replay(&mut self, rounds: usize, trees_per_round: usize, n: usize) {
+        for iter in 0..rounds {
+            if let Some(b) = self.bagging.as_mut() {
+                b.rows(iter, n);
+            }
+            for _ in 0..trees_per_round {
+                self.cols.reset_by_tree();
+            }
+        }
+    }
+}
+
+/// The features of `binned_x` with more than one bin (LightGBM's
+/// `ValidFeatureIndices`; it drops the trivial ones).
+fn valid_features(binned_x: &Array2<u8>) -> Vec<usize> {
+    (0..binned_x.ncols())
+        .filter(|&j| {
+            let col = binned_x.column(j);
+            col.iter().any(|&b| b != col[0])
+        })
+        .collect()
 }
 
 /// DART's book-keeping (LightGBM's `dart.hpp`). Tree leaves carry their
@@ -2416,11 +3059,11 @@ struct DartState {
 }
 
 impl DartState {
-    fn new(p: DartParams, learning_rate: f64) -> Self {
+    fn new(p: DartParams, learning_rate: f64, drop_seed: u32) -> Self {
         Self {
             p,
             learning_rate,
-            rng: LgbmRandom(p.drop_seed),
+            rng: LgbmRandom(drop_seed),
             tree_weight: Vec::new(),
             sum_weight: 0.0,
         }
@@ -2564,6 +3207,9 @@ struct LgbmParams {
     /// sklearn's `max_features`: share of the allowed features tried at
     /// every split (1 = all).
     feature_fraction_per_split: f64,
+    /// Per feature, the bin LightGBM derives from the node totals (see
+    /// `lgbm_fixed_bins`; empty in sklearn mode).
+    fixed_bins: Vec<Option<u8>>,
 }
 
 /// How categorical features are split (LightGBM's parameters of the same
@@ -2626,8 +3272,19 @@ pub struct LgbmRegressor {
     pub min_split_gain: f64,
     pub reg_alpha: f64,
     pub reg_lambda: f64,
+    /// Share of the rows of a bag (LightGBM's `bagging_fraction`); only
+    /// used with `subsample_freq > 0`.
     pub subsample: f64,
+    /// Re-bag every this many iterations; 0 (default) = no bagging
+    /// (LightGBM's `bagging_freq`).
+    #[serde(default)]
+    pub subsample_freq: usize,
+    /// Share of the features of a tree (LightGBM's `feature_fraction`).
     pub colsample_bytree: f64,
+    /// Share of the tree's features a node may split on (LightGBM's
+    /// `feature_fraction_bynode`).
+    #[serde(default = "default_one")]
+    pub colsample_bynode: f64,
     pub max_bins: usize,
     /// Minimum number of training samples per histogram bin.  Bins with fewer
     /// samples are merged with their neighbours, reducing the effective split
@@ -2669,7 +3326,11 @@ pub struct LgbmRegressor {
     /// model does not depend on it.
     #[serde(default)]
     pub n_jobs: Option<usize>,
-    pub seed: u64,
+    /// LightGBM's `seed` (`random_state`): derives the seeds of bagging,
+    /// GOSS, the feature fractions and DART's dropping as LightGBM does.
+    /// `None` (default): LightGBM's default seeds (and `dart.drop_seed`).
+    #[serde(default)]
+    pub seed: Option<u64>,
     /// sklearn's numerics instead of LightGBM's: float32 gradients and
     /// hessians, its L1 / quantile gradient at ties (prediction == target
     /// counts as below), split search (see `find_best_split`), weighted
@@ -2702,7 +3363,9 @@ impl LgbmRegressor {
             reg_alpha: 0.0,
             reg_lambda: 0.0,
             subsample: 1.0,
+            subsample_freq: 0,
             colsample_bytree: 1.0,
+            colsample_bynode: 1.0,
             max_bins: DEFAULT_MAX_BINS,
             min_data_in_bin: 3,
             binning: BinningMethod::LightGbm,
@@ -2719,7 +3382,7 @@ impl LgbmRegressor {
             monotone_constraints: Vec::new(),
             enable_bundle: true,
             n_jobs: None,
-            seed: 0,
+            seed: None,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
             feature_fraction_per_split: 1.0,
@@ -2766,6 +3429,14 @@ impl LgbmRegressor {
     }
     pub fn with_subsample(mut self, s: f64) -> Self {
         self.subsample = s;
+        self
+    }
+    pub fn with_subsample_freq(mut self, f: usize) -> Self {
+        self.subsample_freq = f;
+        self
+    }
+    pub fn with_colsample_bynode(mut self, c: f64) -> Self {
+        self.colsample_bynode = c;
         self
     }
     pub fn with_colsample_bytree(mut self, c: f64) -> Self {
@@ -2842,7 +3513,7 @@ impl LgbmRegressor {
         self
     }
     pub fn with_seed(mut self, s: u64) -> Self {
-        self.seed = s;
+        self.seed = Some(s);
         self
     }
 
@@ -2853,6 +3524,21 @@ impl LgbmRegressor {
             boosting_type: self.boosting_type,
             early_stopping: self.early_stopping_rounds.is_some(),
             feature_fraction_per_split: self.feature_fraction_per_split,
+            colsample_bynode: self.colsample_bynode,
+        }
+    }
+
+    fn sampling(&self) -> SamplingParams {
+        SamplingParams {
+            boosting_type: self.boosting_type,
+            learning_rate: self.learning_rate,
+            subsample: self.subsample,
+            subsample_freq: self.subsample_freq,
+            colsample_bytree: self.colsample_bytree,
+            colsample_bynode: self.colsample_bynode,
+            goss_top_rate: self.goss_top_rate,
+            goss_other_rate: self.goss_other_rate,
+            seeds: LgbmSeeds::new(self.seed, self.dart.drop_seed),
         }
     }
 
@@ -2877,6 +3563,7 @@ impl LgbmRegressor {
             has_missing: Vec::new(),
             interaction_cst: self.interaction_cst.clone(),
             feature_fraction_per_split: self.feature_fraction_per_split,
+            fixed_bins: Vec::new(),
         }
     }
 }
@@ -3294,32 +3981,6 @@ fn regression_baseline(
     }
 }
 
-/// Select random feature subset for this tree.
-fn sample_features(n_features: usize, frac: f64, rng: &mut StdRng) -> Vec<usize> {
-    if frac >= 1.0 {
-        return (0..n_features).collect();
-    }
-    let k = ((n_features as f64 * frac).ceil() as usize).max(1);
-    let mut indices: Vec<usize> = (0..n_features).collect();
-    indices.shuffle(rng);
-    indices.truncate(k);
-    indices.sort_unstable();
-    indices
-}
-
-/// Select random row subset.
-fn sample_rows(n: usize, frac: f64, rng: &mut StdRng) -> Vec<usize> {
-    if frac >= 1.0 {
-        return (0..n).collect();
-    }
-    let k = ((n as f64 * frac).ceil() as usize).max(1);
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.shuffle(rng);
-    indices.truncate(k);
-    indices.sort_unstable();
-    indices
-}
-
 /// sklearn's early stopping rule (`scoring="loss"`): stop once none of the
 /// last `n_iter_no_change` scores beats the one before them by more than
 /// `tol`; all trees are kept.
@@ -3608,6 +4269,7 @@ impl LgbmRegressor {
         }
         validate_eval_opts(opts, x.ncols())?;
         validate_max_bins(self.max_bins)?;
+        self.sampling().validate()?;
         validate_regression_objective(self.objective, y)?;
         if let Some(f) = prev {
             check_warm_start(
@@ -3640,7 +4302,7 @@ impl LgbmRegressor {
                 &self.categorical_features,
                 self.min_data_in_bin,
                 self.binning,
-                self.seed,
+                self.seed.unwrap_or(0),
             ),
         };
         // Row-major copy for the per-row score updates.
@@ -3686,12 +4348,20 @@ impl LgbmRegressor {
         let mut feature_split_count =
             prev.map_or_else(|| vec![0u32; p], |f| f.feature_split_count.clone());
 
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        replay_draws(&mut rng, start, n, p, self.subsample, self.colsample_bytree);
+        let sampling = self.sampling();
+        let mut samplers = LgbmSamplers::new(sampling, &binned_x, None);
+        samplers.replay(start, 1, n);
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
+        let has_missing = columns_with_missing(x, true);
+        let fixed_bins = if self.sklearn_compat {
+            Vec::new()
+        } else {
+            lgbm_fixed_bins(&binned_x, &bins, &has_missing)
+        };
         let params = LgbmParams {
-            has_missing: columns_with_missing(x, true),
+            has_missing,
+            fixed_bins,
             ..self.params()
         };
 
@@ -3755,7 +4425,7 @@ impl LgbmRegressor {
             ));
         }
         let mut dart = (self.boosting_type == BoostingType::Dart)
-            .then(|| DartState::new(self.dart, self.learning_rate));
+            .then(|| DartState::new(self.dart, self.learning_rate, sampling.seeds.drop));
 
         for iter in start..self.n_estimators {
             // DART: drop earlier trees before the gradients are computed.
@@ -3785,31 +4455,12 @@ impl LgbmRegressor {
             round_to_f32(&mut gradients);
             round_to_f32(&mut hessians);
 
-            // Row selection: GBDT = bagging, GOSS = top-k + sampled rest w/ amplification
-            let row_indices: Vec<usize> = match self.boosting_type {
-                BoostingType::Gbdt | BoostingType::Dart => sample_rows(n, self.subsample, &mut rng),
-                BoostingType::Goss => {
-                    let all: Vec<usize> = (0..n).collect();
-                    let (selected, amp_weights) = goss_sample(
-                        &gradients,
-                        &all,
-                        self.goss_top_rate,
-                        self.goss_other_rate,
-                        &mut rng,
-                    );
-                    // Amplify gradients/hessians for the "other" sampled rows
-                    for (k, &i) in selected.iter().enumerate() {
-                        // float32, as LightGBM's `score_t`.
-                        gradients[i] = f64::from((gradients[i] * amp_weights[k]) as f32);
-                        hessians[i] = f64::from((hessians[i] * amp_weights[k]) as f32);
-                    }
-                    selected
-                }
-            };
-
-            let feature_indices = sample_features(p, self.colsample_bytree, &mut rng);
+            // Row selection: bagging or GOSS (which amplifies the
+            // gradients of its sampled rows).
+            let row_indices = samplers.rows(iter, n, &mut [&mut gradients], &mut [&mut hessians]);
+            let feature_indices = samplers.tree_features(p);
             let refit = refit_percentile(self.objective).map(|a| (a, row_indices.clone()));
-            let mut tree = build_lgbm_tree(
+            let (mut tree, leaf_rows) = build_lgbm_tree(
                 &binned_x,
                 bundles.as_ref(),
                 &gradients,
@@ -3821,6 +4472,7 @@ impl LgbmRegressor {
                 &mut feature_gain,
                 &mut feature_split_count,
                 &mut feature_rng,
+                samplers.node_sampler(),
             );
             if let Some((alpha, rows)) = refit {
                 let residuals: Vec<f64> = y_vec.iter().zip(&preds).map(|(y, p)| y - p).collect();
@@ -3839,7 +4491,7 @@ impl LgbmRegressor {
                 // The tree's leaves carry its weight; the first tree also
                 // carries the initial score (LightGBM's `AddBias`).
                 tree.scale(shrinkage);
-                add_tree_scores(&mut preds[..], &tree, &binned_rows, 1.0);
+                add_leaf_scores(&mut preds[..], &tree, &leaf_rows, &binned_rows, 1.0);
                 if iter == 0 && baseline.abs() > LGBM_EPSILON {
                     tree.add_bias(baseline);
                 }
@@ -3855,7 +4507,13 @@ impl LgbmRegressor {
                 continue;
             }
             // Update predictions (on ALL rows, not just sampled)
-            add_tree_scores(&mut preds[..], &tree, &binned_rows, self.learning_rate);
+            add_leaf_scores(
+                &mut preds[..],
+                &tree,
+                &leaf_rows,
+                &binned_rows,
+                self.learning_rate,
+            );
 
             if let Some(t) = tracker.as_mut() {
                 if let (Some(eb), Some(ep)) = (eval_binned.as_ref(), eval_preds.as_mut()) {
@@ -4114,8 +4772,19 @@ pub struct LgbmClassifier {
     pub min_split_gain: f64,
     pub reg_alpha: f64,
     pub reg_lambda: f64,
+    /// Share of the rows of a bag (LightGBM's `bagging_fraction`); only
+    /// used with `subsample_freq > 0`.
     pub subsample: f64,
+    /// Re-bag every this many iterations; 0 (default) = no bagging
+    /// (LightGBM's `bagging_freq`).
+    #[serde(default)]
+    pub subsample_freq: usize,
+    /// Share of the features of a tree (LightGBM's `feature_fraction`).
     pub colsample_bytree: f64,
+    /// Share of the tree's features a node may split on (LightGBM's
+    /// `feature_fraction_bynode`).
+    #[serde(default = "default_one")]
+    pub colsample_bynode: f64,
     pub max_bins: usize,
     pub min_data_in_bin: usize,
     /// Numeric binning: LightGBM's (default) or sklearn's.
@@ -4133,6 +4802,14 @@ pub struct LgbmClassifier {
     pub categorical_split: CategoricalSplitParams,
     pub monotone_constraints: Vec<i8>,
     pub class_weight: Option<LgbmClassWeight>,
+    /// Balanced bagging of binary labels (LightGBM's `pos_bagging_fraction`
+    /// and `neg_bagging_fraction`, default 1): the shares of the positive
+    /// and the negative rows of a bag (with `subsample_freq > 0`), in place
+    /// of `subsample`.
+    #[serde(default = "default_one")]
+    pub pos_bagging_fraction: f64,
+    #[serde(default = "default_one")]
+    pub neg_bagging_fraction: f64,
     pub early_stopping_rounds: Option<usize>,
     /// Exclusive feature bundling (LightGBM's `enable_bundle`, default
     /// true): see `FeatureBundles`. It changes the speed, not the model
@@ -4145,7 +4822,11 @@ pub struct LgbmClassifier {
     /// model does not depend on it.
     #[serde(default)]
     pub n_jobs: Option<usize>,
-    pub seed: u64,
+    /// LightGBM's `seed` (`random_state`): derives the seeds of bagging,
+    /// GOSS, the feature fractions and DART's dropping as LightGBM does.
+    /// `None` (default): LightGBM's default seeds (and `dart.drop_seed`).
+    #[serde(default)]
+    pub seed: Option<u64>,
     /// Scale the softmax hessian by K / (K - 1) as LightGBM does; the
     /// HistGradientBoosting facade turns it off (sklearn's hessian).
     #[serde(skip, default = "default_true")]
@@ -4184,7 +4865,9 @@ impl LgbmClassifier {
             reg_alpha: 0.0,
             reg_lambda: 0.0,
             subsample: 1.0,
+            subsample_freq: 0,
             colsample_bytree: 1.0,
+            colsample_bynode: 1.0,
             max_bins: DEFAULT_MAX_BINS,
             min_data_in_bin: 3,
             binning: BinningMethod::LightGbm,
@@ -4196,10 +4879,12 @@ impl LgbmClassifier {
             categorical_split: CategoricalSplitParams::default(),
             monotone_constraints: Vec::new(),
             class_weight: None,
+            pos_bagging_fraction: 1.0,
+            neg_bagging_fraction: 1.0,
             early_stopping_rounds: None,
             enable_bundle: true,
             n_jobs: None,
-            seed: 0,
+            seed: None,
             softmax_hessian_factor: true,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
@@ -4244,6 +4929,14 @@ impl LgbmClassifier {
         self.subsample = s;
         self
     }
+    pub fn with_subsample_freq(mut self, f: usize) -> Self {
+        self.subsample_freq = f;
+        self
+    }
+    pub fn with_colsample_bynode(mut self, c: f64) -> Self {
+        self.colsample_bynode = c;
+        self
+    }
     pub fn with_colsample_bytree(mut self, c: f64) -> Self {
         self.colsample_bytree = c;
         self
@@ -4272,6 +4965,11 @@ impl LgbmClassifier {
         self.dart = p;
         self
     }
+    pub fn with_goss_rates(mut self, top: f64, other: f64) -> Self {
+        self.goss_top_rate = top;
+        self.goss_other_rate = other;
+        self
+    }
     pub fn with_categorical_features(mut self, feats: Vec<usize>) -> Self {
         self.categorical_features = feats;
         self
@@ -4284,6 +4982,12 @@ impl LgbmClassifier {
     }
     pub fn with_monotone_constraints(mut self, c: Vec<i8>) -> Self {
         self.monotone_constraints = c;
+        self
+    }
+    /// Balanced bagging: the shares of the positive and the negative rows.
+    pub fn with_bagging_fractions(mut self, pos: f64, neg: f64) -> Self {
+        self.pos_bagging_fraction = pos;
+        self.neg_bagging_fraction = neg;
         self
     }
     pub fn with_class_weight(mut self, w: Option<LgbmClassWeight>) -> Self {
@@ -4305,7 +5009,7 @@ impl LgbmClassifier {
         self
     }
     pub fn with_seed(mut self, s: u64) -> Self {
-        self.seed = s;
+        self.seed = Some(s);
         self
     }
 
@@ -4316,6 +5020,21 @@ impl LgbmClassifier {
             boosting_type: self.boosting_type,
             early_stopping: self.early_stopping_rounds.is_some(),
             feature_fraction_per_split: self.feature_fraction_per_split,
+            colsample_bynode: self.colsample_bynode,
+        }
+    }
+
+    fn sampling(&self) -> SamplingParams {
+        SamplingParams {
+            boosting_type: self.boosting_type,
+            learning_rate: self.learning_rate,
+            subsample: self.subsample,
+            subsample_freq: self.subsample_freq,
+            colsample_bytree: self.colsample_bytree,
+            colsample_bynode: self.colsample_bynode,
+            goss_top_rate: self.goss_top_rate,
+            goss_other_rate: self.goss_other_rate,
+            seeds: LgbmSeeds::new(self.seed, self.dart.drop_seed),
         }
     }
 
@@ -4340,6 +5059,7 @@ impl LgbmClassifier {
             has_missing: Vec::new(),
             interaction_cst: self.interaction_cst.clone(),
             feature_fraction_per_split: self.feature_fraction_per_split,
+            fixed_bins: Vec::new(),
         }
     }
 
@@ -4550,6 +5270,7 @@ impl LgbmClassifier {
         }
         validate_eval_opts(opts, x.ncols())?;
         validate_max_bins(self.max_bins)?;
+        self.sampling().validate()?;
         if let Some(f) = prev {
             check_warm_start(
                 f.n_estimators(),
@@ -4572,7 +5293,7 @@ impl LgbmClassifier {
                 &self.categorical_features,
                 self.min_data_in_bin,
                 self.binning,
-                self.seed,
+                self.seed.unwrap_or(0),
             ),
         };
         // Row-major copy for the per-row score updates.
@@ -4664,19 +5385,23 @@ impl LgbmClassifier {
         let train_class = |i: usize| classes.iter().position(|&c| c == y[i]).unwrap_or(0);
         let train_w = |i: usize| effective_weights[i];
 
-        let mut rng = StdRng::seed_from_u64(self.seed);
+        // Balanced bagging (binary labels): its own fractions for the
+        // positive and the negative rows.
+        let balanced = (n_classes == 2).then(|| {
+            let positives = (0..n).map(|i| train_class(i) == 1).collect();
+            (
+                positives,
+                self.pos_bagging_fraction,
+                self.neg_bagging_fraction,
+            )
+        });
+        let sampling = self.sampling();
+        let mut samplers = LgbmSamplers::new(sampling, &binned_x, balanced);
         // A warm start replays the draws of the fitted rounds (one tree per
         // class and round for more than two classes).
         let start = prev.map_or(0, |f| f.n_estimators());
         let trees_per_round = if n_classes == 2 { 1 } else { n_classes };
-        replay_draws(
-            &mut rng,
-            start * trees_per_round,
-            n,
-            p,
-            self.subsample,
-            self.colsample_bytree,
-        );
+        samplers.replay(start, trees_per_round, n);
         if self.boosting_type == BoostingType::Dart
             && (opts.init_score.is_some()
                 || tracker.is_some()
@@ -4687,11 +5412,18 @@ impl LgbmClassifier {
             ));
         }
         let mut dart = (self.boosting_type == BoostingType::Dart)
-            .then(|| DartState::new(self.dart, self.learning_rate));
+            .then(|| DartState::new(self.dart, self.learning_rate, sampling.seeds.drop));
         let mut feature_rng =
             feature_generator(self.feature_fraction_per_split, self.feature_subsample_seed);
+        let has_missing = columns_with_missing(x, true);
+        let fixed_bins = if self.sklearn_compat {
+            Vec::new()
+        } else {
+            lgbm_fixed_bins(&binned_x, &bins, &has_missing)
+        };
         let params = LgbmParams {
-            has_missing: columns_with_missing(x, true),
+            has_missing,
+            fixed_bins,
             ..self.params()
         };
         let mut feature_gain = prev.map_or_else(|| vec![0.0f64; p], |f| f.feature_gain.clone());
@@ -4795,30 +5527,11 @@ impl LgbmClassifier {
                 round_to_f32(&mut gradients);
                 round_to_f32(&mut hessians);
 
-                let row_indices: Vec<usize> = match self.boosting_type {
-                    BoostingType::Gbdt | BoostingType::Dart => {
-                        sample_rows(n, self.subsample, &mut rng)
-                    }
-                    BoostingType::Goss => {
-                        let all: Vec<usize> = (0..n).collect();
-                        let (selected, amp) = goss_sample(
-                            &gradients,
-                            &all,
-                            self.goss_top_rate,
-                            self.goss_other_rate,
-                            &mut rng,
-                        );
-                        for (k, &i) in selected.iter().enumerate() {
-                            // float32, as LightGBM's `score_t`.
-                            gradients[i] = f64::from((gradients[i] * amp[k]) as f32);
-                            hessians[i] = f64::from((hessians[i] * amp[k]) as f32);
-                        }
-                        selected
-                    }
-                };
-                let feature_indices = sample_features(p, self.colsample_bytree, &mut rng);
+                let row_indices =
+                    samplers.rows(iter, n, &mut [&mut gradients], &mut [&mut hessians]);
+                let feature_indices = samplers.tree_features(p);
 
-                let tree = build_lgbm_tree(
+                let (tree, leaf_rows) = build_lgbm_tree(
                     &binned_x,
                     bundles.as_ref(),
                     &gradients,
@@ -4830,12 +5543,13 @@ impl LgbmClassifier {
                     &mut feature_gain,
                     &mut feature_split_count,
                     &mut feature_rng,
+                    samplers.node_sampler(),
                 );
 
                 if let (Some(d), Some((drops, shrinkage))) = (dart.as_mut(), dart_step) {
                     let mut tree = tree;
                     tree.scale(shrinkage);
-                    add_tree_scores(&mut raw[..], &tree, &binned_rows, 1.0);
+                    add_leaf_scores(&mut raw[..], &tree, &leaf_rows, &binned_rows, 1.0);
                     if iter == 0 && baseline.abs() > LGBM_EPSILON {
                         tree.add_bias(baseline);
                     }
@@ -4849,7 +5563,13 @@ impl LgbmClassifier {
                     trees.push(tree);
                     continue;
                 }
-                add_tree_scores(&mut raw[..], &tree, &binned_rows, self.learning_rate);
+                add_leaf_scores(
+                    &mut raw[..],
+                    &tree,
+                    &leaf_rows,
+                    &binned_rows,
+                    self.learning_rate,
+                );
 
                 if let Some(t) = tracker.as_mut() {
                     if let (Some(eb), Some(er)) = (eval_binned.as_ref(), eval_raw.as_mut()) {
@@ -5000,52 +5720,48 @@ impl LgbmClassifier {
                 } else {
                     1.0
                 };
-                for (c, &cls) in classes.iter().enumerate() {
-                    let mut gradients: Vec<f64> = (0..n)
-                        .map(|i| {
-                            let lbl = if y[i] == cls { 1.0 } else { 0.0 };
-                            (probas[i][c] - lbl) * effective_weights[i]
-                        })
-                        .collect();
-                    let mut hessians: Vec<f64> = (0..n)
-                        .map(|i| {
-                            hess_factor
-                                * (probas[i][c] * (1.0 - probas[i][c])).max(1e-12)
-                                * effective_weights[i]
-                        })
-                        .collect();
+                // The gradients of every class, then one row sample for the
+                // iteration's trees.
+                let (mut all_gradients, mut all_hessians): (Vec<Vec<f64>>, Vec<Vec<f64>>) = classes
+                    .iter()
+                    .enumerate()
+                    .map(|(c, &cls)| {
+                        let mut gradients: Vec<f64> = (0..n)
+                            .map(|i| {
+                                let lbl = if y[i] == cls { 1.0 } else { 0.0 };
+                                (probas[i][c] - lbl) * effective_weights[i]
+                            })
+                            .collect();
+                        let mut hessians: Vec<f64> = (0..n)
+                            .map(|i| {
+                                // LightGBM's order: `factor * p * (1 - p)`.
+                                (hess_factor * probas[i][c] * (1.0 - probas[i][c])).max(1e-12)
+                                    * effective_weights[i]
+                            })
+                            .collect();
+                        round_to_f32(&mut gradients);
+                        round_to_f32(&mut hessians);
+                        (gradients, hessians)
+                    })
+                    .unzip();
+                let row_indices = {
+                    let mut g: Vec<&mut [f64]> =
+                        all_gradients.iter_mut().map(|v| v.as_mut_slice()).collect();
+                    let mut h: Vec<&mut [f64]> =
+                        all_hessians.iter_mut().map(|v| v.as_mut_slice()).collect();
+                    samplers.rows(iter, n, &mut g, &mut h)
+                };
+                for (c, (gradients, hessians)) in
+                    all_gradients.iter().zip(&all_hessians).enumerate()
+                {
+                    let row_indices = row_indices.clone();
+                    let feature_indices = samplers.tree_features(p);
 
-                    round_to_f32(&mut gradients);
-                    round_to_f32(&mut hessians);
-
-                    let row_indices: Vec<usize> = match self.boosting_type {
-                        BoostingType::Gbdt | BoostingType::Dart => {
-                            sample_rows(n, self.subsample, &mut rng)
-                        }
-                        BoostingType::Goss => {
-                            let all: Vec<usize> = (0..n).collect();
-                            let (selected, amp) = goss_sample(
-                                &gradients,
-                                &all,
-                                self.goss_top_rate,
-                                self.goss_other_rate,
-                                &mut rng,
-                            );
-                            for (k, &i) in selected.iter().enumerate() {
-                                // float32, as LightGBM's `score_t`.
-                                gradients[i] = f64::from((gradients[i] * amp[k]) as f32);
-                                hessians[i] = f64::from((hessians[i] * amp[k]) as f32);
-                            }
-                            selected
-                        }
-                    };
-                    let feature_indices = sample_features(p, self.colsample_bytree, &mut rng);
-
-                    let tree = build_lgbm_tree(
+                    let (tree, leaf_rows) = build_lgbm_tree(
                         &binned_x,
                         bundles.as_ref(),
-                        &gradients,
-                        &hessians,
+                        gradients,
+                        hessians,
                         row_indices,
                         &feature_indices,
                         &bins,
@@ -5053,19 +5769,27 @@ impl LgbmClassifier {
                         &mut feature_gain,
                         &mut feature_split_count,
                         &mut feature_rng,
+                        samplers.node_sampler(),
                     );
 
                     let mut tree = tree;
                     if let Some((_, shrinkage)) = &dart_step {
                         tree.scale(*shrinkage);
-                        add_tree_scores(&mut raw_scores[c][..], &tree, &binned_rows, 1.0);
+                        add_leaf_scores(
+                            &mut raw_scores[c][..],
+                            &tree,
+                            &leaf_rows,
+                            &binned_rows,
+                            1.0,
+                        );
                         if iter == 0 && baselines[c].abs() > LGBM_EPSILON {
                             tree.add_bias(baselines[c]);
                         }
                     } else {
-                        add_tree_scores(
+                        add_leaf_scores(
                             &mut raw_scores[c][..],
                             &tree,
+                            &leaf_rows,
                             &binned_rows,
                             self.learning_rate,
                         );
@@ -5578,6 +6302,7 @@ mod tests {
             .with_num_leaves(4)
             .with_min_child_samples(1)
             .with_subsample(0.5)
+            .with_subsample_freq(1)
             .with_colsample_bytree(0.5)
             .fit(&x, &y)
             .unwrap();
@@ -6360,16 +7085,19 @@ mod tests {
         ];
         let y = array![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
 
-        let fitted = LgbmRegressor::new()
-            .with_n_estimators(20)
-            .with_num_leaves(4)
-            .with_min_child_samples(1)
-            .with_boosting_type(BoostingType::Goss)
-            .with_goss_rates(0.6, 0.6)
-            .fit(&x, &y)
-            .unwrap();
-
-        let preds = fitted.predict(&x).unwrap();
+        let goss = |top: f64, other: f64| {
+            LgbmRegressor::new()
+                .with_n_estimators(20)
+                .with_num_leaves(4)
+                .with_min_child_samples(1)
+                .with_boosting_type(BoostingType::Goss)
+                .with_goss_rates(top, other)
+                .fit(&x, &y)
+        };
+        // LightGBM's checks: positive rates with a sum of at most 1.
+        assert!(goss(0.6, 0.6).is_err());
+        assert!(goss(0.5, 0.0).is_err());
+        let preds = goss(0.5, 0.5).unwrap().predict(&x).unwrap();
         for &p in preds.iter() {
             assert!(p.is_finite());
         }
@@ -6738,6 +7466,7 @@ mod tests {
             .with_num_leaves(4)
             .with_min_child_samples(1)
             .with_subsample(0.5)
+            .with_subsample_freq(1)
             .with_colsample_bytree(0.5)
             .with_seed(42);
 
@@ -6771,12 +7500,14 @@ mod tests {
             .with_num_leaves(4)
             .with_min_child_samples(1)
             .with_subsample(0.5)
+            .with_subsample_freq(1)
             .with_seed(1);
         let m2 = LgbmRegressor::new()
             .with_n_estimators(20)
             .with_num_leaves(4)
             .with_min_child_samples(1)
             .with_subsample(0.5)
+            .with_subsample_freq(1)
             .with_seed(2);
 
         let f1 = m1.fit(&x, &y).unwrap();
@@ -7236,7 +7967,16 @@ mod bundling_tests {
         let feats: Vec<usize> = (0..15).collect();
         let totals = node_totals(&grad, &hess, &rows);
         let plain = build_histograms(
-            &binned, &bins, None, true, &grad, &hess, &rows, totals, &feats,
+            &binned,
+            &bins,
+            None,
+            true,
+            &grad,
+            &hess,
+            &rows,
+            totals,
+            &feats,
+            &[],
         );
         let bundled = build_histograms(
             &binned,
@@ -7248,6 +7988,7 @@ mod bundling_tests {
             &rows,
             totals,
             &feats,
+            &[],
         );
         for (a, b) in plain.iter().zip(&bundled) {
             assert_eq!(a.count, b.count);
@@ -7317,6 +8058,7 @@ mod bundling_tests {
                     .with_n_estimators(n)
                     .with_min_child_samples(5)
                     .with_subsample(0.7)
+                    .with_subsample_freq(1)
                     .with_colsample_bytree(0.8)
                     .with_objective(objective)
                     .with_seed(4)
@@ -7347,6 +8089,7 @@ mod bundling_tests {
                     .with_n_estimators(n)
                     .with_min_child_samples(5)
                     .with_subsample(0.7)
+                    .with_subsample_freq(1)
                     .with_colsample_bytree(0.8)
                     .with_seed(6)
             };
