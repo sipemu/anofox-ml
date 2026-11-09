@@ -6,6 +6,23 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM custom objectives and raw scores (#213)
+
+- `LgbmRegressor::fit_custom(x, &objective)` boosts on any
+  `LgbmCustomObjective` (gradients and hessians from the raw scores, the
+  side data held by the objective) with one or `n_outputs()` raw scores per
+  row: one tree per output and iteration, as LightGBM's `objective="none"`
+  with `num_class = K`. Tree parameters, categorical features, bagging,
+  GOSS and the feature fractions apply. An output whose tree cannot split
+  adds 0, and training stops once none can, as in LightGBM. The result,
+  `FittedLgbmBooster`, serializes without the objective and gives
+  `predict_raw` (`n × K`). Pseudo-Huber and FFORMA's softmax combination
+  loss (plain, bagged with a feature fraction, categorical, GOSS) match
+  LightGBM 4.7 with a Python callable objective to ~5e-16
+  (`gen_lgbm_custom.py`). Example: `examples/fforma_custom_objective.rs`.
+- `predict_raw` on `FittedLgbmRegressor` (before `exp` / sigmoid) and
+  `FittedLgbmClassifier` (before sigmoid / softmax).
+
 ### LightGBM objectives: tweedie, cross_entropy, multiclassova (#206)
 
 - `LgbmObjective::Tweedie { variance_power }` (log link, power in
