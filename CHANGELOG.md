@@ -6,6 +6,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Registry
+
+- `DynModel::predict_log_proba` (#125) for GaussianNB, MultinomialNB,
+  BernoulliNB, ComplementNB, CategoricalNB (their joint log-likelihoods,
+  finite where `predict_proba` underflows), LinearDiscriminantAnalysis,
+  QuadraticDiscriminantAnalysis, LogisticRegressor, Svc and GaussianMixture.
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /

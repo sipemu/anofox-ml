@@ -63,6 +63,12 @@ pub trait DynModel: Send + Sync {
     fn predict_proba(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_proba"))
     }
+    /// Log-probabilities of the classes: the estimator's own where it has
+    /// them (naive Bayes from its joint log-likelihoods, which stay finite
+    /// where `predict_proba` underflows), else `ln(predict_proba)`.
+    fn predict_log_proba(&self, _x: ArrayView2<f64>) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_log_proba"))
+    }
     fn decision_function(&self, _x: ArrayView2<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "decision_function"))
     }
