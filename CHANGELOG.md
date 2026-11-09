@@ -18,6 +18,44 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   the default was a fixed 0.03. Python: `learning_rate=None` now means the
   automatic rate. Matches catboost 1.2.10 on 6 golden cases.
 
+### CatBoost-style boosting: Depthwise and Lossguide trees (#154)
+
+- `grow_policy` (`SymmetricTree` default, `Depthwise`, `Lossguide`),
+  `min_data_in_leaf` (default 1) and `max_leaves` (Lossguide, default 31),
+  for plain boosting with numeric and one-hot features (CTR features and
+  ordered boosting are rejected for now), as CatBoost's
+  `GreedyTensorSearchDepthwise` / `GreedyTensorSearchLossguide`: every
+  leaf scored on its own (`CalcScoreWithoutSplit`, gain ≥ 1e-9), the
+  smaller sibling's bucket statistics computed and the larger one's as the
+  parent's minus them (Depthwise: from CatBoost's FIFO of the parents), the
+  generator's draws in CatBoost's order, Lossguide's libc++
+  `priority_queue` by gain, and CatBoost's leaf numbering (the false side
+  keeps the leaf's id).
+- Trees serialize their nodes (`children`); oblivious models are
+  unchanged.
+- Matches catboost 1.2.10 to 1.6e-15 on 21 golden cases (RMSE, Logloss,
+  MultiClass, Quantile; Cosine / L2, weights, missing values, one-hot,
+  score noise, MVS and full defaults).
+
+### CatBoost-style boosting: eval sets, early stopping, use_best_model (#155)
+
+- `fit_with_eval(x, y, w, CatBoostEvalSet { x, y, sample_weight })` on
+  both CatBoost estimators (registry: `fit_with_validation`; Python:
+  `fit(..., eval_set=(X_val, y_val[, w_val]))`). The eval set's objective
+  metric is tracked after every iteration on CatBoost's `TestApprox`
+  (shrunk with the model), `eval_metrics()` / `best_iteration()`
+  (Python `evals_result_`, `best_iteration_`).
+- CatBoost's overfitting detector: `od_type` (`IncToDec` with `od_pval`,
+  `Iter`), `od_wait` (default 20), `with_early_stopping_rounds(n)`; and
+  `use_best_model` (default on with an eval set), which keeps the trees up
+  to the first strictly best iteration. With it, the automatic learning
+  rate takes CatBoost's `use_best_model` coefficients.
+- Class weights also weight the eval set, as in CatBoost.
+- Python: the dict form of `class_weights` now keys on the original labels
+  (it used the encoded ones).
+- Matches catboost 1.2.10 on 14 golden cases: predictions to 1.5e-15 and the
+  per-iteration eval metrics and tree counts exactly.
+
 ### CatBoost-style boosting: more regression losses (#153)
 
 - `CatBoostRegressor::loss_function` (`CatBoostRegressionLoss`): RMSE

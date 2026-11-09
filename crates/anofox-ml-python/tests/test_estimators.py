@@ -1030,3 +1030,43 @@ def test_catboost_regression_losses_match_catboost():
         ref = cb.CatBoostRegressor(loss_function=loss, **kw, **ref_kw).fit(X, target)
         ours = am.CatBoostRegressor(loss_function=loss, **kw).fit(X, target)
         np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10, err_msg=loss)
+
+
+def test_catboost_eval_set_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(51)
+    X = rs.normal(size=(400, 4))
+    eta = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2]
+    y = eta + rs.normal(scale=0.4, size=400)
+    labels = np.where(eta + rs.logistic(size=400) > 0, "yes", "no")
+    tr, va = slice(0, 300), slice(300, None)
+    kw = dict(iterations=200, learning_rate=0.4, depth=4, random_strength=0, bootstrap_type="No",
+              has_time=True, early_stopping_rounds=5)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    ref = cb.CatBoostRegressor(**kw, **ref_kw).fit(X[tr], y[tr], eval_set=(X[va], y[va]))
+    ours = am.CatBoostRegressor(**kw).fit(X[tr], y[tr], eval_set=(X[va], y[va]))
+    assert ours.best_iteration_ == ref.get_best_iteration()
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
+    np.testing.assert_allclose(ours.evals_result_, ref.get_evals_result()["validation"]["RMSE"],
+                               rtol=1e-10)
+    kw["auto_class_weights"] = "Balanced"
+    ref = cb.CatBoostClassifier(**kw, **ref_kw).fit(X[tr], labels[tr], eval_set=(X[va], labels[va]))
+    ours = am.CatBoostClassifier(**kw).fit(X[tr], labels[tr], eval_set=(X[va], labels[va]))
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
+    explicit = am.CatBoostClassifier(iterations=5, class_weights={"no": 1.0, "yes": 2.0})
+    explicit.fit(X[tr], labels[tr])
+
+
+def test_catboost_grow_policies_match_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(61)
+    X = rs.normal(size=(300, 4))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] + rs.normal(scale=0.3, size=300)
+    kw = dict(iterations=30, learning_rate=0.2, depth=5, random_strength=0, bootstrap_type="No",
+              has_time=True)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    for extra in (dict(grow_policy="Depthwise", min_data_in_leaf=5),
+                  dict(grow_policy="Lossguide", max_leaves=10)):
+        ref = cb.CatBoostRegressor(**kw, **extra, **ref_kw).fit(X, y)
+        ours = am.CatBoostRegressor(**kw, **extra).fit(X, y)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)

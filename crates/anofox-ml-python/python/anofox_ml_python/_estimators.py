@@ -642,7 +642,17 @@ class _CatBoost(BaseEstimator):
                  random_strength=1.0, bootstrap_type=None, subsample=None,
                  bagging_temperature=1.0, mvs_reg=None, monotone_constraints=None,
                  model_shrink_rate=None, model_shrink_mode="Constant", class_weights=None,
-                 auto_class_weights=None, loss_function=None):
+                 auto_class_weights=None, loss_function=None, use_best_model=None,
+                 early_stopping_rounds=None, od_type=None, od_wait=None, od_pval=None,
+                 grow_policy="SymmetricTree", min_data_in_leaf=1, max_leaves=31):
+        self.grow_policy = grow_policy
+        self.min_data_in_leaf = min_data_in_leaf
+        self.max_leaves = max_leaves
+        self.use_best_model = use_best_model
+        self.early_stopping_rounds = early_stopping_rounds
+        self.od_type = od_type
+        self.od_wait = od_wait
+        self.od_pval = od_pval
         self.loss_function = loss_function
         self.monotone_constraints = monotone_constraints
         self.model_shrink_rate = model_shrink_rate
@@ -718,6 +728,23 @@ class _CatBoost(BaseEstimator):
             self.leaf_estimation_backtracking, {"AnyImprovement": "AnyImprovement", "No": "No"},
             "leaf_estimation_backtracking")
         n_features = np.shape(X)[1]
+        params["grow_policy"] = _choice(
+            self.grow_policy, {"SymmetricTree": "SymmetricTree", "Depthwise": "Depthwise",
+                               "Lossguide": "Lossguide"}, "grow_policy")
+        params["min_data_in_leaf"] = int(self.min_data_in_leaf)
+        params["max_leaves"] = int(self.max_leaves)
+        if self.use_best_model is not None:
+            params["use_best_model"] = bool(self.use_best_model)
+        if self.early_stopping_rounds is not None:
+            params["od_type"] = "Iter"
+            params["od_wait"] = int(self.early_stopping_rounds)
+        if self.od_type is not None:
+            params["od_type"] = _choice(self.od_type, {"IncToDec": "IncToDec", "Iter": "Iter"},
+                                        "od_type")
+        if self.od_wait is not None:
+            params["od_wait"] = int(self.od_wait)
+        if self.od_pval is not None:
+            params["od_pval"] = float(self.od_pval)
         if self.monotone_constraints is not None:
             mc = self.monotone_constraints
             if isinstance(mc, dict):
@@ -737,7 +764,7 @@ class _CatBoost(BaseEstimator):
             if self.class_weights is not None:
                 cw = self.class_weights
                 if isinstance(cw, dict):
-                    cw = [cw[c] for c in np.unique(y).tolist()]
+                    cw = [cw[c] for c in self.classes_.tolist()]
                 params["class_weights"] = [float(v) for v in cw]
             if self.auto_class_weights is not None:
                 params["auto_class_weights"] = _choice(
@@ -778,8 +805,32 @@ class _CatBoost(BaseEstimator):
                     col[i] = codes.get(key, -1.0)
         return out
 
-    def _fit_model(self, X, y=None, sample_weight=None):
-        return super()._fit_model(self._encode(X, fit=True), y, sample_weight)
+    def _fit_model(self, X, y=None, sample_weight=None, eval_set=None):
+        if eval_set is None:
+            return super()._fit_model(self._encode(X, fit=True), y, sample_weight)
+        X = self._encode(X, fit=True)
+        Xv, yv, wv = (tuple(eval_set) + (None,))[:3]
+        Xv = self._encode(Xv, fit=False)
+        if Xv.shape[1] != X.shape[1]:
+            raise ValueError("eval_set must have the features of X")
+        w = None if sample_weight is None else _check_1d(sample_weight, "sample_weight")
+        wv = None if wv is None else _check_1d(wv, "eval_set weight")
+        model = self._new_model(X, y)
+        model.fit_with_validation(X, y, w, Xv, self._eval_target(yv), wv)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def _eval_target(self, yv):
+        return _check_1d(yv, "eval_set y")
+
+    @property
+    def best_iteration_(self):
+        return self._fitted_state().get("best_iteration")
+
+    @property
+    def evals_result_(self):
+        return list(self._fitted_state().get("eval_metrics", []))
 
     def _call(self, method, X):
         return super()._call(method, self._encode(X, fit=False))
@@ -791,6 +842,10 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
     ``"Tweedie:variance_power=1.5"`` or ``"LogLinQuantile:alpha=0.5"``."""
 
     _kind = "CatBoostRegressor"
+
+    def fit(self, X, y, sample_weight=None, eval_set=None):
+        """``eval_set``: ``(X_val, y_val)`` or ``(X_val, y_val, weight_val)``."""
+        return self._fit_model(X, _check_1d(y), sample_weight, eval_set)
 
     def _rust_params(self, X, y):
         params = super()._rust_params(X, y)
@@ -819,6 +874,21 @@ class CatBoostClassifier(ClassifierMixin, _CatBoost):
     name them)."""
 
     _kind = "CatBoostClassifier"
+
+    def fit(self, X, y, sample_weight=None, eval_set=None):
+        """``eval_set``: ``(X_val, y_val)`` or ``(X_val, y_val, weight_val)``."""
+        y = np.asarray(y)
+        if y.ndim == 2 and y.shape[1] == 1:
+            y = y.ravel()
+        self.classes_, y_enc = np.unique(y, return_inverse=True)
+        return self._fit_model(X, y_enc.astype(np.float64), sample_weight, eval_set)
+
+    def _eval_target(self, yv):
+        yv = np.asarray(yv).ravel()
+        idx = np.searchsorted(self.classes_, yv)
+        if np.any(idx >= len(self.classes_)) or np.any(self.classes_[np.minimum(idx, len(self.classes_) - 1)] != yv):
+            raise ValueError("eval_set has labels that are not in y")
+        return idx.astype(np.float64)
 
     def _rust_params(self, X, y):
         if self.loss_function not in (None, "Logloss", "MultiClass"):

@@ -83,8 +83,9 @@ pub use bagging_regressor::{BaggingRegressor, FittedBaggingRegressor};
 pub use calibrated_classifier::{CalibratedClassifierCV, CalibrationMethod};
 pub use catboost::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
-    CatBoostClassifier, CatBoostLeafEstimation, CatBoostRegressionLoss, CatBoostRegressor,
-    CatBoostScoreFunction, CatBoostShrinkMode, FittedCatBoostClassifier, FittedCatBoostRegressor,
+    CatBoostClassifier, CatBoostEvalSet, CatBoostGrowPolicy, CatBoostLeafEstimation,
+    CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostShrinkMode, FittedCatBoostClassifier, FittedCatBoostRegressor,
 };
 pub use extra_trees_classifier::{ExtraTreesClassifier, FittedExtraTreesClassifier};
 pub use extra_trees_regressor::{ExtraTreesRegressor, FittedExtraTreesRegressor};
