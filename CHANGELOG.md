@@ -23,6 +23,26 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `coef` per target); converged coefficients match scikit-learn 1.8
   (`gen_multi_task.py`).
 
+### Python
+
+- Wrappers for the registry kinds added in #125 / #113: `LassoLarsIC`,
+  `BinomialRegressor`, `IsotonicRegression`, `GaussianProcessRegressor`
+  (`predict(return_std=True)`), `GaussianProcessClassifier`,
+  `PLSRegression`, `CCA`, `PLSCanonical`, `PLSSVD` (`fit(X, Y)`,
+  `transform(X, Y)` → `(x_scores, y_scores)`), `MultiTaskLasso`,
+  `MultiTaskElasticNet` (2-D `Y`), `SpectralEmbedding` and `RcsTransformer`.
+  Each is tested against scikit-learn 1.8 (`tests/test_registry_kinds.py`).
+- `partial_fit` for the five naive Bayes classes, the SGD classifier and
+  regressor, `PassiveAggressiveRegressor`, the MLPs, `StandardScaler`,
+  `MinMaxScaler`, `MaxAbsScaler` and `IncrementalPCA`; `warm_start` for the
+  MLPs; `kneighbors` for the k-NN estimators; `offset=` in `fit` / `predict`
+  of the Poisson, Gamma, Tweedie and binomial GLMs.
+- `predict_log_proba` is the model's own where it has one (naive Bayes,
+  LDA / QDA, logistic regression, SVC, GMM) instead of `log(predict_proba)`,
+  so it stays finite where the probabilities underflow.
+- Fix: `coef_` / `intercept_` of `PoissonRegressor`, `GammaRegressor` and
+  `TweedieRegressor` raised `KeyError`.
+
 ### Registry
 
 - `DynModel::predict_log_proba` (#125) for GaussianNB, MultinomialNB,

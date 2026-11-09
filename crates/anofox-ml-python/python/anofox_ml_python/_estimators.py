@@ -13,12 +13,15 @@ import numpy as np
 from ._base import (
     BaseEstimator,
     ClassifierMixin,
+    ClassifierPartialFitMixin,
     ClusterMixin,
     OutlierMixin,
+    PartialFitMixin,
     RegressorMixin,
     StagedPredictMixin,
     SupervisedTransformerMixin,
     TransformerMixin,
+    WarmStartMixin,
     _check_1d,
     _check_X,
     _nd,
@@ -215,7 +218,7 @@ class ExtraTreesRegressor(RegressorMixin, BaseEstimator):
                 "seed": _seed(self.random_state)}
 
 
-class _GradientBoosting(StagedPredictMixin, BaseEstimator):
+class _GradientBoosting(WarmStartMixin, StagedPredictMixin, BaseEstimator):
     def __init__(self, n_estimators=100, learning_rate=0.1, max_depth=3, min_samples_split=2,
                  min_samples_leaf=1, subsample=1.0, random_state=None, warm_start=False):
         self.warm_start = warm_start
@@ -232,26 +235,6 @@ class _GradientBoosting(StagedPredictMixin, BaseEstimator):
                 "max_depth": self.max_depth, "min_samples_split": self.min_samples_split,
                 "min_samples_leaf": self.min_samples_leaf, "subsample": self.subsample,
                 "seed": _seed(self.random_state)}
-
-    def _fit_model(self, X, y=None, sample_weight=None):
-        model = self.__dict__.get("_model_")
-        if not self.warm_start or model is None:
-            return super()._fit_model(X, y, sample_weight)
-        # sklearn's warm_start: keep the fitted stages (and their seed) and
-        # add more up to n_estimators.
-        X = _check_X(X)
-        if X.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"X has {X.shape[1]} features, but {type(self).__name__} was fitted "
-                f"with {self.n_features_in_}."
-            )
-        if sample_weight is not None:
-            sample_weight = _check_1d(sample_weight, "sample_weight")
-        params = self._rust_params(X, y)
-        params.pop("seed")
-        model.set_params_json(json.dumps(params))
-        model.warm_start(X, y, sample_weight)
-        return self
 
 
 class GradientBoostingClassifier(ClassifierMixin, _GradientBoosting):
@@ -1152,7 +1135,7 @@ _PENALTY = {None: "None", "l2": "L2", "l1": "L1", "elasticnet": "ElasticNet"}
 _LEARNING_RATE = {"constant": "Constant", "optimal": "Optimal", "invscaling": "InvScaling"}
 
 
-class SGDClassifier(ClassifierMixin, BaseEstimator):
+class SGDClassifier(ClassifierPartialFitMixin, ClassifierMixin, BaseEstimator):
     _kind = "SgdClassifier"
 
     def __init__(self, loss="hinge", penalty="l2", alpha=1e-4, l1_ratio=0.15, max_iter=1000,
@@ -1193,7 +1176,7 @@ class SGDClassifier(ClassifierMixin, BaseEstimator):
                 else int(bool(self.average))}
 
 
-class SGDRegressor(RegressorMixin, BaseEstimator):
+class SGDRegressor(PartialFitMixin, RegressorMixin, BaseEstimator):
     _kind = "SgdRegressor"
 
     def __init__(self, loss="squared_error", penalty="l2", alpha=1e-4, l1_ratio=0.15,
@@ -1255,7 +1238,7 @@ class PassiveAggressiveClassifier(ClassifierMixin, BaseEstimator):
                 "seed": _seed(self.random_state)}
 
 
-class PassiveAggressiveRegressor(RegressorMixin, BaseEstimator):
+class PassiveAggressiveRegressor(PartialFitMixin, RegressorMixin, BaseEstimator):
     _kind = "PassiveAggressiveRegressor"
 
     def __init__(self, C=1.0, fit_intercept=True, max_iter=1000, tol=1e-3, shuffle=True,
@@ -1279,15 +1262,20 @@ class PassiveAggressiveRegressor(RegressorMixin, BaseEstimator):
 
 
 class _LinearAttrs:
-    """``coef_`` / ``intercept_`` from the fitted Rust state."""
+    """``coef_`` / ``intercept_`` from the fitted Rust state (nested under
+    ``"fit"`` for the GLMs)."""
+
+    def _linear_state(self):
+        state = self._fitted_state()
+        return state["fit"] if "coef" not in state and "fit" in state else state
 
     @property
     def coef_(self):
-        return _nd(self._fitted_state()["coef"])
+        return _nd(self._linear_state()["coef"])
 
     @property
     def intercept_(self):
-        b = self._fitted_state()["intercept"]
+        b = self._linear_state()["intercept"]
         return 0.0 if b is None else float(b)
 
 
@@ -1453,7 +1441,31 @@ class LogisticRegression(ClassifierMixin, BaseEstimator):
                 "class_weight": self._encode_class_weight(self.class_weight)}
 
 
-class _Glm(_LinearAttrs, RegressorMixin, BaseEstimator):
+class _OffsetMixin:
+    """``offset=`` on the link scale for ``fit`` and ``predict`` (e.g.
+    ``log(exposure)`` for a log link); ``predict`` defaults to offset 0."""
+
+    def fit(self, X, y, sample_weight=None, offset=None):
+        if offset is None:
+            return super().fit(X, y, sample_weight)
+        X = _check_X(X)
+        y = _check_1d(y)
+        if sample_weight is not None:
+            sample_weight = _check_1d(sample_weight, "sample_weight")
+        model = self._new_model(X, y)
+        model.fit_with_offset(X, y, _check_1d(offset, "offset"), sample_weight)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def predict(self, X, offset=None):
+        if offset is None:
+            return super().predict(X)
+        X = self._checked(X)
+        return self._model().predict_with_offset(X, _check_1d(offset, "offset"))
+
+
+class _Glm(_OffsetMixin, _LinearAttrs, RegressorMixin, BaseEstimator):
     def __init__(self, alpha=1.0, fit_intercept=True, max_iter=100, tol=1e-8):
         self.alpha = alpha
         self.fit_intercept = fit_intercept
@@ -1617,7 +1629,7 @@ class TheilSenRegressor(_LinearAttrs, RegressorMixin, BaseEstimator):
 # ---------------------------------------------------------------------------
 
 
-class GaussianNB(ClassifierMixin, BaseEstimator):
+class GaussianNB(ClassifierPartialFitMixin, ClassifierMixin, BaseEstimator):
     _kind = "GaussianNB"
 
     def __init__(self, priors=None, var_smoothing=1e-9):
@@ -1629,7 +1641,7 @@ class GaussianNB(ClassifierMixin, BaseEstimator):
                 "var_smoothing": self.var_smoothing}
 
 
-class _DiscreteNB(ClassifierMixin, BaseEstimator):
+class _DiscreteNB(ClassifierPartialFitMixin, ClassifierMixin, BaseEstimator):
     def __init__(self, alpha=1.0, force_alpha=True, fit_prior=True, class_prior=None):
         self.alpha = alpha
         self.force_alpha = force_alpha
@@ -1698,7 +1710,17 @@ def _neighbor_params(est):
             "algorithm": _choice(est.algorithm, _ALGORITHM, "algorithm")}
 
 
-class KNeighborsClassifier(ClassifierMixin, BaseEstimator):
+class _KNeighborsMixin:
+    def kneighbors(self, X, n_neighbors=None, return_distance=True):
+        """Distances to and indices of the ``n_neighbors`` nearest training
+        rows of each row of ``X``, nearest first."""
+        X = self._checked(X)
+        k = None if n_neighbors is None else int(n_neighbors)
+        dist, idx = self._model().kneighbors(X, k)
+        return (dist, idx) if return_distance else idx
+
+
+class KNeighborsClassifier(_KNeighborsMixin, ClassifierMixin, BaseEstimator):
     _kind = "KnnClassifier"
 
     def __init__(self, n_neighbors=5, weights="uniform", algorithm="auto", p=2,
@@ -1713,7 +1735,7 @@ class KNeighborsClassifier(ClassifierMixin, BaseEstimator):
         return {"n_neighbors": self.n_neighbors, **_neighbor_params(self)}
 
 
-class KNeighborsRegressor(RegressorMixin, BaseEstimator):
+class KNeighborsRegressor(_KNeighborsMixin, RegressorMixin, BaseEstimator):
     _kind = "KnnRegressor"
 
     def __init__(self, n_neighbors=5, weights="uniform", algorithm="auto", p=2,
@@ -1843,13 +1865,14 @@ class QuadraticDiscriminantAnalysis(ClassifierMixin, BaseEstimator):
                 "reg": float(self.reg_param), "tol": self.tol}
 
 
-class _Mlp(BaseEstimator):
+class _Mlp(WarmStartMixin, BaseEstimator):
     def __init__(self, hidden_layer_sizes=(100,), activation="relu", solver="adam",
                  alpha=1e-4, batch_size="auto", learning_rate="constant",
                  learning_rate_init=1e-3, power_t=0.5, max_iter=200, shuffle=True,
                  random_state=None, tol=1e-4, momentum=0.9, nesterovs_momentum=True,
                  early_stopping=False, validation_fraction=0.1, beta_1=0.9, beta_2=0.999,
-                 epsilon=1e-8, n_iter_no_change=10, max_fun=15000):
+                 epsilon=1e-8, n_iter_no_change=10, max_fun=15000, warm_start=False):
+        self.warm_start = warm_start
         self.hidden_layer_sizes = hidden_layer_sizes
         self.activation = activation
         self.solver = solver
@@ -1898,11 +1921,11 @@ class _Mlp(BaseEstimator):
         return p
 
 
-class MLPClassifier(ClassifierMixin, _Mlp):
+class MLPClassifier(ClassifierPartialFitMixin, ClassifierMixin, _Mlp):
     _kind = "MlpClassifier"
 
 
-class MLPRegressor(RegressorMixin, _Mlp):
+class MLPRegressor(PartialFitMixin, RegressorMixin, _Mlp):
     _kind = "MlpRegressor"
 
 
@@ -1911,7 +1934,7 @@ class MLPRegressor(RegressorMixin, _Mlp):
 # ---------------------------------------------------------------------------
 
 
-class StandardScaler(TransformerMixin, BaseEstimator):
+class StandardScaler(PartialFitMixin, TransformerMixin, BaseEstimator):
     _kind = "StandardScaler"
 
     def __init__(self, with_mean=True, with_std=True):
@@ -1922,7 +1945,7 @@ class StandardScaler(TransformerMixin, BaseEstimator):
         return {"with_mean": self.with_mean, "with_std": self.with_std}
 
 
-class MinMaxScaler(TransformerMixin, BaseEstimator):
+class MinMaxScaler(PartialFitMixin, TransformerMixin, BaseEstimator):
     _kind = "MinMaxScaler"
 
     def __init__(self, feature_range=(0, 1)):
@@ -1933,7 +1956,7 @@ class MinMaxScaler(TransformerMixin, BaseEstimator):
         return {"feature_min": float(lo), "feature_max": float(hi)}
 
 
-class MaxAbsScaler(TransformerMixin, BaseEstimator):
+class MaxAbsScaler(PartialFitMixin, TransformerMixin, BaseEstimator):
     _kind = "MaxAbsScaler"
 
     def __init__(self):
@@ -2214,7 +2237,7 @@ class PCA(TransformerMixin, BaseEstimator):
         return {"n_components": n, "whiten": self.whiten}
 
 
-class IncrementalPCA(TransformerMixin, BaseEstimator):
+class IncrementalPCA(PartialFitMixin, TransformerMixin, BaseEstimator):
     _kind = "IncrementalPca"
 
     def __init__(self, n_components=None, whiten=False, batch_size=None):
@@ -3576,3 +3599,415 @@ class KNeighborsTransformer(TransformerMixin, BaseEstimator):
         return {"mode": _choice(self.mode, {"distance": "Distance",
                                             "connectivity": "Connectivity"}, "mode"),
                 "n_neighbors": int(self.n_neighbors)}
+
+
+# ---------------------------------------------------------------------------
+# registry kinds: LARS-IC, GLMs, isotonic, Gaussian processes, PLS / CCA,
+# multi-task linear models, spectral embedding, splines
+# ---------------------------------------------------------------------------
+
+
+def _check_2d_y(Y, n_rows) -> np.ndarray:
+    """Targets as an ``n × k`` float array (a 1-D ``y`` is one column)."""
+    Y = np.asarray(Y, dtype=np.float64)
+    if Y.ndim == 1:
+        Y = Y.reshape(-1, 1)
+    if Y.ndim != 2:
+        raise ValueError(f"y must be 1- or 2-dimensional, got {Y.ndim}D")
+    if Y.shape[0] != n_rows:
+        raise ValueError(f"X has {n_rows} rows but y has {Y.shape[0]}")
+    return np.ascontiguousarray(Y)
+
+
+class LassoLarsIC(RegressorMixin, BaseEstimator):
+    """Lasso on the LARS path, with ``alpha`` chosen by AIC or BIC."""
+
+    _kind = "LassoLarsIC"
+
+    def __init__(self, criterion="aic", *, fit_intercept=True, max_iter=None,
+                 noise_variance=None):
+        self.criterion = criterion
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+        self.noise_variance = noise_variance
+
+    def _rust_params(self, X, y):
+        return {"criterion": _choice(self.criterion, {"aic": "Aic", "bic": "Bic"}, "criterion"),
+                "fit_intercept": self.fit_intercept, "max_features": self.max_iter,
+                "noise_variance": self.noise_variance}
+
+    @property
+    def coef_(self):
+        return _nd(self._fitted_state()["fitted"]["coef"])
+
+    @property
+    def intercept_(self):
+        return float(self._fitted_state()["fitted"]["intercept"])
+
+    @property
+    def alpha_(self):
+        return float(self._fitted_state()["alpha"])
+
+    @property
+    def criterion_(self):
+        return _nd(self._fitted_state()["criterion_path"])
+
+    @property
+    def noise_variance_(self):
+        return float(self._fitted_state()["noise_variance"])
+
+
+class BinomialRegressor(_OffsetMixin, _LinearAttrs, RegressorMixin, BaseEstimator):
+    """Binomial GLM for proportions in ``[0, 1]`` (weights: trial counts);
+    ``predict`` returns the mean. ``alpha`` is an L2 penalty."""
+
+    _kind = "BinomialRegressor"
+
+    def __init__(self, link="logit", *, alpha=0.0, fit_intercept=True, max_iter=100,
+                 tol=1e-8):
+        self.link = link
+        self.alpha = alpha
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+        self.tol = tol
+
+    def _rust_params(self, X, y):
+        return {"link": _choice(self.link, {"logit": "Logit", "probit": "Probit",
+                                            "cloglog": "Cloglog"}, "link"),
+                "alpha": float(self.alpha), "with_intercept": self.fit_intercept,
+                "max_iter": self.max_iter, "tol": self.tol}
+
+
+class IsotonicRegression(RegressorMixin, BaseEstimator):
+    """Monotone piecewise-linear fit of one feature (``X`` may be 1-D)."""
+
+    _kind = "IsotonicRegressor"
+
+    def __init__(self, *, increasing=True, out_of_bounds="nan"):
+        self.increasing = increasing
+        self.out_of_bounds = out_of_bounds
+
+    def _rust_params(self, X, y):
+        if self.increasing == "auto":
+            raise ValueError("increasing='auto' is not supported; pass True or False")
+        return {"increasing": bool(self.increasing),
+                "out_of_bounds": _choice(self.out_of_bounds, {"nan": "Nan", "clip": "Clip",
+                                                              "raise": "Raise"},
+                                         "out_of_bounds")}
+
+    @staticmethod
+    def _column(X):
+        X = np.asarray(X, dtype=np.float64)
+        return X.reshape(-1, 1) if X.ndim == 1 else X
+
+    def fit(self, X, y, sample_weight=None):
+        return super().fit(self._column(X), y, sample_weight)
+
+    def predict(self, T):
+        return super().predict(self._column(T))
+
+    def transform(self, T):
+        return self.predict(T)
+
+    @property
+    def X_thresholds_(self):
+        return np.asarray(self._fitted_state()["x_thresholds"], dtype=np.float64)
+
+    @property
+    def y_thresholds_(self):
+        return np.asarray(self._fitted_state()["y_thresholds"], dtype=np.float64)
+
+
+class GaussianProcessRegressor(RegressorMixin, BaseEstimator):
+    """Gaussian process regression. ``kernel=None`` is sklearn's default,
+    ``ConstantKernel(1.0, "fixed") * RBF(1.0, "fixed")``; other kernels are
+    given as the Rust kernel spec (a dict, as in ``default_params``)."""
+
+    _kind = "GaussianProcessRegressor"
+
+    def __init__(self, kernel=None, *, alpha=1e-10, optimizer="fmin_l_bfgs_b",
+                 n_restarts_optimizer=0, normalize_y=False, random_state=None):
+        self.kernel = kernel
+        self.alpha = alpha
+        self.optimizer = optimizer
+        self.n_restarts_optimizer = n_restarts_optimizer
+        self.normalize_y = normalize_y
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        p = {"alpha": float(self.alpha), "optimizer": self.optimizer is not None,
+             "n_restarts_optimizer": self.n_restarts_optimizer,
+             "normalize_y": self.normalize_y, "seed": _seed(self.random_state)}
+        if self.kernel is not None:
+            p["kernel"] = self.kernel
+        return p
+
+    def predict(self, X, return_std=False):
+        mean = self._call("predict", X)
+        if not return_std:
+            return mean
+        return mean, self._call("predict_std", X)
+
+    @property
+    def log_marginal_likelihood_value_(self):
+        return float(self._fitted_state()["log_marginal_likelihood_value"])
+
+
+class GaussianProcessClassifier(ClassifierMixin, BaseEstimator):
+    """Gaussian process classification (Laplace approximation, one-vs-rest
+    for more than two classes). ``kernel`` as in
+    :class:`GaussianProcessRegressor`."""
+
+    _kind = "GaussianProcessClassifier"
+
+    def __init__(self, kernel=None, *, optimizer="fmin_l_bfgs_b", n_restarts_optimizer=0,
+                 max_iter_predict=100, random_state=None):
+        self.kernel = kernel
+        self.optimizer = optimizer
+        self.n_restarts_optimizer = n_restarts_optimizer
+        self.max_iter_predict = max_iter_predict
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        p = {"optimizer": self.optimizer is not None,
+             "n_restarts_optimizer": self.n_restarts_optimizer,
+             "max_iter": self.max_iter_predict, "seed": _seed(self.random_state)}
+        if self.kernel is not None:
+            p["kernel"] = self.kernel
+        return p
+
+
+class PLSRegression(RegressorMixin, BaseEstimator):
+    """PLS regression (NIPALS) of one target."""
+
+    _kind = "PlsRegression"
+
+    def __init__(self, n_components=2, *, scale=True, max_iter=500, tol=1e-6):
+        self.n_components = n_components
+        self.scale = scale
+        self.max_iter = max_iter
+        self.tol = tol
+
+    def _rust_params(self, X, y):
+        return {"n_components": self.n_components, "scale": self.scale,
+                "max_iter": self.max_iter, "tol": self.tol}
+
+    def transform(self, X):
+        return self._call("transform", X)
+
+    def fit_transform(self, X, y):
+        return self.fit(X, y).transform(X)
+
+    @property
+    def coef_(self):
+        return _nd(self._fitted_state()["coef"]).reshape(1, -1)
+
+    @property
+    def intercept_(self):
+        """sklearn's: the target mean (``predict`` centres ``X`` first)."""
+        return np.array([float(self._fitted_state()["y_mean"])])
+
+    def _attr(self, name):
+        return _nd(self._fitted_state()[name])
+
+    x_weights_ = property(lambda self: self._attr("x_weights"))
+    x_loadings_ = property(lambda self: self._attr("x_loadings"))
+    x_rotations_ = property(lambda self: self._attr("x_rotations"))
+    x_scores_ = property(lambda self: self._attr("x_scores"))
+    y_loadings_ = property(lambda self: self._attr("y_loadings").reshape(1, -1))
+
+
+class _TwoBlock(TransformerMixin, BaseEstimator):
+    """Fit on ``(X, Y)``; ``transform(X, Y=None)`` returns the X scores, or
+    ``(x_scores, y_scores)`` with ``Y``."""
+
+    def _rust_params(self, X, y):
+        return {"n_components": self.n_components, "scale": self.scale,
+                "y_columns": int(y.shape[1])}
+
+    def fit(self, X, y):
+        X = _check_X(X)
+        Y = _check_2d_y(y, X.shape[0])
+        model = self._new_model(X, Y)
+        model.fit(np.hstack([X, Y]), None, None)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        self._n_targets = Y.shape[1]
+        return self
+
+    def transform(self, X, y=None):
+        x_scores = self._call("transform", X)
+        if y is None:
+            return x_scores
+        Y = _check_2d_y(y, x_scores.shape[0])
+        if Y.shape[1] != self._n_targets:
+            raise ValueError(f"y has {Y.shape[1]} columns, expected {self._n_targets}")
+        return x_scores, self._model().transform_y(Y)
+
+    def fit_transform(self, X, y):
+        return self.fit(X, y).transform(X, y)
+
+    def _attr(self, name):
+        return _nd(self._fitted_state()[name])
+
+    x_weights_ = property(lambda self: self._attr("x_weights"))
+    y_weights_ = property(lambda self: self._attr("y_weights"))
+
+
+class _NipalsTwoBlock(_TwoBlock):
+    def __init__(self, n_components=2, *, scale=True, max_iter=500, tol=1e-6):
+        self.n_components = n_components
+        self.scale = scale
+        self.max_iter = max_iter
+        self.tol = tol
+
+    def _rust_params(self, X, y):
+        return {**super()._rust_params(X, y), "max_iter": self.max_iter, "tol": self.tol}
+
+    x_loadings_ = property(lambda self: self._attr("x_loadings"))
+    y_loadings_ = property(lambda self: self._attr("y_loadings"))
+    x_rotations_ = property(lambda self: self._attr("x_rotations"))
+    y_rotations_ = property(lambda self: self._attr("y_rotations"))
+
+
+class CCA(_NipalsTwoBlock):
+    """Canonical correlation analysis (NIPALS)."""
+
+    _kind = "Cca"
+
+
+class PLSCanonical(_NipalsTwoBlock):
+    """Canonical PLS (NIPALS, mode A)."""
+
+    _kind = "PlsCanonical"
+
+
+class PLSSVD(_TwoBlock):
+    """PLS from the SVD of the cross-covariance ``XᵀY``."""
+
+    _kind = "PlsSvd"
+
+    def __init__(self, n_components=2, *, scale=True):
+        self.n_components = n_components
+        self.scale = scale
+
+
+class _MultiTask(BaseEstimator):
+    """Fit on ``(X, Y)`` with ``Y`` of shape ``n × k``; the ℓ2,1 penalty
+    selects the features jointly for all targets."""
+
+    _estimator_type = "regressor"
+
+    def _rust_params(self, X, y):
+        return {"alpha": float(self.alpha), "l1_ratio": float(self._l1_ratio()),
+                "fit_intercept": self.fit_intercept, "max_iter": self.max_iter,
+                "y_columns": int(y.shape[1])}
+
+    def fit(self, X, y):
+        X = _check_X(X)
+        Y = _check_2d_y(y, X.shape[0])
+        if Y.shape[1] < 1:
+            raise ValueError("y needs at least one column")
+        model = self._new_model(X, Y)
+        model.fit(np.hstack([X, Y]), None, None)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def predict(self, X):
+        return self._call("predict", X)
+
+    def score(self, X, y, sample_weight=None):
+        """R² averaged uniformly over the targets (sklearn's default)."""
+        Y = _check_2d_y(y, len(X))
+        pred = self.predict(X).reshape(Y.shape)
+        w = np.ones(len(Y)) if sample_weight is None else np.asarray(sample_weight, float)
+        ss_res = (w[:, None] * (Y - pred) ** 2).sum(0)
+        ss_tot = (w[:, None] * (Y - np.average(Y, axis=0, weights=w)) ** 2).sum(0)
+        r2 = np.where(ss_tot == 0, np.where(ss_res == 0, 1.0, 0.0),
+                      1.0 - ss_res / np.where(ss_tot == 0, 1.0, ss_tot))
+        return float(r2.mean())
+
+    @property
+    def coef_(self):
+        return np.asarray(self._model().coef())
+
+    @property
+    def intercept_(self):
+        return _nd(self._fitted_state()["intercept"])
+
+
+class MultiTaskLasso(_MultiTask):
+    """Multi-task Lasso, solved by block coordinate descent to convergence
+    (``max_iter`` caps the sweeps)."""
+
+    _kind = "MultiTaskLasso"
+
+    def __init__(self, alpha=1.0, *, fit_intercept=True, max_iter=100_000):
+        self.alpha = alpha
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+
+    def _l1_ratio(self):
+        return 1.0
+
+
+class MultiTaskElasticNet(_MultiTask):
+    """Multi-task elastic net, solved as :class:`MultiTaskLasso`."""
+
+    _kind = "MultiTaskElasticNet"
+
+    def __init__(self, alpha=1.0, *, l1_ratio=0.5, fit_intercept=True, max_iter=100_000):
+        self.alpha = alpha
+        self.l1_ratio = l1_ratio
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+
+    def _l1_ratio(self):
+        return self.l1_ratio
+
+
+class SpectralEmbedding(_Embedding):
+    """Laplacian eigenmaps on a k-NN (``n_neighbors`` default
+    ``max(n / 10, 1)``) or RBF (``gamma`` default ``1 / n_features``)
+    affinity."""
+
+    _kind = "SpectralEmbedding"
+
+    def __init__(self, n_components=2, *, affinity="nearest_neighbors", gamma=None,
+                 n_neighbors=None):
+        self.n_components = n_components
+        self.affinity = affinity
+        self.gamma = gamma
+        self.n_neighbors = n_neighbors
+
+    def _rust_params(self, X, y):
+        return {"n_components": self.n_components,
+                "affinity": _choice(self.affinity, {"nearest_neighbors": "NearestNeighbors",
+                                                    "rbf": "Rbf"}, "affinity"),
+                "gamma": self.gamma, "n_neighbors": self.n_neighbors}
+
+
+class RcsTransformer(TransformerMixin, BaseEstimator):
+    """Restricted cubic spline basis per feature (Harrell's ``rcs``):
+    ``n_knots`` quantile knots, or explicit ``knots`` (one list per
+    feature). ``norm`` scales the nonlinear terms: ``"range"`` divides by
+    ``(t_k − t_1)²`` (``rms::rcs``'s default), ``"last_interval"`` by
+    ``(t_k − t_{k−1})³``."""
+
+    _kind = "RcsTransformer"
+
+    def __init__(self, n_knots=5, *, knots=None, norm="range"):
+        self.n_knots = n_knots
+        self.knots = knots
+        self.norm = norm
+
+    def _rust_params(self, X, y):
+        knots = None if self.knots is None else [[float(t) for t in k] for k in self.knots]
+        return {"n_knots": self.n_knots, "knots": knots,
+                "norm": _choice(self.norm, {"none": "None", "last_interval": "LastInterval",
+                                            "range": "Range"}, "norm")}
+
+    @property
+    def knots_(self):
+        return [np.asarray(k, dtype=np.float64) for k in self._fitted_state()["knots"]]

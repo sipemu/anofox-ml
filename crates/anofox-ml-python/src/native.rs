@@ -141,12 +141,108 @@ impl PyModel {
         self.call(py, x, |m, x| m.predict_proba(x))
     }
 
+    /// Class log-probabilities: the estimator's own where it has them (naive
+    /// Bayes stays finite where `predict_proba` underflows).
+    fn predict_log_proba(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.call(py, x, |m, x| m.predict_log_proba(x))
+    }
+
+    /// Standard deviation of the predictive distribution (Gaussian process).
+    fn predict_std(&self, py: Python<'_>, x: PyReadonlyArray2<'_, f64>) -> PyResult<Py<PyAny>> {
+        self.call(py, x, |m, x| m.predict_std(x))
+    }
+
     fn decision_function(
         &self,
         py: Python<'_>,
         x: PyReadonlyArray2<'_, f64>,
     ) -> PyResult<Py<PyAny>> {
         self.call(py, x, |m, x| m.decision_function(x))
+    }
+
+    /// Scores of the second block (the Y scores of Cca / PLS).
+    fn transform_y(&self, py: Python<'_>, y: PyReadonlyArray2<'_, f64>) -> PyResult<Py<PyAny>> {
+        self.call(py, y, |m, y| m.transform_y(y))
+    }
+
+    /// Distances and training-row indices of the `k` nearest training rows.
+    #[pyo3(signature = (x, k=None))]
+    fn kneighbors(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        k: Option<usize>,
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let x = x.as_array();
+        let inner: &dyn DynModel = self.inner.as_ref();
+        let (dist, idx) = py.detach(|| inner.kneighbors(x, k)).map_err(to_py_err)?;
+        let idx = idx.mapv(|i| i as i64);
+        Ok((
+            PyArray2::from_owned_array(py, dist).into_any().unbind(),
+            PyArray2::from_owned_array(py, idx).into_any().unbind(),
+        ))
+    }
+
+    /// Coefficients of the fitted linear model.
+    fn coef(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let out = self.inner.coef().map_err(to_py_err)?;
+        Ok(out_to_py(py, out))
+    }
+
+    /// Fold one batch into the model (sklearn's `partial_fit`).
+    #[pyo3(signature = (x, y=None, sample_weight=None, classes=None))]
+    fn partial_fit(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        y: Option<PyReadonlyArray1<'_, f64>>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+        classes: Option<Vec<f64>>,
+    ) -> PyResult<()> {
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_ref().map(|y| y.as_array()),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let inner = &mut self.inner;
+        py.detach(|| inner.partial_fit(x, y, w, classes.as_deref()))
+            .map_err(to_py_err)
+    }
+
+    /// Fit with an offset on the link scale (the GLMs).
+    #[pyo3(signature = (x, y, offset, sample_weight=None))]
+    fn fit_with_offset(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        y: PyReadonlyArray1<'_, f64>,
+        offset: PyReadonlyArray1<'_, f64>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+    ) -> PyResult<()> {
+        let (x, y, o, w) = (
+            x.as_array(),
+            y.as_array(),
+            offset.as_array(),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let inner = &mut self.inner;
+        py.detach(|| inner.fit_with_offset(x, Some(y), w, o))
+            .map_err(to_py_err)
+    }
+
+    /// Predictions with an offset on the link scale (the GLMs).
+    fn predict_with_offset(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        offset: PyReadonlyArray1<'_, f64>,
+    ) -> PyResult<Py<PyAny>> {
+        let o = offset.as_array();
+        self.call(py, x, |m, x| m.predict_with_offset(x, o))
     }
 
     fn transform(&self, py: Python<'_>, x: PyReadonlyArray2<'_, f64>) -> PyResult<Py<PyAny>> {

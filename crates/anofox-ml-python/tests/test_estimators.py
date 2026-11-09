@@ -21,6 +21,7 @@ X_pos = np.abs(X) + 0.1
 y_reg = X @ np.array([1.5, -2.0, 0.5, 0.0]) + 0.1 * rng.randn(80)
 y_bin = np.where(y_reg > 0, "yes", "no")
 y_multi = np.digitize(y_reg, [-1.0, 1.0])
+Y_two = np.column_stack([y_reg, X[:, 1] - X[:, 2] + 0.1 * rng.randn(80)])
 
 CLASSES = {
     name: cls
@@ -57,6 +58,13 @@ SPECIAL = {
     "KernelCenterer": dict(X=X[:4] @ X[:4].T),
     "GaussianRandomProjection": dict(params=dict(n_components=2)),
     "SparseRandomProjection": dict(params=dict(n_components=2)),
+    "BinomialRegressor": dict(y=1 / (1 + np.exp(-y_reg))),
+    "IsotonicRegression": dict(X=X[:, :1]),
+    "CCA": dict(y=Y_two),
+    "PLSCanonical": dict(y=Y_two),
+    "PLSSVD": dict(y=Y_two),
+    "MultiTaskLasso": dict(y=Y_two, params=dict(alpha=0.1)),
+    "MultiTaskElasticNet": dict(y=Y_two, params=dict(alpha=0.1)),
 }
 
 
@@ -82,7 +90,7 @@ def test_fit_predict_pickle_clone(name):
     if kind in ("classifier", "regressor"):
         assert est.fit(Xd, yd) is est
         pred = est.predict(Xd)
-        assert pred.shape == (len(Xd),)
+        assert pred.shape == (len(Xd),) + np.shape(yd)[1:]
         if kind == "classifier":
             assert set(np.unique(pred)) <= set(np.unique(yd))
             assert 0.0 <= est.score(Xd, yd) <= 1.0
@@ -116,8 +124,11 @@ def test_fit_predict_pickle_clone(name):
         assert est.covariance_.shape == (Xd.shape[1], Xd.shape[1])
     else:  # transformer
         supervised = isinstance(est, SupervisedTransformerMixin) or name in (
-            "SelectKBest", "MutualInformationSelector", "TargetEncoder")
+            "SelectKBest", "MutualInformationSelector", "TargetEncoder", "CCA", "PLSCanonical",
+            "PLSSVD")
         out = est.fit_transform(Xd, yd) if supervised else est.fit_transform(Xd)
+        if isinstance(out, tuple):  # (x_scores, y_scores)
+            out = out[0]
         assert out.shape[0] == len(Xd)
 
     # pickling keeps the fitted model and the hyperparameters

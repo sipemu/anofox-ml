@@ -146,15 +146,20 @@ class BaseEstimator:
         self.n_features_in_ = X.shape[1]
         return self
 
-    def _call(self, method, X):
-        model = self._model()
+    def _checked(self, X):
+        """``X`` as a 2-D float array with the fitted feature count."""
+        self._model()
         X = _check_X(X)
         if X.shape[1] != self.n_features_in_:
             raise ValueError(
                 f"X has {X.shape[1]} features, but {type(self).__name__} is "
                 f"expecting {self.n_features_in_} features as input."
             )
-        return getattr(model, method)(X)
+        return X
+
+    def _call(self, method, X):
+        X = self._checked(X)
+        return getattr(self._model(), method)(X)
 
     def _has(self, capability):
         return capability in _native.Model(self._kind, None).capabilities()
@@ -249,6 +254,8 @@ class ClassifierMixin:
         return self._call("predict_proba", X)
 
     def predict_log_proba(self, X):
+        if self._has("predict_log_proba"):
+            return self._call("predict_log_proba", X)
         with np.errstate(divide="ignore"):
             return np.log(self.predict_proba(X))
 
@@ -262,6 +269,78 @@ class ClassifierMixin:
         y = np.asarray(y)
         correct = (self.predict(X) == y).astype(np.float64)
         return float(np.average(correct, weights=sample_weight))
+
+
+class PartialFitMixin:
+    """sklearn's ``partial_fit``: fold one batch into the model."""
+
+    def partial_fit(self, X, y=None, sample_weight=None):
+        return self._partial_fit(X, y, None, sample_weight)
+
+    def _partial_fit(self, X, y, classes, sample_weight):
+        X = _check_X(X)
+        if sample_weight is not None:
+            sample_weight = _check_1d(sample_weight, "sample_weight")
+        model = self.__dict__.get("_model_")
+        if model is not None and X.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but {type(self).__name__} is "
+                f"expecting {self.n_features_in_} features as input."
+            )
+        codes = None
+        if getattr(self, "_estimator_type", None) == "classifier":
+            y = np.asarray(y)
+            if y.ndim == 2 and y.shape[1] == 1:
+                y = y.ravel()
+            if model is None:
+                if classes is None:
+                    raise ValueError("classes must be passed on the first call to partial_fit")
+                self.classes_ = np.unique(np.asarray(classes))
+                codes = [float(k) for k in range(len(self.classes_))]
+            idx = np.searchsorted(self.classes_, y)
+            idx = np.clip(idx, 0, len(self.classes_) - 1)
+            if not np.all(self.classes_[idx] == y):
+                raise ValueError("y contains labels that are not in classes")
+            y = idx.astype(np.float64)
+        elif y is not None:
+            y = _check_1d(y)
+        if model is None:
+            model = self._new_model(X, y)
+        model.partial_fit(X, y, sample_weight, codes)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+
+class ClassifierPartialFitMixin(PartialFitMixin):
+    """``partial_fit(X, y, classes=None, sample_weight=None)``; ``classes``
+    is required on the first call."""
+
+    def partial_fit(self, X, y, classes=None, sample_weight=None):
+        return self._partial_fit(X, y, classes, sample_weight)
+
+
+class WarmStartMixin:
+    """sklearn's ``warm_start=True``: a refit continues the fitted model
+    (more stages or iterations) instead of starting over."""
+
+    def _fit_model(self, X, y=None, sample_weight=None):
+        model = self.__dict__.get("_model_")
+        if not self.warm_start or model is None:
+            return super()._fit_model(X, y, sample_weight)
+        X = _check_X(X)
+        if X.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but {type(self).__name__} was fitted "
+                f"with {self.n_features_in_}."
+            )
+        if sample_weight is not None:
+            sample_weight = _check_1d(sample_weight, "sample_weight")
+        params = self._rust_params(X, y)
+        params.pop("seed", None)
+        model.set_params_json(json.dumps(params))
+        model.warm_start(X, y, sample_weight)
+        return self
 
 
 class StagedPredictMixin:
