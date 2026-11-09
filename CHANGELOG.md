@@ -6,6 +6,28 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM objectives: tweedie, cross_entropy, multiclassova (#206)
+
+- `LgbmObjective::Tweedie { variance_power }` (log link, power in
+  `[1, 2)`) and `LgbmObjective::CrossEntropy` (targets in `[0, 1]`,
+  sigmoid predictions) for `LgbmRegressor`, and
+  `LgbmClassifier::with_multiclass_ova` (LightGBM's `multiclassova`: a
+  binary log-loss per class; `predict_proba` gives the unnormalized
+  per-class sigmoids, as LightGBM does). Weighted or not, they match
+  LightGBM 4.7 to ~2e-16 (`gen_lgbm_parity.py`), including LightGBM's
+  float32 `1 - y` in the cross-entropy gradient and its clamped
+  `BoostFromScore`.
+- Fix: the L1 / quantile initial score is LightGBM's float32 percentile of
+  the labels; it was the float64 one, ~1e-9 off LightGBM.
+- Registry: the objectives come from the JSON config
+  (`{"objective": {"Tweedie": {"variance_power": 1.5}}}`, `"CrossEntropy"`,
+  `"multiclass_ova": true`). Binary-v1 files of `FittedLgbmClassifier`
+  (and the HistGradientBoosting classifier) still load.
+- Python: `LGBMRegressor(objective=...)` takes LightGBM's names
+  (`"regression"`, `"regression_l1"`, `"huber"`, `"quantile"`, `"poisson"`,
+  `"gamma"`, `"tweedie"` with `tweedie_variance_power`, `"cross_entropy"`)
+  and `LGBMClassifier(objective="multiclassova")`.
+
 ## [0.5.0] - 2026-11-09
 
 The scikit-learn gap list (#113) is closed: about 40 new estimators
