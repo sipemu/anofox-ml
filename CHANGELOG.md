@@ -64,6 +64,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   transformed by a registered transformer (StandardScaler,
   PowerTransformer, …), its predictions mapped back; matches scikit-learn
   1.8.
+- `MultiOutputRegressor` / `RegressorChain` in the registry (#125), fitted
+  on `[X | Y]` with `y_columns` (the last columns are the targets, as Cca);
+  `predict` returns one column per target. The chain takes `order` and
+  matches scikit-learn 1.8 (`cv=None`).
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /
