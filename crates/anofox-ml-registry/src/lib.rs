@@ -572,9 +572,14 @@ mod boosting_surface_tests {
             (
                 "LgbmRegressor",
                 &y,
-                json!({ "min_child_samples": 5, "subsample": 0.8 }),
+                json!({ "min_child_samples": 5, "subsample": 0.8, "subsample_freq": 2,
+                        "colsample_bytree": 0.7 }),
             ),
-            ("LgbmClassifier", &labels, json!({ "min_child_samples": 5 })),
+            (
+                "LgbmClassifier",
+                &labels,
+                json!({ "min_child_samples": 5, "subsample": 0.8, "subsample_freq": 1 }),
+            ),
             (
                 "HistGradientBoostingRegressor",
                 &y,
@@ -643,6 +648,34 @@ mod boosting_surface_tests {
         assert!(lgbm
             .fit_with_validation(xt, Some(yt), None, xv, Some(yv), None)
             .is_err());
+        // CatBoost: its eval set, overfitting detector and use_best_model.
+        let params = json!({ "iterations": 200, "learning_rate": 0.5, "od_type": "Iter",
+                             "od_wait": 3 });
+        let mut cb = super::make("CatBoostRegressor", &params).unwrap();
+        assert!(cb.capabilities().contains(&"fit_with_validation"));
+        cb.fit_with_validation(xt, Some(yt), None, xv, Some(yv), None)
+            .unwrap();
+        let typed = ens::CatBoostRegressor::new()
+            .with_iterations(200)
+            .with_learning_rate(0.5)
+            .with_early_stopping_rounds(3)
+            .fit_with_eval(
+                xt,
+                yt,
+                None,
+                ens::CatBoostEvalSet {
+                    x: xv,
+                    y: yv,
+                    sample_weight: None,
+                },
+            )
+            .unwrap();
+        assert!(typed.n_estimators() < 200);
+        use anofox_ml_core::Predict;
+        assert_eq!(
+            a1(cb.predict(x.view()).unwrap()),
+            typed.predict(&x).unwrap()
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@
 mod common;
 
 use anofox_ml::prelude::*;
-use anofox_ml_ensemble::{DartParams, LgbmClassWeight, LgbmFitOptions, LgbmObjective};
+use anofox_ml_ensemble::{
+    BoostingType, DartParams, LgbmClassWeight, LgbmFitOptions, LgbmObjective,
+};
 use common::{json_to_array1, load_golden_data};
 use ndarray::{Array1, Array2};
 use serde_json::Value;
@@ -62,6 +64,28 @@ macro_rules! configure {
                     .unwrap_or(d.xgboost_dart_mode),
                 drop_seed: p["drop_seed"].as_u64().map_or(d.drop_seed, |v| v as u32),
             });
+        }
+        // LightGBM's generators: bagging, GOSS, feature fractions, seeds.
+        if let Some(v) = p["subsample"].as_f64() {
+            m = m.with_subsample(v);
+        }
+        if let Some(v) = p["subsample_freq"].as_u64() {
+            m = m.with_subsample_freq(v as usize);
+        }
+        if let Some(v) = p["colsample_bytree"].as_f64() {
+            m = m.with_colsample_bytree(v);
+        }
+        if let Some(v) = p["feature_fraction_bynode"].as_f64() {
+            m = m.with_colsample_bynode(v);
+        }
+        if let Some(v) = p["random_state"].as_u64() {
+            m = m.with_seed(v);
+        }
+        if p["boosting_type"] == "goss" {
+            m = m.with_boosting_type(BoostingType::Goss).with_goss_rates(
+                p["top_rate"].as_f64().unwrap_or(0.2),
+                p["other_rate"].as_f64().unwrap_or(0.1),
+            );
         }
         if let Some(b) = p["enable_bundle"].as_bool() {
             m = m.with_enable_bundle(b);
@@ -122,6 +146,12 @@ fn lgbm_matches_lightgbm() {
             )
         } else {
             let mut m = configure!(LgbmClassifier::new(), p).with_categorical_features(categorical);
+            if p["subsample_freq"].is_u64() {
+                m = m.with_bagging_fractions(
+                    p["pos_bagging_fraction"].as_f64().unwrap_or(1.0),
+                    p["neg_bagging_fraction"].as_f64().unwrap_or(1.0),
+                );
+            }
             if p["class_weight"] == "balanced" {
                 m = m.with_class_weight(Some(LgbmClassWeight::Balanced));
             }
