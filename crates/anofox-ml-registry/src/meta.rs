@@ -783,3 +783,191 @@ impl SelfTrainingFit {
         self.model.predict_proba(x)
     }
 }
+
+// ============================================================
+// Voting
+// ============================================================
+
+/// One base estimator of a multi-estimator meta kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EstimatorSpec {
+    pub estimator: String,
+    #[serde(default = "empty_params")]
+    pub estimator_params: serde_json::Value,
+}
+
+fn empty_params() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+impl EstimatorSpec {
+    fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<RegistryFitted> {
+        let mut model = crate::make(&self.estimator, &self.estimator_params)?;
+        model.fit(x, Some(y), None)?;
+        Ok(RegistryFitted(model))
+    }
+}
+
+/// The estimators' weights (1 each by default), checked against their
+/// number.
+fn voting_weights(
+    kind: &str,
+    specs: &[EstimatorSpec],
+    weights: &Option<Vec<f64>>,
+) -> Result<Vec<f64>> {
+    if specs.is_empty() {
+        return Err(err(format!("{kind} needs at least one estimator")));
+    }
+    match weights {
+        None => Ok(vec![1.0; specs.len()]),
+        Some(w) if w.len() == specs.len() => Ok(w.clone()),
+        Some(w) => Err(err(format!(
+            "{kind}: {} weights for {} estimators",
+            w.len(),
+            specs.len()
+        ))),
+    }
+}
+
+/// `Σ w_k a_k / Σ w_k`, summed in estimator order (numpy's `average`).
+fn weighted_average<D: ndarray::Dimension>(
+    arrays: &[ndarray::Array<f64, D>],
+    w: &[f64],
+) -> ndarray::Array<f64, D> {
+    let mut sum = &arrays[0] * w[0];
+    for (a, &wk) in arrays.iter().zip(w).skip(1) {
+        sum = sum + a * wk;
+    }
+    let total: f64 = w.iter().sum();
+    sum / total
+}
+
+/// Averages the predictions of its estimators (sklearn's `VotingRegressor`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct VotingRegressorConfig {
+    pub estimators: Vec<EstimatorSpec>,
+    pub weights: Option<Vec<f64>>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct VotingRegressorFit {
+    models: Vec<RegistryFitted>,
+    weights: Vec<f64>,
+}
+
+impl VotingRegressorConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<VotingRegressorFit> {
+        let weights = voting_weights("VotingRegressor", &self.estimators, &self.weights)?;
+        let models = self
+            .estimators
+            .iter()
+            .map(|s| s.fit(x, y))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(VotingRegressorFit { models, weights })
+    }
+}
+
+impl VotingRegressorFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let preds = self
+            .models
+            .iter()
+            .map(|m| m.predict(x))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(weighted_average(&preds, &self.weights))
+    }
+}
+
+/// Hard (weighted majority of the predicted classes) or soft (weighted
+/// mean of the probabilities) voting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Voting {
+    #[default]
+    Hard,
+    Soft,
+}
+
+/// sklearn's `VotingClassifier`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct VotingClassifierConfig {
+    pub estimators: Vec<EstimatorSpec>,
+    pub voting: Voting,
+    pub weights: Option<Vec<f64>>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct VotingClassifierFit {
+    classes: Vec<f64>,
+    models: Vec<RegistryFitted>,
+    weights: Vec<f64>,
+    voting: Voting,
+}
+
+impl VotingClassifierConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<VotingClassifierFit> {
+        let weights = voting_weights("VotingClassifier", &self.estimators, &self.weights)?;
+        let (classes, _) = encode(y)?;
+        let models = self
+            .estimators
+            .iter()
+            .map(|s| s.fit(x, y))
+            .collect::<Result<Vec<_>>>()?;
+        if self.voting == Voting::Soft {
+            if let Some(m) = models.iter().find(|m| !has(m, "predict_proba")) {
+                return Err(err(format!(
+                    "VotingClassifier: soft voting needs predict_proba, which {} lacks",
+                    m.model().kind()
+                )));
+            }
+        }
+        Ok(VotingClassifierFit {
+            classes,
+            models,
+            weights,
+            voting: self.voting,
+        })
+    }
+}
+
+impl VotingClassifierFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let index = match self.voting {
+            Voting::Soft => argmax_rows(&self.predict_proba(x)?),
+            Voting::Hard => {
+                // Weighted class counts per row; ties go to the first class.
+                let mut votes = Array2::<f64>::zeros((x.nrows(), self.classes.len()));
+                for (m, &w) in self.models.iter().zip(&self.weights) {
+                    for (i, p) in m.predict(x)?.iter().enumerate() {
+                        let k = self.classes.partition_point(|&c| c < *p);
+                        if k == self.classes.len() || self.classes[k] != *p {
+                            return Err(err(format!(
+                                "{} predicted an unknown class {p}",
+                                m.model().kind()
+                            )));
+                        }
+                        votes[[i, k]] += w;
+                    }
+                }
+                argmax_rows(&votes)
+            }
+        };
+        Ok(index.into_iter().map(|k| self.classes[k]).collect())
+    }
+
+    pub fn predict_proba(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        if self.voting == Voting::Hard {
+            return Err(err(
+                "VotingClassifier has predict_proba only with voting=\"soft\"",
+            ));
+        }
+        let probas = self
+            .models
+            .iter()
+            .map(|m| m.predict_proba(x))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(weighted_average(&probas, &self.weights))
+    }
+}
