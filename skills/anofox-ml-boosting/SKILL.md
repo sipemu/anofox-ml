@@ -52,9 +52,10 @@ let proba = cat.predict_proba(&x)?;
 Builder names follow each reference library's parameter names (with a
 `with_` prefix).
 - **LGBM:** `with_num_leaves`, `with_min_child_samples`, `with_reg_lambda`,
-  `with_subsample`, `with_colsample_bytree`, `with_boosting_type`,
+  `with_subsample`, `with_subsample_freq`, `with_colsample_bytree`,
+  `with_colsample_bynode`, `with_boosting_type`, `with_goss_rates`,
   `with_dart`, `with_enable_bundle`, `with_monotone_constraints`,
-  `with_early_stopping`, `with_seed`.
+  `with_early_stopping`, `with_seed` (classifier: `with_bagging_fractions`).
 - **HistGB:** `with_loss`, `with_max_leaf_nodes`, `with_min_samples_leaf`,
   `with_categorical_features`, `with_monotonic_cst`, `with_interaction_cst`,
   `with_early_stopping`, `with_validation_fraction`, `with_n_iter_no_change`,
@@ -64,7 +65,12 @@ Builder names follow each reference library's parameter names (with a
   `with_cat_features`, `with_one_hot_max_size`, `with_max_ctr_complexity`,
   `with_boosting_type`, `with_leaf_estimation_method`,
   `with_leaf_estimation_iterations`, `with_bootstrap_type`, `with_subsample`,
-  `with_random_strength`, `with_random_seed`, `with_has_time`.
+  `with_random_strength`, `with_random_seed`, `with_has_time`,
+  `with_monotone_constraints`, `with_model_shrink_rate`,
+  `with_early_stopping_rounds`, `with_use_best_model`, `fit_with_eval`,
+  `with_grow_policy` (Depthwise / Lossguide: plain boosting, no CTR
+  features), `with_min_data_in_leaf`, `with_max_leaves`; classifier:
+  `with_class_weights`, `with_auto_class_weights`.
 
 Check the docs (`cargo doc -p anofox-ml-ensemble --open`) before relying on
 any other name.
@@ -81,6 +87,22 @@ m = am.LgbmRegressor(n_estimators=300, num_leaves=31).fit(X, y)
 m = am.HistGradientBoostingClassifier(early_stopping=True).fit(X, y)
 ```
 
+## LightGBM: sampling and reproducibility
+
+LightGBM's random generator is reproduced draw for draw: bagging,
+GOSS, `colsample_bytree` / `colsample_bynode` and DART's dropping. The same
+data, parameters and `seed` (LightGBM's `random_state`) give **the model
+LightGBM trains** (with `n_jobs=1`, `deterministic=True,
+force_row_wise=True`), to about 1e-15.
+- Bagging is LightGBM's: `subsample` acts only with `subsample_freq > 0`
+  (LightGBM's default 0 = no bagging). For balanced bagging of binary
+  labels, use `with_bagging_fractions(pos, neg)`.
+- `seed: None` (default) uses LightGBM's default seeds. `with_seed(s)`
+  derives the bagging, feature-fraction and DART seeds from `s`, as
+  LightGBM does.
+- GOSS samples from iteration `1 / learning_rate` on and cannot be combined
+  with bagging. `top_rate + other_rate` must be at most 1.
+
 ## CatBoost: defaults and reproducibility
 
 `CatBoost*` defaults are CatBoost's own:
@@ -89,7 +111,13 @@ m = am.HistGradientBoostingClassifier(early_stopping=True).fit(X, y)
 - MVS bootstrap with `subsample` 0.8 (Bayesian for multiclass);
 - `max_ctr_complexity` 4 (1 below 200 iterations);
 - `leaf_estimation_iterations` 10 for Logloss (1 below 200 iterations with
-  fewer than 20 features).
+  fewer than 20 features);
+- per `loss_function` (regressor: RMSE, MAE, Quantile, Expectile, Poisson,
+  Tweedie, LogLinQuantile): Exact leaves for MAE / Quantile,
+  `boost_from_average` for RMSE / MAE / Quantile; Poisson and Tweedie
+  predict `exp(raw)`;
+- with `monotone_constraints`, model shrinkage `model_shrink_rate=0.01`
+  (CatBoost switches it on with them; pass 0 to turn it off).
 
 CatBoost's random generator is reproduced draw for draw. The same data,
 parameters and `random_seed` give **the model catboost trains** (with
