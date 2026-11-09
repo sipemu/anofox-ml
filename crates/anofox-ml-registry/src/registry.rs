@@ -1935,6 +1935,12 @@ registry! {
         transform: |m, x| Transform::transform(m, x),
         inverse_transform: |m, x| InverseTransform::inverse_transform(m, x),
     }
+    LatentDirichletAllocation {
+        config: pre::LatentDirichletAllocation = Default::default(),
+        fitted: pre::FittedLatentDirichletAllocation,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     Nmf {
         config: pre::Nmf = pre::Nmf::new(2),
         fitted: pre::FittedNmf,

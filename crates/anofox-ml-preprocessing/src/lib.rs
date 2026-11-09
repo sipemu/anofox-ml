@@ -42,6 +42,7 @@ pub mod kernel_approximation;
 pub mod kernel_pca;
 pub mod knn_imputer;
 pub mod label_encoder;
+pub mod lda;
 pub mod max_abs_scaler;
 pub mod minmax_scaler;
 pub mod missing_indicator;
@@ -95,6 +96,7 @@ pub use kernel_approximation::{
 pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
 pub use knn_imputer::{FittedKnnImputer, KnnImputeWeights, KnnImputer};
 pub use label_encoder::{FittedLabelEncoder, LabelEncoder};
+pub use lda::{FittedLatentDirichletAllocation, LatentDirichletAllocation, LdaLearning};
 pub use max_abs_scaler::{FittedMaxAbsScaler, MaxAbsScaler};
 pub use minmax_scaler::{FittedMinMaxScaler, MinMaxScaler};
 pub use missing_indicator::{FittedMissingIndicator, MissingFeatures, MissingIndicator};
