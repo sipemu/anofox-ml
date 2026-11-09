@@ -281,3 +281,23 @@ def test_text_vectorizer_errors():
         am.CountVectorizer().fit("one string")
     with pytest.raises(ValueError, match="min_df"):
         am.CountVectorizer(min_df=0.1).fit(DOCS)
+
+
+def test_feature_hasher_matches_sklearn():
+    from sklearn.feature_extraction import FeatureHasher
+
+    dicts = [{"dog": 1, "cat": 2.5, "elephant": 4}, {"dog": 2, "run": 5, "colour": "brown"},
+             {"zero": 0, "ünï": -1.5}, {}]
+    pairs = [[("a", 1.0), ("a", 2.0), ("b", -3.0)], [("c", 0.5)]]
+    strings = [["foo", "bar", "foo"], ["baz"], []]
+    for n in (8, 2**10):
+        for sign in (True, False):
+            for input_type, data in (("dict", dicts), ("pair", pairs), ("string", strings)):
+                ours = am.FeatureHasher(n, input_type=input_type, alternate_sign=sign)
+                ref = FeatureHasher(n, input_type=input_type, alternate_sign=sign)
+                np.testing.assert_array_equal(ours.transform(data),
+                                              ref.transform(data).toarray())
+    with pytest.raises(ValueError, match="single string"):
+        am.FeatureHasher(8, input_type="string").transform(["abc"])
+    with pytest.raises(ValueError, match="n_features"):
+        am.FeatureHasher(0).transform(dicts)
