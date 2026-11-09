@@ -20,7 +20,10 @@ pub mod tsne;
 
 pub use isomap::{FittedIsomap, Isomap};
 pub use lle::{FittedLocallyLinearEmbedding, LocallyLinearEmbedding};
-pub use spectral_embedding::spectral_embedding;
+pub use spectral_embedding::{
+    build_affinity, spectral_embedding, Affinity, FittedSpectralEmbedding, SpectralAffinity,
+    SpectralEmbedding,
+};
 pub use tsne::{FittedTSne, TSne, TSneInit, TSneMethod};
 
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError};
