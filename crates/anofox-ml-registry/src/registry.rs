@@ -1032,6 +1032,26 @@ registry! {
         predict: |m, x| m.predict(x),
         coef: |m| m.coef.clone(),
     }
+    MultiTaskLassoCV {
+        config: crate::meta::MultiTaskCvConfig = crate::meta::MultiTaskCvConfig::lasso(),
+        fitted: reg::FittedMultiTaskCV,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(K, x)
+        },
+        predict: |m, x| m.predict(x),
+        coef: |m| m.fitted.coef.clone(),
+    }
+    MultiTaskElasticNetCV {
+        config: crate::meta::MultiTaskCvConfig = Default::default(),
+        fitted: reg::FittedMultiTaskCV,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(K, x)
+        },
+        predict: |m, x| m.predict(x),
+        coef: |m| m.fitted.coef.clone(),
+    }
     MultiOutputRegressor {
         config: crate::meta::MultiOutputConfig = Default::default(),
         fitted: crate::meta::MultiOutputFit,

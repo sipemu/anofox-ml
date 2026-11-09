@@ -4036,3 +4036,80 @@ class RcsTransformer(TransformerMixin, BaseEstimator):
     @property
     def knots_(self):
         return [np.asarray(k, dtype=np.float64) for k in self._fitted_state()["knots"]]
+
+
+class _MultiTaskCV(_MultiTask):
+    """``alphas``: the grid size per ``l1_ratio`` (sklearn's grid) or the
+    alphas; ``cv`` contiguous folds (sklearn's ``KFold``)."""
+
+    def _rust_params(self, X, y):
+        p = {"l1_ratios": [float(r) for r in np.atleast_1d(self._l1_ratio())],
+             "eps": float(self.eps), "cv": int(5 if self.cv is None else self.cv),
+             "fit_intercept": self.fit_intercept, "max_iter": self.max_iter,
+             "y_columns": int(y.shape[1])}
+        if isinstance(self.alphas, (int, np.integer)) and not isinstance(self.alphas, bool):
+            p["n_alphas"] = int(self.alphas)
+        else:
+            p["alphas"] = [float(a) for a in self.alphas]
+        return p
+
+    @property
+    def coef_(self):
+        return np.asarray(self._model().coef())
+
+    @property
+    def intercept_(self):
+        return _nd(self._fitted_state()["fitted"]["intercept"])
+
+    @property
+    def alpha_(self):
+        return float(self._fitted_state()["alpha"])
+
+    @property
+    def alphas_(self):
+        a = _nd(self._fitted_state()["alphas"])
+        return a[0] if a.shape[0] == 1 else a
+
+    @property
+    def mse_path_(self):
+        m = _nd(self._fitted_state()["mse_path"])
+        return m[0] if m.shape[0] == 1 else m
+
+
+class MultiTaskLassoCV(_MultiTaskCV):
+    """:class:`MultiTaskLasso` with ``alpha`` chosen by cross-validation."""
+
+    _kind = "MultiTaskLassoCV"
+
+    def __init__(self, *, eps=1e-3, alphas=100, fit_intercept=True, max_iter=100_000, cv=None):
+        self.eps = eps
+        self.alphas = alphas
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+        self.cv = cv
+
+    def _l1_ratio(self):
+        return 1.0
+
+
+class MultiTaskElasticNetCV(_MultiTaskCV):
+    """:class:`MultiTaskElasticNet` with ``alpha`` and ``l1_ratio`` (a float
+    or a list) chosen by cross-validation."""
+
+    _kind = "MultiTaskElasticNetCV"
+
+    def __init__(self, *, l1_ratio=0.5, eps=1e-3, alphas=100, fit_intercept=True,
+                 max_iter=100_000, cv=None):
+        self.l1_ratio = l1_ratio
+        self.eps = eps
+        self.alphas = alphas
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+        self.cv = cv
+
+    def _l1_ratio(self):
+        return self.l1_ratio
+
+    @property
+    def l1_ratio_(self):
+        return float(self._fitted_state()["l1_ratio"])

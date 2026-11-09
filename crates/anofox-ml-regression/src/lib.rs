@@ -55,7 +55,9 @@ pub use lasso::{FittedLassoRegressor, LassoRegressor};
 pub use lasso_cv::{FittedLassoCrossValidated, LassoCrossValidated};
 pub use logistic::{ClassWeight, FittedLogisticRegressor, LogisticRegressor, MultiClass};
 pub use logistic_cv::{CGrid, FittedLogisticRegressionCV, LogisticCvScoring, LogisticRegressionCV};
-pub use multi_task::{FittedMultiTask, MultiTaskElasticNet};
+pub use multi_task::{
+    FittedMultiTask, FittedMultiTaskCV, MultiTaskElasticNet, MultiTaskElasticNetCV,
+};
 pub use ols::{FittedOlsRegressor, OlsRegressor};
 pub use omp::{FittedOrthogonalMatchingPursuit, OrthogonalMatchingPursuit};
 pub use omp_cv::{FittedOrthogonalMatchingPursuitCV, OrthogonalMatchingPursuitCV};

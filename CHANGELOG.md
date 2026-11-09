@@ -22,6 +22,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   with registry kinds fitted on `[X | Y]` with `y_columns` (`predict` and
   `coef` per target); converged coefficients match scikit-learn 1.8
   (`gen_multi_task.py`).
+- `MultiTaskElasticNetCV` / `MultiTaskLassoCV` (`anofox-ml-regression`):
+  sklearn's alpha grid per `l1_ratio`, held-out MSE averaged over targets
+  and folds (contiguous `KFold`), paths solved with warm starts and the
+  best pair refitted. Registry kinds on `[X | Y]` with `y_columns` and
+  Python classes. Alphas, `mse_path_` and the refit match scikit-learn 1.8
+  (`gen_multi_task_cv.py`).
 
 ### Python
 

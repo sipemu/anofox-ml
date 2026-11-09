@@ -2433,3 +2433,62 @@ impl Default for MultiTaskConfig {
         }
     }
 }
+
+/// sklearn's `MultiTaskElasticNetCV` / `MultiTaskLassoCV` (`l1_ratios =
+/// [1]`), fitted on `[X | Y]` whose last `y_columns` columns are the
+/// targets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct MultiTaskCvConfig {
+    pub l1_ratios: Vec<f64>,
+    pub alphas: Option<Vec<f64>>,
+    pub n_alphas: usize,
+    pub eps: f64,
+    pub cv: usize,
+    pub fit_intercept: bool,
+    pub max_iter: usize,
+    pub y_columns: usize,
+}
+
+impl MultiTaskCvConfig {
+    pub fn lasso() -> Self {
+        Self {
+            l1_ratios: vec![1.0],
+            ..Self::default()
+        }
+    }
+
+    pub fn fit(
+        &self,
+        kind: &str,
+        xy: ArrayView2<f64>,
+    ) -> Result<anofox_ml_regression::FittedMultiTaskCV> {
+        let (x, y) = split_targets(kind, xy, self.y_columns)?;
+        anofox_ml_regression::MultiTaskElasticNetCV {
+            l1_ratios: self.l1_ratios.clone(),
+            alphas: self.alphas.clone(),
+            n_alphas: self.n_alphas,
+            eps: self.eps,
+            cv: self.cv,
+            fit_intercept: self.fit_intercept,
+            max_iter: self.max_iter,
+        }
+        .fit(&x, &y)
+    }
+}
+
+impl Default for MultiTaskCvConfig {
+    fn default() -> Self {
+        let d = anofox_ml_regression::MultiTaskElasticNetCV::default();
+        Self {
+            l1_ratios: d.l1_ratios,
+            alphas: d.alphas,
+            n_alphas: d.n_alphas,
+            eps: d.eps,
+            cv: d.cv,
+            fit_intercept: d.fit_intercept,
+            max_iter: d.max_iter,
+            y_columns: 2,
+        }
+    }
+}
