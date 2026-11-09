@@ -2385,3 +2385,51 @@ impl RfecvFit {
         self.rfe.predict(x)
     }
 }
+
+// ============================================================
+// Multi-task Lasso / elastic net
+// ============================================================
+
+/// sklearn's `MultiTaskElasticNet` / `MultiTaskLasso` (`l1_ratio = 1`),
+/// fitted on `[X | Y]` whose last `y_columns` columns are the targets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct MultiTaskConfig {
+    pub alpha: f64,
+    pub l1_ratio: f64,
+    pub fit_intercept: bool,
+    pub max_iter: usize,
+    pub y_columns: usize,
+}
+
+impl MultiTaskConfig {
+    pub fn lasso() -> Self {
+        Self {
+            l1_ratio: 1.0,
+            ..Self::default()
+        }
+    }
+
+    pub fn fit(
+        &self,
+        kind: &str,
+        xy: ArrayView2<f64>,
+    ) -> Result<anofox_ml_regression::FittedMultiTask> {
+        let (x, y) = split_targets(kind, xy, self.y_columns)?;
+        let mut m = anofox_ml_regression::MultiTaskElasticNet::new(self.alpha, self.l1_ratio);
+        (m.fit_intercept, m.max_iter) = (self.fit_intercept, self.max_iter);
+        m.fit(&x, &y)
+    }
+}
+
+impl Default for MultiTaskConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0,
+            l1_ratio: 0.5,
+            fit_intercept: true,
+            max_iter: 100_000,
+            y_columns: 2,
+        }
+    }
+}
