@@ -4309,3 +4309,39 @@ class FeatureHasher(TransformerMixin, BaseEstimator):
 
     def fit_transform(self, raw_X, y=None):
         return self.fit(raw_X).transform(raw_X)
+
+
+class NeighborhoodComponentsAnalysis(SupervisedTransformerMixin, BaseEstimator):
+    """Linear map maximising the stochastic nearest-neighbour accuracy;
+    ``init`` is ``"auto"``, ``"pca"``, ``"lda"``, ``"identity"`` or an
+    ``(n_components, n_features)`` array. The optimiser is L-BFGS like
+    sklearn's, but not SciPy's, so results agree to its tolerance."""
+
+    def __init__(self, n_components=None, *, init="auto", max_iter=50, tol=1e-5):
+        self.n_components = n_components
+        self.init = init
+        self.max_iter = max_iter
+        self.tol = tol
+
+    _kind = "NeighborhoodComponentsAnalysis"
+
+    def _rust_params(self, X, y):
+        if isinstance(self.init, str):
+            init = _choice(self.init, {"auto": "Auto", "pca": "Pca", "lda": "Lda",
+                                       "identity": "Identity"}, "init")
+        else:
+            init = {"Matrix": np.asarray(self.init, dtype=np.float64).tolist()}
+        return {"n_components": self.n_components, "init": init,
+                "max_iter": int(self.max_iter), "tol": float(self.tol)}
+
+    def fit(self, X, y):
+        self.classes_, codes = np.unique(np.asarray(y), return_inverse=True)
+        return self._fit_model(X, codes.astype(np.float64))
+
+    @property
+    def components_(self):
+        return _nd(self._fitted_state()["components"])
+
+    @property
+    def n_iter_(self):
+        return int(self._fitted_state()["n_iter"])

@@ -301,3 +301,22 @@ def test_feature_hasher_matches_sklearn():
         am.FeatureHasher(8, input_type="string").transform(["abc"])
     with pytest.raises(ValueError, match="n_features"):
         am.FeatureHasher(0).transform(dicts)
+
+
+def test_nca_reaches_sklearns_objective():
+    """The expected number of correctly classified rows NCA maximises."""
+    from sklearn.neighbors import NeighborhoodComponentsAnalysis
+
+    labels = np.digitize(y, [-1.0, 1.0])
+    mask = labels[:, None] == labels[None, :]
+    for params in ({"n_components": 2}, {"init": "identity", "max_iter": 200}):
+        ours = am.NeighborhoodComponentsAnalysis(**params).fit(X, labels)
+        ref = NeighborhoodComponentsAnalysis(random_state=0, **params).fit(X, labels)
+
+        def objective(A):
+            return -ref._loss_grad_lbfgs(A.ravel(), X, mask, -1.0)[0]
+
+        # Different L-BFGS paths may end on different plateaus; ours must
+        # be at least as good, to well within one row.
+        assert objective(ours.components_) >= objective(ref.components_) - 0.5
+        assert ours.transform(X).shape == (60, params.get("n_components", 4))

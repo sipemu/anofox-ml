@@ -8,6 +8,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `NeighborhoodComponentsAnalysis` (`anofox-ml-neighbors`): sklearn's
+  objective and gradient, `init="auto"` (LDA / PCA / identity) and
+  L-BFGS with `maxiter = max_iter`, `ftol = gtol = tol`. The optimiser is
+  not SciPy's, so the test compares the objective reached with scikit-learn
+  1.8's (`gen_nca.py`); `expected_correct` evaluates it. Registry kind and
+  Python class.
+
 - `FeatureHasher` (`anofox-ml-text`, sklearn's
   `feature_extraction.FeatureHasher`): signed MurmurHash3 columns for
   `(name, value)` pairs; Python class with `input_type` `dict` / `pair` /

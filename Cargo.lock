@@ -220,6 +220,8 @@ name = "anofox-ml-neighbors"
 version = "0.4.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-discriminant",
+ "anofox-ml-preprocessing",
  "approx",
  "ndarray",
  "num-traits",

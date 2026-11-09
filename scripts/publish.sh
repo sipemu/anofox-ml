@@ -47,16 +47,16 @@ CRATES=(
     anofox-ml-linear
     anofox-ml-neural-networks
     anofox-ml-naive-bayes
-    anofox-ml-neighbors
     anofox-ml-trees
     anofox-ml-discriminant
     anofox-ml-metrics
     anofox-ml-gaussian-process
+    anofox-ml-regression
+    anofox-ml-preprocessing
+    anofox-ml-neighbors
     anofox-ml-manifold
     anofox-ml-cluster
-    anofox-ml-regression
     anofox-ml-ensemble
-    anofox-ml-preprocessing
     anofox-ml-conformal
     anofox-ml-registry
     anofox-ml
