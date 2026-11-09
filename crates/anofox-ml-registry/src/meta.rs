@@ -1831,3 +1831,156 @@ impl TransformedTargetFit {
         }
     }
 }
+
+// ============================================================
+// Multi-output regression
+// ============================================================
+
+/// `[X | Y]` split at its last `y_columns` columns.
+fn split_targets(
+    kind: &str,
+    xy: ArrayView2<f64>,
+    y_columns: usize,
+) -> Result<(Array2<f64>, Array2<f64>)> {
+    let p = xy.ncols();
+    if y_columns == 0 || y_columns >= p {
+        return Err(err(format!(
+            "{kind}: y_columns must be in 1..{p} for {p} columns, got {y_columns}"
+        )));
+    }
+    let s = p - y_columns;
+    Ok((
+        xy.slice(ndarray::s![.., ..s]).to_owned(),
+        xy.slice(ndarray::s![.., s..]).to_owned(),
+    ))
+}
+
+fn stack_columns(cols: &[Array1<f64>]) -> Result<Array2<f64>> {
+    let views: Vec<_> = cols.iter().map(|c| c.view()).collect();
+    ndarray::stack(Axis(1), &views).map_err(|e| err(e.to_string()))
+}
+
+/// sklearn's `MultiOutputRegressor`: one model per target, fitted on
+/// `[X | Y]` whose last `y_columns` columns are the targets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct MultiOutputConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub y_columns: usize,
+}
+
+impl Default for MultiOutputConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "OlsRegressor".into(),
+            estimator_params: empty_params(),
+            y_columns: 2,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct MultiOutputFit {
+    models: Vec<RegistryFitted>,
+}
+
+impl MultiOutputConfig {
+    pub fn fit(&self, xy: ArrayView2<f64>) -> Result<MultiOutputFit> {
+        let (x, y) = split_targets("MultiOutputRegressor", xy, self.y_columns)?;
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let models = y
+            .columns()
+            .into_iter()
+            .map(|c| spec.fit(x.view(), c))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(MultiOutputFit { models })
+    }
+}
+
+impl MultiOutputFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        let cols = self
+            .models
+            .iter()
+            .map(|m| m.predict(x))
+            .collect::<Result<Vec<_>>>()?;
+        stack_columns(&cols)
+    }
+}
+
+/// sklearn's `RegressorChain` (`cv=None`): the targets in `order`, each
+/// model fitted on `X` and the true earlier targets, predicting from the
+/// earlier predictions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct RegressorChainConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub y_columns: usize,
+    pub order: Option<Vec<usize>>,
+}
+
+impl Default for RegressorChainConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "OlsRegressor".into(),
+            estimator_params: empty_params(),
+            y_columns: 2,
+            order: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RegressorChainFit {
+    models: Vec<RegistryFitted>,
+    order: Vec<usize>,
+}
+
+impl RegressorChainConfig {
+    pub fn fit(&self, xy: ArrayView2<f64>) -> Result<RegressorChainFit> {
+        let (x, y) = split_targets("RegressorChain", xy, self.y_columns)?;
+        let k = y.ncols();
+        let order = self.order.clone().unwrap_or_else(|| (0..k).collect());
+        let mut seen = vec![false; k];
+        if order.len() != k
+            || order
+                .iter()
+                .any(|&o| o >= k || std::mem::replace(&mut seen[o], true))
+        {
+            return Err(err(format!(
+                "RegressorChain: order {order:?} is not a permutation of 0..{k}"
+            )));
+        }
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let mut aug = x.clone();
+        let mut models = Vec::with_capacity(k);
+        for &t in &order {
+            models.push(spec.fit(aug.view(), y.column(t))?);
+            aug = ndarray::concatenate(Axis(1), &[aug.view(), y.column(t).insert_axis(Axis(1))])
+                .map_err(|e| err(e.to_string()))?;
+        }
+        Ok(RegressorChainFit { models, order })
+    }
+}
+
+impl RegressorChainFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        let mut aug = x.to_owned();
+        let mut out = vec![Array1::zeros(0); self.order.len()];
+        for (m, &t) in self.models.iter().zip(&self.order) {
+            let p = m.predict(aug.view())?;
+            aug = ndarray::concatenate(Axis(1), &[aug.view(), p.view().insert_axis(Axis(1))])
+                .map_err(|e| err(e.to_string()))?;
+            out[t] = p;
+        }
+        stack_columns(&out)
+    }
+}

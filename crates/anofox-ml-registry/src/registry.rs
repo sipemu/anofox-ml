@@ -976,6 +976,24 @@ registry! {
         },
         predict: |m, x| m.predict(x),
     }
+    MultiOutputRegressor {
+        config: crate::meta::MultiOutputConfig = Default::default(),
+        fitted: crate::meta::MultiOutputFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x)
+        },
+        predict: |m, x| m.predict(x),
+    }
+    RegressorChain {
+        config: crate::meta::RegressorChainConfig = Default::default(),
+        fitted: crate::meta::RegressorChainFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x)
+        },
+        predict: |m, x| m.predict(x),
+    }
     OneVsRestClassifier {
         config: crate::meta::OneVsRestConfig = Default::default(),
         fitted: crate::meta::OneVsRestFit,
