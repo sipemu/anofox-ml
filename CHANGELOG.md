@@ -41,6 +41,11 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   last columns are `Y`); `transform` gives the X scores and the new
   `DynModel::transform_y` the Y scores, matching scikit-learn 1.8. `Cca` and
   `FittedCca` are now `Serialize`.
+- `BaggingEstimatorRegressor` / `BaggingEstimatorClassifier` in the
+  registry (#125): bagging over any registered kind via a nested
+  `{estimator, estimator_params}` (sklearn's `Bagging*(estimator=...)`),
+  with the tree bagging kinds' sampling settings. The existing
+  `BaggingRegressor` / `BaggingClassifier` kinds are unchanged.
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /
