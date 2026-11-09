@@ -278,6 +278,19 @@ def generate():
     add_cat("boot_combo", dict(combo, **boot(bootstrap_type="MVS")), y_cat)
     add_cat("boot_ordered_combo", dict(combo, boosting_type="Ordered",
                                        **boot(bootstrap_type="MVS")), y_cat)
+
+    # CatBoost's automatic learning rate (no learning_rate, l2_leaf_reg,
+    # leaf estimation settings given): from the row and iteration counts.
+    auto = dict(iterations=60, depth=4, **COMMON)
+    add("auto_lr_rmse", "regressor", auto, X, y_reg)
+    add("auto_lr_rmse_no_average", "regressor", dict(auto, boost_from_average=False), X, y_reg)
+    add("auto_lr_logloss", "classifier", auto, X, y_bin)
+    add("auto_lr_mc", "classifier", dict(auto, loss_function="MultiClass"), X,
+        y_mc.astype(float))
+    add("auto_lr_l2_set", "regressor", dict(auto, l2_leaf_reg=1.0), X, y_reg)
+    add_cat("auto_lr_defaults", dict(COMMON, iterations=250, cat_features=cat_cols,
+                                      random_strength=1.0, has_time=False,
+                                      bootstrap_type="MVS"), y_cat)
     return out
 
 

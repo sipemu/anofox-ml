@@ -6,6 +6,18 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: automatic learning rate (#151)
+
+- `learning_rate` is now `Option<f64>` on `CatBoostRegressor` /
+  `CatBoostClassifier`. When unset, it follows CatBoost's
+  `TAutoLRParamsGuesser` (CPU, no best model):
+  `exp(A ln n + B) · exp(C ln iterations) / exp(C ln 1000)`, capped at 0.5
+  and rounded to 6 digits, per loss and `boost_from_average`. As in CatBoost
+  it only applies while `l2_leaf_reg`, `leaf_estimation_method` and
+  `leaf_estimation_iterations` keep their defaults (else 0.03). Previously
+  the default was a fixed 0.03. Python: `learning_rate=None` now means the
+  automatic rate. Matches catboost 1.2.10 on 6 golden cases.
+
 ## [0.4.0] - 2026-11-06
 
 Gradient boosting (#127): HistGradientBoosting parity with scikit-learn 1.8,

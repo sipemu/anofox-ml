@@ -2884,9 +2884,11 @@ macro_rules! catboost_config {
         pub struct $name {
             /// Number of trees (CatBoost's `iterations`, default 1000).
             pub iterations: usize,
-            /// Shrinkage of every tree (default 0.03; CatBoost picks one
-            /// from the data when it is not given).
-            pub learning_rate: f64,
+            /// Shrinkage of every tree. Default (`None`): CatBoost's
+            /// automatic learning rate from the row and iteration counts
+            /// (when `l2_leaf_reg`, `leaf_estimation_method` and
+            /// `leaf_estimation_iterations` keep their defaults; else 0.03).
+            pub learning_rate: Option<f64>,
             /// Tree depth (levels of the symmetric tree, default 6).
             pub depth: usize,
             /// L2 regularization of the leaf values (default 3), scaled by
@@ -2957,7 +2959,7 @@ macro_rules! catboost_config {
             fn default() -> Self {
                 Self {
                     iterations: 1000,
-                    learning_rate: 0.03,
+                    learning_rate: None,
                     depth: 6,
                     l2_leaf_reg: 3.0,
                     border_count: 254,
@@ -2993,7 +2995,7 @@ macro_rules! catboost_config {
                 self
             }
             pub fn with_learning_rate(mut self, lr: f64) -> Self {
-                self.learning_rate = lr;
+                self.learning_rate = Some(lr);
                 self
             }
             pub fn with_depth(mut self, d: usize) -> Self {
@@ -3082,6 +3084,38 @@ macro_rules! catboost_config {
                 self
             }
 
+            /// CatBoost's learning rate for `loss` on `n` rows: the given
+            /// one, else `TAutoLRParamsGuesser` (CPU, no best model),
+            /// `exp(A ln n + B) · exp(C ln iterations) / exp(C ln 1000)`
+            /// capped at 0.5 and rounded to 6 digits.
+            fn learning_rate_for(&self, loss: Loss, n: usize) -> f64 {
+                if let Some(lr) = self.learning_rate {
+                    return lr;
+                }
+                let defaults = self.l2_leaf_reg == 3.0
+                    && self.leaf_estimation_method == CatBoostLeafEstimation::Newton
+                    && self.leaf_estimation_iterations.is_none();
+                // (A, B, C, D): dataset size and iteration coefficients.
+                let coeffs = match (loss, self.boost_from_average) {
+                    (Loss::Logloss, true) => (0.408, -7.299, -0.928, 2.701),
+                    (Loss::Logloss, false) => (0.427, -7.525, -0.917, 2.63),
+                    (Loss::MultiClass(_), false) => (0.051, -2.889, -0.845, 2.928),
+                    (Loss::Rmse, true) => (0.158, -4.287, -0.813, 2.571),
+                    (Loss::Rmse, false) => (0.178, -4.473, -0.76, 2.133),
+                    _ => return 0.03,
+                };
+                if !defaults {
+                    return 0.03;
+                }
+                let (a, b, c, d): (f64, f64, f64, f64) = coeffs;
+                let custom = (c * (self.iterations as f64).ln() + d).exp();
+                let default = (c * 1000f64.ln() + d).exp();
+                let base = (a * (n as f64).ln() + b).exp();
+                let lr = (base * custom / default).min(0.5);
+                let m = 10f64.powi(6);
+                (lr * m).round() / m
+            }
+
             /// CatBoost's bootstrap defaults for `loss` and `n` rows.
             fn sampling(&self, loss: Loss, n: usize) -> (CatBoostBootstrap, f64) {
                 let kind = self.bootstrap_type.unwrap_or(match loss {
@@ -3145,7 +3179,7 @@ macro_rules! catboost_config {
             fn train_params(&self) -> TrainParams {
                 TrainParams {
                     iterations: self.iterations,
-                    learning_rate: f64::from(self.learning_rate as f32),
+                    learning_rate: f64::from(self.learning_rate.unwrap_or(0.03) as f32),
                     depth: self.depth,
                     l2_leaf_reg: f64::from(self.l2_leaf_reg as f32),
                     score_function: self.score_function,
@@ -3252,6 +3286,7 @@ impl FitWeighted<f64> for CatBoostRegressor {
         let q = quantize(x, self.border_count, cat)?;
         let (bootstrap, subsample) = self.sampling(Loss::Rmse, x.nrows());
         let p = TrainParams {
+            learning_rate: f64::from(self.learning_rate_for(Loss::Rmse, x.nrows()) as f32),
             leaf_iterations: self.leaf_iterations(Loss::Rmse, x.ncols()),
             bootstrap,
             subsample,
@@ -3423,6 +3458,7 @@ impl FitWeighted<f64> for CatBoostClassifier {
         let q = quantize(x, self.border_count, cat)?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         let p = TrainParams {
+            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows()) as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             bootstrap,
             subsample,
