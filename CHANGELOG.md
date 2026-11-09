@@ -20,6 +20,8 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   IncrementalPca (batches give the same model as one fit), SgdClassifier,
   SgdRegressor, PassiveAggressiveRegressor, MlpClassifier and MlpRegressor
   (one epoch per batch). A failed batch leaves the model unchanged.
+- `warm_start` on `DynModel` for MlpClassifier and MlpRegressor (#125):
+  up to `max_iter` further epochs from the fitted weights.
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /
