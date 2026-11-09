@@ -213,6 +213,28 @@ impl PyModel {
             .map_err(to_py_err)
     }
 
+    /// Fit a text vectorizer on documents (one string each).
+    fn fit_text(&mut self, py: Python<'_>, docs: Vec<String>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| {
+            let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+            inner.fit_text(&refs)
+        })
+        .map_err(to_py_err)
+    }
+
+    /// Encode documents with a fitted text vectorizer (dense).
+    fn transform_text(&self, py: Python<'_>, docs: Vec<String>) -> PyResult<Py<PyAny>> {
+        let inner: &dyn DynModel = self.inner.as_ref();
+        let out = py
+            .detach(|| {
+                let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+                inner.transform_text(&refs)
+            })
+            .map_err(to_py_err)?;
+        Ok(out_to_py(py, out))
+    }
+
     /// Fit with an offset on the link scale (the GLMs).
     #[pyo3(signature = (x, y, offset, sample_weight=None))]
     fn fit_with_offset(

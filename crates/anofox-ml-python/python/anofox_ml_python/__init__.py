@@ -29,6 +29,9 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    CountVectorizer,
+    TfidfVectorizer,
+    HashingVectorizer,
     LarsCV,
     LassoLarsCV,
     MultiTaskLassoCV,
@@ -197,6 +200,7 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "CountVectorizer", "TfidfVectorizer", "HashingVectorizer",
     "LarsCV", "LassoLarsCV",
     "MultiTaskLassoCV", "MultiTaskElasticNetCV",
     "VotingRegressor", "VotingClassifier", "StackingRegressor", "StackingClassifier",

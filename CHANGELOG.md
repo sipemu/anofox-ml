@@ -68,6 +68,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `TweedieRegressor` raised `KeyError`.
 
 ### Registry
+- Text input (#183): `DynModel::fit_text(&[&str])` and
+  `transform_text(&[&str])` (capabilities `fit_text`, `transform_text`),
+  with kinds `CountVectorizer`, `TfidfVectorizer` and `HashingVectorizer`
+  (their configs and vocabularies now derive serde). The output is a dense
+  `n × n_features` array; the numeric `fit` of these kinds returns an
+  error pointing at `fit_text`. Python: `CountVectorizer`,
+  `TfidfVectorizer`, `HashingVectorizer` (dense `transform`,
+  `get_feature_names_out`, `vocabulary_`, `idf_`), matching scikit-learn
+  1.8 on the default analyzer.
 
 - `DynModel::predict_log_proba` (#125) for GaussianNB, MultinomialNB,
   BernoulliNB, ComplementNB, CategoricalNB (their joint log-likelihoods,

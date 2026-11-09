@@ -4149,3 +4149,111 @@ class LassoLarsCV(LarsCV):
     """:class:`LarsCV` on the Lasso path."""
 
     _kind = "LassoLarsCV"
+
+
+# ---------------------------------------------------------------------------
+# text vectorizers (documents in, dense arrays out)
+# ---------------------------------------------------------------------------
+
+
+def _documents(raw_documents):
+    if isinstance(raw_documents, str):
+        raise ValueError("Iterable over raw text documents expected, string object received.")
+    return [str(d) for d in raw_documents]
+
+
+class _TextVectorizer(TransformerMixin, BaseEstimator):
+    """sklearn's default analyzer: lowercase, ``token_pattern =
+    r"(?u)\\b\\w\\w+\\b"``, unigrams. ``transform`` returns a dense array
+    (sklearn returns a sparse matrix)."""
+
+    def fit(self, raw_documents, y=None):
+        docs = _documents(raw_documents)
+        model = self._new_model(None, None)
+        model.fit_text(docs)
+        self._model_ = model
+        return self
+
+    def transform(self, raw_documents):
+        return self._model().transform_text(_documents(raw_documents))
+
+    def fit_transform(self, raw_documents, y=None):
+        docs = _documents(raw_documents)
+        return self.fit(docs).transform(docs)
+
+
+class _VocabularyVectorizer(_TextVectorizer):
+    def _df_params(self):
+        if not isinstance(self.min_df, (int, np.integer)) or isinstance(self.min_df, bool):
+            raise ValueError("min_df must be an int (a document count)")
+        if not isinstance(self.max_df, (float, np.floating)) or not 0 <= self.max_df <= 1:
+            raise ValueError("max_df must be a float in [0, 1] (a document fraction)")
+        return {"min_df": int(self.min_df), "max_df_frac": float(self.max_df)}
+
+    def _vocabulary(self):
+        state = self._fitted_state()
+        return state.get("vocabulary", state.get("counts", {}).get("vocabulary"))
+
+    def get_feature_names_out(self, input_features=None):
+        return np.asarray(self._vocabulary(), dtype=object)
+
+    @property
+    def vocabulary_(self):
+        return {t: i for i, t in enumerate(self._vocabulary())}
+
+
+class CountVectorizer(_VocabularyVectorizer):
+    """Term counts over the training vocabulary."""
+
+    _kind = "CountVectorizer"
+
+    def __init__(self, *, min_df=1, max_df=1.0):
+        self.min_df = min_df
+        self.max_df = max_df
+
+    def _rust_params(self, X, y):
+        return self._df_params()
+
+
+class TfidfVectorizer(_VocabularyVectorizer):
+    """Counts weighted by the smoothed IDF, rows L2-normalised (``norm="l2"``)
+    or not (``norm=None``)."""
+
+    _kind = "TfidfVectorizer"
+
+    def __init__(self, *, min_df=1, max_df=1.0, norm="l2"):
+        self.min_df = min_df
+        self.max_df = max_df
+        self.norm = norm
+
+    def _rust_params(self, X, y):
+        if self.norm not in ("l2", None):
+            raise ValueError("norm must be 'l2' or None")
+        return {**self._df_params(), "norm_l2": self.norm == "l2"}
+
+    @property
+    def idf_(self):
+        return np.asarray(self._fitted_state()["idf"], dtype=np.float64)
+
+
+class HashingVectorizer(_TextVectorizer):
+    """Signed MurmurHash3 columns (sklearn's); stateless, ``fit`` only checks
+    the parameters. Keep ``n_features`` small: the output is dense."""
+
+    _kind = "HashingVectorizer"
+
+    def __init__(self, *, n_features=2**20, alternate_sign=True, norm="l2"):
+        self.n_features = n_features
+        self.alternate_sign = alternate_sign
+        self.norm = norm
+
+    def _rust_params(self, X, y):
+        if self.norm not in ("l2", None):
+            raise ValueError("norm must be 'l2' or None")
+        return {"n_features": int(self.n_features), "alternate_sign": self.alternate_sign,
+                "norm_l2": self.norm == "l2"}
+
+    def transform(self, raw_documents):
+        if "_model_" not in self.__dict__:
+            self.fit([])
+        return super().transform(raw_documents)
