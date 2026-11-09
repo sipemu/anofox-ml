@@ -1,8 +1,7 @@
 """Golden data for LgbmRegressor / LgbmClassifier against LightGBM 4.7.0 (#127).
 
-Deterministic settings only (no bagging, GOSS or feature fraction, whose
-draws come from LightGBM's own generators): `deterministic=True,
-force_row_wise=True`, one thread.
+`deterministic=True, force_row_wise=True`, one thread. Bagging, GOSS and
+the feature fractions reproduce LightGBM's own generators (#152).
 """
 
 import os
@@ -118,6 +117,52 @@ def generate():
     add("efb_multiclass", "classifier", dict(base, min_child_samples=5),
         np.digitize(eta_s + rng.logistic(size=n) * 0.5, [-0.5, 0.7]).astype(float),
         **sparse_kw)
+    # LightGBM's generators (#152): bagging (every `subsample_freq`
+    # iterations, balanced for binary labels), GOSS (after 1 / learning_rate
+    # iterations), feature fractions by tree and by node, and the seeds
+    # derived from `random_state`.
+    bag = dict(base, subsample=0.7, subsample_freq=1)
+    add("bagging_regression", "regressor", bag, y_reg)
+    add("bagging_freq3_seed", "regressor",
+        dict(bag, subsample=0.6, subsample_freq=3, random_state=42), y_reg)
+    add("bagging_weighted", "regressor", dict(bag, min_child_samples=5), y_reg, sw=weights)
+    add("bagging_quantile", "regressor", dict(bag, objective="quantile", alpha=0.3), y_reg)
+    add("bagging_binary", "classifier", dict(bag, random_state=3), y_bin)
+    add("bagging_balanced", "classifier",
+        dict(base, subsample_freq=1, pos_bagging_fraction=0.5, neg_bagging_fraction=0.8), y_bin)
+    add("bagging_multiclass", "classifier", dict(bag, subsample=0.6, subsample_freq=2), y_multi)
+    add("dart_bagging_seed", "regressor",
+        dict(dart, subsample=0.8, subsample_freq=1, drop_rate=0.3, random_state=11), y_reg)
+    goss = dict(base, boosting_type="goss")
+    add("goss_regression", "regressor", goss, y_reg)
+    add("goss_rates_seed", "regressor",
+        dict(goss, top_rate=0.3, other_rate=0.2, random_state=5), y_reg, sw=weights)
+    add("goss_binary", "classifier", goss, y_bin)
+    add("goss_multiclass", "classifier", dict(goss, min_child_samples=5), y_multi)
+    add("colsample_bytree", "regressor", dict(base, colsample_bytree=0.5), y_reg)
+    add("colsample_bynode", "regressor", dict(base, feature_fraction_bynode=0.5), y_reg)
+    add("colsample_both_seed", "regressor",
+        dict(base, colsample_bytree=0.75, feature_fraction_bynode=0.6, random_state=7,
+             min_child_samples=5), y_reg)
+    add("colsample_multiclass", "classifier",
+        dict(base, colsample_bytree=0.7, feature_fraction_bynode=0.7), y_multi)
+    # A constant feature: LightGBM draws from the non-trivial ones only.
+    Xc = np.column_stack([X[:, :2], np.full(n, 3.0), X[:, 2:]])
+    add("colsample_constant_feature", "regressor",
+        dict(base, colsample_bytree=0.5, feature_fraction_bynode=0.7), y_reg,
+        X=Xc, X_test=Xc[::5])
+    add("all_samplers_efb", "regressor",
+        dict(base, subsample=0.8, subsample_freq=2, colsample_bytree=0.8,
+             feature_fraction_bynode=0.8, min_child_samples=5, random_state=2), ys,
+        **sparse_kw)
+    # More than one generator block (1024 rows each).
+    nb = 1300
+    Xb = np.column_stack([rng.normal(size=nb), rng.uniform(-2, 2, size=nb),
+                          rng.normal(size=nb)])
+    yb = np.sin(2 * Xb[:, 0]) + 0.6 * Xb[:, 1] + rng.normal(scale=0.4, size=nb)
+    big_kw = dict(X=Xb, X_test=Xb[::20])
+    add("bagging_blocks", "regressor", dict(bag, subsample=0.5, num_leaves=15), yb, **big_kw)
+    add("goss_blocks", "regressor", dict(goss, num_leaves=15), yb, **big_kw)
     return out
 
 
