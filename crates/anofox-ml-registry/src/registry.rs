@@ -983,6 +983,15 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
     }
+    TransformedTargetRegressor {
+        config: crate::meta::TransformedTargetConfig = Default::default(),
+        fitted: crate::meta::TransformedTargetFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+    }
     OneVsRestClassifier {
         config: crate::meta::OneVsRestConfig = Default::default(),
         fitted: crate::meta::OneVsRestFit,

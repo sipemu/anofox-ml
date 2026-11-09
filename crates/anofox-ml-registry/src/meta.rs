@@ -1701,3 +1701,133 @@ impl CalibratedClassifierFit {
             .collect())
     }
 }
+
+// ============================================================
+// Transformed target
+// ============================================================
+
+/// A named function of `y` and its inverse (sklearn's `func` /
+/// `inverse_func` pairs `np.log` / `np.exp`, `np.log1p` / `np.expm1`,
+/// `np.sqrt` / `np.square`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum TargetFunc {
+    #[default]
+    Identity,
+    Log,
+    Log1p,
+    Sqrt,
+}
+
+impl TargetFunc {
+    fn transform(self) -> anofox_ml_regression::TargetTransform {
+        use anofox_ml_regression::TargetTransform as T;
+        match self {
+            TargetFunc::Identity => T::Identity,
+            TargetFunc::Log => T::Log,
+            TargetFunc::Log1p => T::Log1p,
+            TargetFunc::Sqrt => T::Sqrt,
+        }
+    }
+}
+
+/// sklearn's `TransformedTargetRegressor`: the regressor learns `func(y)`
+/// (or `y` transformed by a registered transformer fitted on it as one
+/// column) and its predictions are mapped back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct TransformedTargetConfig {
+    pub regressor: EstimatorSpec,
+    pub func: Option<TargetFunc>,
+    pub transformer: Option<EstimatorSpec>,
+}
+
+impl Default for TransformedTargetConfig {
+    fn default() -> Self {
+        Self {
+            regressor: EstimatorSpec {
+                estimator: "OlsRegressor".into(),
+                estimator_params: empty_params(),
+            },
+            func: None,
+            transformer: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+enum TargetMap {
+    Func(TargetFunc),
+    Transformer(RegistryFitted),
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TransformedTargetFit {
+    regressor: RegistryFitted,
+    map: TargetMap,
+}
+
+fn column(o: Out, what: &str) -> Result<Array1<f64>> {
+    match o {
+        Out::A1(a) => Ok(a),
+        Out::A2(a) if a.ncols() == 1 => Ok(a.column(0).to_owned()),
+        Out::A2(a) => Err(err(format!(
+            "{what} gave {} columns for one target",
+            a.ncols()
+        ))),
+    }
+}
+
+impl TransformedTargetConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<TransformedTargetFit> {
+        let (map, y_t) = match (&self.func, &self.transformer) {
+            (Some(_), Some(_)) => {
+                return Err(err(
+                    "TransformedTargetRegressor: give func or transformer, not both",
+                ))
+            }
+            (None, Some(spec)) => {
+                let y2 = y.to_owned().insert_axis(Axis(1));
+                let mut t = crate::make(&spec.estimator, &spec.estimator_params)?;
+                if !t.capabilities().contains(&"inverse_transform") {
+                    return Err(err(format!(
+                        "TransformedTargetRegressor: {} has no inverse_transform",
+                        spec.estimator
+                    )));
+                }
+                t.fit(y2.view(), None, None)?;
+                let y_t = column(t.transform(y2.view())?, &spec.estimator)?;
+                (TargetMap::Transformer(RegistryFitted(t)), y_t)
+            }
+            (func, None) => {
+                let func = func.unwrap_or_default();
+                let tr = func.transform();
+                let y_t = y.mapv(|v| tr.forward(v));
+                if y_t.iter().any(|v| !v.is_finite()) {
+                    return Err(err(format!(
+                        "TransformedTargetRegressor: func {func:?} is not finite on every target"
+                    )));
+                }
+                (TargetMap::Func(func), y_t)
+            }
+        };
+        let regressor = self.regressor.fit(x, y_t.view())?;
+        Ok(TransformedTargetFit { regressor, map })
+    }
+}
+
+impl TransformedTargetFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let p = self.regressor.predict(x)?;
+        match &self.map {
+            TargetMap::Func(f) => {
+                let tr = f.transform();
+                Ok(p.mapv(|v| tr.inverse(v)))
+            }
+            TargetMap::Transformer(t) => {
+                let p2 = p.insert_axis(Axis(1));
+                column(t.model().inverse_transform(p2.view())?, t.model().kind())
+            }
+        }
+    }
+}
