@@ -53,6 +53,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   out-of-fold predictions of the base specs (KFold / StratifiedKFold, `cv`
   folds without shuffling) feed `final_estimator`; `passthrough` and
   `stack_method` as scikit-learn, whose predictions they match.
+- `CalibratedClassifierCV` in the registry (#125): sigmoid (Platt) or
+  isotonic calibration of a registered classifier's decision function (else
+  its probabilities), one-vs-rest for more than two classes, with
+  `ensemble` true (one calibrated model per fold, averaged) or false.
+  Matches scikit-learn 1.8 (isotonic to 1e-12, sigmoid to 1e-7, its
+  L-BFGS-B tolerance).
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /

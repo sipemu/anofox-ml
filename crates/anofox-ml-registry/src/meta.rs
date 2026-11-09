@@ -1280,3 +1280,424 @@ impl StackingClassifierFit {
         self.final_model.predict_proba(self.meta(x)?.view())
     }
 }
+
+// ============================================================
+// Probability calibration
+// ============================================================
+
+/// sklearn's `CalibratedClassifierCV(method=...)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CalibrationMethod {
+    #[default]
+    Sigmoid,
+    Isotonic,
+}
+
+/// One class's map from scores to probabilities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum Calibrator {
+    /// `expit(-(a·f + b))` (sklearn's `_SigmoidCalibration`).
+    Sigmoid { a: f64, b: f64 },
+    /// sklearn's `IsotonicRegression(out_of_bounds="clip")`: thresholds,
+    /// linearly interpolated (scipy's `interp1d`), clipped to their range.
+    Isotonic { x: Vec<f64>, y: Vec<f64> },
+}
+
+fn expit(z: f64) -> f64 {
+    if z >= 0.0 {
+        1.0 / (1.0 + (-z).exp())
+    } else {
+        let e = z.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// sklearn's `_sigmoid_calibration` (Platt): the half-binomial loss of the
+/// prior-smoothed targets at `raw = -(a f + b)`, minimised by Newton's
+/// method (sklearn: L-BFGS-B to `gtol = 1e-6`, the same minimum).
+fn fit_sigmoid(scores: &[f64], y01: &[f64]) -> Calibrator {
+    let max_abs = scores.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let scale = if max_abs >= 30.0 { max_abs } else { 1.0 };
+    let f: Vec<f64> = scores.iter().map(|v| v / scale).collect();
+    let prior0 = y01.iter().filter(|&&v| v <= 0.0).count() as f64;
+    let prior1 = y01.len() as f64 - prior0;
+    let t: Vec<f64> = y01
+        .iter()
+        .map(|&v| {
+            if v > 0.0 {
+                (prior1 + 1.0) / (prior1 + 2.0)
+            } else {
+                1.0 / (prior0 + 2.0)
+            }
+        })
+        .collect();
+    let loss = |a: f64, b: f64| -> f64 {
+        f.iter()
+            .zip(&t)
+            .map(|(&fi, &ti)| {
+                let raw = -(a * fi + b);
+                // log(1 + exp(raw)) - t raw, stably.
+                raw.max(0.0) + (-raw.abs()).exp().ln_1p() - ti * raw
+            })
+            .sum()
+    };
+    let (mut a, mut b) = (0.0, ((prior0 + 1.0) / (prior1 + 1.0)).ln());
+    let mut value = loss(a, b);
+    for _ in 0..200 {
+        // Gradient and Hessian in (a, b); d raw / d(a, b) = -(f, 1).
+        let (mut ga, mut gb, mut haa, mut hab, mut hbb) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for (&fi, &ti) in f.iter().zip(&t) {
+            let p = expit(-(a * fi + b));
+            let g = p - ti;
+            let h = p * (1.0 - p);
+            ga -= g * fi;
+            gb -= g;
+            haa += h * fi * fi;
+            hab += h * fi;
+            hbb += h;
+        }
+        if ga.abs().max(gb.abs()) < 1e-13 * f.len() as f64 {
+            break;
+        }
+        let det = haa * hbb - hab * hab;
+        if det.abs() < 1e-300 {
+            break;
+        }
+        let (da, db) = (-(hbb * ga - hab * gb) / det, -(haa * gb - hab * ga) / det);
+        let mut step = 1.0;
+        let mut moved = false;
+        while step > 1e-12 {
+            let (na, nb) = (a + step * da, b + step * db);
+            let nv = loss(na, nb);
+            if nv <= value {
+                (a, b, value) = (na, nb, nv);
+                moved = true;
+                break;
+            }
+            step /= 2.0;
+        }
+        if !moved {
+            break;
+        }
+    }
+    Calibrator::Sigmoid { a: a / scale, b }
+}
+
+/// sklearn's `IsotonicRegression(out_of_bounds="clip").fit`: rows sorted
+/// by score (then label), equal scores pooled (`_make_unique`, to numpy's
+/// resolution), pool adjacent violators
+/// (`_inplace_contiguous_isotonic_regression`), interior points equal to
+/// both neighbours dropped.
+fn fit_isotonic(scores: &[f64], y01: &[f64]) -> Calibrator {
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by(|&i, &j| {
+        scores[i]
+            .total_cmp(&scores[j])
+            .then(y01[i].total_cmp(&y01[j]))
+    });
+    let (mut xs, mut ys, mut ws) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut cx, mut cy, mut cw) = (scores[order[0]], 0.0, 0.0);
+    for &k in &order {
+        if scores[k] - cx >= 1e-15 {
+            xs.push(cx);
+            ys.push(cy / cw);
+            ws.push(cw);
+            (cx, cy, cw) = (scores[k], y01[k], 1.0);
+        } else {
+            cy += y01[k];
+            cw += 1.0;
+        }
+    }
+    xs.push(cx);
+    ys.push(cy / cw);
+    ws.push(cw);
+    // Pool adjacent violators, as sklearn's Cython (single pass with
+    // backtracking; equal neighbours pool).
+    let n = ys.len();
+    let mut target: Vec<usize> = (0..n).collect();
+    let mut i = 0;
+    while i < n {
+        let mut k = target[i] + 1;
+        if k == n {
+            break;
+        }
+        if ys[i] < ys[k] {
+            i = k;
+            continue;
+        }
+        let (mut sum_wy, mut sum_w) = (ws[i] * ys[i], ws[i]);
+        loop {
+            let prev_y = ys[k];
+            sum_wy += ws[k] * ys[k];
+            sum_w += ws[k];
+            k = target[k] + 1;
+            if k == n || prev_y < ys[k] {
+                ys[i] = sum_wy / sum_w;
+                ws[i] = sum_w;
+                target[i] = k - 1;
+                target[k - 1] = i;
+                if i > 0 {
+                    i = target[i - 1];
+                }
+                break;
+            }
+        }
+    }
+    let mut i = 0;
+    while i < n {
+        let k = target[i] + 1;
+        for j in i + 1..k {
+            ys[j] = ys[i];
+        }
+        i = k;
+    }
+    let keep: Vec<bool> = (0..n)
+        .map(|j| j == 0 || j == n - 1 || ys[j] != ys[j - 1] || ys[j] != ys[j + 1])
+        .collect();
+    let pick = |v: &[f64]| {
+        v.iter()
+            .zip(&keep)
+            .filter(|(_, &k)| k)
+            .map(|(&a, _)| a)
+            .collect()
+    };
+    Calibrator::Isotonic {
+        x: pick(&xs),
+        y: pick(&ys),
+    }
+}
+
+impl Calibrator {
+    fn fit(method: CalibrationMethod, scores: &[f64], y01: &[f64]) -> Calibrator {
+        match method {
+            CalibrationMethod::Sigmoid => fit_sigmoid(scores, y01),
+            CalibrationMethod::Isotonic => fit_isotonic(scores, y01),
+        }
+    }
+
+    fn predict(&self, s: f64) -> f64 {
+        match self {
+            Calibrator::Sigmoid { a, b } => expit(-(a * s + b)),
+            Calibrator::Isotonic { x, y } => {
+                if x.len() == 1 {
+                    return y[0];
+                }
+                let s = s.clamp(x[0], x[x.len() - 1]);
+                // scipy's interp1d: searchsorted (left), clipped to 1..n-1.
+                let hi = x.partition_point(|&v| v < s).clamp(1, x.len() - 1);
+                let lo = hi - 1;
+                let slope = (y[hi] - y[lo]) / (x[hi] - x[lo]);
+                slope * (s - x[lo]) + y[lo]
+            }
+        }
+    }
+}
+
+/// The scores sklearn calibrates (`response_method=["decision_function",
+/// "predict_proba"]`): one column for two classes (the decision function,
+/// or P(class 1)), one per class otherwise.
+fn calibration_scores(
+    m: &RegistryFitted,
+    x: ArrayView2<f64>,
+    n_classes: usize,
+) -> Result<Array2<f64>> {
+    if has(m, "decision_function") {
+        if n_classes == 2 {
+            return Ok(decision_1d(m, x)?.insert_axis(Axis(1)));
+        }
+        return match m.model().decision_function(x)? {
+            Out::A2(a) if a.ncols() == n_classes => Ok(a),
+            other => Err(err(format!(
+                "{}: decision_function of shape {:?} for {n_classes} classes",
+                m.model().kind(),
+                match other {
+                    Out::A1(a) => vec![a.len()],
+                    Out::A2(a) => a.shape().to_vec(),
+                }
+            ))),
+        };
+    }
+    if !has(m, "predict_proba") {
+        return Err(err(format!(
+            "CalibratedClassifierCV: {} has neither decision_function nor predict_proba",
+            m.model().kind()
+        )));
+    }
+    let p = m.predict_proba(x)?;
+    if p.ncols() != n_classes {
+        return Err(err(format!(
+            "{}: predict_proba has {} columns for {n_classes} classes",
+            m.model().kind(),
+            p.ncols()
+        )));
+    }
+    Ok(if n_classes == 2 {
+        p.slice(ndarray::s![.., 1..]).to_owned()
+    } else {
+        p
+    })
+}
+
+/// A base model and its per-class calibrators (sklearn's
+/// `_CalibratedClassifier`).
+#[derive(Serialize, Deserialize)]
+struct CalibratedPair {
+    model: RegistryFitted,
+    calibrators: Vec<Calibrator>,
+}
+
+impl CalibratedPair {
+    fn fit(
+        model: RegistryFitted,
+        scores: &Array2<f64>,
+        idx: &[usize],
+        n_classes: usize,
+        method: CalibrationMethod,
+    ) -> CalibratedPair {
+        let calibrators = (0..scores.ncols())
+            .map(|c| {
+                // The positive class of column c (class 1 for two classes).
+                let pos = if n_classes == 2 { 1 } else { c };
+                let y01: Vec<f64> = idx.iter().map(|&i| f64::from(i == pos)).collect();
+                Calibrator::fit(method, &scores.column(c).to_vec(), &y01)
+            })
+            .collect();
+        CalibratedPair { model, calibrators }
+    }
+
+    fn predict_proba(&self, x: ArrayView2<f64>, n_classes: usize) -> Result<Array2<f64>> {
+        let scores = calibration_scores(&self.model, x, n_classes)?;
+        let mut p = Array2::<f64>::zeros((x.nrows(), n_classes));
+        for (c, cal) in self.calibrators.iter().enumerate() {
+            let col = if n_classes == 2 { 1 } else { c };
+            for i in 0..x.nrows() {
+                p[[i, col]] = cal.predict(scores[[i, c]]);
+            }
+        }
+        if n_classes == 2 {
+            for i in 0..x.nrows() {
+                p[[i, 0]] = 1.0 - p[[i, 1]];
+            }
+        } else {
+            for mut row in p.rows_mut() {
+                let total: f64 = row.sum();
+                if total != 0.0 {
+                    row.mapv_inplace(|v| v / total);
+                } else {
+                    row.fill(1.0 / n_classes as f64);
+                }
+            }
+        }
+        p.mapv_inplace(|v| if v > 1.0 && v <= 1.0 + 1e-5 { 1.0 } else { v });
+        Ok(p)
+    }
+}
+
+/// sklearn's `CalibratedClassifierCV` over a registered classifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct CalibratedClassifierConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub method: CalibrationMethod,
+    pub cv: usize,
+    pub ensemble: bool,
+}
+
+impl Default for CalibratedClassifierConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "LinearSvc".into(),
+            estimator_params: empty_params(),
+            method: CalibrationMethod::Sigmoid,
+            cv: 5,
+            ensemble: true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CalibratedClassifierFit {
+    classes: Vec<f64>,
+    pairs: Vec<CalibratedPair>,
+}
+
+impl CalibratedClassifierConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<CalibratedClassifierFit> {
+        check_cv("CalibratedClassifierCV", self.cv)?;
+        let (classes, idx) = encode(y)?;
+        if classes.len() < 2 {
+            return Err(err("CalibratedClassifierCV needs at least 2 classes"));
+        }
+        let k = classes.len();
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let y_enc: Array1<f64> = idx.iter().map(|&i| i as f64).collect();
+        let splits = anofox_ml_core::stratified_k_fold_ordered(&y_enc, self.cv)?;
+        let pairs = if self.ensemble {
+            // One calibrated model per fold, calibrated on its test rows.
+            splits
+                .iter()
+                .map(|(train, test)| {
+                    let model = spec.fit(
+                        x.select(Axis(0), train).view(),
+                        y.select(Axis(0), train).view(),
+                    )?;
+                    let scores = calibration_scores(&model, x.select(Axis(0), test).view(), k)?;
+                    let test_idx: Vec<usize> = test.iter().map(|&i| idx[i]).collect();
+                    Ok(CalibratedPair::fit(
+                        model,
+                        &scores,
+                        &test_idx,
+                        k,
+                        self.method,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            // Out-of-fold scores of all rows; the model refitted on all rows.
+            let mut oof: Option<Array2<f64>> = None;
+            for (train, test) in &splits {
+                let model = spec.fit(
+                    x.select(Axis(0), train).view(),
+                    y.select(Axis(0), train).view(),
+                )?;
+                let s = calibration_scores(&model, x.select(Axis(0), test).view(), k)?;
+                let all = oof.get_or_insert_with(|| Array2::zeros((x.nrows(), s.ncols())));
+                for (r, &i) in test.iter().enumerate() {
+                    all.row_mut(i).assign(&s.row(r));
+                }
+            }
+            let model = spec.fit(x, y)?;
+            vec![CalibratedPair::fit(
+                model,
+                &oof.expect("cv >= 2 folds"),
+                &idx,
+                k,
+                self.method,
+            )]
+        };
+        Ok(CalibratedClassifierFit { classes, pairs })
+    }
+}
+
+impl CalibratedClassifierFit {
+    pub fn predict_proba(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        let k = self.classes.len();
+        let mut mean = Array2::<f64>::zeros((x.nrows(), k));
+        for pair in &self.pairs {
+            mean = mean + pair.predict_proba(x, k)?;
+        }
+        Ok(mean / self.pairs.len() as f64)
+    }
+
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        Ok(argmax_rows(&self.predict_proba(x)?)
+            .into_iter()
+            .map(|c| self.classes[c])
+            .collect())
+    }
+}
