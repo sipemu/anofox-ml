@@ -8,6 +8,17 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `BernoulliRbm` (`anofox-ml-neural-networks`, sklearn's `BernoulliRBM`):
+  persistent contrastive divergence drawing from numpy's `RandomState` in
+  sklearn's order, so a seeded `fit`, `partial_fit`, `gibbs` and
+  `score_samples` equal scikit-learn 1.8's (`gen_rbm.py`). Registry kind
+  (`transform`, `score_samples`, `partial_fit`) and Python class.
+- `numpy_random::RandomState` gains `random_sample`, `uniform`,
+  `standard_normal` / `normal` (legacy polar method), `standard_exponential`,
+  `standard_gamma` / `gamma` (legacy Marsaglia–Tsang) and `choice_weighted`
+  (`choice(p=...)`, with and without replacement), each equal to numpy, and
+  serde (a fitted model can carry its stream).
+
 - `NeighborhoodComponentsAnalysis` (`anofox-ml-neighbors`): sklearn's
   objective and gradient, `init="auto"` (LDA / PCA / identity) and
   L-BFGS with `maxiter = max_iter`, `ftol = gtol = tol`. The optimiser is

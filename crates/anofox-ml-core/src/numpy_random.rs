@@ -11,11 +11,46 @@ use crate::{Result, RustMlError};
 const N: usize = 624;
 const M: usize = 397;
 
-/// numpy's `np.random.RandomState` seeded with an integer.
-#[derive(Debug, Clone)]
+/// numpy's `np.random.RandomState` seeded with an integer. Serialisable,
+/// so a fitted model can continue its stream (sklearn's `random_state_`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(from = "RandomStateRepr", into = "RandomStateRepr")]
 pub struct RandomState {
     key: [u32; N],
     pos: usize,
+    /// The second normal of the last polar pair (`has_gauss` / `gauss`).
+    gauss: Option<f64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RandomStateRepr {
+    key: Vec<u32>,
+    pos: usize,
+    gauss: Option<f64>,
+}
+
+impl From<RandomState> for RandomStateRepr {
+    fn from(r: RandomState) -> Self {
+        Self {
+            key: r.key.to_vec(),
+            pos: r.pos,
+            gauss: r.gauss,
+        }
+    }
+}
+
+impl From<RandomStateRepr> for RandomState {
+    fn from(r: RandomStateRepr) -> Self {
+        let mut key = [0u32; N];
+        for (k, v) in key.iter_mut().zip(&r.key) {
+            *k = *v;
+        }
+        Self {
+            key,
+            pos: r.pos.min(N),
+            gauss: r.gauss,
+        }
+    }
 }
 
 impl RandomState {
@@ -28,7 +63,11 @@ impl RandomState {
                 .wrapping_mul(key[i - 1] ^ (key[i - 1] >> 30))
                 .wrapping_add(i as u32);
         }
-        Self { key, pos: N }
+        Self {
+            key,
+            pos: N,
+            gauss: None,
+        }
     }
 
     fn generate(&mut self) {
@@ -91,6 +130,158 @@ impl RandomState {
         let mut p: Vec<usize> = (0..n).collect();
         self.shuffle(&mut p);
         p
+    }
+
+    /// `random_sample()`: a 53-bit uniform double in `[0, 1)`.
+    pub fn random_sample(&mut self) -> f64 {
+        let a = f64::from(self.next_u32() >> 5);
+        let b = f64::from(self.next_u32() >> 6);
+        (a * 67_108_864.0 + b) / 9_007_199_254_740_992.0
+    }
+
+    /// `uniform(low, high)`.
+    pub fn uniform(&mut self, low: f64, high: f64) -> f64 {
+        low + (high - low) * self.random_sample()
+    }
+
+    /// `standard_normal()` (the legacy polar method, which caches the second
+    /// value of each pair).
+    pub fn standard_normal(&mut self) -> f64 {
+        if let Some(g) = self.gauss.take() {
+            return g;
+        }
+        let (x1, x2, r2) = loop {
+            let x1 = 2.0 * self.random_sample() - 1.0;
+            let x2 = 2.0 * self.random_sample() - 1.0;
+            let r2 = x1 * x1 + x2 * x2;
+            if r2 < 1.0 && r2 != 0.0 {
+                break (x1, x2, r2);
+            }
+        };
+        let f = (-2.0 * r2.ln() / r2).sqrt();
+        self.gauss = Some(f * x1);
+        f * x2
+    }
+
+    /// `normal(loc, scale)`.
+    pub fn normal(&mut self, loc: f64, scale: f64) -> f64 {
+        loc + scale * self.standard_normal()
+    }
+
+    /// `standard_exponential()` (legacy: `-ln(1 - U)`).
+    pub fn standard_exponential(&mut self) -> f64 {
+        -(1.0 - self.random_sample()).ln()
+    }
+
+    /// `standard_gamma(shape)` (legacy: Marsaglia–Tsang for `shape > 1`,
+    /// Johnk-style rejection below 1).
+    pub fn standard_gamma(&mut self, shape: f64) -> f64 {
+        if shape == 1.0 {
+            return self.standard_exponential();
+        }
+        if shape == 0.0 {
+            return 0.0;
+        }
+        if shape < 1.0 {
+            loop {
+                let u = self.random_sample();
+                let v = self.standard_exponential();
+                if u <= 1.0 - shape {
+                    let x = u.powf(1.0 / shape);
+                    if x <= v {
+                        return x;
+                    }
+                } else {
+                    let y = -((1.0 - u) / shape).ln();
+                    let x = (1.0 - shape + shape * y).powf(1.0 / shape);
+                    if x <= v + y {
+                        return x;
+                    }
+                }
+            }
+        }
+        let b = shape - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * b).sqrt();
+        loop {
+            let (x, mut v) = loop {
+                let x = self.standard_normal();
+                let v = 1.0 + c * x;
+                if v > 0.0 {
+                    break (x, v);
+                }
+            };
+            v = v * v * v;
+            let u = self.random_sample();
+            if u < 1.0 - 0.0331 * (x * x) * (x * x) {
+                return b * v;
+            }
+            if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
+                return b * v;
+            }
+        }
+    }
+
+    /// `gamma(shape, scale)`.
+    pub fn gamma(&mut self, shape: f64, scale: f64) -> f64 {
+        scale * self.standard_gamma(shape)
+    }
+
+    /// `choice(n, size, replace, p)`: indices into `0..p.len()` drawn with
+    /// probabilities `p` (normalised by their sum, as numpy's cdf). Without
+    /// replacement, numpy's loop: draw the missing count at once, zero the
+    /// found entries, keep the first occurrence of each new index.
+    pub fn choice_weighted(&mut self, p: &[f64], size: usize, replace: bool) -> Result<Vec<usize>> {
+        if p.iter().any(|v| !(v.is_finite() && *v >= 0.0)) {
+            return Err(RustMlError::InvalidParameter(
+                "probabilities must be finite and non-negative".into(),
+            ));
+        }
+        let cdf = |p: &[f64]| -> Vec<f64> {
+            let mut acc = 0.0;
+            let mut c: Vec<f64> = p
+                .iter()
+                .map(|v| {
+                    acc += v;
+                    acc
+                })
+                .collect();
+            let last = *c.last().unwrap_or(&1.0);
+            c.iter_mut().for_each(|v| *v /= last);
+            c
+        };
+        let search = |c: &[f64], x: f64| c.partition_point(|&v| v <= x);
+        if replace {
+            let c = cdf(p);
+            return Ok((0..size)
+                .map(|_| search(&c, self.random_sample()))
+                .collect());
+        }
+        if p.iter().filter(|&&v| v > 0.0).count() < size {
+            return Err(RustMlError::InvalidParameter(
+                "fewer non-zero entries in p than size".into(),
+            ));
+        }
+        let mut p = p.to_vec();
+        let mut found: Vec<usize> = Vec::with_capacity(size);
+        while found.len() < size {
+            let x: Vec<f64> = (0..size - found.len())
+                .map(|_| self.random_sample())
+                .collect();
+            for &f in &found {
+                p[f] = 0.0;
+            }
+            let c = cdf(&p);
+            // np.unique(new, return_index=True), first occurrences in draw order.
+            let mut new: Vec<usize> = Vec::new();
+            for v in x {
+                let idx = search(&c, v);
+                if !new.contains(&idx) {
+                    new.push(idx);
+                }
+            }
+            found.extend(new);
+        }
+        Ok(found)
     }
 
     /// `choice(values, size, replace=False)` without probabilities.
@@ -382,6 +573,59 @@ pub fn resample_without_replacement(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn float_draws_match_numpy() {
+        let close = |a: &[f64], b: &[f64]| {
+            for (x, y) in a.iter().zip(b) {
+                assert!((x - y).abs() <= 1e-15 * y.abs().max(1.0), "{x} vs {y}");
+            }
+        };
+        let mut r = super::RandomState::new(42);
+        let u: Vec<f64> = (0..3).map(|_| r.random_sample()).collect();
+        close(
+            &u,
+            &[0.3745401188473625, 0.9507143064099162, 0.7319939418114051],
+        );
+        let z: Vec<f64> = (0..3).map(|_| r.standard_normal()).collect();
+        close(
+            &z,
+            &[-1.1118801180469204, 0.31890218468938336, 0.2790412922001377],
+        );
+        let n: Vec<f64> = (0..2).map(|_| r.normal(1.0, 0.01)).collect();
+        close(&n, &[1.0101051528480653, 0.9941912186597649]);
+
+        let mut r = super::RandomState::new(7);
+        let g: Vec<f64> = (0..4).map(|_| r.gamma(100.0, 0.01)).collect();
+        close(
+            &g,
+            &[
+                1.1751427413211315,
+                0.9508705567396899,
+                0.919962409371817,
+                0.9968728936300447,
+            ],
+        );
+        let g: Vec<f64> = (0..3).map(|_| r.gamma(0.5, 1.0)).collect();
+        close(
+            &g,
+            &[0.5212000571033304, 0.08302788640056277, 0.04553330912242556],
+        );
+        let g: Vec<f64> = (0..2).map(|_| r.gamma(1.0, 2.0)).collect();
+        close(&g, &[5.353278066701518, 0.05042891393314576]);
+        let u: Vec<f64> = (0..2).map(|_| r.uniform(0.0, 1.0)).collect();
+        close(&u, &[0.6005489174641225, 0.9501295004136456]);
+    }
+
+    #[test]
+    fn weighted_choice_matches_numpy() {
+        let mut r = super::RandomState::new(3);
+        let p = [0.1, 0.0, 0.3, 0.2, 0.4];
+        assert_eq!(r.choice_weighted(&p, 3, false).unwrap(), vec![3, 4, 2]);
+        assert_eq!(r.choice_weighted(&p, 4, false).unwrap(), vec![3, 4, 2, 0]);
+        assert_eq!(r.choice_weighted(&p, 2, true).unwrap(), vec![0, 3]);
+        assert!(r.choice_weighted(&p, 5, false).is_err());
+    }
+
     use super::*;
 
     #[test]

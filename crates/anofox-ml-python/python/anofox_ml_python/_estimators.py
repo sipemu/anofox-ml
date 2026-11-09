@@ -4345,3 +4345,38 @@ class NeighborhoodComponentsAnalysis(SupervisedTransformerMixin, BaseEstimator):
     @property
     def n_iter_(self):
         return int(self._fitted_state()["n_iter"])
+
+
+class BernoulliRBM(PartialFitMixin, TransformerMixin, BaseEstimator):
+    """Bernoulli restricted Boltzmann machine (persistent contrastive
+    divergence). A seeded fit draws from numpy's ``RandomState`` in
+    sklearn's order and equals sklearn's; ``transform`` is ``P(h=1|v)``."""
+
+    _kind = "BernoulliRbm"
+
+    def __init__(self, n_components=256, *, learning_rate=0.1, batch_size=10, n_iter=10,
+                 verbose=0, random_state=None):
+        self.n_components = n_components
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
+        self.n_iter = n_iter
+        self.verbose = verbose
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"n_components": int(self.n_components),
+                "learning_rate": float(self.learning_rate),
+                "batch_size": int(self.batch_size), "n_iter": int(self.n_iter),
+                "seed": _seed(self.random_state) % 2**32}
+
+    def score_samples(self, X):
+        """Pseudo-likelihood of each row (one random bit flipped)."""
+        return self._call("score_samples", X)
+
+    def _attr(self, name):
+        return _nd(self._fitted_state()[name])
+
+    components_ = property(lambda self: self._attr("components"))
+    intercept_hidden_ = property(lambda self: self._attr("intercept_hidden"))
+    intercept_visible_ = property(lambda self: self._attr("intercept_visible"))
+    h_samples_ = property(lambda self: self._attr("h_samples"))

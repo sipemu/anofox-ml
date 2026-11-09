@@ -1729,6 +1729,20 @@ registry! {
         warm_start: |c, prev, x, y, w| no_weight(K, w)
             .and_then(|_| c.fit_warm_start(prev, &x.to_owned(), &need_y(K, y)?.to_owned())),
     }
+    BernoulliRbm {
+        config: nn::BernoulliRbm = Default::default(),
+        fitted: nn::FittedBernoulliRbm,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+        score_samples: |m, x| m.score_samples(x),
+        partial_fit: |c, prev, x, y, w, cl| {
+            no_weight(K, w)?;
+            match prev {
+                Some(mut m) => m.partial_fit(x).map(|_| m),
+                None => c.partial_fit_first(x),
+            }
+        },
+    }
     MlpRegressor {
         config: nn::MlpRegressor = Default::default(),
         fitted: nn::FittedMlpRegressor<f64>,
