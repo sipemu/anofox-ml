@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-09
+
+The scikit-learn gap list (#113) is closed: about 40 new estimators
+(multi-task and LARS cross-validation, PLS / CCA, spectral embedding, NCA,
+BernoulliRBM, LatentDirichletAllocation, BisectingKMeans, SparsePCA,
+MiniBatchNMF, single extra trees, RandomTreesEmbedding, FeatureHasher and
+the text vectorizers), most of them equal to scikit-learn 1.8 down to its
+random draws. The registry gains what the DuckDB extension asked for
+(#125): `predict_log_proba`, `kneighbors`, `partial_fit`, `warm_start`,
+offsets, `predict_std`, text input, full linear fits with intervals, and
+meta-estimators over any registered kind. The Python package covers all of
+it. CatBoost and LightGBM parity continue (#151–#157). Breaking changes are
+marked below.
+
 ### New estimators (#113)
 
 - `ExtraTreeRegressor`, `ExtraTreeClassifier` (`anofox-ml-trees`) and

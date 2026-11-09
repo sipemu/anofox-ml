@@ -29,7 +29,7 @@ members = [
 # repository, etc. via `field.workspace = true`. Bumping the version here
 # updates every crate at once — only do that between full-stack releases.
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sipemu/anofox-ml"
@@ -68,22 +68,22 @@ perpetual = "=3.0.0-rc.2"
 # Internal workspace crates. Each carries both `path` (for local builds)
 # and `version` (for crates.io); without `version` cargo refuses to
 # publish. Bump these in lock-step with `workspace.package.version`.
-anofox-ml-core = { version = "0.4.0", path = "crates/anofox-ml-core" }
-anofox-ml-metrics = { version = "0.4.0", path = "crates/anofox-ml-metrics" }
-anofox-ml-preprocessing = { version = "0.4.0", path = "crates/anofox-ml-preprocessing" }
-anofox-ml-neighbors = { version = "0.4.0", path = "crates/anofox-ml-neighbors" }
-anofox-ml-trees = { version = "0.4.0", path = "crates/anofox-ml-trees" }
-anofox-ml-ensemble = { version = "0.4.0", path = "crates/anofox-ml-ensemble" }
-anofox-ml-cluster = { version = "0.4.0", path = "crates/anofox-ml-cluster" }
-anofox-ml-naive-bayes = { version = "0.4.0", path = "crates/anofox-ml-naive-bayes" }
-anofox-ml-discriminant = { version = "0.4.0", path = "crates/anofox-ml-discriminant" }
-anofox-ml-text = { version = "0.4.0", path = "crates/anofox-ml-text" }
-anofox-ml-gaussian-process = { version = "0.4.0", path = "crates/anofox-ml-gaussian-process" }
-anofox-ml-manifold = { version = "0.4.0", path = "crates/anofox-ml-manifold" }
-anofox-ml-io = { version = "0.4.0", path = "crates/anofox-ml-io" }
-anofox-ml-svm = { version = "0.4.0", path = "crates/anofox-ml-svm" }
-anofox-ml-neural-networks = { version = "0.4.0", path = "crates/anofox-ml-neural-networks" }
-anofox-ml-regression = { version = "0.4.0", path = "crates/anofox-ml-regression" }
-anofox-ml-registry = { version = "0.4.0", path = "crates/anofox-ml-registry" }
-anofox-ml-linear = { version = "0.4.0", path = "crates/anofox-ml-linear" }
-anofox-ml-conformal = { version = "0.4.0", path = "crates/anofox-ml-conformal" }
+anofox-ml-core = { version = "0.5.0", path = "crates/anofox-ml-core" }
+anofox-ml-metrics = { version = "0.5.0", path = "crates/anofox-ml-metrics" }
+anofox-ml-preprocessing = { version = "0.5.0", path = "crates/anofox-ml-preprocessing" }
+anofox-ml-neighbors = { version = "0.5.0", path = "crates/anofox-ml-neighbors" }
+anofox-ml-trees = { version = "0.5.0", path = "crates/anofox-ml-trees" }
+anofox-ml-ensemble = { version = "0.5.0", path = "crates/anofox-ml-ensemble" }
+anofox-ml-cluster = { version = "0.5.0", path = "crates/anofox-ml-cluster" }
+anofox-ml-naive-bayes = { version = "0.5.0", path = "crates/anofox-ml-naive-bayes" }
+anofox-ml-discriminant = { version = "0.5.0", path = "crates/anofox-ml-discriminant" }
+anofox-ml-text = { version = "0.5.0", path = "crates/anofox-ml-text" }
+anofox-ml-gaussian-process = { version = "0.5.0", path = "crates/anofox-ml-gaussian-process" }
+anofox-ml-manifold = { version = "0.5.0", path = "crates/anofox-ml-manifold" }
+anofox-ml-io = { version = "0.5.0", path = "crates/anofox-ml-io" }
+anofox-ml-svm = { version = "0.5.0", path = "crates/anofox-ml-svm" }
+anofox-ml-neural-networks = { version = "0.5.0", path = "crates/anofox-ml-neural-networks" }
+anofox-ml-regression = { version = "0.5.0", path = "crates/anofox-ml-regression" }
+anofox-ml-registry = { version = "0.5.0", path = "crates/anofox-ml-registry" }
+anofox-ml-linear = { version = "0.5.0", path = "crates/anofox-ml-linear" }
+anofox-ml-conformal = { version = "0.5.0", path = "crates/anofox-ml-conformal" }
