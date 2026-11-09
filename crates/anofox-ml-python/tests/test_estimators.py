@@ -1015,3 +1015,107 @@ def test_catboost_defaults_match_catboost():
     ref = cb.CatBoostRegressor(**kw, **off).fit(X, y)
     ours = am.CatBoostRegressor(**kw).fit(X, y)
     np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-12)
+
+
+def test_lgbm_sampling_matches_lightgbm():
+    # LightGBM's own generator: bagging, GOSS and feature fractions (#152).
+    lgb = pytest.importorskip("lightgbm")
+    rs = np.random.RandomState(21)
+    X = rs.normal(size=(500, 5))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2] + rs.normal(scale=0.3, size=500)
+    yc = (y > 0).astype(int)
+    base = dict(n_estimators=25, learning_rate=0.2, num_leaves=8)
+    cases = [
+        dict(subsample=0.7, subsample_freq=2, colsample_bytree=0.8, random_state=3),
+        dict(boosting_type="goss", feature_fraction_bynode=0.6),
+        dict(subsample=0.8, subsample_freq=1, feature_fraction_bynode=0.7, random_state=9),
+    ]
+    ref_kw = dict(deterministic=True, force_row_wise=True, verbose=-1, n_jobs=1)
+    for kw in cases:
+        ref = lgb.LGBMRegressor(**base, **kw, **ref_kw).fit(X, y)
+        ours = am.LGBMRegressor(**base, **kw).fit(X, y)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-8)
+        ref = lgb.LGBMClassifier(**base, **kw, **ref_kw).fit(X, yc)
+        ours = am.LGBMClassifier(**base, **kw).fit(X, yc)
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-8)
+    kw = dict(subsample_freq=1, pos_bagging_fraction=0.5, neg_bagging_fraction=0.8)
+    ref = lgb.LGBMClassifier(**base, **kw, **ref_kw).fit(X, yc)
+    ours = am.LGBMClassifier(**base, **kw).fit(X, yc)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-8)
+
+
+def test_catboost_class_weights_and_monotone_match_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(31)
+    X = rs.normal(size=(300, 4))
+    eta = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2]
+    y = eta + rs.normal(scale=0.3, size=300)
+    yc = (eta + rs.logistic(size=300) > 1.0).astype(int)
+    kw = dict(iterations=30, learning_rate=0.2, depth=4, random_strength=0, bootstrap_type="No",
+              has_time=True)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    for extra in (dict(auto_class_weights="Balanced"), dict(class_weights={0: 1.0, 1: 3.0})):
+        ref = cb.CatBoostClassifier(**kw, **extra, **ref_kw).fit(X, yc)
+        ours = am.CatBoostClassifier(**kw, **extra).fit(X, yc)
+        np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
+    mono = dict(monotone_constraints=[1, 1, -1, 0])
+    ref = cb.CatBoostRegressor(**kw, **mono, **ref_kw).fit(X, y)
+    ours = am.CatBoostRegressor(**kw, **mono).fit(X, y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
+
+
+def test_catboost_regression_losses_match_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(41)
+    X = rs.normal(size=(300, 4))
+    eta = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2]
+    y = eta + rs.normal(scale=0.3, size=300)
+    counts = rs.poisson(np.exp(0.5 * eta)).astype(float)
+    kw = dict(iterations=30, learning_rate=0.2, depth=4, random_strength=0, bootstrap_type="No",
+              has_time=True)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    for loss, target in (("MAE", y), ("Quantile:alpha=0.3", y), ("Expectile:alpha=0.7", y),
+                         ("Poisson", counts), ("Tweedie:variance_power=1.5", counts)):
+        ref = cb.CatBoostRegressor(loss_function=loss, **kw, **ref_kw).fit(X, target)
+        ours = am.CatBoostRegressor(loss_function=loss, **kw).fit(X, target)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10, err_msg=loss)
+
+
+def test_catboost_eval_set_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(51)
+    X = rs.normal(size=(400, 4))
+    eta = np.sin(2 * X[:, 0]) + X[:, 1] - 0.5 * X[:, 2]
+    y = eta + rs.normal(scale=0.4, size=400)
+    labels = np.where(eta + rs.logistic(size=400) > 0, "yes", "no")
+    tr, va = slice(0, 300), slice(300, None)
+    kw = dict(iterations=200, learning_rate=0.4, depth=4, random_strength=0, bootstrap_type="No",
+              has_time=True, early_stopping_rounds=5)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    ref = cb.CatBoostRegressor(**kw, **ref_kw).fit(X[tr], y[tr], eval_set=(X[va], y[va]))
+    ours = am.CatBoostRegressor(**kw).fit(X[tr], y[tr], eval_set=(X[va], y[va]))
+    assert ours.best_iteration_ == ref.get_best_iteration()
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
+    np.testing.assert_allclose(ours.evals_result_, ref.get_evals_result()["validation"]["RMSE"],
+                               rtol=1e-10)
+    kw["auto_class_weights"] = "Balanced"
+    ref = cb.CatBoostClassifier(**kw, **ref_kw).fit(X[tr], labels[tr], eval_set=(X[va], labels[va]))
+    ours = am.CatBoostClassifier(**kw).fit(X[tr], labels[tr], eval_set=(X[va], labels[va]))
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-10)
+    explicit = am.CatBoostClassifier(iterations=5, class_weights={"no": 1.0, "yes": 2.0})
+    explicit.fit(X[tr], labels[tr])
+
+
+def test_catboost_grow_policies_match_catboost():
+    cb = pytest.importorskip("catboost")
+    rs = np.random.RandomState(61)
+    X = rs.normal(size=(300, 4))
+    y = np.sin(2 * X[:, 0]) + X[:, 1] + rs.normal(scale=0.3, size=300)
+    kw = dict(iterations=30, learning_rate=0.2, depth=5, random_strength=0, bootstrap_type="No",
+              has_time=True)
+    ref_kw = dict(thread_count=1, verbose=0, allow_writing_files=False)
+    for extra in (dict(grow_policy="Depthwise", min_data_in_leaf=5),
+                  dict(grow_policy="Lossguide", max_leaves=10)):
+        ref = cb.CatBoostRegressor(**kw, **extra, **ref_kw).fit(X, y)
+        ours = am.CatBoostRegressor(**kw, **extra).fit(X, y)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
