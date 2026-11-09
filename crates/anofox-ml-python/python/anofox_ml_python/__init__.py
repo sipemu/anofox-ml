@@ -30,6 +30,7 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    LatentDirichletAllocation,
     BernoulliRBM,
     NeighborhoodComponentsAnalysis,
     FeatureHasher,
@@ -204,6 +205,7 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "LatentDirichletAllocation",
     "BernoulliRBM",
     "NeighborhoodComponentsAnalysis",
     "DictVectorizer", "LabelBinarizer", "MultiLabelBinarizer", "encoders",

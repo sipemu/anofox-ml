@@ -336,3 +336,16 @@ def test_bernoulli_rbm_matches_sklearn():
         ours.partial_fit(V[rows])
         ref.partial_fit(V[rows])
     np.testing.assert_allclose(ours.components_, ref.components_, atol=1e-12)
+
+
+@pytest.mark.parametrize("method", ["batch", "online"])
+def test_latent_dirichlet_allocation_matches_sklearn(method):
+    from sklearn.decomposition import LatentDirichletAllocation
+
+    counts = np.round(np.abs(X) * 3)
+    kw = dict(n_components=3, learning_method=method, batch_size=16, random_state=4)
+    ours = am.LatentDirichletAllocation(**kw).fit(counts)
+    ref = LatentDirichletAllocation(**kw).fit(counts)
+    np.testing.assert_allclose(ours.components_, ref.components_, rtol=1e-10)
+    np.testing.assert_allclose(ours.transform(counts), ref.transform(counts), atol=1e-10)
+    assert ours.bound_ == pytest.approx(ref.bound_, rel=1e-10)

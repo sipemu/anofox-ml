@@ -8,6 +8,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ### New estimators (#113)
 
+- `LatentDirichletAllocation` (`anofox-ml-preprocessing`): variational
+  Bayes, batch and online, with sklearn's `RandomState` gamma draws and
+  its Cython digamma, so seeded fits (components, `transform`, `bound_`,
+  `score`, `perplexity`, early stopping on perplexity) equal scikit-learn
+  1.8's to 1e-10 (`gen_lda_topics.py`). Registry kind and Python class.
+
 - `BernoulliRbm` (`anofox-ml-neural-networks`, sklearn's `BernoulliRBM`):
   persistent contrastive divergence drawing from numpy's `RandomState` in
   sklearn's order, so a seeded `fit`, `partial_fit`, `gibbs` and

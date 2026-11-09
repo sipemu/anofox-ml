@@ -4380,3 +4380,51 @@ class BernoulliRBM(PartialFitMixin, TransformerMixin, BaseEstimator):
     intercept_hidden_ = property(lambda self: self._attr("intercept_hidden"))
     intercept_visible_ = property(lambda self: self._attr("intercept_visible"))
     h_samples_ = property(lambda self: self._attr("h_samples"))
+
+
+class LatentDirichletAllocation(TransformerMixin, BaseEstimator):
+    """Topic model by variational Bayes (``learning_method`` ``"batch"`` or
+    ``"online"``). A seeded fit draws numpy ``RandomState`` gammas in
+    sklearn's order and uses sklearn's digamma, so it equals sklearn's;
+    ``transform`` returns normalised document-topic distributions."""
+
+    _kind = "LatentDirichletAllocation"
+
+    def __init__(self, n_components=10, *, doc_topic_prior=None, topic_word_prior=None,
+                 learning_method="batch", learning_decay=0.7, learning_offset=10.0,
+                 max_iter=10, batch_size=128, evaluate_every=-1, perp_tol=1e-1,
+                 mean_change_tol=1e-3, max_doc_update_iter=100, random_state=None):
+        self.n_components = n_components
+        self.doc_topic_prior = doc_topic_prior
+        self.topic_word_prior = topic_word_prior
+        self.learning_method = learning_method
+        self.learning_decay = learning_decay
+        self.learning_offset = learning_offset
+        self.max_iter = max_iter
+        self.batch_size = batch_size
+        self.evaluate_every = evaluate_every
+        self.perp_tol = perp_tol
+        self.mean_change_tol = mean_change_tol
+        self.max_doc_update_iter = max_doc_update_iter
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        if self.learning_method not in ("batch", "online"):
+            raise ValueError("learning_method must be 'batch' or 'online'")
+        return {"n_components": int(self.n_components),
+                "doc_topic_prior": self.doc_topic_prior,
+                "topic_word_prior": self.topic_word_prior,
+                "learning_method": self.learning_method,
+                "learning_decay": float(self.learning_decay),
+                "learning_offset": float(self.learning_offset),
+                "max_iter": int(self.max_iter), "batch_size": int(self.batch_size),
+                "evaluate_every": int(self.evaluate_every), "perp_tol": float(self.perp_tol),
+                "mean_change_tol": float(self.mean_change_tol),
+                "max_doc_update_iter": int(self.max_doc_update_iter),
+                "seed": _seed(self.random_state) % 2**32}
+
+    components_ = property(lambda self: _nd(self._fitted_state()["components"]))
+    n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
+    bound_ = property(lambda self: float(self._fitted_state()["bound"]))
+    doc_topic_prior_ = property(lambda self: float(self._fitted_state()["doc_topic_prior"]))
+    topic_word_prior_ = property(lambda self: float(self._fitted_state()["topic_word_prior"]))
