@@ -131,6 +131,10 @@ fn lgbm_matches_lightgbm() {
                 },
                 "poisson" => LgbmObjective::Poisson,
                 "gamma" => LgbmObjective::Gamma,
+                "tweedie" => LgbmObjective::Tweedie {
+                    variance_power: p["tweedie_variance_power"].as_f64().unwrap_or(1.5),
+                },
+                "cross_entropy" => LgbmObjective::CrossEntropy,
                 other => panic!("unknown objective {other}"),
             };
             let mut m = configure!(LgbmRegressor::new(), p)
@@ -154,6 +158,9 @@ fn lgbm_matches_lightgbm() {
             }
             if p["class_weight"] == "balanced" {
                 m = m.with_class_weight(Some(LgbmClassWeight::Balanced));
+            }
+            if p["objective"] == "multiclassova" {
+                m = m.with_multiclass_ova(true);
             }
             let f = m.fit_with_eval(&x, &y, &opts).unwrap();
             worst(

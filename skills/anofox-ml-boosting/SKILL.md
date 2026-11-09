@@ -17,7 +17,7 @@ the reference's results.
 |---|---|---|
 | Small data, sklearn's classic algorithm | `GradientBoosting{Classifier,Regressor}` | sklearn `GradientBoosting*` |
 | sklearn-compatible histogram boosting, early stopping, Poisson/Gamma/quantile, native categoricals, monotonic / interaction constraints | `HistGradientBoosting{Classifier,Regressor}` | sklearn 1.8 `HistGradientBoosting*` |
-| Speed on large numeric data, leaf-wise trees, DART, GOSS, sparse / one-hot data (EFB) | `LgbmClassifier`, `LgbmRegressor` | LightGBM 4.7 |
+| Speed on large numeric data, leaf-wise trees, DART, GOSS, sparse / one-hot data (EFB); Tweedie, cross-entropy and one-vs-all objectives | `LgbmClassifier`, `LgbmRegressor` | LightGBM 4.7 |
 | Many categorical features (target statistics, combinations), robust defaults, symmetric trees, ordered boosting against target leakage | `CatBoostClassifier`, `CatBoostRegressor` | catboost 1.2.10 |
 
 ## Rust
@@ -87,6 +87,19 @@ m = am.CatBoostClassifier(iterations=500, cat_features=[2]).fit(X, y)   # X may 
 m = am.LgbmRegressor(n_estimators=300, num_leaves=31).fit(X, y)
 m = am.HistGradientBoostingClassifier(early_stopping=True).fit(X, y)
 ```
+
+## LightGBM: objectives
+
+`LgbmRegressor::with_objective`: `Regression` (L2), `RegressionL1`,
+`Huber`, `Quantile { alpha }`, `Poisson`, `Gamma`,
+`Tweedie { variance_power }` (log link; power in `[1, 2)`, LightGBM's
+default 1.5; zero-inflated counts / intermittent demand) and
+`CrossEntropy` (targets in `[0, 1]`, sigmoid predictions).
+`LgbmClassifier` uses binary log-loss or softmax by the number of classes;
+`with_multiclass_ova(true)` is LightGBM's `multiclassova`, whose
+`predict_proba` rows are per-class sigmoids that do not sum to 1. Python
+takes LightGBM's names: `objective="tweedie"`, `"cross_entropy"`,
+`"multiclassova"`. All match LightGBM 4.7 to ~1e-16.
 
 ## LightGBM: sampling and reproducibility
 

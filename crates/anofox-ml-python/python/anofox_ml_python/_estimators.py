@@ -73,7 +73,7 @@ def _choice(value, mapping, name):
     try:
         return mapping[value]
     except (KeyError, TypeError):
-        raise ValueError(f"invalid {name} {value!r}; expected one of {sorted(mapping)}") from None
+        raise ValueError(f"invalid {name} {value!r}; expected one of {sorted(mapping, key=str)}") from None
 
 
 def _criterion(c):
@@ -623,6 +623,11 @@ class _Lgbm(StagedPredictMixin, BaseEstimator):
 
 
 class LGBMClassifier(ClassifierMixin, _Lgbm):
+    """``objective``: ``None`` (binary / softmax by the number of classes),
+    ``"binary"``, ``"multiclass"`` / ``"softmax"`` or ``"multiclassova"`` /
+    ``"ova"`` (one-vs-all; as in LightGBM, ``predict_proba`` gives each
+    class's unnormalized sigmoid)."""
+
     _kind = "LgbmClassifier"
 
     def __init__(self, boosting_type="gbdt", num_leaves=31, max_depth=-1, learning_rate=0.1,
@@ -632,7 +637,7 @@ class LGBMClassifier(ClassifierMixin, _Lgbm):
                  skip_drop=0.5, uniform_drop=False, xgboost_dart_mode=False, drop_seed=4,
                  enable_bundle=True, n_jobs=None, subsample=1.0, subsample_freq=0,
                  feature_fraction_bynode=1.0, top_rate=0.2, other_rate=0.1,
-                 pos_bagging_fraction=1.0, neg_bagging_fraction=1.0):
+                 pos_bagging_fraction=1.0, neg_bagging_fraction=1.0, objective=None):
         super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
                          min_split_gain, min_child_weight, min_child_samples,
                          colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
@@ -642,9 +647,14 @@ class LGBMClassifier(ClassifierMixin, _Lgbm):
         self.class_weight = class_weight
         self.pos_bagging_fraction = pos_bagging_fraction
         self.neg_bagging_fraction = neg_bagging_fraction
+        self.objective = objective
 
     def _rust_params(self, X, y):
         p = super()._rust_params(X, y)
+        p["multiclass_ova"] = _choice(
+            self.objective, {None: False, "binary": False, "multiclass": False,
+                             "softmax": False, "multiclassova": True, "multiclass_ova": True,
+                             "ova": True, "ovr": True}, "objective")
         p["class_weight"] = self._encode_class_weight(self.class_weight)
         p["pos_bagging_fraction"] = float(self.pos_bagging_fraction)
         p["neg_bagging_fraction"] = float(self.neg_bagging_fraction)
@@ -652,7 +662,47 @@ class LGBMClassifier(ClassifierMixin, _Lgbm):
 
 
 class LGBMRegressor(RegressorMixin, _Lgbm):
+    """``objective``: ``None`` / ``"regression"``, ``"regression_l1"``,
+    ``"huber"`` (``alpha``), ``"quantile"`` (``alpha``), ``"poisson"``,
+    ``"gamma"``, ``"tweedie"`` (``tweedie_variance_power``) or
+    ``"cross_entropy"`` (targets in [0, 1])."""
+
     _kind = "LgbmRegressor"
+
+    def __init__(self, boosting_type="gbdt", num_leaves=31, max_depth=-1, learning_rate=0.1,
+                 n_estimators=100, min_split_gain=0.0, min_child_weight=1e-3,
+                 min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
+                 max_bin=255, random_state=None, drop_rate=0.1, max_drop=50, skip_drop=0.5,
+                 uniform_drop=False, xgboost_dart_mode=False, drop_seed=4, enable_bundle=True,
+                 n_jobs=None, subsample=1.0, subsample_freq=0, feature_fraction_bynode=1.0,
+                 top_rate=0.2, other_rate=0.1, objective=None, alpha=0.9,
+                 tweedie_variance_power=1.5):
+        super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
+                         min_split_gain, min_child_weight, min_child_samples,
+                         colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
+                         drop_rate, max_drop, skip_drop, uniform_drop, xgboost_dart_mode,
+                         drop_seed, enable_bundle, n_jobs, subsample, subsample_freq,
+                         feature_fraction_bynode, top_rate, other_rate)
+        self.objective = objective
+        self.alpha = alpha
+        self.tweedie_variance_power = tweedie_variance_power
+
+    def _rust_params(self, X, y):
+        p = super()._rust_params(X, y)
+        obj = self.objective
+        simple = {None: "Regression", "regression": "Regression", "l2": "Regression",
+                  "regression_l1": "RegressionL1", "l1": "RegressionL1", "huber": "Huber",
+                  "poisson": "Poisson", "gamma": "Gamma", "cross_entropy": "CrossEntropy",
+                  "xentropy": "CrossEntropy"}
+        if obj == "quantile":
+            p["objective"] = {"Quantile": {"alpha": float(self.alpha)}}
+        elif obj == "tweedie":
+            p["objective"] = {"Tweedie": {"variance_power": float(self.tweedie_variance_power)}}
+        else:
+            p["objective"] = _choice(obj, simple, "objective")
+        if obj == "huber":
+            p["huber_delta"] = float(self.alpha)
+        return p
 
 
 class _CatBoost(BaseEstimator):

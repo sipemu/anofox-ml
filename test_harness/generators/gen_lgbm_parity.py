@@ -2,6 +2,7 @@
 
 `deterministic=True, force_row_wise=True`, one thread. Bagging, GOSS and
 the feature fractions reproduce LightGBM's own generators (#152).
+The tweedie, cross_entropy and multiclassova objectives are #206.
 """
 
 import os
@@ -163,6 +164,20 @@ def generate():
     big_kw = dict(X=Xb, X_test=Xb[::20])
     add("bagging_blocks", "regressor", dict(bag, subsample=0.5, num_leaves=15), yb, **big_kw)
     add("goss_blocks", "regressor", dict(goss, num_leaves=15), yb, **big_kw)
+    # Tweedie, cross-entropy and one-vs-all objectives (#206).
+    y_tweedie = np.where(rng.uniform(size=n) < 0.35, 0.0, rng.gamma(2.0, mu / 2.0))
+    y_xent = 1 / (1 + np.exp(-eta)) * 0.8 + 0.2 * rng.uniform(size=n)
+    for name, extra, y in [("tweedie", {}, y_tweedie),
+                           ("tweedie_power_1_2", dict(tweedie_variance_power=1.2), y_tweedie),
+                           ("cross_entropy", {}, y_xent)]:
+        params = dict(base, objective=name.split("_power")[0], **extra)
+        add(name, "regressor", params, y)
+        add(f"{name}_weighted", "regressor", params, y, sw=weights)
+    ova = dict(base, objective="multiclassova")
+    add("multiclassova", "classifier", ova, y_multi)
+    add("multiclassova_weighted", "classifier", dict(ova, min_child_samples=5), y_multi,
+        sw=weights)
+    add("multiclassova_balanced", "classifier", dict(ova, class_weight="balanced"), y_multi)
     return out
 
 

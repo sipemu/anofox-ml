@@ -3175,6 +3175,14 @@ pub enum LgbmObjective {
     /// Gamma regression with a log link (LightGBM's `objective="gamma"`).
     /// Targets must be positive; predictions are `exp` of the raw score.
     Gamma,
+    /// Tweedie regression with a log link (LightGBM's `objective="tweedie"`,
+    /// `tweedie_variance_power` in `[1, 2)`, default 1.5). Targets must be
+    /// non-negative; predictions are `exp` of the raw score.
+    Tweedie { variance_power: f64 },
+    /// Cross-entropy on targets in `[0, 1]` (LightGBM's
+    /// `objective="cross_entropy"`): a logistic link, so predictions are
+    /// the sigmoid of the raw score.
+    CrossEntropy,
     /// Binary classification with log-loss.
     Binary,
     /// Multi-class classification with softmax.
@@ -3615,9 +3623,12 @@ pub struct FittedLgbmRegressor {
     /// Per-feature split count.
     feature_split_count: Vec<u32>,
     best_iteration: usize,
-    /// Predictions are `exp` of the raw score (Poisson, Gamma).
+    /// Predictions are `exp` of the raw score (Poisson, Gamma, Tweedie).
     #[serde(default)]
     log_link: bool,
+    /// Predictions are the sigmoid of the raw score (cross-entropy).
+    #[serde(default)]
+    logistic: bool,
 }
 
 impl FittedLgbmRegressor {
@@ -3677,7 +3688,19 @@ fn default_poisson_max_delta_step() -> f64 {
 /// Whether the objective models `log E[y]` (predictions are `exp` of the
 /// raw score).
 fn has_log_link(objective: LgbmObjective) -> bool {
-    matches!(objective, LgbmObjective::Poisson | LgbmObjective::Gamma)
+    matches!(
+        objective,
+        LgbmObjective::Poisson | LgbmObjective::Gamma | LgbmObjective::Tweedie { .. }
+    )
+}
+
+/// Whether predictions are the sigmoid of the raw score (cross-entropy).
+fn has_logistic_link(objective: LgbmObjective) -> bool {
+    objective == LgbmObjective::CrossEntropy
+}
+
+fn sigmoid(v: f64) -> f64 {
+    1.0 / (1.0 + (-v).exp())
 }
 
 fn compute_regression_gradients(
@@ -3753,6 +3776,33 @@ fn compute_regression_gradients(
                 hess[i] = e;
             }
         }
+        LgbmObjective::Tweedie {
+            variance_power: rho,
+        } => {
+            // LightGBM's RegressionTweedieLoss (no max_delta_step).
+            for i in 0..n {
+                let e1 = ((1.0 - rho) * preds[i]).exp();
+                let e2 = ((2.0 - rho) * preds[i]).exp();
+                grad[i] = -y[i] * e1 + e2;
+                hess[i] = -y[i] * (1.0 - rho) * e1 + (2.0 - rho) * e2;
+            }
+        }
+        LgbmObjective::CrossEntropy => {
+            // LightGBM's CrossEntropy::GetGradients, including its float32
+            // `1 - y` and the branch for very negative scores.
+            for i in 0..n {
+                if preds[i] > -37.0 {
+                    let e = (-preds[i]).exp();
+                    let one_minus_y = (1.0f32 - y[i] as f32) as f64;
+                    grad[i] = (one_minus_y - y[i] * e) / (1.0 + e);
+                    hess[i] = e / ((1.0 + e) * (1.0 + e));
+                } else {
+                    let e = preds[i].exp();
+                    grad[i] = e - y[i];
+                    hess[i] = e;
+                }
+            }
+        }
         _ => unreachable!("regressor only supports regression objectives"),
     }
 
@@ -3769,6 +3819,21 @@ fn validate_regression_objective(objective: LgbmObjective, y: ArrayView1<f64>) -
         LgbmObjective::Gamma if y.iter().any(|&v| v <= 0.0) => Err(RustMlError::InvalidParameter(
             "the Gamma objective needs positive targets".into(),
         )),
+        LgbmObjective::Tweedie { variance_power } if !(1.0..2.0).contains(&variance_power) => {
+            Err(RustMlError::InvalidParameter(format!(
+                "tweedie_variance_power must be in [1, 2), got {variance_power}"
+            )))
+        }
+        LgbmObjective::Tweedie { .. } if y.iter().any(|&v| v < 0.0) || y.sum() <= 0.0 => {
+            Err(RustMlError::InvalidParameter(
+                "the Tweedie objective needs non-negative targets with a positive sum".into(),
+            ))
+        }
+        LgbmObjective::CrossEntropy if y.iter().any(|&v| !(0.0..=1.0).contains(&v)) => {
+            Err(RustMlError::InvalidParameter(
+                "the cross-entropy objective needs targets in [0, 1]".into(),
+            ))
+        }
         LgbmObjective::Binary | LgbmObjective::Multiclass => Err(RustMlError::InvalidParameter(
             format!("{objective:?} is a classification objective; use LgbmClassifier"),
         )),
@@ -3968,7 +4033,10 @@ fn regression_baseline(
 ) -> f64 {
     if let Some(alpha) = refit_percentile(objective) {
         let rows: Vec<usize> = (0..y.len()).collect();
-        return rows_percentile(y, &rows, weights, alpha, sklearn);
+        let v = rows_percentile(y, &rows, weights, alpha, sklearn);
+        // LightGBM's BoostFromScore takes the percentile of the float32
+        // labels and returns it as a float32.
+        return if sklearn { v } else { v as f32 as f64 };
     }
     let mean = match weights {
         Some(w) => y.iter().zip(w).map(|(&v, &wi)| v * wi).sum::<f64>() / w.sum(),
@@ -3976,6 +4044,11 @@ fn regression_baseline(
     };
     if has_log_link(objective) {
         mean.ln()
+    } else if has_logistic_link(objective) {
+        // LightGBM's CrossEntropy::BoostFromScore: the clamped log-odds.
+        let eps = 1e-15f32 as f64;
+        let p = mean.min(1.0 - eps).max(eps);
+        (p / (1.0 - p)).ln()
     } else {
         mean
     }
@@ -4392,7 +4465,16 @@ impl LgbmRegressor {
             if scoring == EarlyStoppingScoring::Loss {
                 return -eval_loss(y, raw, w, self.objective, self.huber_delta);
             }
-            let pred = |i: usize| if log_link { raw[i].exp() } else { raw[i] };
+            let logistic = has_logistic_link(self.objective);
+            let pred = |i: usize| {
+                if log_link {
+                    raw[i].exp()
+                } else if logistic {
+                    sigmoid(raw[i])
+                } else {
+                    raw[i]
+                }
+            };
             let weight = |i: usize| w.map_or(1.0, |w| w[i]);
             regression_score(scoring, y, &pred, &weight, rows)
         };
@@ -4601,6 +4683,7 @@ impl LgbmRegressor {
             feature_split_count,
             best_iteration,
             log_link: has_log_link(self.objective),
+            logistic: has_logistic_link(self.objective),
         };
         Ok((fitted, tracker.map(|t| t.scores).unwrap_or_default()))
     }
@@ -4643,6 +4726,19 @@ fn eval_loss(
             // terms constant in the prediction.
             LgbmObjective::Poisson => preds[i].exp() - y[i] * preds[i],
             LgbmObjective::Gamma => preds[i] + y[i] * (-preds[i]).exp(),
+            LgbmObjective::Tweedie {
+                variance_power: rho,
+            } if rho == 1.0 => preds[i].exp() - y[i] * preds[i],
+            LgbmObjective::Tweedie {
+                variance_power: rho,
+            } => {
+                -y[i] * ((1.0 - rho) * preds[i]).exp() / (1.0 - rho)
+                    + ((2.0 - rho) * preds[i]).exp() / (2.0 - rho)
+            }
+            LgbmObjective::CrossEntropy => {
+                let z = sigmoid(preds[i]).clamp(1e-15, 1.0 - 1e-15);
+                -(y[i] * z.ln() + (1.0 - y[i]) * (1.0 - z).ln())
+            }
             _ => 0.5 * r * r,
         };
         total += w * loss_i;
@@ -4704,6 +4800,8 @@ impl FittedLgbmRegressor {
             }
             if self.log_link {
                 raw.mapv(f64::exp)
+            } else if self.logistic {
+                raw.mapv(sigmoid)
             } else {
                 raw.clone()
             }
@@ -4743,6 +4841,8 @@ impl Predict<f64> for FittedLgbmRegressor {
         }
         if self.log_link {
             preds.mapv_inplace(f64::exp);
+        } else if self.logistic {
+            preds.mapv_inplace(sigmoid);
         }
 
         Ok(preds)
@@ -4827,6 +4927,12 @@ pub struct LgbmClassifier {
     /// `None` (default): LightGBM's default seeds (and `dart.drop_seed`).
     #[serde(default)]
     pub seed: Option<u64>,
+    /// One-vs-all for more than two classes (LightGBM's
+    /// `objective="multiclassova"`): a binary log-loss per class, and
+    /// `predict_proba` gives each class's sigmoid, which LightGBM does not
+    /// normalize. Default false: softmax (`objective="multiclass"`).
+    #[serde(default)]
+    pub multiclass_ova: bool,
     /// Scale the softmax hessian by K / (K - 1) as LightGBM does; the
     /// HistGradientBoosting facade turns it off (sklearn's hessian).
     #[serde(skip, default = "default_true")]
@@ -4885,6 +4991,7 @@ impl LgbmClassifier {
             enable_bundle: true,
             n_jobs: None,
             seed: None,
+            multiclass_ova: false,
             softmax_hessian_factor: true,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
@@ -4994,6 +5101,11 @@ impl LgbmClassifier {
         self.class_weight = w;
         self
     }
+    /// One-vs-all instead of softmax (see `multiclass_ova`).
+    pub fn with_multiclass_ova(mut self, ova: bool) -> Self {
+        self.multiclass_ova = ova;
+        self
+    }
     pub fn with_early_stopping(mut self, r: Option<usize>) -> Self {
         self.early_stopping_rounds = r;
         self
@@ -5079,7 +5191,11 @@ impl Default for LgbmClassifier {
 }
 
 /// Fitted LightGBM-style classifier.
+// `remote = "Self"`: the derived (de)serializers become inherent functions,
+// wrapped below so binary-v1 (positional bincode) files without the
+// trailing `multiclass_ova` still load.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(remote = "Self")]
 pub struct FittedLgbmClassifier {
     /// Binary: single tree set. Multiclass: one set per class.
     tree_sets: Vec<Vec<TreeNode>>,
@@ -5094,6 +5210,99 @@ pub struct FittedLgbmClassifier {
     /// was used with an eval set).
     #[serde(default)]
     best_iteration: usize,
+    /// One-vs-all: per-class sigmoids instead of the softmax.
+    #[serde(default)]
+    multiclass_ova: bool,
+}
+
+impl serde::Serialize for FittedLgbmClassifier {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        FittedLgbmClassifier::serialize(self, s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for FittedLgbmClassifier {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
+        use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
+
+        const FIELDS: &[&str] = &[
+            "tree_sets",
+            "bins",
+            "baselines",
+            "classes",
+            "learning_rate",
+            "n_features",
+            "feature_gain",
+            "feature_split_count",
+            "best_iteration",
+            "multiclass_ova",
+        ];
+        /// Fields every positional (bincode v1) file has.
+        const V1_FIELDS: usize = 9;
+
+        /// Ends the sequence instead of failing when a positional reader
+        /// runs out of input after the fields every file has.
+        struct TrailingDefaults<A> {
+            seq: A,
+            read: usize,
+        }
+        impl<'de, A: SeqAccess<'de>> SeqAccess<'de> for TrailingDefaults<A> {
+            type Error = A::Error;
+            fn next_element_seed<T: DeserializeSeed<'de>>(
+                &mut self,
+                seed: T,
+            ) -> std::result::Result<Option<T::Value>, A::Error> {
+                self.read += 1;
+                match self.seq.next_element_seed(seed) {
+                    Err(_) if self.read > V1_FIELDS => Ok(None),
+                    other => other,
+                }
+            }
+            fn size_hint(&self) -> Option<usize> {
+                self.seq.size_hint()
+            }
+        }
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = FittedLgbmClassifier;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("struct FittedLgbmClassifier")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let seq = TrailingDefaults { seq, read: 0 };
+                FittedLgbmClassifier::deserialize(SeqAccessDeserializer::new(seq))
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                FittedLgbmClassifier::deserialize(MapAccessDeserializer::new(map))
+            }
+        }
+        d.deserialize_struct("FittedLgbmClassifier", FIELDS, V)
+    }
+}
+
+/// Class probabilities of one row's raw `scores` (more than two classes):
+/// the softmax, or LightGBM's unnormalized per-class sigmoids for
+/// one-vs-all.
+fn multiclass_proba(scores: &[f64], ova: bool, out: &mut [f64]) {
+    if ova {
+        for (o, &s) in out.iter_mut().zip(scores) {
+            *o = 1.0 / (1.0 + (-s).exp());
+        }
+        return;
+    }
+    let max_s = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let exp_sum: f64 = scores.iter().map(|&s| (s - max_s).exp()).sum();
+    for (o, &s) in out.iter_mut().zip(scores) {
+        *o = (s - max_s).exp() / exp_sum;
+    }
 }
 
 impl FittedLgbmClassifier {
@@ -5170,11 +5379,7 @@ impl FittedLgbmClassifier {
                                     self.learning_rate * tree.predict_bins(row_of(&binned, i));
                             }
                         }
-                        let max_s = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                        let exp_sum: f64 = scores.iter().map(|&s| (s - max_s).exp()).sum();
-                        for c in 0..n_classes {
-                            row[c] = (scores[c] - max_s).exp() / exp_sum;
-                        }
+                        multiclass_proba(scores, self.multiclass_ova, row);
                     },
                 );
             Ok(proba)
@@ -5314,6 +5519,12 @@ impl LgbmClassifier {
                 "need at least 2 classes".into(),
             ));
         }
+        if self.multiclass_ova && n_classes == 2 {
+            return Err(RustMlError::InvalidParameter(
+                "multiclass_ova needs more than two classes (LightGBM's binary objective covers two)"
+                    .into(),
+            ));
+        }
         if prev.is_some_and(|f| f.classes != classes) {
             return Err(RustMlError::InvalidParameter(
                 "warm start: y has other classes than the fitted model".into(),
@@ -5371,13 +5582,23 @@ impl LgbmClassifier {
                 }
                 mean(total, wsum)
             };
+        let ova = self.multiclass_ova;
+        // The log-loss of row `i`'s class `k` given all class scores
+        // (softmax, or the class's own sigmoid for one-vs-all).
+        let class_loss = |scores: &dyn Fn(usize) -> f64, k: usize| {
+            if ova {
+                sklearn_log1pexp(-scores(k))
+            } else {
+                let max_s = (0..n_classes).map(scores).fold(f64::NEG_INFINITY, f64::max);
+                let sum_exps: f64 = (0..n_classes).map(|c| (scores(c) - max_s).exp()).sum();
+                sum_exps.ln() + max_s - scores(k)
+            }
+        };
         let multi_loss =
             |raw: &[Vec<f64>], class_of: &dyn Fn(usize) -> usize, w: &dyn Fn(usize) -> f64| {
                 let (mut total, mut wsum) = (0.0, 0.0);
                 for i in 0..raw.first().map_or(0, Vec::len) {
-                    let max_s = raw.iter().map(|s| s[i]).fold(f64::NEG_INFINITY, f64::max);
-                    let sum_exps: f64 = raw.iter().map(|s| (s[i] - max_s).exp()).sum();
-                    total += w(i) * (sum_exps.ln() + max_s - raw[class_of(i)][i]);
+                    total += w(i) * class_loss(&|c| raw[c][i], class_of(i));
                     wsum += w(i);
                 }
                 mean(total, wsum)
@@ -5634,6 +5855,7 @@ impl LgbmClassifier {
                 feature_gain,
                 feature_split_count,
                 best_iteration,
+                multiclass_ova: false,
             };
             Ok((fitted, tracker.map(|t| t.scores).unwrap_or_default()))
         } else {
@@ -5653,8 +5875,15 @@ impl LgbmClassifier {
                     .filter(|(&v, _)| v == cls)
                     .map(|(_, w)| w)
                     .sum();
-                let prior = (class_weight / total_weight).max(1e-15);
-                let bl = prev.map_or(prior.ln(), |f| f.baselines[c]);
+                let bl = if ova {
+                    // LightGBM's BinaryLogloss::BoostFromScore per class.
+                    let eps = 1e-15f32 as f64;
+                    let pavg = (class_weight / total_weight).min(1.0 - eps).max(eps);
+                    (pavg / (1.0 - pavg)).ln()
+                } else {
+                    (class_weight / total_weight).max(1e-15).ln()
+                };
+                let bl = prev.map_or(bl, |f| f.baselines[c]);
                 baselines.push(bl);
                 raw_scores[c] = match prev {
                     Some(f) => prev_scores(f, c),
@@ -5701,16 +5930,13 @@ impl LgbmClassifier {
                     }
                     (drops, shrinkage)
                 });
-                // Softmax probabilities.
+                // Softmax probabilities (unused for one-vs-all).
                 let mut probas = vec![vec![0.0; n_classes]; n];
-                for i in 0..n {
-                    let max_s = raw_scores
-                        .iter()
-                        .map(|s| s[i])
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let exp_sum: f64 = raw_scores.iter().map(|s| (s[i] - max_s).exp()).sum();
-                    for c in 0..n_classes {
-                        probas[i][c] = (raw_scores[c][i] - max_s).exp() / exp_sum;
+                if !ova {
+                    let mut row = vec![0.0; n_classes];
+                    for (i, p) in probas.iter_mut().enumerate() {
+                        row.iter_mut().zip(&raw_scores).for_each(|(r, s)| *r = s[i]);
+                        multiclass_proba(&row, false, p);
                     }
                 }
 
@@ -5726,6 +5952,9 @@ impl LgbmClassifier {
                     .iter()
                     .enumerate()
                     .map(|(c, &cls)| {
+                        if ova {
+                            return ova_gradients(&raw_scores[c], y, cls, &effective_weights);
+                        }
                         let mut gradients: Vec<f64> = (0..n)
                             .map(|i| {
                                 let lbl = if y[i] == cls { 1.0 } else { 0.0 };
@@ -5829,9 +6058,7 @@ impl LgbmClassifier {
                     let mut total = 0.0;
                     let mut wsum = 0.0;
                     for (i, &yi) in ci.iter().enumerate() {
-                        let max_s = er.iter().map(|s| s[i]).fold(f64::NEG_INFINITY, f64::max);
-                        let lse = max_s + er.iter().map(|s| (s[i] - max_s).exp()).sum::<f64>().ln();
-                        total += eval_w(i) * (lse - er[yi][i]);
+                        total += eval_w(i) * class_loss(&|c| er[c][i], yi);
                         wsum += eval_w(i);
                     }
                     let loss = if wsum > 0.0 { total / wsum } else { total };
@@ -5863,10 +6090,29 @@ impl LgbmClassifier {
                 feature_gain,
                 feature_split_count,
                 best_iteration,
+                multiclass_ova: self.multiclass_ova,
             };
             Ok((fitted, tracker.map(|t| t.scores).unwrap_or_default()))
         }
     }
+}
+
+/// LightGBM's BinaryLogloss gradients and hessians (sigmoid 1) of the
+/// one-vs-all objective for class `cls`, weighted and in float32.
+fn ova_gradients(raw: &[f64], y: ArrayView1<f64>, cls: f64, w: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    raw.iter()
+        .zip(y)
+        .zip(w)
+        .map(|((&score, &yi), &wi)| {
+            let label = if yi == cls { 1.0 } else { -1.0 };
+            let response = -label / (1.0 + (label * score).exp());
+            let abs_response = response.abs();
+            (
+                (response * wi) as f32 as f64,
+                (abs_response * (1.0 - abs_response) * wi) as f32 as f64,
+            )
+        })
+        .unzip()
 }
 
 /// Book-keeping for eval-set tracking / early stopping in the classifier.
@@ -6029,15 +6275,11 @@ impl FittedLgbmClassifier {
                 })
             } else {
                 let mut proba = Array2::zeros((n, n_sets));
+                let mut row = vec![0.0; n_sets];
                 for i in 0..n {
-                    let max_s = scores
-                        .iter()
-                        .map(|s| s[i])
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let exp_sum: f64 = scores.iter().map(|s| (s[i] - max_s).exp()).sum();
-                    for c in 0..n_sets {
-                        proba[[i, c]] = (scores[c][i] - max_s).exp() / exp_sum;
-                    }
+                    row.iter_mut().zip(&scores).for_each(|(r, s)| *r = s[i]);
+                    let out = proba.row_mut(i).into_slice().unwrap();
+                    multiclass_proba(&row, self.multiclass_ova, out);
                 }
                 proba
             }
@@ -7671,6 +7913,43 @@ mod early_stopping_regression_tests {
             10.0 + c as f64
         }));
         (x, y)
+    }
+
+    #[test]
+    fn classifier_ova_round_trips_every_format() {
+        use anofox_ml_core::persistence as pz;
+        let (x, y) = clf_data(150, 4, 3, 0.1);
+        let fitted = LgbmClassifier::new()
+            .with_n_estimators(5)
+            .with_multiclass_ova(true)
+            .fit(&x, &y)
+            .unwrap();
+        let proba = fitted.predict_proba(&x).unwrap();
+        // One-vs-all probabilities are per-class sigmoids, not normalized.
+        assert!(proba
+            .rows()
+            .into_iter()
+            .any(|r| (r.sum() - 1.0).abs() > 1e-3));
+        let binary: FittedLgbmClassifier =
+            pz::from_binary_bytes(&pz::to_binary_bytes(&fitted).unwrap()).unwrap();
+        let json: FittedLgbmClassifier =
+            pz::from_json_string(&pz::to_json_string(&fitted).unwrap()).unwrap();
+        assert_eq!(binary.predict_proba(&x).unwrap(), proba);
+        // JSON floats may lose the last bit.
+        let from_json = json.predict_proba(&x).unwrap();
+        assert!(from_json
+            .iter()
+            .zip(&proba)
+            .all(|(a, b)| (a - b).abs() < 1e-12));
+    }
+
+    #[test]
+    fn classifier_ova_needs_more_than_two_classes() {
+        let (x, y) = clf_data(60, 4, 2, 0.0);
+        assert!(LgbmClassifier::new()
+            .with_multiclass_ova(true)
+            .fit(&x, &y)
+            .is_err());
     }
 
     fn log_loss(fitted: &FittedLgbmClassifier, x: &Array2<f64>, y: &Array1<f64>) -> f64 {

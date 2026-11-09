@@ -1125,3 +1125,42 @@ def test_catboost_grow_policies_match_catboost():
         ref = cb.CatBoostRegressor(**kw, **extra, **ref_kw).fit(X, y)
         ours = am.CatBoostRegressor(**kw, **extra).fit(X, y)
         np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-10)
+
+
+@pytest.mark.parametrize("objective, extra", [
+    ("tweedie", {}), ("tweedie", {"tweedie_variance_power": 1.2}),
+    ("cross_entropy", {}), ("poisson", {}), ("quantile", {"alpha": 0.3}),
+])
+def test_lgbm_objectives_match_lightgbm(objective, extra):
+    lgb = pytest.importorskip("lightgbm")
+    r = np.random.RandomState(31)
+    X = r.normal(size=(400, 4))
+    mu = np.exp(0.4 * X[:, 0] - 0.3 * X[:, 1])
+    if objective == "cross_entropy":
+        y = 1 / (1 + np.exp(-(X[:, 0] - X[:, 2]))) * 0.8 + 0.1 * r.rand(400)
+    elif objective == "quantile":
+        y = X[:, 0] + r.normal(size=400)
+    else:
+        y = np.where(r.rand(400) < 0.3, 0.0, r.gamma(2.0, mu / 2.0))
+    kw = dict(n_estimators=40, learning_rate=0.1, num_leaves=15, objective=objective, **extra)
+    ref = lgb.LGBMRegressor(**kw, verbose=-1, n_jobs=1, deterministic=True).fit(X, y)
+    ours = am.LGBMRegressor(**kw).fit(X, y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-15)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_lgbm_multiclassova_matches_lightgbm(weighted):
+    lgb = pytest.importorskip("lightgbm")
+    r = np.random.RandomState(5)
+    X = r.normal(size=(500, 4))
+    y = np.digitize(X[:, 0] - 0.5 * X[:, 1] + r.logistic(size=500) * 0.5, [-0.7, 0.2, 1.0])
+    sw = r.uniform(0.3, 2.0, 500) if weighted else None
+    kw = dict(n_estimators=40, learning_rate=0.1, num_leaves=15, objective="multiclassova")
+    ref = lgb.LGBMClassifier(**kw, verbose=-1, n_jobs=1, deterministic=True)
+    ref.fit(X, y, sample_weight=sw)
+    ours = am.LGBMClassifier(**kw).fit(X, y, sample_weight=sw)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
+                               atol=1e-15)
+    np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
+    with pytest.raises(ValueError, match="objective"):
+        am.LGBMClassifier(objective="lambdarank").fit(X, y)
