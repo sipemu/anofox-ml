@@ -49,6 +49,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 - `VotingRegressor` / `VotingClassifier` in the registry (#125), over a
   list of `{estimator, estimator_params}` with optional `weights` and
   (classifier) `voting: "hard" | "soft"`, matching scikit-learn 1.8.
+- `StackingRegressor` / `StackingClassifier` in the registry (#125):
+  out-of-fold predictions of the base specs (KFold / StratifiedKFold, `cv`
+  folds without shuffling) feed `final_estimator`; `passthrough` and
+  `stack_method` as scikit-learn, whose predictions they match.
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /
