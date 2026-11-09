@@ -556,7 +556,13 @@ class _Lgbm(StagedPredictMixin, BaseEstimator):
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
                  max_bin=255, random_state=None, drop_rate=0.1, max_drop=50, skip_drop=0.5,
                  uniform_drop=False, xgboost_dart_mode=False, drop_seed=4, enable_bundle=True,
-                 n_jobs=None):
+                 n_jobs=None, subsample=1.0, subsample_freq=0, feature_fraction_bynode=1.0,
+                 top_rate=0.2, other_rate=0.1):
+        self.subsample = subsample
+        self.subsample_freq = subsample_freq
+        self.feature_fraction_bynode = feature_fraction_bynode
+        self.top_rate = top_rate
+        self.other_rate = other_rate
         self.boosting_type = boosting_type
         self.enable_bundle = enable_bundle
         self.n_jobs = n_jobs
@@ -600,7 +606,11 @@ class _Lgbm(StagedPredictMixin, BaseEstimator):
                 "enable_bundle": bool(self.enable_bundle),
                 # LightGBM's n_jobs: None or <= 0 is the default (physical cores).
                 "n_jobs": None if self.n_jobs is None or self.n_jobs <= 0 else int(self.n_jobs),
-                "seed": _seed(self.random_state)}
+                "subsample": float(self.subsample), "subsample_freq": int(self.subsample_freq),
+                "colsample_bynode": float(self.feature_fraction_bynode),
+                "goss_top_rate": float(self.top_rate), "goss_other_rate": float(self.other_rate),
+                # LightGBM's own seeds without random_state (as LightGBM).
+                "seed": None if self.random_state is None else _seed(self.random_state)}
 
 
 class LGBMClassifier(ClassifierMixin, _Lgbm):
@@ -611,17 +621,24 @@ class LGBMClassifier(ClassifierMixin, _Lgbm):
                  min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
                  max_bin=255, class_weight=None, random_state=None, drop_rate=0.1, max_drop=50,
                  skip_drop=0.5, uniform_drop=False, xgboost_dart_mode=False, drop_seed=4,
-                 enable_bundle=True, n_jobs=None):
+                 enable_bundle=True, n_jobs=None, subsample=1.0, subsample_freq=0,
+                 feature_fraction_bynode=1.0, top_rate=0.2, other_rate=0.1,
+                 pos_bagging_fraction=1.0, neg_bagging_fraction=1.0):
         super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
                          min_split_gain, min_child_weight, min_child_samples,
                          colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
                          drop_rate, max_drop, skip_drop, uniform_drop, xgboost_dart_mode,
-                         drop_seed, enable_bundle, n_jobs)
+                         drop_seed, enable_bundle, n_jobs, subsample, subsample_freq,
+                         feature_fraction_bynode, top_rate, other_rate)
         self.class_weight = class_weight
+        self.pos_bagging_fraction = pos_bagging_fraction
+        self.neg_bagging_fraction = neg_bagging_fraction
 
     def _rust_params(self, X, y):
         p = super()._rust_params(X, y)
         p["class_weight"] = self._encode_class_weight(self.class_weight)
+        p["pos_bagging_fraction"] = float(self.pos_bagging_fraction)
+        p["neg_bagging_fraction"] = float(self.neg_bagging_fraction)
         return p
 
 

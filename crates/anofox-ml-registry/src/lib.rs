@@ -572,9 +572,14 @@ mod boosting_surface_tests {
             (
                 "LgbmRegressor",
                 &y,
-                json!({ "min_child_samples": 5, "subsample": 0.8 }),
+                json!({ "min_child_samples": 5, "subsample": 0.8, "subsample_freq": 2,
+                        "colsample_bytree": 0.7 }),
             ),
-            ("LgbmClassifier", &labels, json!({ "min_child_samples": 5 })),
+            (
+                "LgbmClassifier",
+                &labels,
+                json!({ "min_child_samples": 5, "subsample": 0.8, "subsample_freq": 1 }),
+            ),
             (
                 "HistGradientBoostingRegressor",
                 &y,

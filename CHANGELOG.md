@@ -6,6 +6,33 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM's random generator (#152)
+
+- Bagging, GOSS and the feature fractions of `LgbmRegressor` /
+  `LgbmClassifier` reproduce LightGBM 4.7: its `Random` LCG (one generator
+  per 1024 rows for bagging and GOSS), the seeds it derives from `seed`,
+  GOSS's warm-up of `1 / learning_rate` iterations, and `ColSampler`'s
+  tree and node draws (smaller child first, non-trivial features only).
+- New: `subsample_freq` (LightGBM's `bagging_freq`), `colsample_bynode`
+  (`feature_fraction_bynode`), `pos_bagging_fraction` /
+  `neg_bagging_fraction` (balanced bagging, classifier) and
+  `LgbmClassifier::with_goss_rates`.
+- Tree growth follows LightGBM in the remaining tie-breaks that bagging
+  exposes: the most frequent bin's sums as the node totals minus the other
+  bins (`FixHistogram`), child totals taken from the split scan, LightGBM's
+  comparison of its two missing-value scans, and the softmax hessian in its
+  order of operations.
+- Matches lightgbm 4.7.0 to 6e-16 (quantile: 2e-10, as without bagging) on
+  20 new golden cases (bagging with
+  `subsample_freq` 1–3, balanced, weighted, quantile, multiclass and with
+  DART; GOSS for regression, binary and multiclass; feature fractions by
+  tree and by node; derived seeds; data larger than one generator block).
+  All 35 earlier cases are unchanged.
+- **Breaking:** `subsample` now needs `subsample_freq > 0` to bag, as in
+  LightGBM (before, it bagged every iteration). `seed` is an
+  `Option<u64>` (`None` = LightGBM's default seeds; `with_seed` is
+  unchanged). GOSS rejects `top_rate + other_rate > 1`, non-positive
+  rates and bagging, as LightGBM does.
 ### CatBoost-style boosting: automatic learning rate (#151)
 
 - `learning_rate` is now `Option<f64>` on `CatBoostRegressor` /
