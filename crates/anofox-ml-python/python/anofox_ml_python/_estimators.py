@@ -3949,3 +3949,39 @@ class MultiTaskElasticNetCV(_MultiTaskCV):
     @property
     def l1_ratio_(self):
         return float(self._fitted_state()["l1_ratio"])
+
+
+class LarsCV(RegressorMixin, BaseEstimator):
+    """LARS with ``alpha`` chosen by the mean held-out squared residue over
+    ``cv`` contiguous folds; the refit stops the path at ``alpha_``."""
+
+    _kind = "LarsCV"
+
+    def __init__(self, *, fit_intercept=True, max_iter=500, cv=None, max_n_alphas=1000):
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+        self.cv = cv
+        self.max_n_alphas = max_n_alphas
+
+    def _rust_params(self, X, y):
+        return {"fit_intercept": self.fit_intercept, "max_iter": self.max_iter,
+                "cv": int(5 if self.cv is None else self.cv),
+                "max_n_alphas": self.max_n_alphas}
+
+    def _state(self, name):
+        return self._fitted_state()[name]
+
+    coef_ = property(lambda self: _nd(self._state("fitted")["coef"]))
+    intercept_ = property(lambda self: float(self._state("fitted")["intercept"]))
+    alpha_ = property(lambda self: float(self._state("alpha")))
+    cv_alphas_ = property(lambda self: _nd(self._state("cv_alphas")))
+    mse_path_ = property(lambda self: _nd(self._state("mse_path")))
+    alphas_ = property(lambda self: _nd(self._state("fitted")["alphas"]))
+    coef_path_ = property(lambda self: _nd(self._state("fitted")["coef_path"]))
+    active_ = property(lambda self: list(self._state("fitted")["active_set"]))
+
+
+class LassoLarsCV(LarsCV):
+    """:class:`LarsCV` on the Lasso path."""
+
+    _kind = "LassoLarsCV"

@@ -1533,6 +1533,20 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
+    LarsCV {
+        config: reg::LarsCV = Default::default(),
+        fitted: reg::FittedLarsCV,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        coef: |m| m.fitted.coef.clone(),
+    }
+    LassoLarsCV {
+        config: reg::LarsCV = reg::LarsCV::lasso(),
+        fitted: reg::FittedLarsCV,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        coef: |m| m.fitted.coef.clone(),
+    }
     OrthogonalMatchingPursuit {
         config: reg::OrthogonalMatchingPursuit = Default::default(),
         fitted: reg::FittedOrthogonalMatchingPursuit,

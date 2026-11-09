@@ -18,7 +18,7 @@ use crate::convert::{
 };
 use anofox_ml_core::{Fit, Predict, Result, RustMlError};
 use anofox_regression::solvers::{FittedRegressor as _, LarsMethod, LarsRegressor, Regressor as _};
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 /// LARS / LassoLars estimator.
 ///
@@ -139,8 +139,17 @@ impl Lars {
         let coef = coef_from_col(&res.coefficients);
         // sklearn's `active_`: the active set at the end, in entry order.
         let active = inner.active().to_vec();
+        let mut alphas = Array1::from_iter(path.lambdas.iter().map(|a| a / n));
+        // sklearn's knot alpha is the largest correlation of an inactive
+        // feature: exactly 0 once every feature is active (upstream reports
+        // the rounding residue there).
+        if active.len() == x.ncols() {
+            if let Some(last) = alphas.last_mut() {
+                *last = 0.0;
+            }
+        }
         Ok(LarsPath {
-            alphas: Array1::from_iter(path.lambdas.iter().map(|a| a / n)),
+            alphas,
             coef_path,
             intercepts: path.intercepts,
             intercept: res.intercept.unwrap_or(0.0),
@@ -376,6 +385,243 @@ impl Predict<f64> for FittedLassoLarsIC {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LarsCV / LassoLarsCV — alpha chosen by cross-validated residues.
+// ---------------------------------------------------------------------------
+
+/// sklearn's `LarsCV` (`lasso = false`) / `LassoLarsCV` (`lasso = true`).
+///
+/// Each of `cv` contiguous folds (sklearn's `KFold`) runs a full path on
+/// the training rows centred by their means (the held-out rows by the same
+/// means; sklearn's `_lars_path_residues`); its held-out residues are linearly
+/// interpolated (`scipy.interpolate.interp1d`) onto the union of all
+/// folds' knots (thinned to at most `max_n_alphas`). The alpha with the
+/// lowest mean squared residue, averaged over folds, is refitted on all
+/// rows: the path stopped at that alpha, as `lars_path(alpha_min=)`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LarsCV {
+    pub lasso: bool,
+    pub fit_intercept: bool,
+    pub max_iter: usize,
+    pub cv: usize,
+    pub max_n_alphas: usize,
+}
+
+impl Default for LarsCV {
+    fn default() -> Self {
+        Self {
+            lasso: false,
+            fit_intercept: true,
+            max_iter: 500,
+            cv: 5,
+            max_n_alphas: 1000,
+        }
+    }
+}
+
+impl LarsCV {
+    /// sklearn's `LassoLarsCV()`.
+    pub fn lasso() -> Self {
+        Self {
+            lasso: true,
+            ..Self::default()
+        }
+    }
+
+    fn lars(&self, fit_intercept: bool) -> Lars {
+        let base = if self.lasso {
+            Lars::lasso(usize::MAX)
+        } else {
+            Lars::new(usize::MAX)
+        };
+        base.with_fit_intercept(fit_intercept)
+            .with_max_iter(self.max_iter)
+    }
+}
+
+/// `scipy.interpolate.interp1d(x, y, axis=0)(x_new)` (linear, `x`
+/// increasing, `x_new` inside `[x₀, x_last]`): row `i` of the result
+/// interpolates the rows of `y`.
+fn interp1d_rows(x: &[f64], y: &Array2<f64>, x_new: &[f64]) -> Array2<f64> {
+    let mut out = Array2::<f64>::zeros((x_new.len(), y.ncols()));
+    for (i, &v) in x_new.iter().enumerate() {
+        let hi = x.partition_point(|&a| a < v).clamp(1, x.len() - 1);
+        let lo = hi - 1;
+        let dx = x[hi] - x[lo];
+        for c in 0..y.ncols() {
+            let slope = (y[[hi, c]] - y[[lo, c]]) / dx;
+            out[[i, c]] = slope * (v - x[lo]) + y[[lo, c]];
+        }
+    }
+    out
+}
+
+impl Fit<f64> for LarsCV {
+    type Fitted = FittedLarsCV;
+
+    fn fit_view(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self::Fitted> {
+        check_xy(x, y)?;
+        let n = x.nrows();
+        if self.cv < 2 || self.cv > n {
+            return Err(RustMlError::InvalidParameter(format!(
+                "cv must be in 2..={n}, got {}",
+                self.cv
+            )));
+        }
+        if self.max_n_alphas == 0 {
+            return Err(RustMlError::InvalidParameter(
+                "max_n_alphas must be at least 1".into(),
+            ));
+        }
+        let ids = crate::elastic_net_cv::contiguous_fold_ids(n, self.cv);
+        // Per fold: knots (decreasing) and held-out residues per knot.
+        let mut paths: Vec<(Vec<f64>, Array2<f64>)> = Vec::with_capacity(self.cv);
+        for f in 0..self.cv {
+            let test: Vec<usize> = (0..n).filter(|&i| ids[i] == f).collect();
+            let train = crate::elastic_net_cv::train_rows(n, &test);
+            let (mut xt, mut yt) = (x.select(Axis(0), &train), y.select(Axis(0), &train));
+            let (mut xs, mut ys) = (x.select(Axis(0), &test), y.select(Axis(0), &test));
+            if self.fit_intercept {
+                let xm = xt.mean_axis(Axis(0)).unwrap();
+                xt -= &xm;
+                xs -= &xm;
+                let ym = yt.mean().unwrap_or(0.0);
+                yt -= ym;
+                ys -= ym;
+            }
+            let path = self.lars(false).path(xt.view(), yt.view())?;
+            // knots × test rows
+            let resid = xs.dot(&path.coef_path).t().to_owned() - &ys.insert_axis(Axis(0));
+            paths.push((path.alphas.to_vec(), resid));
+        }
+        let mut all: Vec<f64> = paths.iter().flat_map(|(a, _)| a.iter().copied()).collect();
+        all.sort_by(f64::total_cmp);
+        all.dedup();
+        let stride = (all.len() / self.max_n_alphas).max(1);
+        let mut all: Vec<f64> = all.into_iter().step_by(stride).collect();
+        let top = *all.last().unwrap();
+        let mut mse = Array2::<f64>::zeros((all.len(), self.cv));
+        for (f, (alphas, resid)) in paths.iter().enumerate() {
+            let mut a: Vec<f64> = alphas.iter().rev().copied().collect();
+            let mut r: Vec<Array1<f64>> = resid
+                .rows()
+                .into_iter()
+                .rev()
+                .map(|v| v.to_owned())
+                .collect();
+            if a[0] != 0.0 {
+                a.insert(0, 0.0);
+                r.insert(0, r[0].clone());
+            }
+            if *a.last().unwrap() != top {
+                a.push(top);
+                r.push(r.last().unwrap().clone());
+            }
+            // interp1d sorts its points: the appended top alpha lies inside
+            // the fold's range when thinning dropped the largest knots.
+            let mut order: Vec<usize> = (0..a.len()).collect();
+            order.sort_by(|&i, &j| a[i].total_cmp(&a[j]));
+            let a: Vec<f64> = order.iter().map(|&i| a[i]).collect();
+            let views: Vec<_> = order.iter().map(|&i| r[i].view()).collect();
+            let r = ndarray::stack(Axis(0), &views)
+                .map_err(|e| RustMlError::InvalidParameter(e.to_string()))?;
+            let at = interp1d_rows(&a, &r, &all);
+            for i in 0..all.len() {
+                mse[[i, f]] = at.row(i).mapv(|v| v * v).mean().unwrap_or(0.0);
+            }
+        }
+        let keep: Vec<usize> = (0..all.len())
+            .filter(|&i| mse.row(i).iter().all(|v| v.is_finite()))
+            .collect();
+        all = keep.iter().map(|&i| all[i]).collect();
+        let mse = mse.select(Axis(0), &keep);
+        if all.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "no alpha has a finite cross-validated error".into(),
+            ));
+        }
+        let mean: Vec<f64> = mse
+            .rows()
+            .into_iter()
+            .map(|r| r.mean().unwrap_or(0.0))
+            .collect();
+        let best = (0..mean.len()).fold(0, |b, i| if mean[i] < mean[b] { i } else { b });
+        let alpha = all[best];
+
+        // Refit: the full-data path stopped at `alpha` (sklearn's
+        // `lars_path(alpha_min=alpha)`, float32-eps equality tolerance).
+        let path = self.lars(self.fit_intercept).path(x, y)?;
+        let tol = f32::EPSILON as f64;
+        let knots = path.alphas.len();
+        let stop = (0..knots).find(|&l| path.alphas[l] <= alpha + tol);
+        let (last, coef) = match stop {
+            None => (knots - 1, path.coef_path.column(knots - 1).to_owned()),
+            Some(l) => {
+                let c = path.coef_path.column(l).to_owned();
+                if (path.alphas[l] - alpha).abs() > tol && l > 0 {
+                    let prev = path.coef_path.column(l - 1);
+                    let ss = (path.alphas[l - 1] - alpha) / (path.alphas[l - 1] - path.alphas[l]);
+                    (l, &prev + &((&c - &prev) * ss))
+                } else {
+                    (l, c)
+                }
+            }
+        };
+        let mut alphas = path.alphas.slice(ndarray::s![..=last]).to_owned();
+        let mut coef_path = path.coef_path.slice(ndarray::s![.., ..=last]).to_owned();
+        if stop.is_some() {
+            alphas[last] = alpha;
+            coef_path.column_mut(last).assign(&coef);
+        }
+        let intercept = if self.fit_intercept {
+            y.mean().unwrap_or(0.0) - x.mean_axis(Axis(0)).unwrap().dot(&coef)
+        } else {
+            0.0
+        };
+        let active_set = path
+            .active
+            .iter()
+            .copied()
+            .filter(|&j| coef[j] != 0.0)
+            .collect();
+        Ok(FittedLarsCV {
+            alpha,
+            cv_alphas: Array1::from(all),
+            mse_path: mse,
+            fitted: FittedLars {
+                coef,
+                intercept,
+                active_set,
+                n_iter: last,
+                alphas,
+                coef_path,
+                n_features: x.ncols(),
+            },
+        })
+    }
+}
+
+/// A fitted [`LarsCV`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FittedLarsCV {
+    /// The selected alpha (sklearn's `alpha_`).
+    pub alpha: f64,
+    /// The alphas scored, increasing (sklearn's `cv_alphas_`).
+    pub cv_alphas: Array1<f64>,
+    /// Mean squared held-out residue per alpha and fold (`mse_path_`).
+    pub mse_path: Array2<f64>,
+    /// The refit on all rows (path up to `alpha`).
+    pub fitted: FittedLars,
+}
+
+impl Predict<f64> for FittedLarsCV {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        self.fitted.predict(x)
+    }
+}
+
+impl anofox_ml_core::RegressorScore<f64> for FittedLarsCV {}
 impl anofox_ml_core::RegressorScore<f64> for FittedLars {}
 impl anofox_ml_core::RegressorScore<f64> for FittedLassoLarsIC {}
 
