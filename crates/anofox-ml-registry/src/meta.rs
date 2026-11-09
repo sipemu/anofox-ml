@@ -2108,3 +2108,147 @@ impl RfeFit {
         self.model.predict(self.transform(x)?.view())
     }
 }
+
+// ============================================================
+// Sequential feature selection
+// ============================================================
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Direction {
+    #[default]
+    Forward,
+    Backward,
+}
+
+/// sklearn's `SequentialFeatureSelector` (`tol=None`): features added
+/// (removed) one at a time, each the one whose addition (removal) gives the
+/// best mean `cv`-fold score; R² for regressors, accuracy for classifiers
+/// (kinds with `predict_proba` or `decision_function`), KFold /
+/// StratifiedKFold without shuffling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct SfsConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    /// Features to select (`None`: half, rounded down); fewer than all.
+    pub n_features_to_select: Option<usize>,
+    pub direction: Direction,
+    pub cv: usize,
+}
+
+impl Default for SfsConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "OlsRegressor".into(),
+            estimator_params: empty_params(),
+            n_features_to_select: None,
+            direction: Direction::Forward,
+            cv: 5,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SfsFit {
+    support: Vec<bool>,
+}
+
+/// sklearn's `r2_score` (1 for a perfect fit of a constant target, else 0).
+fn r2(y: ArrayView1<f64>, p: &Array1<f64>) -> f64 {
+    let mean = y.mean().unwrap_or(0.0);
+    let ss_res: f64 = y.iter().zip(p).map(|(a, b)| (a - b) * (a - b)).sum();
+    let ss_tot: f64 = y.iter().map(|a| (a - mean) * (a - mean)).sum();
+    if ss_tot == 0.0 {
+        return if ss_res == 0.0 { 1.0 } else { 0.0 };
+    }
+    1.0 - ss_res / ss_tot
+}
+
+impl SfsConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<SfsFit> {
+        check_cv("SequentialFeatureSelector", self.cv)?;
+        let p = x.ncols();
+        let k = self.n_features_to_select.unwrap_or(p / 2);
+        if k == 0 || k >= p {
+            return Err(err(format!(
+                "SequentialFeatureSelector: n_features_to_select must be in 1..{p}, got {k}"
+            )));
+        }
+        let probe = crate::make(&self.estimator, &self.estimator_params)?;
+        let caps = probe.capabilities();
+        let classifier = caps.contains(&"predict_proba") || caps.contains(&"decision_function");
+        let splits = if classifier {
+            let (_, idx) = encode(y)?;
+            let y_enc: Array1<f64> = idx.iter().map(|&i| i as f64).collect();
+            anofox_ml_core::stratified_k_fold_ordered(&y_enc, self.cv)?
+        } else {
+            anofox_ml_core::k_fold(x.nrows(), self.cv)?
+        };
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let score = |features: &[usize]| -> Result<f64> {
+            let xs = x.select(Axis(1), features);
+            let mut total = 0.0;
+            for (train, test) in &splits {
+                let m = spec.fit(
+                    xs.select(Axis(0), train).view(),
+                    y.select(Axis(0), train).view(),
+                )?;
+                let pred = m.predict(xs.select(Axis(0), test).view())?;
+                let yt = y.select(Axis(0), test);
+                total += if classifier {
+                    yt.iter().zip(&pred).filter(|(a, b)| a == b).count() as f64 / yt.len() as f64
+                } else {
+                    r2(yt.view(), &pred)
+                };
+            }
+            Ok(total / splits.len() as f64)
+        };
+        // `chosen`: the selected features (forward) or the removed ones
+        // (backward), as sklearn's `current_mask`.
+        let mut chosen = vec![false; p];
+        let steps = match self.direction {
+            Direction::Forward => k,
+            Direction::Backward => p - k,
+        };
+        for _ in 0..steps {
+            let mut best: Option<(usize, f64)> = None;
+            for j in (0..p).filter(|&j| !chosen[j]) {
+                let mut mask = chosen.clone();
+                mask[j] = true;
+                let features: Vec<usize> = (0..p)
+                    .filter(|&f| mask[f] == (self.direction == Direction::Forward))
+                    .collect();
+                let s = score(&features)?;
+                if best.is_none_or(|(_, b)| s > b) {
+                    best = Some((j, s));
+                }
+            }
+            chosen[best.expect("a candidate").0] = true;
+        }
+        let support = match self.direction {
+            Direction::Forward => chosen,
+            Direction::Backward => chosen.iter().map(|&c| !c).collect(),
+        };
+        Ok(SfsFit { support })
+    }
+}
+
+impl SfsFit {
+    pub fn transform(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.support.len() {
+            return Err(err(format!(
+                "SequentialFeatureSelector: expected {} features, got {}",
+                self.support.len(),
+                x.ncols()
+            )));
+        }
+        let features: Vec<usize> = (0..self.support.len())
+            .filter(|&j| self.support[j])
+            .collect();
+        Ok(x.select(Axis(1), &features))
+    }
+}

@@ -74,6 +74,9 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   (scikit-learn's `importance_getter="auto"`), with `n_features_to_select`
   and `step`; `transform` keeps the selected columns, `predict` uses the
   model refitted on them; `ranking` / `support` in `fitted_json`.
+- `SequentialFeatureSelector` in the registry (#125): greedy forward or
+  backward selection by the mean `cv`-fold R² (regressors) or accuracy
+  (classifiers), matching scikit-learn 1.8's selections.
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /
