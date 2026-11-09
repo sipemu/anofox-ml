@@ -25,11 +25,18 @@
 
 pub mod classifier;
 mod engine;
+pub mod extra_tree;
 pub mod node;
 pub mod regressor;
+pub mod sk_random_tree;
 pub mod split;
 
 pub use classifier::{DecisionTreeClassifier, FittedDecisionTreeClassifier};
+pub use extra_tree::{
+    ExtraTreeClassifier, ExtraTreeParams, ExtraTreeRegressor, FittedExtraTreeClassifier,
+    FittedExtraTreeRegressor,
+};
 pub use node::TreeNode;
 pub use regressor::{DecisionTreeRegressor, FittedDecisionTreeRegressor};
+pub use sk_random_tree::{SkCriterion, SkTree};
 pub use split::{ClassWeight, MaxFeatures, SplitCriterion, SplitStrategy};
