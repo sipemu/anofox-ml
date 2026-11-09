@@ -61,7 +61,7 @@ pub enum BetaLoss {
 }
 
 impl BetaLoss {
-    fn beta(self) -> f64 {
+    pub(crate) fn beta(self) -> f64 {
         match self {
             BetaLoss::Frobenius => 2.0,
             BetaLoss::KullbackLeibler => 1.0,
@@ -268,11 +268,55 @@ struct NmfParams {
     l2_w: f64,
 }
 
+/// sklearn's `_initialize_nmf` for a resolved `init` (not `Auto`).
+pub(crate) fn initial_wh(
+    x: ArrayView2<f64>,
+    k: usize,
+    init: NmfInit,
+    seed: u64,
+) -> Result<(Array2<f64>, Array2<f64>)> {
+    let (n, d) = x.dim();
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mean = x.mean().unwrap_or(0.0);
+    Ok(match init {
+        NmfInit::Random => {
+            let avg = (mean / k as f64).sqrt();
+            // sklearn draws H first, then W.
+            let h = Array2::<f64>::from_shape_fn((k, d), |_| avg * abs_normal(&mut rng));
+            let w = Array2::<f64>::from_shape_fn((n, k), |_| avg * abs_normal(&mut rng));
+            (w, h)
+        }
+        _ => {
+            let (mut w, mut h) = nndsvd_init(x, k)?;
+            match init {
+                NmfInit::NndsvdA => {
+                    w.mapv_inplace(|v| if v == 0.0 { mean } else { v });
+                    h.mapv_inplace(|v| if v == 0.0 { mean } else { v });
+                }
+                NmfInit::NndsvdAr => {
+                    for v in w.iter_mut().chain(h.iter_mut()) {
+                        if *v == 0.0 {
+                            *v = mean * abs_normal(&mut rng) / 100.0;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            (w, h)
+        }
+    })
+}
+
 const EPSILON: f64 = f64::EPSILON;
 
 /// β-divergence `D(X || W H)` (sklearn `_beta_divergence`, square-rooted
 /// for β = 2 as sklearn reports it).
-fn beta_divergence(x: ArrayView2<f64>, w: &Array2<f64>, h: &Array2<f64>, beta: f64) -> f64 {
+pub(crate) fn beta_divergence(
+    x: ArrayView2<f64>,
+    w: &Array2<f64>,
+    h: &Array2<f64>,
+    beta: f64,
+) -> f64 {
     if beta == 2.0 {
         let x_norm = x.mapv(|v| v * v).sum();
         let norm_wh = (w.t().dot(w) * h.dot(&h.t())).sum();
@@ -333,7 +377,7 @@ fn cd_update(x: ArrayView2<f64>, w: &mut Array2<f64>, ht: &Array2<f64>, l1: f64,
     violation
 }
 
-fn gamma(beta: f64) -> f64 {
+pub(crate) fn gamma(beta: f64) -> f64 {
     if beta < 1.0 {
         1.0 / (2.0 - beta)
     } else if beta > 2.0 {
@@ -345,7 +389,7 @@ fn gamma(beta: f64) -> f64 {
 
 /// Multiplicative update of `W` for `X ≈ W H` (sklearn
 /// `_multiplicative_update_w`).
-fn mu_update_w(
+pub(crate) fn mu_update_w(
     x: ArrayView2<f64>,
     w: &mut Array2<f64>,
     h: &Array2<f64>,
@@ -481,35 +525,7 @@ impl FitUnsupervised<f64> for Nmf {
                 "alpha must be >= 0 and l1_ratio in [0, 1]".into(),
             ));
         }
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        let mean = x.mean().unwrap_or(0.0);
-        let (mut w, mut h) = match init {
-            NmfInit::Random => {
-                let avg = (mean / k as f64).sqrt();
-                // sklearn draws H first, then W.
-                let h = Array2::<f64>::from_shape_fn((k, d), |_| avg * abs_normal(&mut rng));
-                let w = Array2::<f64>::from_shape_fn((n, k), |_| avg * abs_normal(&mut rng));
-                (w, h)
-            }
-            _ => {
-                let (mut w, mut h) = nndsvd_init(x, k)?;
-                match init {
-                    NmfInit::NndsvdA => {
-                        w.mapv_inplace(|v| if v == 0.0 { mean } else { v });
-                        h.mapv_inplace(|v| if v == 0.0 { mean } else { v });
-                    }
-                    NmfInit::NndsvdAr => {
-                        for v in w.iter_mut().chain(h.iter_mut()) {
-                            if *v == 0.0 {
-                                *v = mean * abs_normal(&mut rng) / 100.0;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                (w, h)
-            }
-        };
+        let (mut w, mut h) = initial_wh(x, k, init, self.seed)?;
         let (l1_w, l2_w, l1_h, l2_h) = self.regularization(n, d);
         let params = NmfParams {
             solver: self.solver,

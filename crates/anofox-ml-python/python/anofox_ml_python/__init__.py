@@ -30,6 +30,7 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    MiniBatchNMF,
     SparsePCA,
     BisectingKMeans,
     LatentDirichletAllocation,
@@ -207,6 +208,7 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "MiniBatchNMF",
     "SparsePCA",
     "BisectingKMeans",
     "LatentDirichletAllocation",

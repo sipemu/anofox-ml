@@ -4491,3 +4491,59 @@ class SparsePCA(TransformerMixin, BaseEstimator):
     mean_ = property(lambda self: _nd(self._fitted_state()["mean"]))
     error_ = property(lambda self: np.asarray(self._fitted_state()["error"]))
     n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
+
+
+class MiniBatchNMF(TransformerMixin, BaseEstimator):
+    """NMF by online multiplicative updates over contiguous mini-batches
+    (no ``fresh_restarts``). With the default NNDSVDa init it draws no
+    random numbers and equals sklearn's; ``fit_transform`` returns the
+    training ``W``."""
+
+    _kind = "MiniBatchNmf"
+
+    def __init__(self, n_components="auto", *, init=None, batch_size=1024,
+                 beta_loss="frobenius", tol=1e-4, max_no_improvement=10, max_iter=200,
+                 alpha_W=0.0, alpha_H="same", l1_ratio=0.0, forget_factor=0.7,
+                 transform_max_iter=None, random_state=None):
+        self.n_components = n_components
+        self.init = init
+        self.batch_size = batch_size
+        self.beta_loss = beta_loss
+        self.tol = tol
+        self.max_no_improvement = max_no_improvement
+        self.max_iter = max_iter
+        self.alpha_W = alpha_W
+        self.alpha_H = alpha_H
+        self.l1_ratio = l1_ratio
+        self.forget_factor = forget_factor
+        self.transform_max_iter = transform_max_iter
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        k = self.n_components
+        k = X.shape[1] if k in ("auto", None) else int(k)
+        return {"n_components": k,
+                "init": _choice(self.init, {None: "Auto", "random": "Random",
+                                            "nndsvd": "Nndsvd", "nndsvda": "NndsvdA",
+                                            "nndsvdar": "NndsvdAr"}, "init"),
+                "batch_size": int(self.batch_size),
+                "beta_loss": _choice(self.beta_loss, {"frobenius": "Frobenius",
+                                                      "kullback-leibler": "KullbackLeibler",
+                                                      "itakura-saito": "ItakuraSaito"},
+                                     "beta_loss"),
+                "tol": float(self.tol),
+                "max_no_improvement": None if self.max_no_improvement is None
+                else int(self.max_no_improvement),
+                "max_iter": int(self.max_iter), "alpha_w": float(self.alpha_W),
+                "alpha_h": None if self.alpha_H == "same" else float(self.alpha_H),
+                "l1_ratio": float(self.l1_ratio), "forget_factor": float(self.forget_factor),
+                "transform_max_iter": self.transform_max_iter,
+                "seed": _seed(self.random_state)}
+
+    def fit_transform(self, X, y=None, **fit_params):
+        return np.asarray(self.fit(X)._model().embedding())
+
+    components_ = property(lambda self: _nd(self._fitted_state()["components"]))
+    reconstruction_err_ = property(lambda self: float(self._fitted_state()["reconstruction_err"]))
+    n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
+    n_steps_ = property(lambda self: int(self._fitted_state()["n_steps"]))

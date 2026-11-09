@@ -373,3 +373,15 @@ def test_sparse_pca_matches_sklearn():
     assert ours.n_iter_ == ref.n_iter_
     np.testing.assert_allclose(ours.components_, ref.components_, atol=1e-7)
     np.testing.assert_allclose(ours.transform(X), ref.transform(X), atol=1e-7)
+
+
+def test_minibatch_nmf_matches_sklearn():
+    from sklearn.decomposition import MiniBatchNMF
+
+    V = np.abs(X) + 0.05
+    kw = dict(n_components=3, batch_size=12, max_iter=80, random_state=0)
+    ours, ref = am.MiniBatchNMF(**kw), MiniBatchNMF(**kw)
+    np.testing.assert_allclose(ours.fit_transform(V), ref.fit_transform(V), rtol=1e-9)
+    np.testing.assert_allclose(ours.components_, ref.components_, rtol=1e-9)
+    assert ours.n_steps_ == ref.n_steps_
+    np.testing.assert_allclose(ours.transform(V[:7]), ref.transform(V[:7]), rtol=1e-9)
