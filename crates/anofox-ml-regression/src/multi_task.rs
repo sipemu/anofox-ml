@@ -68,21 +68,21 @@ impl MultiTaskElasticNet {
         for _ in 0..self.max_iter {
             let mut max_change = 0.0f64;
             let mut max_w = 0.0f64;
-            for j in 0..p {
-                if norms[j] == 0.0 {
+            for (j, &norm_j) in norms.iter().enumerate() {
+                if norm_j == 0.0 {
                     continue;
                 }
                 let xj = xc.column(j);
                 let old = w.column(j).to_owned();
                 // tmp = X_jᵀ R + ‖X_j‖² w_j
-                let tmp: Array1<f64> = r.t().dot(&xj) + &old * norms[j];
+                let tmp: Array1<f64> = r.t().dot(&xj) + &old * norm_j;
                 let norm = tmp.dot(&tmp).sqrt();
                 let shrink = if norm > 0.0 {
                     (1.0 - l1 / norm).max(0.0)
                 } else {
                     0.0
                 };
-                let new = &tmp * (shrink / (norms[j] + l2));
+                let new = &tmp * (shrink / (norm_j + l2));
                 let delta = &new - &old;
                 if delta.iter().any(|&d| d != 0.0) {
                     for i in 0..n {
