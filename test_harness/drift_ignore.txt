@@ -13,3 +13,11 @@ hdbscan.json:labels_public
 # convergence). golden_cv_linear.rs compares them at 1e-6; the accuracy
 # scores and the chosen C are exact.
 cv_linear.json:scores
+
+# NeighborhoodComponentsAnalysis runs scipy's L-BFGS-B, whose iterates agree
+# between machines only to ~1e-8 (BLAS-dependent); the map is also only
+# identified up to rotation. golden_nca.rs compares the objective reached
+# (`loss`) at 0.05 / 0.5, never the components.
+nca.json:components
+nca.json:transform
+nca.json:loss
