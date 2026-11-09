@@ -437,7 +437,7 @@ scripts/publish.sh --execute # requires `cargo login` against crates.io
 ## Python
 
 `crates/anofox-ml-python` builds the `anofox_ml_python` package (PyO3 +
-maturin). It exposes 95 estimators with scikit-learn's API:
+maturin). It exposes 150+ estimators with scikit-learn's API:
 constructor arguments are stored unchanged, so `get_params` / `set_params`,
 `sklearn.base.clone`, `GridSearchCV` and sklearn pipelines work; `fit`
 returns `self`; seeds are `random_state`; classifiers accept any label type;

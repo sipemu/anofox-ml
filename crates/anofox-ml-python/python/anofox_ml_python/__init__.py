@@ -16,6 +16,19 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    LassoLarsIC,
+    BinomialRegressor,
+    IsotonicRegression,
+    GaussianProcessRegressor,
+    GaussianProcessClassifier,
+    PLSRegression,
+    CCA,
+    PLSCanonical,
+    PLSSVD,
+    MultiTaskLasso,
+    MultiTaskElasticNet,
+    SpectralEmbedding,
+    RcsTransformer,
     KNeighborsTransformer,
     FeatureAgglomeration,
     LabelPropagation,
@@ -167,6 +180,9 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "LassoLarsIC", "BinomialRegressor", "IsotonicRegression", "GaussianProcessRegressor",
+    "GaussianProcessClassifier", "PLSRegression", "CCA", "PLSCanonical", "PLSSVD",
+    "MultiTaskLasso", "MultiTaskElasticNet", "SpectralEmbedding", "RcsTransformer",
     "BaseEstimator", "NotFittedError", "conformal", "metrics", "model_selection", "multiclass", "train_test_split",
     "TuneSearchCV",
     "OneVsRestClassifier", "OneVsOneClassifier", "FixedThresholdClassifier",
