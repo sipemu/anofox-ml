@@ -36,13 +36,33 @@ fn text_only(kind: &str) -> anofox_ml_core::RustMlError {
     ))
 }
 
-/// Compact fitted form of a linear model whose full fitted type holds
-/// non-serializable solver state: enough to predict and to pickle.
-/// Aliased (`NaN`) coefficients count as 0, as in the Rust `predict`.
+/// Fitted form of the linear models: coefficients and intercept (enough to
+/// predict), plus the fit statistics. Aliased (`NaN`) coefficients count as
+/// 0, as in the Rust `predict`. The optional fields default when absent, so
+/// models stored before they existed still load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LinearFit {
     pub coef: Array1<f64>,
     pub intercept: f64,
+    /// Training R².
+    #[serde(default)]
+    pub r_squared: Option<f64>,
+    /// The selected regularisation strength of the CV kinds (sklearn's
+    /// `alpha_`).
+    #[serde(default)]
+    pub alpha: Option<f64>,
+    /// The coefficient table (OLS / Ridge fitted with `inference: true`).
+    #[serde(default)]
+    pub summary: Option<reg::RegressionSummary>,
+    /// The full OLS / Ridge fit, behind `predict_interval`.
+    #[serde(default)]
+    full: Option<FullLinear>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum FullLinear {
+    Ols(reg::FittedOlsRegressor),
+    Ridge(reg::FittedRidgeRegressor),
 }
 
 impl LinearFit {
@@ -50,7 +70,35 @@ impl LinearFit {
         Self {
             coef: coef.mapv(|c| if c.is_nan() { 0.0 } else { c }),
             intercept: intercept.unwrap_or(0.0),
+            r_squared: None,
+            alpha: None,
+            summary: None,
+            full: None,
         }
+    }
+
+    fn with_r2(mut self, r2: f64) -> Self {
+        self.r_squared = Some(r2);
+        self
+    }
+
+    fn with_alpha(mut self, alpha: f64) -> Self {
+        self.alpha = Some(alpha);
+        self
+    }
+
+    fn ols(f: reg::FittedOlsRegressor) -> Self {
+        let mut l = Self::new(f.coefficients(), f.intercept()).with_r2(f.r_squared());
+        l.summary = f.summary().ok();
+        l.full = Some(FullLinear::Ols(f));
+        l
+    }
+
+    fn ridge(f: reg::FittedRidgeRegressor) -> Self {
+        let mut l = Self::new(f.coefficients(), f.intercept()).with_r2(f.r_squared());
+        l.summary = f.summary().ok();
+        l.full = Some(FullLinear::Ridge(f));
+        l
     }
 
     fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
@@ -62,6 +110,45 @@ impl LinearFit {
             )));
         }
         Ok(x.dot(&self.coef) + self.intercept)
+    }
+
+    /// Prediction intervals at miscoverage `alpha` (`n × 2`: lower,
+    /// upper), from the OLS / Ridge fit with `inference: true`.
+    fn interval(&self, x: ArrayView2<f64>, alpha: f64) -> Result<Array2<f64>> {
+        if !(alpha > 0.0 && alpha < 1.0) {
+            return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                "alpha must be in (0, 1), got {alpha}"
+            )));
+        }
+        let x = x.to_owned();
+        let kind = reg::IntervalKind::Prediction;
+        let needs_inference = |e: anofox_ml_core::RustMlError| match e {
+            anofox_ml_core::RustMlError::InvalidParameter(m) if m.contains("inference") => {
+                anofox_ml_core::RustMlError::InvalidParameter(
+                    "predict_interval is only available for a model fitted with inference: true"
+                        .into(),
+                )
+            }
+            other => other,
+        };
+        let pi = match &self.full {
+            Some(FullLinear::Ols(m)) => m
+                .predict_interval(&x, kind, 1.0 - alpha)
+                .map_err(needs_inference)?,
+            Some(FullLinear::Ridge(m)) => m
+                .predict_interval(&x, kind, 1.0 - alpha)
+                .map_err(needs_inference)?,
+            None => {
+                return Err(anofox_ml_core::RustMlError::InvalidParameter(
+                    "predict_interval is not available for a model stored without its full fit"
+                        .into(),
+                ))
+            }
+        };
+        let mut out = Array2::<f64>::zeros((x.nrows(), 2));
+        out.column_mut(0).assign(&pi.lower);
+        out.column_mut(1).assign(&pi.upper);
+        Ok(out)
     }
 }
 
@@ -1392,24 +1479,24 @@ registry! {
     OlsRegressor {
         config: reg::OlsRegressor = Default::default(),
         fitted: LinearFit,
-        fit: |c, x, y, w| wsup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+        fit: |c, x, y, w| wsup(K, c, x, y, w).map(LinearFit::ols),
         predict: |m, x| m.predict(x),
+        predict_interval: |m, x, alpha| m.interval(x, alpha),
         coef: |m| m.coef.clone(),
     }
     RidgeRegressor {
         config: reg::RidgeRegressor = Default::default(),
         fitted: LinearFit,
-        fit: |c, x, y, w| wsup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+        fit: |c, x, y, w| wsup(K, c, x, y, w).map(LinearFit::ridge),
         predict: |m, x| m.predict(x),
+        predict_interval: |m, x, alpha| m.interval(x, alpha),
         coef: |m| m.coef.clone(),
     }
     LassoRegressor {
         config: reg::LassoRegressor = Default::default(),
         fitted: LinearFit,
         fit: |c, x, y, w| sup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+            .map(|f| LinearFit::new(f.coefficients(), f.intercept()).with_r2(f.r_squared())),
         predict: |m, x| m.predict(x),
         coef: |m| m.coef.clone(),
     }
@@ -1417,7 +1504,7 @@ registry! {
         config: reg::ElasticNetRegressor = Default::default(),
         fitted: LinearFit,
         fit: |c, x, y, w| sup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+            .map(|f| LinearFit::new(f.coefficients(), f.intercept()).with_r2(f.r_squared())),
         predict: |m, x| m.predict(x),
         coef: |m| m.coef.clone(),
     }
@@ -1425,35 +1512,47 @@ registry! {
         config: reg::HuberRegressor = Default::default(),
         fitted: LinearFit,
         fit: |c, x, y, w| sup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+            .map(|f| LinearFit::new(f.coefficients(), f.intercept()).with_r2(f.r_squared())),
         predict: |m, x| m.predict(x),
     }
     QuantileRegressor {
         config: reg::QuantileRegressor = reg::QuantileRegressor::new(0.5),
         fitted: LinearFit,
         fit: |c, x, y, w| wsup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+            .map(|f| LinearFit::new(f.coefficients(), f.intercept()).with_r2(f.r_squared())),
         predict: |m, x| m.predict(x),
     }
     RidgeCrossValidated {
         config: reg::RidgeCrossValidated = Default::default(),
         fitted: LinearFit,
         fit: |c, x, y, w| sup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+            .map(|f| {
+                LinearFit::new(f.coefficients(), f.intercept())
+                    .with_r2(f.r_squared())
+                    .with_alpha(f.best_alpha())
+            }),
         predict: |m, x| m.predict(x),
     }
     LassoCrossValidated {
         config: reg::LassoCrossValidated = Default::default(),
         fitted: LinearFit,
         fit: |c, x, y, w| sup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+            .map(|f| {
+                LinearFit::new(f.coefficients(), f.intercept())
+                    .with_r2(f.r_squared())
+                    .with_alpha(f.best_alpha())
+            }),
         predict: |m, x| m.predict(x),
     }
     ElasticNetCrossValidated {
         config: reg::ElasticNetCrossValidated = Default::default(),
         fitted: LinearFit,
         fit: |c, x, y, w| sup(K, c, x, y, w)
-            .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
+            .map(|f| {
+                LinearFit::new(f.coefficients(), f.intercept())
+                    .with_r2(f.r_squared())
+                    .with_alpha(f.best_alpha())
+            }),
         predict: |m, x| m.predict(x),
     }
     LogisticRegressor {

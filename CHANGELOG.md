@@ -131,6 +131,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `TweedieRegressor` raised `KeyError`.
 
 ### Registry
+- Full linear fits (#125): the registry's linear kinds keep the training
+  R² (`r_squared`) and the CV kinds the selected `alpha`; `OlsRegressor` and
+  `RidgeRegressor` keep their full fit, with the coefficient table
+  (`summary` in `fitted_json`) and `predict_interval(x, alpha)` (prediction
+  intervals at level `1 − alpha`) when fitted with `inference: true`. The
+  new fields are optional in the stored model, so blobs written by earlier
+  versions still load (and predict).
 - Text input (#183): `DynModel::fit_text(&[&str])` and
   `transform_text(&[&str])` (capabilities `fit_text`, `transform_text`),
   with kinds `CountVectorizer`, `TfidfVectorizer` and `HashingVectorizer`
