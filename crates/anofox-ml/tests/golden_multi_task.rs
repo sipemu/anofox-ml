@@ -12,7 +12,11 @@ fn multi_task_models_match_scikit_learn() {
     let (x, y) = (json_to_array2(&data["X"]), json_to_array2(&data["Y"]));
     for case in data["cases"].as_array().unwrap() {
         let p = &case["params"];
-        let l1_ratio = if case["kind"] == "MultiTaskLasso" { 1.0 } else { p["l1_ratio"].as_f64().unwrap() };
+        let l1_ratio = if case["kind"] == "MultiTaskLasso" {
+            1.0
+        } else {
+            p["l1_ratio"].as_f64().unwrap()
+        };
         let mut m = MultiTaskElasticNet::new(p["alpha"].as_f64().unwrap(), l1_ratio);
         m.fit_intercept = p["fit_intercept"].as_bool().unwrap_or(true);
         let f = m.fit(&x, &y).unwrap();
