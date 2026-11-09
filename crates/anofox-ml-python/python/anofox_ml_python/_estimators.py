@@ -282,29 +282,54 @@ class AdaBoostRegressor(RegressorMixin, BaseEstimator):
 
 
 class _Bagging(BaseEstimator):
-    """Bagged decision trees (``max_samples`` is a fraction)."""
+    """Bagging of decision trees (``estimator=None``, which also takes
+    ``max_depth``) or of any of this package's estimators of the same type.
+    ``max_samples`` / ``max_features`` are fractions or counts."""
 
-    def __init__(self, n_estimators=10, max_samples=1.0, bootstrap=True, max_depth=None,
+    def __init__(self, estimator=None, n_estimators=10, *, max_samples=1.0, max_features=1.0,
+                 bootstrap=True, bootstrap_features=False, oob_score=False, max_depth=None,
                  random_state=None):
+        self.estimator = estimator
         self.n_estimators = n_estimators
         self.max_samples = max_samples
+        self.max_features = max_features
         self.bootstrap = bootstrap
+        self.bootstrap_features = bootstrap_features
+        self.oob_score = oob_score
         self.max_depth = max_depth
         self.random_state = random_state
 
+    @property
+    def _kind(self):
+        return self._tree_kind if self.estimator is None else self._estimator_kind
+
     def _rust_params(self, X, y):
-        ms = None if self.max_samples == 1.0 else float(self.max_samples)
-        return {"n_estimators": self.n_estimators, "max_samples": ms,
-                "bootstrap": self.bootstrap, "max_depth": self.max_depth,
-                "seed": _seed(self.random_state)}
+        ms = self.max_samples
+        if isinstance(ms, (int, np.integer)) and not isinstance(ms, bool):
+            ms = ms / X.shape[0]
+        ms = None if ms == 1.0 else float(ms)
+        mf = None if self.max_features == 1.0 else _max_features(self.max_features)
+        p = {"n_estimators": self.n_estimators, "max_samples": ms, "max_features": mf,
+             "bootstrap": self.bootstrap, "bootstrap_features": self.bootstrap_features,
+             "oob_score": self.oob_score, "seed": _seed(self.random_state)}
+        if self.estimator is None:
+            p["max_depth"] = self.max_depth
+            return p
+        if self.max_depth is not None:
+            raise ValueError("max_depth applies only to the default tree estimator")
+        from .meta import _spec
+
+        return {**p, **_spec(self.estimator, X, y)}
 
 
 class BaggingClassifier(ClassifierMixin, _Bagging):
-    _kind = "BaggingClassifier"
+    _tree_kind = "BaggingClassifier"
+    _estimator_kind = "BaggingEstimatorClassifier"
 
 
 class BaggingRegressor(RegressorMixin, _Bagging):
-    _kind = "BaggingRegressor"
+    _tree_kind = "BaggingRegressor"
+    _estimator_kind = "BaggingEstimatorRegressor"
 
 
 def _categorical_indices(categorical_features, n_features):
