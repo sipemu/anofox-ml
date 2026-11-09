@@ -11,7 +11,9 @@
 //!   generator and seeds
 //! - **Early stopping** with an evaluation set
 //! - **Categorical features** (Fisher method: sort by grad/hess, then split)
-//! - **Custom objectives** (user-provided gradient/hessian)
+//! - **Custom objectives** ([`LgbmRegressor::fit_custom`]: gradients and
+//!   hessians from the caller, one or several outputs) and raw scores
+//!   (`predict_raw`)
 //! - **Feature importance** (split count and total gain)
 //!
 //! Not included: distributed training.
@@ -24,6 +26,9 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+
+mod custom;
+pub use custom::{FittedLgbmBooster, LgbmCustomObjective};
 
 const DEFAULT_MAX_BINS: usize = 255;
 /// Special bin index reserved for NaN / missing values.
@@ -4809,8 +4814,13 @@ impl FittedLgbmRegressor {
     }
 }
 
-impl Predict<f64> for FittedLgbmRegressor {
-    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+impl FittedLgbmRegressor {
+    /// The raw scores (no `exp` / sigmoid link).
+    pub fn predict_raw<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array1<f64>> {
+        self.raw_scores(x.into())
+    }
+
+    fn raw_scores(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         if x.ncols() != self.n_features {
             return Err(RustMlError::ShapeMismatch(format!(
                 "expected {} features, got {}",
@@ -4839,12 +4849,18 @@ impl Predict<f64> for FittedLgbmRegressor {
                     }
                 });
         }
+        Ok(preds)
+    }
+}
+
+impl Predict<f64> for FittedLgbmRegressor {
+    fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let mut preds = self.raw_scores(x)?;
         if self.log_link {
             preds.mapv_inplace(f64::exp);
         } else if self.logistic {
             preds.mapv_inplace(sigmoid);
         }
-
         Ok(preds)
     }
 }
@@ -5325,6 +5341,27 @@ impl FittedLgbmClassifier {
         } else {
             Array1::zeros(self.n_features)
         }
+    }
+
+    /// The raw scores before the sigmoid / softmax: one column for two
+    /// classes, one per class otherwise.
+    pub fn predict_raw<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        if x.ncols() != self.n_features {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} features, got {}",
+                self.n_features,
+                x.ncols()
+            )));
+        }
+        let binned = bin_matrix(x, &self.bins);
+        let k = self.tree_sets.len();
+        Ok(Array2::from_shape_fn((x.nrows(), k), |(i, c)| {
+            let row = row_of(&binned, i);
+            self.tree_sets[c].iter().fold(self.baselines[c], |s, tree| {
+                s + self.learning_rate * tree.predict_bins(row)
+            })
+        }))
     }
 
     pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {

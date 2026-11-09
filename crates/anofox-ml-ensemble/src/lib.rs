@@ -103,9 +103,9 @@ pub use hist_gradient_boosting::{
 };
 pub use isolation_forest::{FittedIsolationForest, IsolationForest};
 pub use lgbm::{
-    BinningMethod, BoostingType, CategoricalSplitParams, DartParams, FittedLgbmClassifier,
-    FittedLgbmRegressor, LgbmClassWeight, LgbmClassifier, LgbmFitOptions, LgbmObjective,
-    LgbmRegressor,
+    BinningMethod, BoostingType, CategoricalSplitParams, DartParams, FittedLgbmBooster,
+    FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassWeight, LgbmClassifier,
+    LgbmCustomObjective, LgbmFitOptions, LgbmObjective, LgbmRegressor,
 };
 pub use random_forest_classifier::{FittedRandomForestClassifier, RandomForestClassifier};
 pub use random_forest_regressor::{FittedRandomForestRegressor, RandomForestRegressor};
