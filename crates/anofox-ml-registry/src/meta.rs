@@ -1984,3 +1984,127 @@ impl RegressorChainFit {
         stack_columns(&out)
     }
 }
+
+// ============================================================
+// Recursive feature elimination
+// ============================================================
+
+/// sklearn's `RFE` with `importance_getter="auto"`: the squared `coef`
+/// (summed over classes), else the squared `feature_importances`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct RfeConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    /// Features to keep (`None`: half, rounded down, at least 1).
+    pub n_features_to_select: Option<usize>,
+    /// Features removed per round.
+    pub step: usize,
+}
+
+impl Default for RfeConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "OlsRegressor".into(),
+            estimator_params: empty_params(),
+            n_features_to_select: None,
+            step: 1,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RfeFit {
+    /// Whether each input feature is kept (sklearn's `support_`).
+    support: Vec<bool>,
+    /// 1 for the kept features, then the round of elimination, latest
+    /// first (sklearn's `ranking_`).
+    ranking: Vec<usize>,
+    model: RegistryFitted,
+}
+
+/// sklearn's importances for elimination (`transform_func="square"`).
+fn rfe_importances(m: &RegistryFitted) -> Result<Array1<f64>> {
+    let model = m.model();
+    let out = if has(m, "coef") {
+        model.coef()?
+    } else if has(m, "feature_importances") {
+        model.feature_importances()?
+    } else {
+        return Err(err(format!(
+            "Rfe: {} has neither coef nor feature_importances",
+            model.kind()
+        )));
+    };
+    Ok(match out {
+        Out::A1(a) => a.mapv(|v| v * v),
+        Out::A2(a) => a.mapv(|v| v * v).sum_axis(Axis(0)),
+    })
+}
+
+impl RfeConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<RfeFit> {
+        let p = x.ncols();
+        let keep = self.n_features_to_select.unwrap_or((p / 2).max(1));
+        if keep == 0 || keep > p {
+            return Err(err(format!(
+                "Rfe: n_features_to_select must be in 1..={p}, got {keep}"
+            )));
+        }
+        if self.step == 0 {
+            return Err(err("Rfe: step must be at least 1"));
+        }
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let mut support = vec![true; p];
+        let mut ranking = vec![1usize; p];
+        loop {
+            let features: Vec<usize> = (0..p).filter(|&j| support[j]).collect();
+            if features.len() <= keep {
+                break;
+            }
+            let model = spec.fit(x.select(Axis(1), &features).view(), y)?;
+            let imp = rfe_importances(&model)?;
+            let mut order: Vec<usize> = (0..features.len()).collect();
+            order.sort_by(|&a, &b| imp[a].total_cmp(&imp[b]));
+            let drop = self.step.min(features.len() - keep);
+            for &k in &order[..drop] {
+                support[features[k]] = false;
+            }
+            for j in 0..p {
+                if !support[j] {
+                    ranking[j] += 1;
+                }
+            }
+        }
+        let features: Vec<usize> = (0..p).filter(|&j| support[j]).collect();
+        let model = spec.fit(x.select(Axis(1), &features).view(), y)?;
+        Ok(RfeFit {
+            support,
+            ranking,
+            model,
+        })
+    }
+}
+
+impl RfeFit {
+    pub fn transform(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.support.len() {
+            return Err(err(format!(
+                "Rfe: expected {} features, got {}",
+                self.support.len(),
+                x.ncols()
+            )));
+        }
+        let features: Vec<usize> = (0..self.support.len())
+            .filter(|&j| self.support[j])
+            .collect();
+        Ok(x.select(Axis(1), &features))
+    }
+
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        self.model.predict(self.transform(x)?.view())
+    }
+}

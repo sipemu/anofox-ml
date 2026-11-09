@@ -1010,6 +1010,16 @@ registry! {
         },
         predict: |m, x| m.predict(x),
     }
+    Rfe {
+        config: crate::meta::RfeConfig = Default::default(),
+        fitted: crate::meta::RfeFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+        transform: |m, x| m.transform(x),
+    }
     OneVsRestClassifier {
         config: crate::meta::OneVsRestConfig = Default::default(),
         fitted: crate::meta::OneVsRestFit,
@@ -1290,6 +1300,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w)
             .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
         predict: |m, x| m.predict(x),
+        coef: |m| m.coef.clone(),
     }
     RidgeRegressor {
         config: reg::RidgeRegressor = Default::default(),
@@ -1297,6 +1308,7 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w)
             .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
         predict: |m, x| m.predict(x),
+        coef: |m| m.coef.clone(),
     }
     LassoRegressor {
         config: reg::LassoRegressor = Default::default(),
@@ -1304,6 +1316,7 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w)
             .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
         predict: |m, x| m.predict(x),
+        coef: |m| m.coef.clone(),
     }
     ElasticNetRegressor {
         config: reg::ElasticNetRegressor = Default::default(),
@@ -1311,6 +1324,7 @@ registry! {
         fit: |c, x, y, w| sup(K, c, x, y, w)
             .map(|f| LinearFit::new(f.coefficients(), f.intercept())),
         predict: |m, x| m.predict(x),
+        coef: |m| m.coef.clone(),
     }
     HuberRegressor {
         config: reg::HuberRegressor = Default::default(),
@@ -1355,6 +1369,7 @@ registry! {
         predict_proba: |m, x| PredictProba::predict_proba(m, x),
         predict_log_proba: |m, x| PredictLogProba::predict_log_proba(m, x),
         decision_function: |m, x| DecisionFunction::decision_function(m, x),
+        coef: |m| m.coef().clone(),
     }
     LogisticRegressionCV {
         config: reg::LogisticRegressionCV = Default::default(),
