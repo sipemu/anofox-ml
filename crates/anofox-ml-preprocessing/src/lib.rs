@@ -72,7 +72,7 @@ pub mod variance_threshold;
 
 pub use areg_imputer::{AregImputer, AregMatch, AregVariable, MultipleImputation};
 pub use binarizer::{Binarizer, FittedBinarizer};
-pub use cca::{Cca, FittedCca};
+pub use cca::{Cca, FittedCca, FittedPlsSvd, PlsCanonical, PlsSvd};
 pub use covariance::{
     EllipticEnvelope, EmpiricalCovariance, FittedCovariance, FittedEllipticEnvelope, LedoitWolf,
     MinCovDet, Oas, ShrunkCovariance,
