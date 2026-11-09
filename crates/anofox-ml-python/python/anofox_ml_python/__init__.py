@@ -30,6 +30,7 @@ from .multiclass import (
 )
 from ._base import BaseEstimator, NotFittedError
 from ._estimators import (
+    OneHotEncoder,
     ExtraTreeRegressor,
     ExtraTreeClassifier,
     RandomTreesEmbedding,
@@ -211,6 +212,7 @@ Hdbscan = HDBSCAN
 TSne = TSNE
 
 __all__ = [
+    "OneHotEncoder",
     "ExtraTreeRegressor", "ExtraTreeClassifier", "RandomTreesEmbedding",
     "MiniBatchNMF",
     "SparsePCA",
