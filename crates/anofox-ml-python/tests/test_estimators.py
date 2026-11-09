@@ -64,6 +64,7 @@ SPECIAL = {
                                                                  random_state=0)),
     "LatentDirichletAllocation": dict(X=np.round(X_pos * 3),
                                       params=dict(n_components=3, random_state=0)),
+    "BisectingKMeans": dict(params=dict(n_clusters=3, random_state=0)),
     "FeatureHasher": dict(X=[{"a": 1.0, "b": 2.0}, {"c": "x"}, {"a": -1.0}, {}],
                           params=dict(n_features=16)),
     "CountVectorizer": dict(X=["a fox", "the dog", "the fox ran", "dogs run"]),
