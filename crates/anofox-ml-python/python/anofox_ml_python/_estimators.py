@@ -634,7 +634,7 @@ class _CatBoost(BaseEstimator):
     ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""
 
     def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
-                 border_count=254, score_function="Cosine", leaf_estimation_method="Newton",
+                 border_count=254, score_function="Cosine", leaf_estimation_method=None,
                  boost_from_average=None, cat_features=None, one_hot_max_size=2,
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
                  max_ctr_complexity=None, leaf_estimation_iterations=None,
@@ -642,7 +642,8 @@ class _CatBoost(BaseEstimator):
                  random_strength=1.0, bootstrap_type=None, subsample=None,
                  bagging_temperature=1.0, mvs_reg=None, monotone_constraints=None,
                  model_shrink_rate=None, model_shrink_mode="Constant", class_weights=None,
-                 auto_class_weights=None):
+                 auto_class_weights=None, loss_function=None):
+        self.loss_function = loss_function
         self.monotone_constraints = monotone_constraints
         self.model_shrink_rate = model_shrink_rate
         self.model_shrink_mode = model_shrink_mode
@@ -679,10 +680,12 @@ class _CatBoost(BaseEstimator):
             "border_count": int(self.border_count),
             "score_function": _choice(self.score_function, {"Cosine": "Cosine", "L2": "L2"},
                                       "score_function"),
-            "leaf_estimation_method": _choice(self.leaf_estimation_method,
-                                              {"Newton": "Newton", "Gradient": "Gradient"},
-                                              "leaf_estimation_method"),
         }
+        if self.leaf_estimation_method is not None:
+            params["leaf_estimation_method"] = _choice(
+                self.leaf_estimation_method,
+                {"Newton": "Newton", "Gradient": "Gradient", "Exact": "Exact"},
+                "leaf_estimation_method")
         if self.boost_from_average is not None:
             params["boost_from_average"] = bool(self.boost_from_average)
         params["cat_features"] = self._cat_indices(np.shape(X)[1])
@@ -783,11 +786,44 @@ class _CatBoost(BaseEstimator):
 
 
 class CatBoostRegressor(RegressorMixin, _CatBoost):
+    """``loss_function`` as in catboost: ``"RMSE"``, ``"MAE"``,
+    ``"Quantile:alpha=0.3"``, ``"Expectile:alpha=0.3"``, ``"Poisson"``,
+    ``"Tweedie:variance_power=1.5"`` or ``"LogLinQuantile:alpha=0.5"``."""
+
     _kind = "CatBoostRegressor"
+
+    def _rust_params(self, X, y):
+        params = super()._rust_params(X, y)
+        name, _, rest = str(self.loss_function or "RMSE").partition(":")
+        args = dict(kv.split("=", 1) for kv in rest.split(";") if kv)
+        param = {"Quantile": "alpha", "Expectile": "alpha", "LogLinQuantile": "alpha",
+                 "Tweedie": "variance_power"}
+        if name in ("RMSE", "MAE", "Poisson"):
+            if args:
+                raise ValueError(f"{name} takes no parameters")
+            params["loss_function"] = name
+        elif name in param:
+            key = param[name]
+            if key not in args and name != "Tweedie":
+                args[key] = "0.5"
+            if set(args) != {key}:
+                raise ValueError(f"{name} takes the parameter {key}")
+            params["loss_function"] = {name: {key: float(args[key])}}
+        else:
+            raise ValueError(f"unsupported loss_function {self.loss_function!r}")
+        return params
 
 
 class CatBoostClassifier(ClassifierMixin, _CatBoost):
+    """Logloss for two classes, MultiClass for more (``loss_function`` may
+    name them)."""
+
     _kind = "CatBoostClassifier"
+
+    def _rust_params(self, X, y):
+        if self.loss_function not in (None, "Logloss", "MultiClass"):
+            raise ValueError(f"unsupported loss_function {self.loss_function!r}")
+        return super()._rust_params(X, y)
 
 
 class IsolationForest(OutlierMixin, BaseEstimator):

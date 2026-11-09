@@ -92,6 +92,10 @@ m = am.HistGradientBoostingClassifier(early_stopping=True).fit(X, y)
 - `max_ctr_complexity` 4 (1 below 200 iterations);
 - `leaf_estimation_iterations` 10 for Logloss (1 below 200 iterations with
   fewer than 20 features);
+- per `loss_function` (regressor: RMSE, MAE, Quantile, Expectile, Poisson,
+  Tweedie, LogLinQuantile): Exact leaves for MAE / Quantile,
+  `boost_from_average` for RMSE / MAE / Quantile; Poisson and Tweedie
+  predict `exp(raw)`;
 - with `monotone_constraints`, model shrinkage `model_shrink_rate=0.01`
   (CatBoost switches it on with them; pass 0 to turn it off).
 

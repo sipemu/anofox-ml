@@ -628,6 +628,31 @@ pub enum CatBoostLeafEstimation {
     Newton,
     /// `ΣDer / (ΣW + λ)`.
     Gradient,
+    /// The loss-optimal constant of the leaf's residuals (CatBoost's
+    /// default for MAE and Quantile: their weighted quantile).
+    Exact,
+}
+
+/// The loss of [`CatBoostRegressor`] (CatBoost's `loss_function`).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostRegressionLoss {
+    #[default]
+    #[serde(rename = "RMSE")]
+    Rmse,
+    #[serde(rename = "MAE")]
+    Mae,
+    /// The `alpha` quantile.
+    Quantile { alpha: f64 },
+    /// The `alpha` expectile.
+    Expectile { alpha: f64 },
+    /// Poisson log-likelihood on the log scale; predictions are `exp(raw)`.
+    Poisson,
+    /// Tweedie with `1 < variance_power < 2` on the log scale; predictions
+    /// are `exp(raw)`.
+    Tweedie { variance_power: f64 },
+    /// The `alpha` quantile of `exp(raw)` (predictions stay raw, as in
+    /// CatBoost).
+    LogLinQuantile { alpha: f64 },
 }
 
 /// CatBoost's `model_shrink_mode`: the factor the model is shrunk by
@@ -772,9 +797,25 @@ pub enum CatBoostBacktracking {
 }
 
 /// Losses, with CatBoost's derivative signs (`der1 = −∂L/∂a`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Loss {
     Rmse,
+    /// Quantile (`mae`: CatBoost's MAE, whose metric is doubled).
+    Quantile {
+        alpha: f64,
+        delta: f64,
+        mae: bool,
+    },
+    Expectile {
+        alpha: f64,
+    },
+    Poisson,
+    Tweedie {
+        power: f64,
+    },
+    LogLinQuantile {
+        alpha: f64,
+    },
     Logloss,
     /// Softmax over `k` approximations (CatBoost's `MultiClass`); the target
     /// is the class index.
@@ -804,6 +845,53 @@ impl Loss {
             Loss::Rmse => {
                 der[0] = w * (target - approx[0]);
                 der2[0] = -w;
+            }
+            // CatBoost's `TQuantileError`, ... (`CalcDer · w`); the error
+            // functions parse `alpha` as float32.
+            Loss::Quantile { alpha, delta, .. } => {
+                let alpha = f64::from(alpha as f32);
+                let val = target - approx[0];
+                let d = if val.abs() < delta {
+                    0.0
+                } else if val > 0.0 {
+                    alpha
+                } else {
+                    -(1.0 - alpha)
+                };
+                der[0] = w * d;
+                der2[0] = 0.0;
+            }
+            Loss::Expectile { alpha } => {
+                let e = target - approx[0];
+                let (d, d2) = if e > 0.0 {
+                    (2.0 * alpha * e, -2.0 * alpha)
+                } else {
+                    (2.0 * (1.0 - alpha) * e, -2.0 * (1.0 - alpha))
+                };
+                der[0] = w * d;
+                der2[0] = w * d2;
+            }
+            Loss::Poisson => {
+                let e = approx[0].exp();
+                der[0] = w * (target - e);
+                der2[0] = w * -e;
+            }
+            Loss::Tweedie { power } => {
+                let (a, b) = (
+                    ((1.0 - power) * approx[0]).exp(),
+                    ((2.0 - power) * approx[0]).exp(),
+                );
+                der[0] = w * (target * a - b);
+                der2[0] = w * (target * a * (1.0 - power) - b * (2.0 - power));
+            }
+            Loss::LogLinQuantile { alpha } => {
+                let e = approx[0].exp();
+                der[0] = w * if target - e > 0.0 {
+                    alpha * e
+                } else {
+                    -(1.0 - alpha) * e
+                };
+                der2[0] = 0.0;
             }
             Loss::Logloss => {
                 let e = approx[0].exp();
@@ -849,6 +937,11 @@ impl Loss {
     fn metric(self, target: f64, approx: &[f64]) -> f64 {
         match self {
             Loss::Rmse => (target - approx[0]) * (target - approx[0]),
+            Loss::Quantile { .. }
+            | Loss::Expectile { .. }
+            | Loss::Poisson
+            | Loss::Tweedie { .. }
+            | Loss::LogLinQuantile { .. } => self.metric_moved(target, approx[0], 0.0),
             Loss::Logloss => {
                 let a = approx[0];
                 let e = a.exp();
@@ -866,11 +959,77 @@ impl Loss {
         }
     }
 
+    /// CatBoost's metric of one row at `approx` moved by the leaf value
+    /// `delta`, in its order of operations (`TQuantileMetric`,
+    /// `TExpectileMetric`, `TPoissonMetric` on stored `exp(a)`,
+    /// `TTweedieMetric`, `TLogLinQuantileMetric`).
+    fn metric_moved(self, target: f64, approx: f64, delta: f64) -> f64 {
+        match self {
+            Loss::Quantile {
+                alpha,
+                delta: d,
+                mae,
+            } => {
+                let mut val = target - approx - delta;
+                let m = if val.abs() < d {
+                    0.0
+                } else if val > 0.0 {
+                    alpha
+                } else {
+                    -(1.0 - alpha)
+                };
+                if val < -d {
+                    val += d;
+                } else if val > d {
+                    val -= d;
+                }
+                if mae {
+                    2.0 * (m * val)
+                } else {
+                    m * val
+                }
+            }
+            Loss::Expectile { alpha } => {
+                let val = target - approx - delta;
+                let m = if val > 0.0 { alpha } else { 1.0 - alpha };
+                m * (val * val)
+            }
+            Loss::Poisson => {
+                let e = approx.exp() * delta.exp();
+                e - target * f64::from(fast_logf(e as f32))
+            }
+            Loss::Tweedie { power } => {
+                let a = approx + delta;
+                let margin = -target * ((1.0 - power) * a).exp() / (1.0 - power);
+                margin + ((2.0 - power) * a).exp() / (2.0 - power)
+            }
+            Loss::LogLinQuantile { alpha } => {
+                let val = target - approx.exp() * delta.exp();
+                (if val > 0.0 { alpha } else { -(1.0 - alpha) }) * val
+            }
+            _ => self.metric(target, &[approx + delta]),
+        }
+    }
+
     /// Whether CatBoost stores this loss's approximations as `exp(a)`
     /// (`IsStoreExpApprox`), which changes how its metric and learning
     /// folds are computed.
     fn exp_approx(self) -> bool {
-        matches!(self, Loss::Logloss)
+        matches!(
+            self,
+            Loss::Logloss | Loss::Poisson | Loss::LogLinQuantile { .. }
+        )
+    }
+
+    /// CatBoost's default `boost_from_average`: on for RMSE, MAE and
+    /// Quantile.
+    fn default_boost_from_average(self) -> bool {
+        matches!(self, Loss::Rmse | Loss::Quantile { .. })
+    }
+
+    /// Predictions are `exp(raw)` (CatBoost's `Exponent` prediction type).
+    fn exp_prediction(self) -> bool {
+        matches!(self, Loss::Poisson | Loss::Tweedie { .. })
     }
 
     /// How a learning fold's approximation moves by the leaf value `v`
@@ -897,8 +1056,17 @@ impl Loss {
         weights: &[f64],
         rows: usize,
     ) -> f64 {
-        if self.exp_approx() {
+        if self == Loss::Logloss {
             return logloss_metric_exp(target, approx, leaves, leaf_of, weights, rows);
+        }
+        if self.dims() == 1 && self != Loss::Rmse {
+            let (mut sum, mut sum_w) = (0.0, 0.0);
+            for i in 0..rows {
+                let w = weights[i];
+                sum += self.metric_moved(target[i], approx[i], leaves[leaf_of[i] as usize]) * w;
+                sum_w += w;
+            }
+            return sum / sum_w;
         }
         let k = self.dims();
         let (mut sum, mut sum_w) = (0.0, 0.0);
@@ -2225,13 +2393,94 @@ impl LeafSums {
                 let der2 = &self.der2[leaf * h..(leaf + 1) * h];
                 newton_multi(der, der2, l2, sum_w, count, out);
             }
-            CatBoostLeafEstimation::Gradient => {
+            CatBoostLeafEstimation::Gradient | CatBoostLeafEstimation::Exact => {
                 for (o, &d) in out.iter_mut().zip(der) {
                     *o = average(d, self.w[leaf], scaled_l2);
                 }
             }
         }
     }
+}
+
+/// CatBoost's `CalcSampleQuantile`: below 100 values the first value of
+/// the stable sort whose cumulative weight reaches `alpha` of the total;
+/// else 100 bisection steps (with libc++'s `std::partition` of the rows
+/// still undecided), returning the upper end.
+fn sample_quantile(values: &[f32], weights: &[f32], alpha: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    if alpha <= 0.0 {
+        return f64::from(values.iter().copied().fold(f32::INFINITY, f32::min));
+    }
+    let total: f64 = weights.iter().fold(0.0, |s, &w| s + f64::from(w));
+    let need = total * alpha;
+    let mut elements: Vec<(f32, f32)> = values
+        .iter()
+        .copied()
+        .zip(weights.iter().copied())
+        .collect();
+    if values.len() < 100 {
+        elements.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut sum = 0.0;
+        for &(v, w) in &elements {
+            sum += f64::from(w);
+            if sum >= need - f64::EPSILON {
+                return f64::from(v);
+            }
+        }
+        return f64::from(elements.last().unwrap().0);
+    }
+    let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (mut lq, mut rq) = (f64::from(min) - f64::EPSILON, f64::from(max));
+    let (mut l, mut r) = (0usize, elements.len());
+    let mut collected = 0.0;
+    for _ in 0..100 {
+        let q = (lq + rq) / 2.0;
+        let point = l + libcxx_partition(&mut elements[l..r], |e: (f32, f32)| f64::from(e.0) <= q);
+        let left: f64 = elements[l..point]
+            .iter()
+            .fold(0.0, |s, e| s + f64::from(e.1));
+        if collected + left < need - f64::EPSILON {
+            l = point;
+            lq = q;
+            collected += left;
+        } else {
+            r = point;
+            rq = q;
+        }
+    }
+    rq
+}
+
+/// CatBoost's `CalculateWeightedTargetQuantile`: the sample quantile moved
+/// by `delta` towards the side that holds less than `alpha` of the weight,
+/// as float32.
+fn weighted_quantile(values: &[f32], weights: &[f32], alpha: f64, delta: f64) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut q = sample_quantile(values, weights, alpha);
+    if delta > 0.0 {
+        let total: f64 = weights.iter().fold(0.0, |s, &w| s + f64::from(w));
+        let need = total * alpha;
+        let (mut less, mut equal) = (0.0f64, 0.0f64);
+        for (&v, &w) in values.iter().zip(weights) {
+            let v = f64::from(v);
+            if v < q {
+                less += f64::from(w);
+            } else if v == q {
+                equal += f64::from(w);
+            }
+        }
+        if less + equal * alpha >= need - f64::EPSILON {
+            q -= delta;
+        } else {
+            q += delta;
+        }
+    }
+    q as f32
 }
 
 /// The rows a leaf estimation runs on: the approximations `approx` of the
@@ -2252,6 +2501,8 @@ struct LeafProblem<'a> {
     moving: bool,
     /// The tree's monotone leaf orders (empty: unconstrained).
     orders: &'a [Vec<usize>],
+    /// The weights of Exact leaves (CatBoost's `SampleWeights`).
+    exact_weights: &'a [f64],
 }
 
 /// CatBoost's leaf estimation (`FastGradientWalker`): `leaf_iterations`
@@ -2268,6 +2519,26 @@ fn estimate_leaves(
 ) -> (Vec<f64>, usize) {
     let k = lp.loss.dims();
     let (n_leaves, rows) = (lp.n_leaves, lp.rows);
+    if p.leaf_estimation == CatBoostLeafEstimation::Exact {
+        // CatBoost's `CalcExactLeafDeltas`: the loss-optimal constant of
+        // each leaf's float32 residuals (one step, no generator draw).
+        let Loss::Quantile { alpha, delta, .. } = lp.loss else {
+            unreachable!("Exact leaves are validated to Quantile / MAE");
+        };
+        let mut residuals = vec![Vec::new(); n_leaves];
+        let mut weights = vec![Vec::new(); n_leaves];
+        for i in 0..rows {
+            let leaf = lp.leaf_of[i] as usize;
+            residuals[leaf].push((lp.target[i] - lp.approx[i]) as f32);
+            weights[leaf].push(lp.exact_weights[i] as f32);
+        }
+        let step: Vec<f64> = residuals
+            .iter()
+            .zip(&weights)
+            .map(|(r, w)| f64::from(weighted_quantile(r, w, alpha, delta)))
+            .collect();
+        return (step, 0);
+    }
     let mut steps = 0;
     let backtracking = p.backtracking && p.leaf_iterations > 1;
     let metric = |approx: &[f64], leaves: &[f64]| {
@@ -2299,7 +2570,9 @@ fn estimate_leaves(
             let scaled_l2 = p.l2_leaf_reg * (lp.stats.0 / lp.stats.1);
             let weights: Vec<f64> = (0..n_leaves)
                 .map(|leaf| match p.leaf_estimation {
-                    CatBoostLeafEstimation::Gradient => sums.w[leaf] + scaled_l2,
+                    CatBoostLeafEstimation::Gradient | CatBoostLeafEstimation::Exact => {
+                        sums.w[leaf] + scaled_l2
+                    }
                     CatBoostLeafEstimation::Newton => -sums.der2[leaf] + scaled_l2,
                 })
                 .collect();
@@ -2372,6 +2645,10 @@ struct LearnFold {
     tails: Vec<(usize, usize, f64)>,
     approx: Vec<Vec<f64>>,
     cache: CombinationCache,
+    /// CatBoost's `TFold::SampleWeights`: the bootstrap times the sample
+    /// weights of the fold's last turn as the taken fold (1 before), what
+    /// its Exact leaves are weighted with.
+    sample_weights: Vec<f64>,
 }
 
 /// `v` in the order `perm` (`out[i] = v[perm[i] * k ..]`, `k` per row).
@@ -2492,7 +2769,7 @@ struct Sample {
 
 /// libc++'s `std::partition` (the bidirectional algorithm): the elements
 /// with `pred` first; returns their count.
-fn libcxx_partition(v: &mut [f64], pred: impl Fn(f64) -> bool) -> usize {
+fn libcxx_partition<T: Copy>(v: &mut [T], pred: impl Fn(T) -> bool) -> usize {
     let (mut first, mut last) = (0, v.len());
     loop {
         loop {
@@ -2717,6 +2994,7 @@ fn update_fold(
 ) {
     let k = loss.dims();
     let (target, weights) = (&fold.target, &fold.weights);
+    let exact_weights = &fold.sample_weights;
     for (&(body, tail, bw), a) in fold.tails.iter().zip(&mut fold.approx) {
         let lp = LeafProblem {
             loss,
@@ -2729,6 +3007,7 @@ fn update_fold(
             stats: (bw, body as f64),
             moving: false,
             orders,
+            exact_weights,
         };
         if k == 1 {
             // Each prefix's approximation moves by the leaf values of its
@@ -2832,6 +3111,7 @@ fn boost(
             weights,
             tails,
             cache: CombinationCache::new(),
+            sample_weights: vec![1.0; n],
         }
     };
     let mut folds: Vec<LearnFold> = (0..n_folds)
@@ -2864,6 +3144,7 @@ fn boost(
     let shrink_rate = f64::from(p.shrink_rate as f32);
     let mut shrink_history: Vec<f64> = Vec::new();
     let mut bias = bias.to_vec();
+    let unit_weights = vec![1.0; n];
     for iteration in 0..p.iterations {
         if shrink_rate > 0.0 {
             let factor = if iteration == 0 {
@@ -2905,6 +3186,7 @@ fn boost(
             .last()
             .map(|t: &ObliviousTree| t.leaf_values.as_slice());
         let sample = bootstrap(&mut rng, &ders, &fold.tails, &fold.weights, previous, k, &p);
+        fold.sample_weights.clone_from(&sample.weights);
         let sampled: Vec<Vec<f64>> = ders
             .iter()
             .map(|d| {
@@ -2969,6 +3251,8 @@ fn boost(
             stats: (avg_sum_w, n as f64),
             moving: true,
             orders: &orders,
+            // The averaging fold is never bootstrapped.
+            exact_weights: &unit_weights,
         };
         let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
@@ -3152,7 +3436,7 @@ fn f32_values(v: ArrayView1<f64>) -> Vec<f64> {
 
 macro_rules! catboost_config {
     (
-        $(#[$doc:meta])* $name:ident, boost_from_average: $bfa:expr
+        $(#[$doc:meta])* $name:ident
         $(, extra: { $($(#[$fdoc:meta])* $field:ident: $fty:ty = $fdef:expr),* $(,)? })?
     ) => {
         $(#[$doc])*
@@ -3174,9 +3458,12 @@ macro_rules! catboost_config {
             /// Borders per numeric feature (default 254).
             pub border_count: usize,
             pub score_function: CatBoostScoreFunction,
-            pub leaf_estimation_method: CatBoostLeafEstimation,
+            /// Default (`None`): CatBoost's for the loss (Exact for MAE and
+            /// Quantile, Gradient for LogLinQuantile, else Newton).
+            pub leaf_estimation_method: Option<CatBoostLeafEstimation>,
             /// Start from the loss-optimal constant instead of 0.
-            pub boost_from_average: bool,
+            /// Default (`None`): CatBoost's, on for RMSE, MAE and Quantile.
+            pub boost_from_average: Option<bool>,
             /// Categorical features (their values are category codes).
             /// Those with at most `one_hot_max_size` categories are split
             /// one-hot, the others through CatBoost's ordered target
@@ -3252,8 +3539,8 @@ macro_rules! catboost_config {
                     l2_leaf_reg: 3.0,
                     border_count: 254,
                     score_function: CatBoostScoreFunction::Cosine,
-                    leaf_estimation_method: CatBoostLeafEstimation::Newton,
-                    boost_from_average: $bfa,
+                    leaf_estimation_method: None,
+                    boost_from_average: None,
                     cat_features: Vec::new(),
                     one_hot_max_size: 2,
                     max_ctr_complexity: None,
@@ -3307,11 +3594,11 @@ macro_rules! catboost_config {
                 self
             }
             pub fn with_leaf_estimation_method(mut self, m: CatBoostLeafEstimation) -> Self {
-                self.leaf_estimation_method = m;
+                self.leaf_estimation_method = Some(m);
                 self
             }
             pub fn with_boost_from_average(mut self, b: bool) -> Self {
-                self.boost_from_average = b;
+                self.boost_from_average = Some(b);
                 self
             }
             pub fn with_cat_features(mut self, features: Vec<usize>) -> Self {
@@ -3334,20 +3621,46 @@ macro_rules! catboost_config {
             /// CatBoost's default leaf estimation iterations for `loss`
             /// (`GetEstimationMethodDefaults`, then
             /// `UpdateLeavesEstimationIterations`).
+            /// CatBoost's leaf estimation method for `loss` (Exact needs no
+            /// monotone constraints).
+            fn leaf_method(&self, loss: Loss) -> CatBoostLeafEstimation {
+                let monotone = self.monotone_constraints.iter().any(|&m| m != 0);
+                self.leaf_estimation_method.unwrap_or(match loss {
+                    Loss::Quantile { .. } if !monotone => CatBoostLeafEstimation::Exact,
+                    Loss::Quantile { .. } | Loss::LogLinQuantile { .. } => {
+                        CatBoostLeafEstimation::Gradient
+                    }
+                    _ => CatBoostLeafEstimation::Newton,
+                })
+            }
+
+            /// CatBoost's `boost_from_average` for `loss`.
+            fn boost_from_average_for(&self, loss: Loss) -> bool {
+                self.boost_from_average.unwrap_or(loss.default_boost_from_average())
+            }
+
             fn leaf_iterations(&self, loss: Loss, n_features: usize) -> usize {
                 if let Some(n) = self.leaf_estimation_iterations {
                     return n;
                 }
+                let method = self.leaf_method(loss);
                 if self.iterations < 200 && n_features < 20 {
                     return 1;
                 }
-                let newton = self.leaf_estimation_method == CatBoostLeafEstimation::Newton;
-                match (loss, newton) {
-                    (Loss::Rmse, _) => 1,
-                    (Loss::Logloss, true) => 10,
-                    (Loss::Logloss, false) => 40,
-                    (Loss::MultiClass(_), true) => 1,
-                    (Loss::MultiClass(_), false) => 10,
+                // CatBoost's `GetEstimationMethodDefaults` (CPU): Newton,
+                // Gradient steps.
+                let (newton, gradient) = match loss {
+                    Loss::Rmse | Loss::Quantile { .. } | Loss::Tweedie { .. } => (1, 1),
+                    Loss::LogLinQuantile { .. } => (1, 1),
+                    Loss::Expectile { .. } => (5, 10),
+                    Loss::Poisson => (10, 1),
+                    Loss::Logloss => (10, 40),
+                    Loss::MultiClass(_) => (1, 10),
+                };
+                match method {
+                    CatBoostLeafEstimation::Newton => newton,
+                    CatBoostLeafEstimation::Gradient => gradient,
+                    CatBoostLeafEstimation::Exact => 1,
                 }
             }
 
@@ -3397,10 +3710,10 @@ macro_rules! catboost_config {
                     return lr;
                 }
                 let defaults = self.l2_leaf_reg == 3.0
-                    && self.leaf_estimation_method == CatBoostLeafEstimation::Newton
+                    && self.leaf_estimation_method.is_none()
                     && self.leaf_estimation_iterations.is_none();
                 // (A, B, C, D): dataset size and iteration coefficients.
-                let coeffs = match (loss, self.boost_from_average) {
+                let coeffs = match (loss, self.boost_from_average_for(loss)) {
                     (Loss::Logloss, true) => (0.408, -7.299, -0.928, 2.701),
                     (Loss::Logloss, false) => (0.427, -7.525, -0.917, 2.63),
                     (Loss::MultiClass(_), false) => (0.051, -2.889, -0.845, 2.928),
@@ -3509,7 +3822,7 @@ macro_rules! catboost_config {
                     depth: self.depth,
                     l2_leaf_reg: f64::from(self.l2_leaf_reg as f32),
                     score_function: self.score_function,
-                    leaf_estimation: self.leaf_estimation_method,
+                    leaf_estimation: self.leaf_estimation_method.unwrap_or_default(),
                     model_size_reg: self.model_size_reg,
                     ordered: self.boosting_type == CatBoostBoostingType::Ordered,
                     fold_len_multiplier: self.fold_len_multiplier,
@@ -3550,13 +3863,84 @@ macro_rules! catboost_config {
 catboost_config!(
     /// CatBoost-style regressor (RMSE) on oblivious trees.
     CatBoostRegressor,
-    boost_from_average: true
+    extra: {
+        /// CatBoost's `loss_function` (default RMSE).
+        loss_function: CatBoostRegressionLoss = CatBoostRegressionLoss::Rmse,
+    }
 );
+
+impl CatBoostRegressor {
+    /// CatBoost's checks of the loss, its parameters and the target.
+    fn check_loss(&self, loss: Loss, target: &[f64]) -> Result<()> {
+        let invalid = |m: &str| Err(RustMlError::InvalidParameter(m.into()));
+        let unit = |a: f64| (0.0..=1.0).contains(&a);
+        match loss {
+            Loss::Quantile { alpha, .. }
+            | Loss::Expectile { alpha }
+            | Loss::LogLinQuantile { alpha }
+                if !unit(alpha) =>
+            {
+                return invalid("alpha must be in [0, 1]");
+            }
+            Loss::Tweedie { power } if !(power > 1.0 && power < 2.0) => {
+                return invalid("variance_power must be in (1, 2)");
+            }
+            Loss::Poisson | Loss::Tweedie { .. } if target.iter().any(|&t| t < 0.0) => {
+                return invalid("Poisson and Tweedie need non-negative targets");
+            }
+            _ => {}
+        }
+        if self.boost_from_average_for(loss) && !matches!(loss, Loss::Rmse | Loss::Quantile { .. })
+        {
+            return invalid("boost_from_average is supported for RMSE, MAE and Quantile");
+        }
+        if self.leaf_method(loss) == CatBoostLeafEstimation::Exact {
+            if !matches!(loss, Loss::Quantile { .. }) {
+                return invalid("Exact leaf estimation is only available for MAE and Quantile");
+            }
+            if self.monotone_constraints.iter().any(|&m| m != 0) {
+                return invalid("monotone constraints are unsupported for Exact leaves");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn with_loss_function(mut self, l: CatBoostRegressionLoss) -> Self {
+        self.loss_function = l;
+        self
+    }
+
+    fn loss(&self) -> Loss {
+        match self.loss_function {
+            CatBoostRegressionLoss::Rmse => Loss::Rmse,
+            CatBoostRegressionLoss::Mae => Loss::Quantile {
+                alpha: 0.5,
+                delta: 1e-6,
+                mae: true,
+            },
+            CatBoostRegressionLoss::Quantile { alpha } => Loss::Quantile {
+                alpha,
+                delta: 1e-6,
+                mae: false,
+            },
+            // Error function and metric parse `alpha` as float32.
+            CatBoostRegressionLoss::Expectile { alpha } => Loss::Expectile {
+                alpha: f64::from(alpha as f32),
+            },
+            CatBoostRegressionLoss::Poisson => Loss::Poisson,
+            CatBoostRegressionLoss::Tweedie { variance_power } => Loss::Tweedie {
+                power: variance_power,
+            },
+            CatBoostRegressionLoss::LogLinQuantile { alpha } => Loss::LogLinQuantile {
+                alpha: f64::from(alpha as f32),
+            },
+        }
+    }
+}
 catboost_config!(
     /// CatBoost-style classifier on oblivious trees: Logloss for two
     /// classes, MultiClass (softmax) for more, as CatBoost picks them.
     CatBoostClassifier,
-    boost_from_average: false,
     extra: {
         /// Per-class weights (CatBoost's `class_weights`, by class in
         /// ascending order of the labels), multiplied into the sample
@@ -3618,6 +4002,9 @@ pub struct FittedCatBoostRegressor {
     #[serde(default)]
     ctrs: CtrModel,
     bias: f64,
+    /// Predictions are `exp(raw)` (Poisson, Tweedie).
+    #[serde(default)]
+    exp_prediction: bool,
     borders: Vec<Vec<f32>>,
     n_features: usize,
 }
@@ -3668,10 +4055,16 @@ impl FitWeighted<f64> for CatBoostRegressor {
         };
         let target = f32_values(y);
         let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
-        let bias = if self.boost_from_average {
-            f64::from(weighted_target_average(&target, &weights))
-        } else {
+        let loss = self.loss();
+        self.check_loss(loss, &target)?;
+        let bias = if !self.boost_from_average_for(loss) {
             0.0
+        } else if let Loss::Quantile { alpha, delta, .. } = loss {
+            let t: Vec<f32> = target.iter().map(|&v| v as f32).collect();
+            let w: Vec<f32> = weights.iter().map(|&v| v as f32).collect();
+            f64::from(weighted_quantile(&t, &w, alpha, delta))
+        } else {
+            f64::from(weighted_target_average(&target, &weights))
         };
         let classes_of = target_classes(&target);
         let cat = CategoricalParams {
@@ -3681,19 +4074,21 @@ impl FitWeighted<f64> for CatBoostRegressor {
             max_ctr_complexity: self.max_ctr_complexity(),
         };
         let q = quantize(x, self.border_count, cat)?;
-        let (bootstrap, subsample) = self.sampling(Loss::Rmse, x.nrows());
+        let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         let p = TrainParams {
-            learning_rate: f64::from(self.learning_rate_for(Loss::Rmse, x.nrows()) as f32),
-            leaf_iterations: self.leaf_iterations(Loss::Rmse, x.ncols()),
+            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows()) as f32),
+            leaf_iterations: self.leaf_iterations(loss, x.ncols()),
+            leaf_estimation: self.leaf_method(loss),
             bootstrap,
             subsample,
             ..p
         };
-        let (trees, ctrs, bias) = boost(&q, &target, &weights, &[bias], Loss::Rmse, p, rng);
+        let (trees, ctrs, bias) = boost(&q, &target, &weights, &[bias], loss, p, rng);
         Ok(FittedCatBoostRegressor {
             trees,
             ctrs,
             bias: bias[0],
+            exp_prediction: loss.exp_prediction(),
             borders: q.borders,
             n_features: x.ncols(),
         })
@@ -3712,7 +4107,12 @@ impl Predict<f64> for FittedCatBoostRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         check_features(x, self.n_features)?;
         let raw = raw_scores(&self.trees, &self.ctrs, &[self.bias], x);
-        Ok(raw.column(0).to_owned())
+        let raw = raw.column(0).to_owned();
+        Ok(if self.exp_prediction {
+            raw.mapv(f64::exp)
+        } else {
+            raw
+        })
     }
 }
 
@@ -3832,7 +4232,13 @@ impl FitWeighted<f64> for CatBoostClassifier {
                 "monotone constraints are not supported for more than two classes".into(),
             ));
         }
-        if multiclass && self.boost_from_average {
+        if self.leaf_estimation_method == Some(CatBoostLeafEstimation::Exact) {
+            return Err(RustMlError::InvalidParameter(
+                "Exact leaf estimation is only available for MAE and Quantile".into(),
+            ));
+        }
+        let boost_from_average = self.boost_from_average.unwrap_or(false);
+        if multiclass && boost_from_average {
             return Err(RustMlError::InvalidParameter(
                 "boost_from_average is not supported for more than two classes".into(),
             ));
@@ -3850,7 +4256,7 @@ impl FitWeighted<f64> for CatBoostClassifier {
         )?;
         let (loss, bias) = if multiclass {
             (Loss::MultiClass(classes.len()), vec![0.0; classes.len()])
-        } else if self.boost_from_average {
+        } else if boost_from_average {
             let p1 = f64::from(weighted_target_average(&target, &weights));
             (Loss::Logloss, vec![(p1 / (1.0 - p1)).ln()])
         } else {
@@ -4194,6 +4600,34 @@ mod tests {
         assert!(CatBoostRegressor::new()
             .fit_weighted(&x, &y, Some(&w))
             .is_err());
+        // Losses: their parameters, targets and leaf methods.
+        let fit = |l: CatBoostRegressionLoss, y: &Array1<f64>| {
+            CatBoostRegressor::new()
+                .with_iterations(2)
+                .with_loss_function(l)
+                .fit(&x, y)
+        };
+        assert!(fit(CatBoostRegressionLoss::Poisson, &y.mapv(|v| v - 10.0)).is_err());
+        assert!(fit(
+            CatBoostRegressionLoss::Tweedie {
+                variance_power: 2.5
+            },
+            &y
+        )
+        .is_err());
+        assert!(fit(CatBoostRegressionLoss::Quantile { alpha: 1.5 }, &y).is_err());
+        assert!(CatBoostRegressor::new()
+            .with_leaf_estimation_method(CatBoostLeafEstimation::Exact)
+            .fit(&x, &y)
+            .is_err());
+        assert!(CatBoostRegressor::new()
+            .with_loss_function(CatBoostRegressionLoss::Poisson)
+            .with_boost_from_average(true)
+            .fit(&x, &y)
+            .is_err());
+        let counts = y.mapv(|v| (v * 3.0).abs().round());
+        let m = fit(CatBoostRegressionLoss::Poisson, &counts).unwrap();
+        assert!(m.predict(&x).unwrap().iter().all(|&p| p > 0.0));
     }
 
     #[test]
