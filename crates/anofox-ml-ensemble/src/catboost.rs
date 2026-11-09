@@ -1187,6 +1187,9 @@ impl Loss {
     }
 }
 
+/// Rows per parallel chunk of the per-row loops of the leaf estimation.
+const PARALLEL_ROWS: usize = 1024;
+
 /// Paul Mineiro's `FastLogf` (CatBoost's `library/cpp/fast_log`, the same
 /// arithmetic as its SSE `VectorFastLogf`): a float logarithm accurate to
 /// about 1e-5.
@@ -1220,8 +1223,10 @@ fn logloss_metric_exp(
 /// Every row's `exp(a)` and `FastLogf(exp(a))` (what the Logloss metric
 /// needs of the approximations; cached while they do not move).
 fn exp_point(approx: &[f64]) -> Vec<(f64, f32)> {
+    use rayon::prelude::*;
     approx
-        .iter()
+        .par_iter()
+        .with_min_len(PARALLEL_ROWS)
         .map(|a| {
             let e = a.exp();
             (e, fast_logf(e as f32))
@@ -1232,8 +1237,10 @@ fn exp_point(approx: &[f64]) -> Vec<(f64, f32)> {
 /// [`Loss::all_ders`] of Logloss at approximations given by
 /// [`exp_point`] (the same arithmetic on the cached `exp(a)`).
 fn logloss_ders_at(target: &[f64], point: &[(f64, f32)], weights: &[f64]) -> Ders {
+    use rayon::prelude::*;
     let (der, der2) = point
-        .iter()
+        .par_iter()
+        .with_min_len(PARALLEL_ROWS)
         .zip(target)
         .zip(weights)
         .map(|((&(e, _), &t), &w)| {
@@ -1261,8 +1268,9 @@ fn logloss_metric_exp_at(
     let rows = point.len();
     let exp_leaves: Vec<f64> = leaves.iter().map(|v| v.exp()).collect();
     let log_leaves: Vec<f32> = exp_leaves.iter().map(|&d| fast_logf(d as f32)).collect();
-    let (mut s0, mut s1) = (0.0f64, 0.0f64);
-    for start in (0..rows).step_by(4096) {
+    // The blocks in parallel, added in order.
+    use rayon::prelude::*;
+    let block = |start: usize| {
         let end = (start + 4096).min(rows);
         let (mut lanes0, mut lanes1) = ([0.0f32; 4], [0.0f32; 4]);
         let mut i = start;
@@ -1285,21 +1293,37 @@ fn logloss_metric_exp_at(
             }
             i += 4;
         }
-        s0 += f64::from((lanes0[0] + lanes0[1]) + (lanes0[2] + lanes0[3]));
-        s1 += f64::from((lanes1[0] + lanes1[1]) + (lanes1[2] + lanes1[3]));
-        for r in i..end {
-            let w = f64::from(weights[r] as f32);
-            let prob = if target[r] > 0.5 { 1.0 } else { 0.0 };
-            let leaf = leaf_of[r] as usize;
-            let ((e, le), d) = (point[r], exp_leaves[leaf]);
-            let mut non_exp = f64::from(le);
-            let e = e * d;
-            non_exp += f64::from(log_leaves[leaf]);
-            s0 += w * if e.is_finite() {
-                f64::from(fast_logf((1.0 + e) as f32)) - prob * non_exp
-            } else {
-                (1.0 - prob) * non_exp
-            };
+        let lanes = (
+            f64::from((lanes0[0] + lanes0[1]) + (lanes0[2] + lanes0[3])),
+            f64::from((lanes1[0] + lanes1[1]) + (lanes1[2] + lanes1[3])),
+        );
+        // The rows past the last group of four.
+        let rest: Vec<(f64, f64)> = (i..end)
+            .map(|r| {
+                let w = f64::from(weights[r] as f32);
+                let prob = if target[r] > 0.5 { 1.0 } else { 0.0 };
+                let leaf = leaf_of[r] as usize;
+                let ((e, le), d) = (point[r], exp_leaves[leaf]);
+                let mut non_exp = f64::from(le);
+                let e = e * d;
+                non_exp += f64::from(log_leaves[leaf]);
+                let value = if e.is_finite() {
+                    f64::from(fast_logf((1.0 + e) as f32)) - prob * non_exp
+                } else {
+                    (1.0 - prob) * non_exp
+                };
+                (w * value, w)
+            })
+            .collect();
+        (lanes, rest)
+    };
+    let blocks: Vec<_> = (0..rows).into_par_iter().step_by(4096).map(block).collect();
+    let (mut s0, mut s1) = (0.0f64, 0.0f64);
+    for ((l0, l1), rest) in blocks {
+        s0 += l0;
+        s1 += l1;
+        for (v, w) in rest {
+            s0 += v;
             s1 += w;
         }
     }
@@ -2218,6 +2242,19 @@ fn grow_tree(
     let mut score_before_split = 0.0;
     let mut splits: Vec<(ColumnRef, usize)> = Vec::new();
     let mut leaf_of = vec![0u32; n];
+    // Plain boosting with one approximation: the taken rows and their
+    // (weighted derivative, weight), gathered once per tree.
+    let plain_taken = (!ordered && k == 1 && parts.len() == 1).then(|| {
+        let part = &parts[0];
+        let rows: Vec<u32> = (0..part.tail as u32)
+            .filter(|&i| sample.taken[i as usize])
+            .collect();
+        let contrib: Vec<(f64, f64)> = rows
+            .iter()
+            .map(|&i| (part.swder[i as usize], sample.weights[i as usize]))
+            .collect();
+        (rows, contrib)
+    });
     for d in 0..depth {
         let leaves = 1usize << d;
         let (combinations, tree_ctr_draws) = combination_columns(q, &splits, cache);
@@ -2246,16 +2283,11 @@ fn grow_tree(
             .max()
             .unwrap_or(1)
             .max(1);
-        // Plain boosting with one approximation: the taken rows, their
-        // leaves and (weighted derivative, weight), gathered once per level.
-        let plain_rows: Option<(Vec<(u32, u32)>, Vec<(f64, f64)>)> =
-            (!ordered && k == 1 && parts.len() == 1).then(|| {
-                let part = &parts[0];
-                (0..part.tail)
-                    .filter(|&i| sample.taken[i])
-                    .map(|i| ((i as u32, leaf_of[i]), (part.swder[i], sample.weights[i])))
-                    .unzip()
-            });
+        // Plain boosting with one approximation: the taken rows' leaves.
+        let plain_rows = plain_taken.as_ref().map(|(rows, contrib)| {
+            let leaves: Vec<u32> = rows.iter().map(|&i| leaf_of[i as usize]).collect();
+            (rows.as_slice(), leaves, contrib.as_slice())
+        });
         // The score of every split of every column.
         let per_column: Vec<Option<Vec<f64>>> = candidates
             .par_iter()
@@ -2269,10 +2301,10 @@ fn grow_tree(
                 }
                 // Per part and dimension: leaves × buckets.
                 let mut hist = vec![BucketStats::default(); parts.len() * k * leaves * nb];
-                if let Some((rows, contrib)) = &plain_rows {
+                if let Some((rows, row_leaves, contrib)) = &plain_rows {
                     // Plain boosting, one approximation: the taken rows in
                     // order, as the general loop sums them.
-                    for (&(i, leaf), &(swd, sw)) in rows.iter().zip(contrib) {
+                    for ((&i, &leaf), &(swd, sw)) in rows.iter().zip(row_leaves).zip(*contrib) {
                         let h = &mut hist[leaf as usize * nb + column.buckets[i as usize] as usize];
                         h.swd += swd;
                         h.sw += sw;
@@ -2400,39 +2432,52 @@ fn grow_tree(
         let mut best: Option<(f64, usize, usize)> = None;
         let mut best_gain = f64::NEG_INFINITY;
         let mut best_score = f64::MIN;
-        for (t, entry) in entries.iter().enumerate() {
-            let mut local = CatRng::new(noise_seed.wrapping_add(t as u64));
-            local.advance(10);
-            for bins in entry {
-                let mut val = f64::MIN;
-                let mut chosen: Option<(usize, usize)> = None;
-                let mut best_instance = f64::MIN;
-                for &(c, s) in bins {
-                    let Some(scores) = &per_column[c] else {
-                        continue;
-                    };
-                    let instance = scores[s] + local.std_normal() * score_std;
-                    if instance > best_instance {
-                        best_instance = instance;
-                        val = scores[s];
-                        chosen = Some((c, s));
-                    }
+        // Each entry's best noisy instance per candidate (from the entry's
+        // own generator, in parallel), then the candidates' noise from the
+        // main one, in order.
+        let instances: Vec<Vec<_>> = entries
+            .par_iter()
+            .enumerate()
+            .map(|(t, entry)| {
+                let mut local = CatRng::new(noise_seed.wrapping_add(t as u64));
+                local.advance(10);
+                entry
+                    .iter()
+                    .map(|bins| {
+                        let mut val = f64::MIN;
+                        let mut chosen: Option<(usize, usize)> = None;
+                        let mut best_instance = f64::MIN;
+                        for &(c, s) in bins {
+                            let Some(scores) = &per_column[c] else {
+                                continue;
+                            };
+                            let instance = scores[s] + local.std_normal() * score_std;
+                            if instance > best_instance {
+                                best_instance = instance;
+                                val = scores[s];
+                                chosen = Some((c, s));
+                            }
+                        }
+                        (val, chosen)
+                    })
+                    .collect()
+            })
+            .collect();
+        for &(val, chosen) in instances.iter().flatten() {
+            let mut score = val + rng.std_normal() * score_std;
+            let Some((c, s)) = chosen else {
+                continue;
+            };
+            if let Some((key, k)) = &candidates[c].get(q).ctr_key {
+                if !used_ctrs.contains(key) {
+                    score *= (1.0 + *k as f64 / max_categories as f64).powf(-model_size_reg);
                 }
-                let mut score = val + rng.std_normal() * score_std;
-                let Some((c, s)) = chosen else {
-                    continue;
-                };
-                if let Some((key, k)) = &candidates[c].get(q).ctr_key {
-                    if !used_ctrs.contains(key) {
-                        score *= (1.0 + *k as f64 / max_categories as f64).powf(-model_size_reg);
-                    }
-                }
-                let gain = score - score_before_split;
-                if gain > best_gain {
-                    best_gain = gain;
-                    best_score = score;
-                    best = Some((score, c, s));
-                }
+            }
+            let gain = score - score_before_split;
+            if gain > best_gain {
+                best_gain = gain;
+                best_score = score;
+                best = Some((score, c, s));
             }
         }
         let Some((_, c, s)) = best else {
@@ -3050,6 +3095,21 @@ impl LeafSums {
             der2: vec![0.0; n_leaves * h],
             w: vec![0.0; n_leaves],
         };
+        if k == 1 && h == 1 {
+            // One approximation: the same sums without the inner loops.
+            for (((&leaf, &d), &d2), &w) in leaf_of[..rows]
+                .iter()
+                .zip(&ders.der)
+                .zip(&ders.der2)
+                .zip(&weights[..rows])
+            {
+                let leaf = leaf as usize;
+                s.der[leaf] += d;
+                s.der2[leaf] += d2;
+                s.w[leaf] += w;
+            }
+            return s;
+        }
         for i in 0..rows {
             s.add(leaf_of[i] as usize, ders, i, weights[i]);
         }
@@ -3310,15 +3370,20 @@ fn estimate_leaves(
             }
         }
         let take = |scaled: &[f64], total: &mut [f64], point: &mut [f64]| {
+            use rayon::prelude::*;
             for (t, s) in total.iter_mut().zip(scaled) {
                 *t += s;
             }
-            for i in 0..rows {
-                let leaf = lp.leaf_of[i] as usize;
-                for d in 0..k {
-                    point[i * k + d] += scaled[leaf * k + d];
-                }
-            }
+            point[..rows * k]
+                .par_chunks_mut(k)
+                .with_min_len(PARALLEL_ROWS)
+                .zip(&lp.leaf_of[..rows])
+                .for_each(|(row, &leaf)| {
+                    let leaf = leaf as usize;
+                    for (v, s) in row.iter_mut().zip(&scaled[leaf * k..(leaf + 1) * k]) {
+                        *v += s;
+                    }
+                });
         };
         if !backtracking {
             take(&step, &mut total, &mut point);
@@ -3647,34 +3712,41 @@ fn bootstrap(
                         mean * mean
                     }
                 };
+                // The blocks draw from generators of their own, in
+                // parallel.
+                use rayon::prelude::*;
                 let seed = rng.gen();
-                for (block, start) in (0..n).step_by(8192).enumerate() {
-                    let end = (start + 8192).min(n);
-                    let mut local = CatRng::new(seed.wrapping_add(block as u64));
-                    local.advance(10);
-                    let mut candidates: Vec<f64> = (start..end)
-                        .map(|i| {
-                            let mut c = lambda;
-                            for dim in 0..k {
-                                c += der[i * k + dim] * der[i * k + dim];
-                            }
-                            c.sqrt()
-                        })
-                        .collect();
-                    let size = f64::from(rate) * (end - start) as f64;
-                    let threshold = mvs_threshold(&mut candidates, 0.0, 0, size);
-                    for i in start..end {
-                        let g = (row(i) + lambda).sqrt();
-                        let prob = if g > threshold { 1.0 } else { g / threshold };
-                        boot[i] = if prob > f64::EPSILON {
-                            let r = local.real1();
-                            f64::from(((1.0 / prob) * f64::from(u8::from(r < prob))) as f32)
-                        } else {
-                            0.0
-                        };
-                        taken[i] = (boot[i] as f32) > f32::EPSILON;
-                    }
-                }
+                boot.par_chunks_mut(8192)
+                    .zip(taken.par_chunks_mut(8192))
+                    .enumerate()
+                    .for_each(|(block, (boot, taken))| {
+                        let start = block * 8192;
+                        let end = start + boot.len();
+                        let mut local = CatRng::new(seed.wrapping_add(block as u64));
+                        local.advance(10);
+                        let mut candidates: Vec<f64> = (start..end)
+                            .map(|i| {
+                                let mut c = lambda;
+                                for dim in 0..k {
+                                    c += der[i * k + dim] * der[i * k + dim];
+                                }
+                                c.sqrt()
+                            })
+                            .collect();
+                        let size = f64::from(rate) * (end - start) as f64;
+                        let threshold = mvs_threshold(&mut candidates, 0.0, 0, size);
+                        for (j, i) in (start..end).enumerate() {
+                            let g = (row(i) + lambda).sqrt();
+                            let prob = if g > threshold { 1.0 } else { g / threshold };
+                            boot[j] = if prob > f64::EPSILON {
+                                let r = local.real1();
+                                f64::from(((1.0 / prob) * f64::from(u8::from(r < prob))) as f32)
+                            } else {
+                                0.0
+                            };
+                            taken[j] = (boot[j] as f32) > f32::EPSILON;
+                        }
+                    });
             }
         }
     }
