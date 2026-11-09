@@ -27,6 +27,10 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   GammaRegressor and TweedieRegressor: an offset on the link scale, e.g.
   `ln(exposure)`; `predict` predicts at offset 0.
 - `GammaRegressor::fit_weighted_with_offset`.
+- New registry kinds (#125): `LassoLarsIC` (AIC / BIC), `PlsRegression`
+  (predict and transform), both matching scikit-learn 1.8, `IsotonicRegressor`
+  and `BinomialRegressor` (with offsets; weights as trial counts).
+  `PlsRegression` and `IsotonicRegressor` configs are now `Serialize`.
 ### LightGBM's random generator (#152)
 
 - Bagging, GOSS and the feature fractions of `LgbmRegressor` /

@@ -14,7 +14,7 @@ use anofox_ml_core::{Fit, Predict, Result, RustMlError, Transform};
 use anofox_regression::solvers::{FittedRegressor as _, PlsRegressor, Regressor as _};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlsRegression {
     pub n_components: usize,
     /// Kept for sklearn API compatibility; PLS1 needs no inner iterations.

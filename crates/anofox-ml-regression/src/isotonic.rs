@@ -26,7 +26,7 @@ pub enum OutOfBounds {
 /// `IsotonicRegression.predict`, predictions interpolate linearly between
 /// the fitted points; outside the training range they follow
 /// `out_of_bounds`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IsotonicRegressor {
     increasing: bool,
     out_of_bounds: OutOfBounds,
