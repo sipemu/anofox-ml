@@ -1165,6 +1165,12 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    NeighborhoodComponentsAnalysis {
+        config: neighbors::NeighborhoodComponentsAnalysis = Default::default(),
+        fitted: neighbors::FittedNeighborhoodComponentsAnalysis,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     LabelPropagation {
         config: neighbors::LabelPropagation = Default::default(),
         fitted: neighbors::FittedLabelPropagation,
