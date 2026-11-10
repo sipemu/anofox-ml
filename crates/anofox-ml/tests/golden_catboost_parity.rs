@@ -94,13 +94,26 @@ macro_rules! configure {
         }
         // The generator's common settings (not stored) include `has_time`.
         m = m.with_has_time(p["has_time"].as_bool().unwrap_or(true));
-        m = m.with_random_strength(p["random_strength"].as_f64().unwrap_or(0.0));
-        m = m.with_bootstrap_type(match p["bootstrap_type"].as_str().unwrap_or("No") {
-            "Bayesian" => CatBoostBootstrap::Bayesian,
-            "Bernoulli" => CatBoostBootstrap::Bernoulli,
-            "MVS" => CatBoostBootstrap::Mvs,
-            _ => CatBoostBootstrap::No,
-        });
+        // Settings a case leaves at catboost's defaults.
+        let default = |k: &str| {
+            p["defaults"]
+                .as_array()
+                .is_some_and(|d| d.iter().any(|v| v == k))
+        };
+        if !default("random_strength") {
+            m = m.with_random_strength(p["random_strength"].as_f64().unwrap_or(0.0));
+        }
+        if let Some(r) = p["bayesian_matrix_reg"].as_f64() {
+            m = m.with_bayesian_matrix_reg(r);
+        }
+        if !default("bootstrap_type") {
+            m = m.with_bootstrap_type(match p["bootstrap_type"].as_str().unwrap_or("No") {
+                "Bayesian" => CatBoostBootstrap::Bayesian,
+                "Bernoulli" => CatBoostBootstrap::Bernoulli,
+                "MVS" => CatBoostBootstrap::Mvs,
+                _ => CatBoostBootstrap::No,
+            });
+        }
         if let Some(v) = p["subsample"].as_f64() {
             m = m.with_subsample(v);
         }
@@ -284,7 +297,8 @@ fn catboost_models_match_catboost() {
                     "RMSEWithUncertainty" => CatBoostRegressionLoss::RmseWithUncertainty,
                     "QueryRMSE" => CatBoostRegressionLoss::QueryRmse,
                     "PairLogit" => CatBoostRegressionLoss::PairLogit,
-                    "YetiRank" => {
+                    "PairLogitPairwise" => CatBoostRegressionLoss::PairLogitPairwise,
+                    "YetiRank" | "YetiRankPairwise" => {
                         let arg = |k: &str, d: f64| {
                             param
                                 .split(';')
@@ -292,9 +306,18 @@ fn catboost_models_match_catboost() {
                                 .find(|(key, _)| *key == k)
                                 .map_or(d, |(_, v)| v.parse().unwrap())
                         };
-                        CatBoostRegressionLoss::YetiRank {
-                            permutations: arg("permutations", 10.0) as usize,
-                            decay: arg("decay", 0.85),
+                        let (permutations, decay) =
+                            (arg("permutations", 10.0) as usize, arg("decay", 0.85));
+                        if name == "YetiRank" {
+                            CatBoostRegressionLoss::YetiRank {
+                                permutations,
+                                decay,
+                            }
+                        } else {
+                            CatBoostRegressionLoss::YetiRankPairwise {
+                                permutations,
+                                decay,
+                            }
                         }
                     }
                     other => panic!("unknown loss {other}"),

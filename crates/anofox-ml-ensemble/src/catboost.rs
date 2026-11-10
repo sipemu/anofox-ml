@@ -753,6 +753,14 @@ pub enum CatBoostRegressionLoss {
     /// defaults 10 and 0.85, and `l2_leaf_reg` 0).
     #[serde(rename = "YetiRank")]
     YetiRank { permutations: usize, decay: f64 },
+    /// PairLogit whose splits and leaves are scored on the pairs (CatBoost's
+    /// `PairLogitPairwise`; plain symmetric trees, numeric features).
+    #[serde(rename = "PairLogitPairwise")]
+    PairLogitPairwise,
+    /// YetiRank whose splits and leaves are scored on the pairs (CatBoost's
+    /// `YetiRankPairwise`; plain symmetric trees, numeric features).
+    #[serde(rename = "YetiRankPairwise")]
+    YetiRankPairwise { permutations: usize, decay: f64 },
 }
 
 /// CatBoost's `grow_policy`.
@@ -986,6 +994,13 @@ enum Loss {
         permutations: usize,
         decay: f64,
     },
+    /// PairLogit with pairwise scoring (CatBoost's `PairLogitPairwise`).
+    PairLogitPairwise,
+    /// YetiRank with pairwise scoring (CatBoost's `YetiRankPairwise`).
+    YetiRankPairwise {
+        permutations: usize,
+        decay: f64,
+    },
 }
 
 impl Loss {
@@ -1000,15 +1015,41 @@ impl Loss {
 
     /// A querywise loss: derivatives and metric need the query bounds.
     fn querywise(self) -> bool {
-        matches!(
-            self,
-            Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. }
-        )
+        self == Loss::QueryRmse || self.pairwise()
     }
 
     /// A pairwise loss: leaves and scores weigh rows by their pairs.
     fn pairwise(self) -> bool {
-        matches!(self, Loss::PairLogit | Loss::YetiRank { .. })
+        matches!(
+            self,
+            Loss::PairLogit
+                | Loss::YetiRank { .. }
+                | Loss::PairLogitPairwise
+                | Loss::YetiRankPairwise { .. }
+        )
+    }
+
+    /// Splits and leaves scored on pairs (CatBoost's `IsPairwiseScoring`).
+    fn pairwise_scoring(self) -> bool {
+        matches!(
+            self,
+            Loss::PairLogitPairwise | Loss::YetiRankPairwise { .. }
+        )
+    }
+
+    /// The pairs' redraw parameters (YetiRank, YetiRankPairwise).
+    fn yeti_rank(self) -> Option<(usize, f64)> {
+        match self {
+            Loss::YetiRank {
+                permutations,
+                decay,
+            }
+            | Loss::YetiRankPairwise {
+                permutations,
+                decay,
+            } => Some((permutations, decay)),
+            _ => None,
+        }
     }
 
     /// Target values per row (the engine's targets are row-major).
@@ -1127,7 +1168,11 @@ impl Loss {
                 der2[0] = -w;
                 der2[1] = -2.0 * w * sq * prec[0];
             }
-            Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. } => {
+            Loss::QueryRmse
+            | Loss::PairLogit
+            | Loss::YetiRank { .. }
+            | Loss::PairLogitPairwise
+            | Loss::YetiRankPairwise { .. } => {
                 unreachable!("querywise derivatives need the queries")
             }
             // CatBoost's `TMultiRMSEError::CalcDers`.
@@ -1228,7 +1273,11 @@ impl Loss {
                 let d = approx[0] - target;
                 0.9189385332046 + approx[1] + 0.5 * e[0] * (d * d)
             }
-            Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. } => {
+            Loss::QueryRmse
+            | Loss::PairLogit
+            | Loss::YetiRank { .. }
+            | Loss::PairLogitPairwise
+            | Loss::YetiRankPairwise { .. } => {
                 unreachable!("the querywise metric needs the queries")
             }
             // `TMultiRMSEMetric`'s squared errors.
@@ -1358,6 +1407,8 @@ impl Loss {
                 | Loss::LogLinQuantile { .. }
                 | Loss::PairLogit
                 | Loss::YetiRank { .. }
+                | Loss::PairLogitPairwise
+                | Loss::YetiRankPairwise { .. }
         )
     }
 
@@ -1525,11 +1576,77 @@ struct Groups {
     /// Row `i`'s competitors are `comp[comp_start[i]..comp_start[i + 1]]`.
     comp_start: Vec<usize>,
     comp: Vec<(usize, f32)>,
+    /// Pairwise scoring: each pair's bootstrapped weight
+    /// (`TCompetitor::SampleWeight`; empty: the pair weights).
+    sample: Vec<f32>,
 }
 
 impl Groups {
     fn competitors(&self, row: usize) -> &[(usize, f32)] {
         &self.comp[self.comp_start[row]..self.comp_start[row + 1]]
+    }
+
+    /// CatBoost's `UnpackPairsFromQueries` of the rows `0..rows`: (winner,
+    /// loser, sample weight) in winner order.
+    fn flat_pairs(&self, rows: usize) -> Vec<(usize, usize, f32)> {
+        let mut out = Vec::with_capacity(self.comp_start[rows]);
+        for w in 0..rows {
+            for idx in self.comp_start[w]..self.comp_start[w + 1] {
+                let (l, cw) = self.comp[idx];
+                let sw = if self.sample.is_empty() {
+                    cw
+                } else {
+                    self.sample[idx]
+                };
+                out.push((w, l, sw));
+            }
+        }
+        out
+    }
+
+    /// CatBoost's bootstrap of pairwise scoring (`GenerateBernoulliWeights
+    /// ForPairs` / `GenerateBayesianWeightsForPairs`, per-object sampling):
+    /// blocks of 1000 queries, each with its own generator; a draw per
+    /// query, then one per pair.
+    fn bootstrap_pairs(
+        &mut self,
+        rng: &mut CatRng,
+        kind: CatBoostBootstrap,
+        rate: f64,
+        temperature: f64,
+    ) {
+        match kind {
+            CatBoostBootstrap::Bernoulli if rate != 1.0 => {}
+            CatBoostBootstrap::Bayesian if temperature != 0.0 => {}
+            _ => return,
+        }
+        let seed = rng.gen();
+        let n_queries = self.queries.len().saturating_sub(1);
+        if self.sample.len() != self.comp.len() {
+            self.sample = self.comp.iter().map(|&(_, w)| w).collect();
+        }
+        let rate = f64::from(rate as f32);
+        let t = temperature as f32;
+        for b in 0..n_queries.div_ceil(1000) {
+            let mut local = CatRng::new(seed.wrapping_add(b as u64));
+            local.advance(10);
+            for q in b * 1000..((b + 1) * 1000).min(n_queries) {
+                local.real1(); // the query's draw (per-object sampling ignores it)
+                for idx in self.comp_start[self.queries[q]]..self.comp_start[self.queries[q + 1]] {
+                    let weight = self.comp[idx].1;
+                    self.sample[idx] = if kind == CatBoostBootstrap::Bernoulli {
+                        if local.real1() < rate {
+                            weight
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        let w = (-fast_logf((local.real1() + 1e-100) as f32)).powf(t);
+                        weight * w
+                    };
+                }
+            }
+        }
     }
 
     /// CatBoost's PairLogit pairs (`GeneratePairLogitPairs`, all of them):
@@ -1553,6 +1670,7 @@ impl Groups {
             queries,
             comp_start,
             comp,
+            sample: Vec::new(),
         }
     }
 
@@ -1580,6 +1698,7 @@ impl Groups {
             queries,
             comp_start,
             comp,
+            sample: Vec::new(),
         }
     }
 
@@ -1783,6 +1902,7 @@ fn yeti_rank_groups(
         queries: all_queries.to_vec(),
         comp_start,
         comp,
+        sample: Vec::new(),
     }
 }
 
@@ -2190,6 +2310,8 @@ struct TrainParams {
     has_time: bool,
     /// The scale of the split scores' noise (float32, as in CatBoost).
     random_strength: f64,
+    /// Pairwise scoring's prior (`bayesian_matrix_reg`, float32).
+    pairwise_prior: f64,
     bootstrap: CatBoostBootstrap,
     subsample: f64,
     bagging_temperature: f64,
@@ -2971,6 +3093,7 @@ fn grow_tree(
     score_std: f64,
     sample: &Sample,
     monotone: &[i8],
+    pairwise: Option<PairwiseScoring>,
 ) -> (Vec<(ColumnRef, usize)>, Vec<u32>) {
     use rayon::prelude::*;
     let n = w.len();
@@ -3023,12 +3146,69 @@ fn grow_tree(
             let leaves: Vec<u32> = rows.iter().map(|&i| leaf_of[i as usize]).collect();
             (rows.as_slice(), leaves, contrib.as_slice())
         });
+        // Pairwise scoring: each pack of binary features is scored as one
+        // candidate (its bits' scores, from the pack values).
+        let mut pack_scores = std::collections::HashMap::new();
+        if let Some(pw) = &pairwise {
+            let wder = parts[0].wder;
+            for entry in candidate_entries(q, &candidates) {
+                let bins = &entry[0];
+                let binary = bins.iter().all(|&(c, _)| {
+                    matches!(&candidates[c].get(q).split, ColumnSplit::Float { borders, .. } if borders.len() == 1)
+                });
+                if !binary {
+                    continue;
+                }
+                let mut values = vec![0u32; n];
+                for (bit, &(c, _)) in bins.iter().enumerate() {
+                    let column = candidates[c].get(q);
+                    for (v, &b) in values.iter_mut().zip(&column.buckets) {
+                        *v |= u32::from(b) << bit;
+                    }
+                }
+                let scores = pairwise_split_scores(
+                    &values,
+                    1 << bins.len(),
+                    bins.len(),
+                    &leaf_of,
+                    leaves,
+                    wder,
+                    &pw.pairs,
+                    pw.l2,
+                    pw.prior,
+                );
+                for (&(c, _), score) in bins.iter().zip(scores) {
+                    pack_scores.insert(c, score);
+                }
+            }
+        }
         // The score of every split of every column.
         let per_column: Vec<Option<Vec<f64>>> = candidates
             .par_iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(ci, c)| {
                 let column = c.get(q);
                 let nb = column.n_buckets;
+                if let Some(pw) = &pairwise {
+                    if nb < 2 {
+                        return None;
+                    }
+                    if let Some(&score) = pack_scores.get(&ci) {
+                        return Some(vec![score]);
+                    }
+                    let buckets: Vec<u32> = column.buckets.iter().map(|&b| u32::from(b)).collect();
+                    return Some(pairwise_split_scores(
+                        &buckets,
+                        nb,
+                        0,
+                        &leaf_of,
+                        leaves,
+                        parts[0].wder,
+                        &pw.pairs,
+                        pw.l2,
+                        pw.prior,
+                    ));
+                }
                 let one_hot = column.one_hot();
                 let n_splits = if one_hot { nb } else { nb - 1 };
                 if nb < 2 {
@@ -4198,7 +4378,12 @@ fn estimate_leaves(
         };
         let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
         let mut step = vec![0.0; n_leaves * k];
-        if lp.orders.is_empty() {
+        if lp.loss.pairwise_scoring() {
+            // CatBoost's `CalculatePairwiseLeafValues` of the leaves' pair
+            // weights and derivative sums.
+            let weights = pairwise_weight_sums(lp.groups, lp.leaf_of, n_leaves, rows);
+            step = pairwise_leaf_values(&weights, &sums.der, p.l2_leaf_reg, p.pairwise_prior);
+        } else if lp.orders.is_empty() {
             for (leaf, o) in step.chunks_mut(k).enumerate() {
                 sums.delta(leaf, p.l2_leaf_reg, lp.stats.0, lp.stats.1, p, o);
             }
@@ -4699,11 +4884,7 @@ fn update_fold(
     seed: u64,
 ) {
     let k = loss.dims();
-    if let Loss::YetiRank {
-        permutations,
-        decay,
-    } = loss
-    {
+    if let Some((permutations, decay)) = loss.yeti_rank() {
         // `CalcApproxDeltaSimple`: pairs drawn at the fold's scores.
         let seed = seed_vector(fold.tails.len(), seed)[0];
         let n = fold.weights.len();
@@ -5045,11 +5226,7 @@ fn boost(
         let taken = (rng.gen() % n_folds as u64) as usize;
         let der_seed = rng.gen(); // the derivatives' seeds
         let fold = &mut folds[taken];
-        if let Loss::YetiRank {
-            permutations,
-            decay,
-        } = loss
-        {
+        if let Some((permutations, decay)) = loss.yeti_rank() {
             // `CalcWeightedDerivatives`: pairs drawn at the fold's scores
             // (one body / tail: no ordered boosting).
             let seed = seed_vector(fold.tails.len(), der_seed)[0];
@@ -5073,7 +5250,18 @@ fn boost(
         let previous = trees
             .last()
             .map(|t: &ObliviousTree| t.leaf_values.as_slice());
-        let sample = bootstrap(&mut rng, &ders, &fold.tails, &fold.weights, previous, k, &p);
+        // Pairwise scoring samples the pairs (all rows taken).
+        let sample = if loss.pairwise_scoring() {
+            fold.groups
+                .bootstrap_pairs(&mut rng, p.bootstrap, p.subsample, p.bagging_temperature);
+            Sample {
+                boot: vec![1.0; n],
+                weights: vec![1.0; n],
+                taken: vec![true; n],
+            }
+        } else {
+            bootstrap(&mut rng, &ders, &fold.tails, &fold.weights, previous, k, &p)
+        };
         fold.sample_weights.clone_from(&sample.weights);
         let sampled: Vec<Vec<f64>> = ders
             .iter()
@@ -5146,6 +5334,11 @@ fn boost(
                 std,
                 &sample,
                 &p.monotone,
+                loss.pairwise_scoring().then(|| PairwiseScoring {
+                    pairs: fold.groups.flat_pairs(n),
+                    l2: p.l2_leaf_reg,
+                    prior: p.pairwise_prior,
+                }),
             );
             (splits, Vec::new())
         };
@@ -5170,11 +5363,7 @@ fn boost(
             .q
             .tree_leaves(&splits, &children, &mut average.cache);
         let mut seeded_steps = 0;
-        if let Loss::YetiRank {
-            permutations,
-            decay,
-        } = loss
-        {
+        if let Some((permutations, decay)) = loss.yeti_rank() {
             // `CalcLeafValuesSimple`'s seed of its one step.
             seeded_steps = 1;
             average.groups = yeti_rank_groups(
@@ -5374,6 +5563,371 @@ fn validate(
     Ok(())
 }
 
+/// LAPACK's `dposv` with `uplo = 'U'` (reference `dpotf2` Cholesky, below
+/// its block size of 64, and `dpotrs` through `dtrsm`), which CatBoost's
+/// `SolveLinearSystemCholesky` calls: solves `A x = b` in place for the
+/// `n × n` column-major `A` (upper triangle). A matrix that is not
+/// positive definite leaves `b` unchanged, as `dposv` does.
+fn dposv_upper(a: &mut [f64], b: &mut [f64]) {
+    let n = b.len();
+    if n == 1 {
+        b[0] /= a[0];
+        return;
+    }
+    // Reference `ddot`: unrolled by 5 after the leftover terms.
+    let ddot = |x: &[f64], y: &[f64]| -> f64 {
+        let m = x.len() % 5;
+        let mut t = 0.0;
+        for i in 0..m {
+            t += x[i] * y[i];
+        }
+        let mut i = m;
+        while i < x.len() {
+            t = t
+                + x[i] * y[i]
+                + x[i + 1] * y[i + 1]
+                + x[i + 2] * y[i + 2]
+                + x[i + 3] * y[i + 3]
+                + x[i + 4] * y[i + 4];
+            i += 5;
+        }
+        t
+    };
+    let at = |r: usize, c: usize| c * n + r;
+    for j in 0..n {
+        let col: Vec<f64> = (0..j).map(|r| a[at(r, j)]).collect();
+        let ajj = a[at(j, j)] - ddot(&col, &col);
+        if ajj <= 0.0 || ajj.is_nan() {
+            return;
+        }
+        let ajj = ajj.sqrt();
+        a[at(j, j)] = ajj;
+        if j + 1 < n {
+            // dgemv('T'): a(j, c) -= a(0..j, c) · a(0..j, j).
+            for c in j + 1..n {
+                let mut temp = 0.0;
+                for r in 0..j {
+                    temp += a[at(r, c)] * col[r];
+                }
+                a[at(j, c)] += -temp;
+            }
+            let r = 1.0 / ajj;
+            for c in j + 1..n {
+                a[at(j, c)] *= r;
+            }
+        }
+    }
+    // dtrsm: Uᵀ y = b, then U x = y.
+    for i in 0..n {
+        let mut temp = b[i];
+        for k in 0..i {
+            temp -= a[at(k, i)] * b[k];
+        }
+        b[i] = temp / a[at(i, i)];
+    }
+    for k in (0..n).rev() {
+        if b[k] != 0.0 {
+            b[k] /= a[at(k, k)];
+            for i in 0..k {
+                b[i] -= b[k] * a[at(i, k)];
+            }
+        }
+    }
+}
+
+/// CatBoost's `CalculatePairwiseLeafValues`: the leaf values of the
+/// pairwise system `weights` (`L × L`, row-major) and `der`, with the
+/// prior spread over the cells, the last leaf fixed at 0, then centred.
+fn pairwise_leaf_values(weights: &[f64], der: &[f64], l2: f64, prior: f64) -> Vec<f64> {
+    let size = der.len();
+    let cell_prior = 1.0 / size as f64;
+    let non_diag = -prior * cell_prior;
+    let diag = prior * (1.0 - cell_prior) + l2;
+    let mut res = if size == 2 {
+        vec![der[0] / (weights[0] + diag), 0.0]
+    } else {
+        let m = size - 1;
+        let mut matrix = vec![0.0; m * m];
+        for y in 0..m {
+            for x in 0..y {
+                matrix[y * m + x] = weights[y * size + x] + non_diag;
+            }
+            matrix[y * m + y] = weights[y * size + y] + diag;
+        }
+        let mut res = der[..m].to_vec();
+        dposv_upper(&mut matrix, &mut res);
+        res.push(0.0);
+        res
+    };
+    let mean = res.iter().sum::<f64>() / size as f64;
+    res.iter_mut().for_each(|v| *v -= mean);
+    res
+}
+
+/// CatBoost's `ComputePairwiseWeightSums` of the queries of the rows
+/// `0..rows` (pair weights, blocks of `⌈queries / 128⌉` queries merged in
+/// order): `L × L`, row-major.
+fn pairwise_weight_sums(
+    groups: &Groups,
+    leaf_of: &[u32],
+    n_leaves: usize,
+    rows: usize,
+) -> Vec<f64> {
+    let queries = query_prefix(&groups.queries, rows);
+    let n_queries = queries.len() - 1;
+    let block = n_queries.div_ceil(128).max(1);
+    let mut merged = vec![0.0f64; n_leaves * n_leaves];
+    for b in 0..n_queries.div_ceil(block) {
+        let mut sum = vec![0.0f64; n_leaves * n_leaves];
+        for q in b * block..((b + 1) * block).min(n_queries) {
+            for w in queries[q]..queries[q + 1] {
+                for &(l, cw) in groups.competitors(w) {
+                    let (lw, ll) = (leaf_of[w] as usize, leaf_of[l] as usize);
+                    if lw == ll {
+                        continue;
+                    }
+                    let cw = f64::from(cw);
+                    sum[lw * n_leaves + ll] -= cw;
+                    sum[ll * n_leaves + lw] -= cw;
+                    sum[lw * n_leaves + lw] += cw;
+                    sum[ll * n_leaves + ll] += cw;
+                }
+            }
+        }
+        if b == 0 {
+            merged = sum;
+        } else {
+            merged.iter_mut().zip(&sum).for_each(|(m, s)| *m += s);
+        }
+    }
+    merged
+}
+
+/// What pairwise split scoring needs: the taken fold's pairs with their
+/// bootstrapped weights, the L2 regularization and the prior (float32).
+struct PairwiseScoring {
+    pairs: Vec<(usize, usize, f32)>,
+    l2: f64,
+    prior: f64,
+}
+
+/// One pair cell's statistics (CatBoost's `TBucketPairWeightStatistics`).
+#[derive(Clone, Copy, Default)]
+struct PairCell {
+    smaller: f64,
+    greater: f64,
+}
+
+/// CatBoost's `TPairwiseScoreCalcer::CalculateScore` (SSE lanes, products
+/// then adds).
+fn pairwise_score(avrg: &[f64], der: &[f64], weights: &[f64]) -> f64 {
+    let size = der.len();
+    let mut score = 0.0;
+    for x in 0..size {
+        let row = &weights[x * size..(x + 1) * size];
+        let (mut s0, mut s2) = ([0.0f64; 2], [0.0f64; 2]);
+        let mut y = 0;
+        while y + 4 <= size {
+            s0[0] += avrg[y] * row[y];
+            s0[1] += avrg[y + 1] * row[y + 1];
+            s2[0] += avrg[y + 2] * row[y + 2];
+            s2[1] += avrg[y + 3] * row[y + 3];
+            y += 4;
+        }
+        let mut sub = (s0[0] + s0[1]) + (s2[0] + s2[1]);
+        for y in size - size % 4..size {
+            sub += avrg[y] * row[y];
+        }
+        score += avrg[x] * (der[x] - 0.5 * sub);
+    }
+    score
+}
+
+/// `UpdateWeightSumFromTotal`.
+fn pairwise_add_total(w: &mut [f64], size: usize, y: usize, x: usize, total: f64) {
+    w[(2 * y + 1) * size + 2 * x + 1] += total;
+    w[(2 * x + 1) * size + 2 * y + 1] += total;
+    w[(2 * x + 1) * size + 2 * x + 1] -= total;
+    w[(2 * y + 1) * size + 2 * y + 1] -= total;
+}
+
+/// `UpdateWeightSumFromNonDiagStats`.
+fn pairwise_add_non_diag(
+    w: &mut [f64],
+    size: usize,
+    y: usize,
+    x: usize,
+    xy: PairCell,
+    yx: PairCell,
+) {
+    let w00 = xy.greater + yx.greater;
+    let w01 = xy.smaller - xy.greater;
+    let w10 = yx.smaller - yx.greater;
+    let w11 = -(xy.smaller + yx.smaller);
+    let at = |r: usize, c: usize| r * size + c;
+    w[at(2 * x, 2 * y)] += w00;
+    w[at(2 * y, 2 * x)] += w00;
+    w[at(2 * x, 2 * y + 1)] += w01;
+    w[at(2 * y + 1, 2 * x)] += w01;
+    w[at(2 * x + 1, 2 * y)] += w10;
+    w[at(2 * y, 2 * x + 1)] += w10;
+    w[at(2 * x + 1, 2 * y + 1)] += w11;
+    w[at(2 * y + 1, 2 * x + 1)] += w11;
+    w[at(2 * y, 2 * y)] -= w00 + w10;
+    w[at(2 * x, 2 * x)] -= w00 + w01;
+    w[at(2 * x + 1, 2 * x + 1)] -= w10 + w11;
+    w[at(2 * y + 1, 2 * y + 1)] -= w01 + w11;
+}
+
+/// The diagonal update of a leaf's own pairs.
+fn pairwise_add_diag(w: &mut [f64], size: usize, y: usize, delta: f64) {
+    w[2 * y * size + 2 * y + 1] += delta;
+    w[(2 * y + 1) * size + 2 * y] += delta;
+    w[2 * y * size + 2 * y] -= delta;
+    w[(2 * y + 1) * size + 2 * y + 1] -= delta;
+}
+
+/// CatBoost's pairwise split scores (`ComputePairwiseStats` and
+/// `CalculatePairwiseScore`) of a float feature (`bits == 0`: every border
+/// of `buckets`, `n_buckets` values) or of a pack of binary features
+/// (`bits > 0`: `buckets` holds the pack value, one score per bit).
+#[allow(clippy::too_many_arguments)]
+fn pairwise_split_scores(
+    buckets: &[u32],
+    n_buckets: usize,
+    bits: usize,
+    leaf_of: &[u32],
+    leaves: usize,
+    wder: &[f64],
+    pairs: &[(usize, usize, f32)],
+    l2: f64,
+    prior: f64,
+) -> Vec<f64> {
+    let n = leaf_of.len();
+    let mut der_sums = vec![0.0f64; leaves * n_buckets];
+    for i in 0..n {
+        der_sums[leaf_of[i] as usize * n_buckets + buckets[i] as usize] += wder[i];
+    }
+    let cells = if bits > 0 { 2 * bits } else { n_buckets };
+    let mut stats = vec![PairCell::default(); leaves * leaves * cells];
+    let cell = |a: usize, b: usize, c: usize| (a * leaves + b) * cells + c;
+    for &(w, l, sw) in pairs {
+        if w == l {
+            continue;
+        }
+        let sw = f64::from(sw);
+        let (wl, ll) = (leaf_of[w] as usize, leaf_of[l] as usize);
+        let (wb, lb) = (buckets[w] as usize, buckets[l] as usize);
+        if bits == 0 {
+            if wb > lb {
+                stats[cell(ll, wl, lb)].smaller -= sw;
+                stats[cell(ll, wl, wb)].greater -= sw;
+            } else {
+                stats[cell(wl, ll, wb)].smaller -= sw;
+                stats[cell(wl, ll, lb)].greater -= sw;
+            }
+        } else {
+            for bit in 0..bits {
+                let (wbit, lbit) = ((wb >> bit) & 1, (lb >> bit) & 1);
+                if wbit > lbit {
+                    stats[cell(ll, wl, 2 * bit)].smaller -= sw;
+                    stats[cell(ll, wl, 2 * bit + 1)].greater -= sw;
+                } else {
+                    stats[cell(wl, ll, 2 * bit + wbit)].smaller -= sw;
+                    stats[cell(wl, ll, 2 * bit + lbit)].greater -= sw;
+                }
+            }
+        }
+    }
+    let size = 2 * leaves;
+    let mut out = Vec::new();
+    if bits == 0 {
+        let mut der = vec![0.0f64; size];
+        let mut weights = vec![0.0f64; size * size];
+        for leaf in 0..leaves {
+            for b in 0..n_buckets {
+                der[2 * leaf + 1] += der_sums[leaf * n_buckets + b];
+            }
+        }
+        for y in 0..leaves {
+            for x in y + 1..leaves {
+                // SSE pairs of buckets, then the rest.
+                let (mut xy0, mut xy2, mut yx0, mut yx2) =
+                    ([0.0f64; 2], [0.0f64; 2], [0.0f64; 2], [0.0f64; 2]);
+                let mut b = 0;
+                while b + 4 <= n_buckets {
+                    for lane in 0..2 {
+                        xy0[lane] += stats[cell(x, y, b + lane)].smaller;
+                        xy2[lane] += stats[cell(x, y, b + 2 + lane)].smaller;
+                        yx0[lane] += stats[cell(y, x, b + lane)].smaller;
+                        yx2[lane] += stats[cell(y, x, b + 2 + lane)].smaller;
+                    }
+                    b += 4;
+                }
+                let mut total =
+                    (xy0[0] + xy0[1]) + (xy2[0] + xy2[1]) + (yx0[0] + yx0[1]) + (yx2[0] + yx2[1]);
+                for b in n_buckets - n_buckets % 4..n_buckets {
+                    total += stats[cell(x, y, b)].smaller + stats[cell(y, x, b)].smaller;
+                }
+                pairwise_add_total(&mut weights, size, y, x, total);
+            }
+        }
+        for split in 0..n_buckets - 1 {
+            for y in 0..leaves {
+                let d = der_sums[y * n_buckets + split];
+                der[2 * y] += d;
+                der[2 * y + 1] -= d;
+                let own = stats[cell(y, y, split)];
+                pairwise_add_diag(&mut weights, size, y, own.smaller - own.greater);
+                for x in y + 1..leaves {
+                    pairwise_add_non_diag(
+                        &mut weights,
+                        size,
+                        y,
+                        x,
+                        stats[cell(x, y, split)],
+                        stats[cell(y, x, split)],
+                    );
+                }
+            }
+            let values = pairwise_leaf_values(&weights, &der, l2, prior);
+            out.push(pairwise_score(&values, &der, &weights));
+        }
+    } else {
+        for bit in 0..bits {
+            let mut der = vec![0.0f64; size];
+            for y in 0..leaves {
+                for b in 0..n_buckets {
+                    der[y * 2 + ((b >> bit) & 1)] += der_sums[y * n_buckets + b];
+                }
+            }
+            let mut weights = vec![0.0f64; size * size];
+            for y in 0..leaves {
+                let own = stats[cell(y, y, 2 * bit)];
+                pairwise_add_diag(&mut weights, size, y, own.smaller - own.greater);
+                for x in y + 1..leaves {
+                    let total = stats[cell(x, y, 2 * bit)].smaller
+                        + stats[cell(y, x, 2 * bit)].smaller
+                        + stats[cell(x, y, 2 * bit + 1)].smaller
+                        + stats[cell(y, x, 2 * bit + 1)].smaller;
+                    pairwise_add_total(&mut weights, size, y, x, total);
+                    pairwise_add_non_diag(
+                        &mut weights,
+                        size,
+                        y,
+                        x,
+                        stats[cell(x, y, 2 * bit)],
+                        stats[cell(y, x, 2 * bit)],
+                    );
+                }
+            }
+            let values = pairwise_leaf_values(&weights, &der, l2, prior);
+            out.push(pairwise_score(&values, &der, &weights));
+        }
+    }
+    out
+}
+
 /// The query groups of `loss` (with pairs for a pairwise one).
 fn groups_of(loss: Loss, queries: Vec<usize>, target: &[f64]) -> Groups {
     if loss.pairwise() {
@@ -5484,8 +6038,9 @@ macro_rules! catboost_config {
             /// sample weight as in CatBoost. Default (`None`): CatBoost's, 3,
             /// or 0 for YetiRank.
             pub l2_leaf_reg: Option<f64>,
-            /// Borders per numeric feature (default 254).
-            pub border_count: usize,
+            /// Borders per numeric feature. Default (`None`): CatBoost's,
+            /// 254, or 32 for pairwise scoring.
+            pub border_count: Option<usize>,
             pub score_function: CatBoostScoreFunction,
             /// Default (`None`): CatBoost's for the loss (Exact for MAE and
             /// Quantile, Gradient for LogLinQuantile, else Newton).
@@ -5531,11 +6086,15 @@ macro_rules! catboost_config {
             pub permutation_count: usize,
             /// The seed of CatBoost's generator (`random_seed`, default 0).
             pub random_seed: u64,
-            /// The noise of the split scores (CatBoost's `random_strength`,
-            /// default 1; `NormalWithModelSizeDecrease`): normal with the
-            /// root mean square of the derivatives times this, fading with
-            /// the model's length.
-            pub random_strength: f64,
+            /// The noise of the split scores (CatBoost's `random_strength`;
+            /// `NormalWithModelSizeDecrease`): normal with the root mean
+            /// square of the derivatives times this, fading with the model's
+            /// length. Default (`None`): CatBoost's, 1, or 0 for pairwise
+            /// scoring.
+            pub random_strength: Option<f64>,
+            /// The prior of the pairwise leaf systems (CatBoost's
+            /// `bayesian_matrix_reg`, default 0.1).
+            pub bayesian_matrix_reg: f64,
             /// CatBoost's `bootstrap_type`. Default (`None`): MVS, or
             /// Bayesian for more than two classes.
             pub bootstrap_type: Option<CatBoostBootstrap>,
@@ -5593,7 +6152,7 @@ macro_rules! catboost_config {
                     learning_rate: None,
                     depth: 6,
                     l2_leaf_reg: None,
-                    border_count: 254,
+                    border_count: None,
                     score_function: CatBoostScoreFunction::Cosine,
                     leaf_estimation_method: None,
                     boost_from_average: None,
@@ -5608,7 +6167,8 @@ macro_rules! catboost_config {
                     has_time: false,
                     permutation_count: 4,
                     random_seed: 0,
-                    random_strength: 1.0,
+                    random_strength: None,
+                    bayesian_matrix_reg: 0.1,
                     bootstrap_type: None,
                     subsample: None,
                     bagging_temperature: 1.0,
@@ -5650,8 +6210,18 @@ macro_rules! catboost_config {
                 self
             }
             pub fn with_border_count(mut self, b: usize) -> Self {
-                self.border_count = b;
+                self.border_count = Some(b);
                 self
+            }
+            pub fn with_bayesian_matrix_reg(mut self, r: f64) -> Self {
+                self.bayesian_matrix_reg = r;
+                self
+            }
+            /// Borders per feature for `loss` (CatBoost's default: 32 for
+            /// pairwise scoring).
+            fn border_count_for(&self, loss: Loss) -> usize {
+                self.border_count
+                    .unwrap_or(if loss.pairwise_scoring() { 32 } else { 254 })
             }
             pub fn with_score_function(mut self, s: CatBoostScoreFunction) -> Self {
                 self.score_function = s;
@@ -5702,6 +6272,8 @@ macro_rules! catboost_config {
                     }
                     Loss::LogCosh if !monotone => CatBoostLeafEstimation::Exact,
                     Loss::Lq { q } if q < 2.0 => CatBoostLeafEstimation::Gradient,
+                    // CPU pairwise scoring has no Newton.
+                    l if l.pairwise_scoring() => CatBoostLeafEstimation::Gradient,
                     _ => CatBoostLeafEstimation::Newton,
                 })
             }
@@ -5726,6 +6298,8 @@ macro_rules! catboost_config {
                     Loss::Huber { .. } | Loss::LogCosh | Loss::Lq { .. } => (1, 1),
                     Loss::RmseWithUncertainty | Loss::MultiRmse(_) => (1, 1),
                     Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. } => (1, 1),
+                    Loss::YetiRankPairwise { .. } => (1, 1),
+                    Loss::PairLogitPairwise => (1, 50),
                     Loss::LogLinQuantile { .. } => (1, 1),
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
@@ -5863,12 +6437,16 @@ macro_rules! catboost_config {
                     Loss::MultiClass(_) | Loss::MultiClassOneVsAll(_) => {
                         CatBoostBootstrap::Bayesian
                     }
+                    // Pairwise scoring: Bernoulli pairs, half of them.
+                    l if l.pairwise_scoring() => CatBoostBootstrap::Bernoulli,
                     _ => CatBoostBootstrap::Mvs,
                 });
                 let rate = self.subsample.unwrap_or(if n < 100 {
                     1.0
                 } else if kind == CatBoostBootstrap::Mvs {
                     0.8
+                } else if loss.pairwise_scoring() {
+                    0.5
                 } else {
                     0.66
                 });
@@ -5876,7 +6454,7 @@ macro_rules! catboost_config {
             }
 
             pub fn with_random_strength(mut self, r: f64) -> Self {
-                self.random_strength = r;
+                self.random_strength = Some(r);
                 self
             }
             pub fn with_random_seed(mut self, seed: u64) -> Self {
@@ -6016,7 +6594,8 @@ macro_rules! catboost_config {
                     backtracking: self.leaf_estimation_backtracking
                         == CatBoostBacktracking::AnyImprovement,
                     has_time: self.has_time,
-                    random_strength: f64::from(self.random_strength as f32),
+                    random_strength: f64::from(self.random_strength.unwrap_or(1.0) as f32),
+                    pairwise_prior: f64::from(self.bayesian_matrix_reg as f32),
                     bootstrap: CatBoostBootstrap::No,
                     subsample: 1.0,
                     bagging_temperature: self.bagging_temperature,
@@ -6172,6 +6751,14 @@ impl CatBoostRegressor {
                 permutations,
                 decay,
             } => Loss::YetiRank {
+                permutations,
+                decay,
+            },
+            CatBoostRegressionLoss::PairLogitPairwise => Loss::PairLogitPairwise,
+            CatBoostRegressionLoss::YetiRankPairwise {
+                permutations,
+                decay,
+            } => Loss::YetiRankPairwise {
                 permutations,
                 decay,
             },
@@ -6437,6 +7024,34 @@ impl CatBoostRegressor {
                 "PairLogit and YetiRank do not take sample weights".into(),
             ));
         }
+        if loss.pairwise_scoring() {
+            let invalid = |m: &str| Err(RustMlError::InvalidParameter(m.into()));
+            // CatBoost's: plain symmetric trees, no Newton, no monotone
+            // constraints. Not ported: categorical features (one-hot and CTR
+            // pairwise statistics).
+            if self.boosting_type == CatBoostBoostingType::Ordered
+                || self.grow_policy != CatBoostGrowPolicy::SymmetricTree
+            {
+                return invalid("pairwise scoring needs plain boosting and symmetric trees");
+            }
+            if self.leaf_estimation_method == Some(CatBoostLeafEstimation::Newton) {
+                return invalid("pairwise scoring has no Newton leaf estimation");
+            }
+            if self.monotone_constraints.iter().any(|&m| m != 0) || !self.cat_features.is_empty() {
+                return invalid("pairwise scoring supports neither monotone constraints nor categorical features");
+            }
+            if self.depth > 6 {
+                return invalid("pairwise scoring supports depth up to 6");
+            }
+            if let Some((permutations, decay)) = loss.yeti_rank() {
+                if permutations == 0 || !(decay > 0.0 && decay <= 1.0) {
+                    return invalid("YetiRankPairwise needs permutations >= 1 and decay in (0, 1]");
+                }
+                if self.leaf_estimation_iterations.is_some_and(|i| i != 1) {
+                    return invalid("YetiRankPairwise takes one leaf step");
+                }
+            }
+        }
         if let Loss::YetiRank {
             permutations,
             decay,
@@ -6570,7 +7185,13 @@ impl CatBoostRegressor {
         queries: Option<Vec<usize>>,
     ) -> Result<FittedCatBoostRegressor> {
         let p = self.train_params();
-        validate(x, y.column(0), sample_weight, &p, self.border_count)?;
+        validate(
+            x,
+            y.column(0),
+            sample_weight,
+            &p,
+            self.border_count.unwrap_or(254),
+        )?;
         self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
             return Err(RustMlError::InvalidParameter(
@@ -6655,16 +7276,25 @@ impl CatBoostRegressor {
             classes: Some((&classes_of, 2)),
             max_ctr_complexity: self.max_ctr_complexity(),
         };
-        let q = quantize(x, self.border_count, cat)?;
+        let q = quantize(x, self.border_count_for(loss), cat)?;
         self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         // CatBoost's YetiRank default `l2_leaf_reg` is 0 (made 1e-20).
+        // PairLogitPairwise's is 5.
         let l2 = match (self.l2_leaf_reg, loss) {
-            (None, Loss::YetiRank { .. }) => f64::from(1e-20f32),
+            (None, Loss::YetiRank { .. } | Loss::YetiRankPairwise { .. }) => f64::from(1e-20f32),
+            (None, Loss::PairLogitPairwise) => 5.0,
             _ => p.l2_leaf_reg,
+        };
+        // Pairwise scoring has no score noise by default.
+        let random_strength = match self.random_strength {
+            None if loss.pairwise_scoring() => 0.0,
+            _ => p.random_strength,
         };
         let p = TrainParams {
             l2_leaf_reg: l2,
+            random_strength,
+            pairwise_prior: f64::from(self.bayesian_matrix_reg as f32),
             learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             leaf_estimation: self.leaf_method(loss),
@@ -6856,7 +7486,7 @@ impl CatBoostClassifier {
     ) -> Result<FittedCatBoostClassifier> {
         let p = self.train_params();
         let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
-        validate(x, y, sample_weight, &p, self.border_count)?;
+        validate(x, y, sample_weight, &p, self.border_count.unwrap_or(254))?;
         self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
             return Err(RustMlError::InvalidParameter(
@@ -6995,7 +7625,7 @@ impl CatBoostClassifier {
             classes: Some((&classes_of, classes.len())),
             max_ctr_complexity: self.max_ctr_complexity(),
         };
-        let q = quantize(x, self.border_count, cat)?;
+        let q = quantize(x, self.border_count_for(loss), cat)?;
         self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         // CatBoost has no automatic learning rate for CrossEntropy.
@@ -7568,5 +8198,23 @@ mod tests {
             .fit_with_groups_eval(x.view(), labels.view(), None, &groups, eval, &groups)
             .unwrap();
         assert_eq!(f.eval_metrics().len(), 5);
+        // Pairwise scoring: plain symmetric trees on numeric features.
+        let pw = CatBoostRegressor::new()
+            .with_iterations(5)
+            .with_loss_function(CatBoostRegressionLoss::PairLogitPairwise);
+        assert!(pw
+            .fit_with_groups(x.view(), labels.view(), None, &groups)
+            .is_ok());
+        for bad in [
+            pw.clone().with_grow_policy(CatBoostGrowPolicy::Depthwise),
+            pw.clone().with_cat_features(vec![2]),
+            pw.clone()
+                .with_leaf_estimation_method(CatBoostLeafEstimation::Newton),
+            pw.clone().with_depth(7),
+        ] {
+            assert!(bad
+                .fit_with_groups(x.view(), labels.view(), None, &groups)
+                .is_err());
+        }
     }
 }
