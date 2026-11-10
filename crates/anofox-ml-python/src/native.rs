@@ -276,6 +276,47 @@ impl PyModel {
             .map_err(to_py_err)
     }
 
+    /// Fit with text columns besides `x` (CatBoost's `text_features`):
+    /// `text[c][r]` is row `r` of text column `c`.
+    #[pyo3(signature = (x, text, y, sample_weight=None))]
+    fn fit_with_text(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        text: Vec<Vec<String>>,
+        y: PyReadonlyArray1<'_, f64>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+    ) -> PyResult<()> {
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_array(),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let inner = &mut self.inner;
+        py.detach(|| inner.fit_with_text(x, &text, Some(y), w))
+            .map_err(to_py_err)
+    }
+
+    /// Predictions of a model fitted with `fit_with_text`.
+    fn predict_with_text(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        text: Vec<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.call(py, x, |m, x| m.predict_with_text(x, &text))
+    }
+
+    /// Class probabilities of a model fitted with `fit_with_text`.
+    fn predict_proba_with_text(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        text: Vec<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.call(py, x, |m, x| m.predict_proba_with_text(x, &text))
+    }
+
     /// Predictions with an offset on the link scale (the GLMs).
     fn predict_with_offset(
         &self,

@@ -199,6 +199,26 @@ pub trait DynModel: Send + Sync {
     fn transform_text(&self, _docs: &[&str]) -> Result<Out> {
         Err(unsupported(self.kind(), "transform_text"))
     }
+    /// Fit with text columns besides `x` (CatBoost's `text_features`):
+    /// `text[c][r]` is row `r` of text column `c`.
+    fn fit_with_text<'a>(
+        &mut self,
+        _x: ArrayView2<'a, f64>,
+        _text: &[Vec<String>],
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "fit_with_text"))
+    }
+    /// Predictions of a model fitted with [`DynModel::fit_with_text`].
+    fn predict_with_text(&self, _x: ArrayView2<f64>, _text: &[Vec<String>]) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_with_text"))
+    }
+    /// Class probabilities of a model fitted with
+    /// [`DynModel::fit_with_text`].
+    fn predict_proba_with_text(&self, _x: ArrayView2<f64>, _text: &[Vec<String>]) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_proba_with_text"))
+    }
     /// Fit with an explicit validation set for early stopping (sklearn's
     /// HistGradientBoosting `fit(X, y, sample_weight, X_val=, y_val=,
     /// sample_weight_val=)`).
@@ -586,6 +606,43 @@ macro_rules! registry {
             let $c = &self.0.config;
             self.0.fitted = Some($body?);
             Ok(())
+        }
+    };
+    (@cap $kind:ident, fit_with_text, $c:ident, $x:ident, $t:ident, $y:ident, $w:ident,
+     $body:expr) => {
+        #[allow(unused_variables)]
+        fn fit_with_text<'a>(
+            &mut self,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $t: &[Vec<String>],
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    (@cap $kind:ident, predict_with_text, $m:ident, $x:ident, $t:ident, $body:expr) => {
+        fn predict_with_text(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $t: &[Vec<String>],
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
+        }
+    };
+    (@cap $kind:ident, predict_proba_with_text, $m:ident, $x:ident, $t:ident, $body:expr) => {
+        fn predict_proba_with_text(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $t: &[Vec<String>],
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
         }
     };
     (@cap $kind:ident, embedding, $m:ident, $body:expr) => {

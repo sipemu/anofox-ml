@@ -88,6 +88,12 @@ m = am.LgbmRegressor(n_estimators=300, num_leaves=31).fit(X, y)
 m = am.HistGradientBoostingClassifier(early_stopping=True).fit(X, y)
 ```
 
+CatBoost text features (catboost's default processing, matching catboost):
+pass `text_features=[...]` in Python (a DataFrame or object array), or call
+`fit_with_text(x, &text, y, w)` / `predict_with_text` in Rust. Regression
+gets BoW over word bigrams and words. Classification also gets the online
+NaiveBayes. No eval sets, rankers or MultiRMSE with text yet.
+
 ## LightGBM: objectives
 
 `LgbmRegressor::with_objective`: `Regression` (L2), `RegressionL1`,

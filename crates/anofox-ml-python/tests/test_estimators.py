@@ -871,6 +871,41 @@ def test_catboost_matches_catboost():
     np.testing.assert_array_equal(ours.predict(Xc), ref.predict(Xc).ravel())
 
 
+def test_catboost_text_features_match_catboost():
+    cb = pytest.importorskip("catboost")
+    pd = pytest.importorskip("pandas")
+    off = dict(random_strength=0, bootstrap_type="No", has_time=True, thread_count=1)
+    kw = dict(iterations=20, learning_rate=0.2, depth=4)
+    r = np.random.RandomState(4)
+    n = 300
+    vocab = ["red", "green", "blue", "big", "small", "fast", "slow", "old"]
+    words = [" ".join(vocab[i] for i in r.randint(0, len(vocab), r.randint(0, 5)))
+             for _ in range(n)]
+    x0 = r.randn(n)
+    colour = r.choice(["a", "b", "c"], n)
+    y = x0 + np.array(["red" in w.split() for w in words]) - (colour == "b") \
+        + 0.3 * r.randn(n)
+    # Text in the middle, a categorical column after it.
+    frame = pd.DataFrame({"x0": x0, "words": words, "colour": colour})
+    ref = cb.CatBoostRegressor(**kw, **off, verbose=0, allow_writing_files=False).fit(
+        cb.Pool(frame, y, text_features=[1], cat_features=[2]))
+    ours = am.CatBoostRegressor(**kw, **off, text_features=[1], cat_features=[2]).fit(frame, y)
+    pool = cb.Pool(frame, text_features=[1], cat_features=[2])
+    np.testing.assert_allclose(ours.predict(frame), ref.predict(pool), rtol=1e-12, atol=1e-12)
+    labels = np.where(y > np.median(y), "hi", "lo")
+    ref = cb.CatBoostClassifier(**kw, **off, verbose=0, allow_writing_files=False).fit(
+        cb.Pool(frame, labels, text_features=[1], cat_features=[2]))
+    ours = am.CatBoostClassifier(**kw, **off, text_features=[1], cat_features=[2]).fit(
+        frame, labels)
+    np.testing.assert_allclose(ours.predict_proba(frame), ref.predict_proba(pool),
+                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_array_equal(ours.predict(frame), ref.predict(pool).ravel())
+    restored = pickle.loads(pickle.dumps(ours))
+    np.testing.assert_array_equal(restored.predict_proba(frame), ours.predict_proba(frame))
+    with pytest.raises(ValueError):
+        ours.fit(frame, labels, eval_set=(frame, labels))
+
+
 def test_catboost_categorical_features_match_catboost():
     cb = pytest.importorskip("catboost")
     off = dict(random_strength=0, bootstrap_type="No", boosting_type="Plain", has_time=True,
