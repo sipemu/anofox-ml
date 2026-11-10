@@ -677,6 +677,76 @@ impl Default for BaggingEstimatorConfig {
 
 type BaggingEstimatorFit = ensemble::FittedGenericBagging<RegistryFitted, f64>;
 
+/// `CatBoostRegressor` with MultiRMSE (whatever its `loss_function`),
+/// fitted on one matrix `[X | Y]`: its last `y_columns` columns are the
+/// targets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct CatBoostMultiConfig {
+    #[serde(flatten)]
+    catboost: ensemble::CatBoostRegressor,
+    y_columns: usize,
+}
+
+impl Default for CatBoostMultiConfig {
+    fn default() -> Self {
+        Self {
+            catboost: Default::default(),
+            y_columns: 2,
+        }
+    }
+}
+
+impl CatBoostMultiConfig {
+    /// `[X | Y]` split at its last `y_columns` columns.
+    fn split<'a>(
+        &self,
+        xy: ArrayView2<'a, f64>,
+    ) -> Result<(ArrayView2<'a, f64>, ArrayView2<'a, f64>)> {
+        let p = xy.ncols();
+        if self.y_columns < 2 || self.y_columns >= p {
+            return Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                "CatBoostMultiRegressor: y_columns must be in 2..{p} for {p} columns, got {}",
+                self.y_columns
+            )));
+        }
+        Ok(xy.split_at(ndarray::Axis(1), p - self.y_columns))
+    }
+
+    fn model(&self) -> ensemble::CatBoostRegressor {
+        self.catboost
+            .clone()
+            .with_loss_function(ensemble::CatBoostRegressionLoss::MultiRmse)
+    }
+
+    fn fit(
+        &self,
+        xy: ArrayView2<f64>,
+        w: Option<ArrayView1<f64>>,
+    ) -> Result<ensemble::FittedCatBoostRegressor> {
+        let (x, y) = self.split(xy)?;
+        self.model().fit_multi(x, y, w)
+    }
+
+    /// With an eval set `[X_val | Y_val]`.
+    fn fit_eval<'a>(
+        &self,
+        xy: ArrayView2<f64>,
+        w: Option<ArrayView1<f64>>,
+        xy_val: ArrayView2<'a, f64>,
+        w_val: Option<ArrayView1<'a, f64>>,
+    ) -> Result<ensemble::FittedCatBoostRegressor> {
+        let (x, y) = self.split(xy)?;
+        let (xv, yv) = self.split(xy_val)?;
+        let eval = ensemble::CatBoostMultiEvalSet {
+            x: xv,
+            y: yv,
+            sample_weight: w_val,
+        };
+        self.model().fit_multi_with_eval(x, y, w, eval)
+    }
+}
+
 /// `Cca` fitted on one matrix `[X | Y]`: its last `y_columns` columns are
 /// `Y`.
 #[derive(Serialize, Deserialize)]
@@ -1056,6 +1126,14 @@ registry! {
         predict: |m, x| m.predict(x),
         // RMSEWithUncertainty: the predicted standard deviation.
         predict_std: |m, x| m.predict_uncertainty(x).map(|u| u.column(1).mapv(f64::sqrt)),
+    }
+    CatBoostMultiRegressor {
+        config: CatBoostMultiConfig = Default::default(),
+        fitted: ensemble::FittedCatBoostRegressor,
+        fit: |c, x, y, w| c.fit(x, w),
+        // The eval set is `[X_val | Y_val]` too.
+        fit_with_validation: |c, x, y, w, xv, yv, wv| c.fit_eval(x, w, xv, wv),
+        predict: |m, x| m.predict_multi(x),
     }
     CatBoostClassifier {
         config: ensemble::CatBoostClassifier = Default::default(),

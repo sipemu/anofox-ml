@@ -1258,3 +1258,29 @@ def test_catboost_uncertainty_matches_catboost():
     ours = am.CatBoostRegressor(**kw, random_strength=0, bootstrap_type="No",
                                 has_time=True).fit(X, y)
     np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+
+
+def test_catboost_multirmse_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    r = np.random.RandomState(10)
+    X = r.normal(size=(300, 3))
+    Y = np.column_stack([X[:, 0] + r.normal(size=300), X[:, 1] * X[:, 2], r.normal(size=300)])
+    w = r.uniform(0.5, 2.0, size=300)
+    kw = dict(iterations=30, depth=4, loss_function="MultiRMSE", random_seed=0)
+    fixed = dict(random_strength=0, bootstrap_type="No", has_time=True)
+    ref = cb.CatBoostRegressor(**kw, **fixed, thread_count=1, verbose=0,
+                               allow_writing_files=False).fit(X, Y, sample_weight=w)
+    ours = am.CatBoostRegressor(**kw, **fixed).fit(X, Y, sample_weight=w)
+    assert ours.predict(X).shape == (300, 3)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+    # An eval set with use_best_model, and pickling.
+    Xv, Yv = X[:80] + 0.1, Y[:80]
+    ref = cb.CatBoostRegressor(**kw, **fixed, thread_count=1, verbose=0,
+                               allow_writing_files=False).fit(X, Y, eval_set=(Xv, Yv))
+    ours = am.CatBoostRegressor(**kw, **fixed).fit(X, Y, eval_set=(Xv, Yv))
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+    assert ours.best_iteration_ == ref.get_best_iteration()
+    back = pickle.loads(pickle.dumps(ours))
+    np.testing.assert_array_equal(back.predict(X), ours.predict(X))
+    with pytest.raises(ValueError):
+        am.CatBoostRegressor(**kw).fit(X, Y[:, 0])

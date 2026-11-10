@@ -539,6 +539,25 @@ def generate():
     add("loss_uncertainty_defaults", "regressor",
         dict(COMMON, iterations=60, depth=4, loss_function="RMSEWithUncertainty",
              random_strength=1.0, has_time=False, bootstrap_type="MVS"), X, y_het)
+    # MultiRMSE (#209): a target matrix, a diagonal Newton step per
+    # target, each target starting from its mean.
+    Y = np.column_stack([y_reg, y_het, 0.5 * eta - X[:, 3] + rng.normal(scale=0.3, size=n)])
+    Yv = np.column_stack([yv_reg, yv_reg * 0.5 + rng.normal(size=150),
+                          rng.normal(size=150)])
+    multi = dict(base, loss_function="MultiRMSE")
+    add("loss_multirmse", "regressor", multi, X, Y)
+    add("loss_multirmse_2", "regressor", multi, X, Y[:, :2])
+    add("loss_multirmse_weighted", "regressor", multi, X, Y, sw=weights)
+    add("loss_multirmse_l2", "regressor", dict(multi, score_function="L2"), X, Y)
+    add("loss_multirmse_no_average", "regressor", dict(multi, boost_from_average=False), X, Y)
+    add("loss_multirmse_ordered", "regressor", dict(multi, boosting_type="Ordered"), X, Y)
+    add("loss_multirmse_depthwise", "regressor", dict(multi, grow_policy="Depthwise"), X, Y)
+    add("loss_multirmse_lossguide", "regressor", dict(multi, grow_policy="Lossguide"), X, Y)
+    add("loss_multirmse_defaults", "regressor",
+        dict(COMMON, iterations=60, depth=4, loss_function="MultiRMSE",
+             random_strength=1.0, has_time=False, bootstrap_type="MVS"), X, Y)
+    add_eval("eval_multirmse", "regressor", dict(over, loss_function="MultiRMSE"), X, Y, Xv, Yv,
+             sw=weights, we=wv)
     return out
 
 

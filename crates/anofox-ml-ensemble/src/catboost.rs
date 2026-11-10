@@ -698,6 +698,11 @@ pub enum CatBoostRegressionLoss {
     /// the mean, `predict_uncertainty` the mean and the variance.
     #[serde(rename = "RMSEWithUncertainty")]
     RmseWithUncertainty,
+    /// The RMSE summed over k targets per row (CatBoost's `MultiRMSE`):
+    /// fit with [`CatBoostRegressor::fit_multi`], predict with
+    /// [`FittedCatBoostRegressor::predict_multi`].
+    #[serde(rename = "MultiRMSE")]
+    MultiRmse,
 }
 
 /// CatBoost's `grow_policy`.
@@ -916,14 +921,25 @@ enum Loss {
     /// Mean and log standard deviation (CatBoost's `RMSEWithUncertainty`),
     /// with a diagonal Hessian.
     RmseWithUncertainty,
+    /// The RMSE over `k` targets per row (CatBoost's `MultiRMSE`), with a
+    /// diagonal Hessian.
+    MultiRmse(usize),
 }
 
 impl Loss {
     /// Approximations per row.
     fn dims(self) -> usize {
         match self {
-            Loss::MultiClass(k) | Loss::MultiClassOneVsAll(k) => k,
+            Loss::MultiClass(k) | Loss::MultiClassOneVsAll(k) | Loss::MultiRmse(k) => k,
             Loss::RmseWithUncertainty => 2,
+            _ => 1,
+        }
+    }
+
+    /// Target values per row (the engine's targets are row-major).
+    fn target_dims(self) -> usize {
+        match self {
+            Loss::MultiRmse(k) => k,
             _ => 1,
         }
     }
@@ -933,14 +949,15 @@ impl Loss {
     fn hessian_len(self) -> usize {
         let k = self.dims();
         match self {
-            Loss::MultiClassOneVsAll(_) | Loss::RmseWithUncertainty => k,
+            Loss::MultiClassOneVsAll(_) | Loss::RmseWithUncertainty | Loss::MultiRmse(_) => k,
             _ => k * (k + 1) / 2,
         }
     }
 
     /// The weighted derivatives of one row into `der` (`dims`) and `der2`
-    /// (`hessian_len`).
-    fn ders(self, target: f64, approx: &[f64], w: f64, der: &mut [f64], der2: &mut [f64]) {
+    /// (`hessian_len`); `targets` holds the row's `target_dims` values.
+    fn ders(self, targets: &[f64], approx: &[f64], w: f64, der: &mut [f64], der2: &mut [f64]) {
+        let target = targets[0];
         match self {
             Loss::Rmse => {
                 der[0] = w * (target - approx[0]);
@@ -1035,6 +1052,13 @@ impl Loss {
                 der2[0] = -w;
                 der2[1] = -2.0 * w * sq * prec[0];
             }
+            // CatBoost's `TMultiRMSEError::CalcDers`.
+            Loss::MultiRmse(_) => {
+                for (d, (&t, &a)) in targets.iter().zip(approx).enumerate() {
+                    der[d] = w * (t - a);
+                    der2[d] = -w;
+                }
+            }
             // CatBoost's `TMultiClassOneVsAllError::CalcDersMulti`.
             Loss::MultiClassOneVsAll(_) => {
                 der.copy_from_slice(approx);
@@ -1084,7 +1108,8 @@ impl Loss {
 
     /// CatBoost's objective metric of one row (`RMSE`, `Logloss`,
     /// `MultiClass`), unweighted: what backtracking compares.
-    fn metric(self, target: f64, approx: &[f64]) -> f64 {
+    fn metric(self, targets: &[f64], approx: &[f64]) -> f64 {
+        let target = targets[0];
         match self {
             Loss::Rmse => (target - approx[0]) * (target - approx[0]),
             Loss::Quantile { .. }
@@ -1125,6 +1150,12 @@ impl Loss {
                 let d = approx[0] - target;
                 0.9189385332046 + approx[1] + 0.5 * e[0] * (d * d)
             }
+            // `TMultiRMSEMetric`'s squared errors.
+            Loss::MultiRmse(_) => targets
+                .iter()
+                .zip(approx)
+                .map(|(&t, &a)| (a - t) * (a - t))
+                .sum(),
             // `TMultiClassOneVsAllMetric`.
             Loss::MultiClassOneVsAll(k) => {
                 let mut sum = 0.0;
@@ -1196,13 +1227,16 @@ impl Loss {
                 }
             }
             Loss::Lq { q } => (approx - target + delta).abs().powf(q),
-            _ => self.metric(target, &[approx + delta]),
+            _ => self.metric(&[target], &[approx + delta]),
         }
     }
 
     /// CatBoost's objective metric on an eval set, whose approximations it
     /// keeps on the raw scale (`TestApprox`).
     fn eval_metric(self, target: &[f64], approx: &[f64], weights: &[f64]) -> f64 {
+        if let Loss::MultiRmse(k) = self {
+            return multi_rmse(target, approx, &[], &[], weights, k);
+        }
         let k = self.dims();
         let (mut sum, mut sum_w) = (0.0, 0.0);
         for (i, (&t, &w)) in target.iter().zip(weights).enumerate() {
@@ -1213,7 +1247,7 @@ impl Loss {
                     let v = t - a[0].exp();
                     (if v > 0.0 { alpha } else { -(1.0 - alpha) }) * v
                 }
-                _ => self.metric(t, a),
+                _ => self.metric(&[t], a),
             };
             sum += m * w;
             sum_w += w;
@@ -1239,7 +1273,10 @@ impl Loss {
     /// CatBoost's default `boost_from_average`: on for RMSE, MAE and
     /// Quantile.
     fn default_boost_from_average(self) -> bool {
-        matches!(self, Loss::Rmse | Loss::Quantile { .. })
+        matches!(
+            self,
+            Loss::Rmse | Loss::Quantile { .. } | Loss::MultiRmse(_)
+        )
     }
 
     /// Predictions are `exp(raw)` (CatBoost's `Exponent` prediction type).
@@ -1274,6 +1311,16 @@ impl Loss {
         if self == Loss::Logloss {
             return logloss_metric_exp(target, approx, leaves, leaf_of, weights, rows);
         }
+        if let Loss::MultiRmse(k) = self {
+            return multi_rmse(
+                &target[..rows * k],
+                &approx[..rows * k],
+                leaves,
+                leaf_of,
+                &weights[..rows],
+                k,
+            );
+        }
         if self.dims() == 1 && self != Loss::Rmse {
             let (mut sum, mut sum_w) = (0.0, 0.0);
             for i in 0..rows {
@@ -1295,7 +1342,7 @@ impl Loss {
             for d in 0..k {
                 point[d] = approx[i * k + d] + leaves[leaf * k + d];
             }
-            sum += weights[i] * self.metric(target[i], &point);
+            sum += weights[i] * self.metric(&target[i..=i], &point);
             sum_w += weights[i];
         }
         match self {
@@ -1306,7 +1353,7 @@ impl Loss {
 
     /// The weighted derivatives of the rows `0..rows`.
     fn all_ders(self, target: &[f64], approx: &[f64], weights: &[f64], rows: usize) -> Ders {
-        let (k, h) = (self.dims(), self.hessian_len());
+        let (k, h, t) = (self.dims(), self.hessian_len(), self.target_dims());
         let mut out = Ders {
             k,
             h,
@@ -1315,7 +1362,7 @@ impl Loss {
         };
         for i in 0..rows {
             self.ders(
-                target[i],
+                &target[i * t..(i + 1) * t],
                 &approx[i * k..(i + 1) * k],
                 weights[i],
                 &mut out.der[i * k..(i + 1) * k],
@@ -1323,6 +1370,36 @@ impl Loss {
             );
         }
         out
+    }
+}
+
+/// CatBoost's `TMultiRMSEMetric` of row-major targets and approximations
+/// (moved by `leaves` when given): squared errors summed dimension by
+/// dimension, then over the weights.
+fn multi_rmse(
+    target: &[f64],
+    approx: &[f64],
+    leaves: &[f64],
+    leaf_of: &[u32],
+    weights: &[f64],
+    k: usize,
+) -> f64 {
+    let mut sum = 0.0;
+    for d in 0..k {
+        for (i, &w) in weights.iter().enumerate() {
+            let mut a = approx[i * k + d];
+            if !leaves.is_empty() {
+                a += leaves[leaf_of[i] as usize * k + d];
+            }
+            let e = a - target[i * k + d];
+            sum += w * (e * e);
+        }
+    }
+    let sum_w: f64 = weights.iter().sum();
+    if sum_w == 0.0 {
+        0.0
+    } else {
+        (sum / sum_w).sqrt()
     }
 }
 
@@ -4095,7 +4172,14 @@ fn update_fold(
                     let leaf = leaf_of[i] as usize;
                     let o = &mut tail_delta[(i - body) * k..(i - body + 1) * k];
                     let point: Vec<f64> = (0..k).map(|dim| a[i * k + dim] + o[dim]).collect();
-                    loss.ders(target[i], &point, weights[i], &mut der, &mut der2);
+                    let t = loss.target_dims();
+                    loss.ders(
+                        &target[i * t..(i + 1) * t],
+                        &point,
+                        weights[i],
+                        &mut der,
+                        &mut der2,
+                    );
                     let row = Ders {
                         k,
                         h: der2.len(),
@@ -4150,6 +4234,15 @@ struct EvalSet<'a> {
 pub struct CatBoostEvalSet<'a> {
     pub x: ArrayView2<'a, f64>,
     pub y: ArrayView1<'a, f64>,
+    pub sample_weight: Option<ArrayView1<'a, f64>>,
+}
+
+/// An eval set for [`CatBoostRegressor::fit_multi_with_eval`]: features,
+/// one target column per MultiRMSE target and optional weights.
+#[derive(Debug, Clone, Copy)]
+pub struct CatBoostMultiEvalSet<'a> {
+    pub x: ArrayView2<'a, f64>,
+    pub y: ArrayView2<'a, f64>,
     pub sample_weight: Option<ArrayView1<'a, f64>>,
 }
 
@@ -4246,7 +4339,7 @@ fn boost(
     mut rng: CatRng,
     eval: Option<&EvalSet<'_>>,
 ) -> Boosted {
-    let n = target.len();
+    let n = weights.len();
     let k = loss.dims();
     let has_ctrs = q.ctr.is_some();
     let learn_permuted = !p.has_time && (has_ctrs || p.ordered);
@@ -4264,7 +4357,7 @@ fn boost(
     let start = |rows: usize| -> Vec<f64> { bias.iter().copied().cycle().take(rows * k).collect() };
     let identity: Vec<usize> = (0..n).collect();
     let make_fold = |perm: &[usize]| -> LearnFold {
-        let target = permute_rows(target, perm, 1);
+        let target = permute_rows(target, perm, loss.target_dims());
         let weights = permute_rows(weights, perm, 1);
         let sum_w: f64 = weights.iter().sum();
         let tails = if p.ordered {
@@ -4936,7 +5029,7 @@ macro_rules! catboost_config {
                 let (newton, gradient) = match loss {
                     Loss::Rmse | Loss::Quantile { .. } | Loss::Tweedie { .. } => (1, 1),
                     Loss::Huber { .. } | Loss::LogCosh | Loss::Lq { .. } => (1, 1),
-                    Loss::RmseWithUncertainty => (1, 1),
+                    Loss::RmseWithUncertainty | Loss::MultiRmse(_) => (1, 1),
                     Loss::LogLinQuantile { .. } => (1, 1),
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
@@ -5281,6 +5374,20 @@ catboost_config!(
 impl CatBoostRegressor {
     /// CatBoost's checks of the loss, its parameters and the target.
     fn check_loss(&self, loss: Loss, target: &[f64]) -> Result<()> {
+        if let Loss::MultiRmse(k) = loss {
+            if k < 2 {
+                return Err(RustMlError::InvalidParameter(
+                    "MultiRMSE needs at least two target columns (RMSE for one)".into(),
+                ));
+            }
+            // CatBoost builds a CTR target border per target column; not
+            // ported.
+            if !self.cat_features.is_empty() {
+                return Err(RustMlError::InvalidParameter(
+                    "MultiRMSE does not support categorical features".into(),
+                ));
+            }
+        }
         let invalid = |m: &str| Err(RustMlError::InvalidParameter(m.into()));
         let unit = |a: f64| (0.0..=1.0).contains(&a);
         match loss {
@@ -5301,9 +5408,15 @@ impl CatBoostRegressor {
             Loss::Lq { q } if !(q >= 1.0) => return invalid("q must be at least 1"),
             _ => {}
         }
-        if self.boost_from_average_for(loss) && !matches!(loss, Loss::Rmse | Loss::Quantile { .. })
+        if self.boost_from_average_for(loss)
+            && !matches!(
+                loss,
+                Loss::Rmse | Loss::Quantile { .. } | Loss::MultiRmse(_)
+            )
         {
-            return invalid("boost_from_average is supported for RMSE, MAE and Quantile");
+            return invalid(
+                "boost_from_average is supported for RMSE, MAE, Quantile and MultiRMSE",
+            );
         }
         if self.leaf_method(loss) == CatBoostLeafEstimation::Exact {
             if !matches!(loss, Loss::Quantile { .. } | Loss::LogCosh) {
@@ -5323,7 +5436,8 @@ impl CatBoostRegressor {
         self
     }
 
-    fn loss(&self) -> Loss {
+    /// The engine's loss for `targets` target columns.
+    fn loss(&self, targets: usize) -> Loss {
         match self.loss_function {
             CatBoostRegressionLoss::Rmse => Loss::Rmse,
             CatBoostRegressionLoss::Mae => Loss::Quantile {
@@ -5351,6 +5465,7 @@ impl CatBoostRegressor {
             CatBoostRegressionLoss::LogCosh => Loss::LogCosh,
             CatBoostRegressionLoss::Lq { q } => Loss::Lq { q },
             CatBoostRegressionLoss::RmseWithUncertainty => Loss::RmseWithUncertainty,
+            CatBoostRegressionLoss::MultiRmse => Loss::MultiRmse(targets),
         }
     }
 }
@@ -5452,13 +5567,35 @@ pub struct FittedCatBoostRegressor {
     /// then has two approximations per row).
     #[serde(default)]
     log_sigma_bias: Option<f64>,
+    /// MultiRMSE: the starting approximations of the targets after the
+    /// first (the model then has one approximation per target).
+    #[serde(default)]
+    multi_bias: Vec<f64>,
 }
 
 impl FittedCatBoostRegressor {
     fn biases(&self) -> Vec<f64> {
         std::iter::once(self.bias)
             .chain(self.log_sigma_bias)
+            .chain(self.multi_bias.iter().copied())
             .collect()
+    }
+
+    /// MultiRMSE: one predicted column per target.
+    pub fn predict_multi<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        check_features(x, self.n_features)?;
+        if self.multi_bias.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "predict_multi needs MultiRMSE".into(),
+            ));
+        }
+        Ok(raw_scores(&self.trees, &self.ctrs, &self.biases(), x))
+    }
+
+    /// Target columns the model predicts (MultiRMSE: more than one).
+    pub fn n_targets(&self) -> usize {
+        1 + self.multi_bias.len()
     }
 
     /// RMSEWithUncertainty: the mean and the variance `exp(2 raw₁)` of
@@ -5526,16 +5663,104 @@ impl CatBoostRegressor {
         sample_weight: Option<ArrayView1<f64>>,
         eval: Option<CatBoostEvalSet<'_>>,
     ) -> Result<FittedCatBoostRegressor> {
-        let p = self.train_params();
+        if self.loss_function == CatBoostRegressionLoss::MultiRmse {
+            return Err(RustMlError::InvalidParameter(
+                "MultiRMSE has a target matrix: use fit_multi".into(),
+            ));
+        }
         let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
-        let eval_set = eval.map(|e| EvalSet {
+        let eval = eval.map(|e| EvalSet {
             x: e.x,
             target: f32_values(e.y),
             weights: e
                 .sample_weight
                 .map_or_else(|| vec![1.0; e.y.len()], f32_values),
         });
-        validate(x, y, sample_weight, &p, self.border_count)?;
+        self.fit_targets(
+            x,
+            y.insert_axis(ndarray::Axis(1)),
+            sample_weight,
+            eval,
+            use_best,
+        )
+    }
+
+    /// MultiRMSE (CatBoost's multi-regression): `y` holds one column per
+    /// target.
+    pub fn fit_multi(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView2<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostRegressor> {
+        self.fit_multi_inner(x, y, sample_weight, None)
+    }
+
+    /// [`fit_multi`](Self::fit_multi) with an eval set, as
+    /// [`fit_with_eval`](Self::fit_with_eval).
+    pub fn fit_multi_with_eval(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView2<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: CatBoostMultiEvalSet<'_>,
+    ) -> Result<FittedCatBoostRegressor> {
+        self.fit_multi_inner(x, y, sample_weight, Some(eval))
+    }
+
+    fn fit_multi_inner(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView2<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval: Option<CatBoostMultiEvalSet<'_>>,
+    ) -> Result<FittedCatBoostRegressor> {
+        if self.loss_function != CatBoostRegressionLoss::MultiRmse {
+            return Err(RustMlError::InvalidParameter(
+                "fit_multi needs loss_function MultiRMSE".into(),
+            ));
+        }
+        if y.ncols() == 0 {
+            return Err(RustMlError::InvalidParameter(
+                "MultiRMSE needs at least two target columns (RMSE for one)".into(),
+            ));
+        }
+        if let Some(e) = &eval {
+            if e.y.ncols() != y.ncols() {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "the eval set has {} targets, y {}",
+                    e.y.ncols(),
+                    y.ncols()
+                )));
+            }
+        }
+        let checked = eval.map(|e| CatBoostEvalSet {
+            x: e.x,
+            y: e.y.index_axis_move(ndarray::Axis(1), 0),
+            sample_weight: e.sample_weight,
+        });
+        let use_best = self.use_best_model_with(checked.as_ref(), x.ncols())?;
+        let eval = eval.map(|e| EvalSet {
+            x: e.x,
+            target: e.y.iter().map(|&t| f64::from(t as f32)).collect(),
+            weights: e
+                .sample_weight
+                .map_or_else(|| vec![1.0; e.y.nrows()], f32_values),
+        });
+        self.fit_targets(x, y, sample_weight, eval, use_best)
+    }
+
+    /// Fit on the target columns `y` (one, or MultiRMSE's k).
+    fn fit_targets(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView2<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        eval_set: Option<EvalSet<'_>>,
+        use_best: bool,
+    ) -> Result<FittedCatBoostRegressor> {
+        let p = self.train_params();
+        validate(x, y.column(0), sample_weight, &p, self.border_count)?;
         self.check_monotone(x.ncols())?;
         if self.leaf_estimation_iterations == Some(0) {
             return Err(RustMlError::InvalidParameter(
@@ -5547,6 +5772,7 @@ impl CatBoostRegressor {
                 "max_ctr_complexity must be at least 1".into(),
             ));
         }
+        let loss = self.loss(y.ncols());
         let mut rng = CatRng::new(self.random_seed);
         let shuffled = self.learn_order(x.nrows(), &mut rng).map(|order| {
             (
@@ -5559,28 +5785,45 @@ impl CatBoostRegressor {
             Some((x, y, w)) => (x.view(), y.view(), w.as_ref().map(|w| w.view())),
             None => (x.view(), y.view(), sample_weight.as_ref().map(|w| w.view())),
         };
-        let target = f32_values(y);
-        let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
-        let loss = self.loss();
+        let weights = sample_weight.map_or_else(|| vec![1.0; y.nrows()], f32_values);
+        let columns: Vec<Vec<f64>> = y.columns().into_iter().map(f32_values).collect();
+        // Row-major targets.
+        let target: Vec<f64> = y.iter().map(|&t| f64::from(t as f32)).collect();
+        let target0 = &columns[0];
         self.check_loss(loss, &target)?;
         // RMSEWithUncertainty always starts from the target's mean and log
         // standard deviation (CatBoost's `CalcOptimumConstApprox`).
         let start_sigma = (loss == Loss::RmseWithUncertainty).then(|| {
-            let mean = weighted_target_average(&target, &weights);
-            0.5 * f64::from(weighted_target_variance(&target, &weights, mean)).ln()
+            let mean = weighted_target_average(target0, &weights);
+            0.5 * f64::from(weighted_target_variance(target0, &weights, mean)).ln()
         });
         let bias = if loss == Loss::RmseWithUncertainty {
-            f64::from(weighted_target_average(&target, &weights))
+            f64::from(weighted_target_average(target0, &weights))
         } else if !self.boost_from_average_for(loss) {
             0.0
         } else if let Loss::Quantile { alpha, delta, .. } = loss {
-            let t: Vec<f32> = target.iter().map(|&v| v as f32).collect();
+            let t: Vec<f32> = target0.iter().map(|&v| v as f32).collect();
             let w: Vec<f32> = weights.iter().map(|&v| v as f32).collect();
             f64::from(weighted_quantile(&t, &w, alpha, delta))
         } else {
-            f64::from(weighted_target_average(&target, &weights))
+            f64::from(weighted_target_average(target0, &weights))
         };
-        let classes_of = target_classes(&target);
+        // MultiRMSE starts each target from its RMSE optimum.
+        let multi_bias: Vec<f64> = if matches!(loss, Loss::MultiRmse(_)) {
+            columns[1..]
+                .iter()
+                .map(|c| {
+                    if self.boost_from_average_for(loss) {
+                        f64::from(weighted_target_average(c, &weights))
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let classes_of = target_classes(target0);
         let cat = CategoricalParams {
             features: &self.cat_features,
             one_hot_max_size: self.one_hot_max_size,
@@ -5599,12 +5842,16 @@ impl CatBoostRegressor {
             use_best_model: use_best,
             ..p
         };
+        let start: Vec<f64> = std::iter::once(bias)
+            .chain(start_sigma)
+            .chain(multi_bias.iter().copied())
+            .collect();
         let b = crate::lgbm::with_fit_threads(self.thread_count, || {
             boost(
                 &q,
                 &target,
                 &weights,
-                &start_sigma.map_or_else(|| vec![bias], |s| vec![bias, s]),
+                &start,
                 loss,
                 p,
                 rng,
@@ -5615,7 +5862,12 @@ impl CatBoostRegressor {
             trees: b.trees,
             ctrs: b.ctrs,
             bias: b.bias[0],
-            log_sigma_bias: b.bias.get(1).copied(),
+            log_sigma_bias: start_sigma.map(|_| b.bias[1]),
+            multi_bias: if multi_bias.is_empty() {
+                Vec::new()
+            } else {
+                b.bias[1..].to_vec()
+            },
             eval_metrics: b.eval_metrics,
             best_iteration: b.best_iteration,
             exp_prediction: loss.exp_prediction(),
@@ -5636,6 +5888,11 @@ impl Fit<f64> for CatBoostRegressor {
 impl Predict<f64> for FittedCatBoostRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         check_features(x, self.n_features)?;
+        if !self.multi_bias.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "a MultiRMSE model predicts one column per target: use predict_multi".into(),
+            ));
+        }
         let raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), x);
         let raw = raw.column(0).to_owned();
         Ok(if self.exp_prediction {
@@ -6362,5 +6619,47 @@ mod tests {
         let back: FittedCatBoostRegressor =
             anofox_ml_core::persistence::from_binary_bytes(&bytes).unwrap();
         assert_eq!(back.predict(&x).unwrap(), f.predict(&x).unwrap());
+    }
+
+    #[test]
+    fn multi_rmse_fits_a_target_matrix_and_checks_its_use() {
+        let (x, y) = data(120);
+        let ys = ndarray::stack(ndarray::Axis(1), &[y.view(), (&y * -2.0 + 1.0).view()]).unwrap();
+        let multi = CatBoostRegressor::new()
+            .with_iterations(40)
+            .with_learning_rate(0.3)
+            .with_loss_function(CatBoostRegressionLoss::MultiRmse);
+        let f = multi.fit_multi(x.view(), ys.view(), None).unwrap();
+        assert_eq!(f.n_targets(), 2);
+        let pred = f.predict_multi(&x).unwrap();
+        assert_eq!(pred.dim(), (120, 2));
+        // Each column follows its own target.
+        for c in 0..2 {
+            let e = (&pred.column(c) - &ys.column(c))
+                .mapv(|e| e * e)
+                .mean()
+                .unwrap();
+            assert!(e < 0.5 * ys.column(c).var(0.0), "{c}: {e}");
+        }
+        assert!(f.predict(&x).is_err());
+        let bytes = anofox_ml_core::persistence::to_binary_bytes(&f).unwrap();
+        let back: FittedCatBoostRegressor =
+            anofox_ml_core::persistence::from_binary_bytes(&bytes).unwrap();
+        assert_eq!(back.predict_multi(&x).unwrap(), pred);
+
+        // MultiRMSE needs fit_multi, two columns, no categorical features;
+        // fit_multi needs MultiRMSE.
+        assert!(multi.fit(&x, &y).is_err());
+        assert!(multi
+            .fit_multi(x.view(), ys.slice(ndarray::s![.., ..1]), None)
+            .is_err());
+        assert!(multi
+            .clone()
+            .with_cat_features(vec![2])
+            .fit_multi(x.view(), ys.view(), None)
+            .is_err());
+        let rmse = CatBoostRegressor::new().with_iterations(5);
+        assert!(rmse.fit_multi(x.view(), ys.view(), None).is_err());
+        assert!(rmse.fit(&x, &y).unwrap().predict_multi(&x).is_err());
     }
 }
