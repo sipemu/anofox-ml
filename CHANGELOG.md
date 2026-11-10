@@ -22,6 +22,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style boosting: Huber, LogCosh, Lq (#209, part)
+
+- `CatBoostRegressionLoss::Huber { delta }`, `LogCosh` and `Lq { q }` with
+  CatBoost's derivatives, metrics and leaf defaults: Newton for Huber and
+  for Lq with `q >= 2`, Gradient below, and Exact leaves for LogCosh (its
+  bisection on `Σ tanh`). Plain, weighted, ordered and full-default fits
+  match catboost 1.2.10 to ~2e-16 (`gen_catboost_parity.py`). Python
+  `loss_function="Huber:delta=1"`, `"LogCosh"`, `"Lq:q=2"`.
 
 ### LightGBM linear trees (#208)
 
