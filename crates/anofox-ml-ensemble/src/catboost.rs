@@ -742,6 +742,11 @@ pub enum CatBoostRegressionLoss {
     /// `QueryRMSE`): fit with [`CatBoostRegressor::fit_with_groups`].
     #[serde(rename = "QueryRMSE")]
     QueryRmse,
+    /// The logistic loss of every pair of a query's rows with different
+    /// targets (CatBoost's `PairLogit`, pairs generated from the targets):
+    /// fit with [`CatBoostRegressor::fit_with_groups`].
+    #[serde(rename = "PairLogit")]
+    PairLogit,
 }
 
 /// CatBoost's `grow_policy`.
@@ -966,6 +971,9 @@ enum Loss {
     /// The RMSE of the residuals around each query's mean residual
     /// (CatBoost's `QueryRMSE`, a querywise error).
     QueryRmse,
+    /// The logistic loss of a query's pairs (CatBoost's `PairLogit`, a
+    /// pairwise error on stored `exp(a)`).
+    PairLogit,
 }
 
 impl Loss {
@@ -980,7 +988,12 @@ impl Loss {
 
     /// A querywise loss: derivatives and metric need the query bounds.
     fn querywise(self) -> bool {
-        self == Loss::QueryRmse
+        matches!(self, Loss::QueryRmse | Loss::PairLogit)
+    }
+
+    /// A pairwise loss: leaves and scores weigh rows by their pairs.
+    fn pairwise(self) -> bool {
+        self == Loss::PairLogit
     }
 
     /// Target values per row (the engine's targets are row-major).
@@ -1099,7 +1112,9 @@ impl Loss {
                 der2[0] = -w;
                 der2[1] = -2.0 * w * sq * prec[0];
             }
-            Loss::QueryRmse => unreachable!("querywise derivatives need the queries"),
+            Loss::QueryRmse | Loss::PairLogit => {
+                unreachable!("querywise derivatives need the queries")
+            }
             // CatBoost's `TMultiRMSEError::CalcDers`.
             Loss::MultiRmse(_) => {
                 for (d, (&t, &a)) in targets.iter().zip(approx).enumerate() {
@@ -1198,7 +1213,9 @@ impl Loss {
                 let d = approx[0] - target;
                 0.9189385332046 + approx[1] + 0.5 * e[0] * (d * d)
             }
-            Loss::QueryRmse => unreachable!("the querywise metric needs the queries"),
+            Loss::QueryRmse | Loss::PairLogit => {
+                unreachable!("the querywise metric needs the queries")
+            }
             // `TMultiRMSEMetric`'s squared errors.
             Loss::MultiRmse(_) => targets
                 .iter()
@@ -1282,15 +1299,12 @@ impl Loss {
 
     /// CatBoost's objective metric on an eval set, whose approximations it
     /// keeps on the raw scale (`TestApprox`).
-    fn eval_metric(
-        self,
-        target: &[f64],
-        approx: &[f64],
-        weights: &[f64],
-        queries: &[usize],
-    ) -> f64 {
+    fn eval_metric(self, target: &[f64], approx: &[f64], weights: &[f64], groups: &Groups) -> f64 {
         if self == Loss::QueryRmse {
-            return query_rmse(target, approx, &[], &[], weights, queries);
+            return query_rmse(target, approx, &[], &[], weights, &groups.queries);
+        }
+        if self == Loss::PairLogit {
+            return pair_logit_metric(approx, &[], &[], groups, approx.len(), true);
         }
         if let Loss::MultiRmse(k) = self {
             return multi_rmse(target, approx, &[], &[], weights, k);
@@ -1324,7 +1338,7 @@ impl Loss {
     fn exp_approx(self) -> bool {
         matches!(
             self,
-            Loss::Logloss | Loss::Poisson | Loss::LogLinQuantile { .. }
+            Loss::Logloss | Loss::Poisson | Loss::LogLinQuantile { .. } | Loss::PairLogit
         )
     }
 
@@ -1365,8 +1379,11 @@ impl Loss {
         leaf_of: &[u32],
         weights: &[f64],
         rows: usize,
-        queries: &[usize],
+        groups: &Groups,
     ) -> f64 {
+        if self == Loss::PairLogit {
+            return pair_logit_metric(approx, leaves, leaf_of, groups, rows, false);
+        }
         if self == Loss::Logloss {
             return logloss_metric_exp(target, approx, leaves, leaf_of, weights, rows);
         }
@@ -1377,7 +1394,7 @@ impl Loss {
                 leaves,
                 leaf_of,
                 weights,
-                query_prefix(queries, rows),
+                query_prefix(&groups.queries, rows),
             );
         }
         if let Loss::MultiRmse(k) = self {
@@ -1427,7 +1444,7 @@ impl Loss {
         approx: &[f64],
         weights: &[f64],
         rows: usize,
-        queries: &[usize],
+        groups: &Groups,
     ) -> Ders {
         let (k, h, t) = (self.dims(), self.hessian_len(), self.target_dims());
         let mut out = Ders {
@@ -1438,12 +1455,31 @@ impl Loss {
         };
         if self == Loss::QueryRmse {
             // CatBoost's `TQueryRmseError::CalcDersForQueries`.
-            for q in query_prefix(queries, rows).windows(2) {
+            for q in query_prefix(&groups.queries, rows).windows(2) {
                 let avg = query_average(target, approx, &[], &[], weights, q[0], q[1]);
                 for i in q[0]..q[1] {
                     out.der[i] = (target[i] - approx[i] - avg) * weights[i];
                     out.der2[i] = -weights[i];
                 }
+            }
+            return out;
+        }
+        if self == Loss::PairLogit {
+            // CatBoost's `TPairLogitError::CalcDersForQueries` on `exp(a)`;
+            // the competitors of the rows `0..rows` are among them.
+            let e: Vec<f64> = approx[..rows].iter().map(|a| a.exp()).collect();
+            for w in 0..rows {
+                let (mut der, mut der2) = (0.0, 0.0);
+                for &(l, cw) in groups.competitors(w) {
+                    let cw = f64::from(cw);
+                    let p = e[l] / (e[l] + e[w]);
+                    der += cw * p;
+                    out.der[l] -= cw * p;
+                    der2 += cw * p * (p - 1.0);
+                    out.der2[l] += cw * p * (p - 1.0);
+                }
+                out.der[w] += der;
+                out.der2[w] += der2;
             }
             return out;
         }
@@ -1458,6 +1494,132 @@ impl Loss {
         }
         out
     }
+}
+
+/// Query groups of the rows (querywise losses): the query bounds, and for
+/// pairwise losses each row's competitors (the rows it beats, with the
+/// pair weight; CatBoost's `TQueryInfo::Competitors`).
+#[derive(Debug, Clone, Default)]
+struct Groups {
+    /// Row offsets of the queries, from 0 to the row count (empty: none).
+    queries: Vec<usize>,
+    /// Row `i`'s competitors are `comp[comp_start[i]..comp_start[i + 1]]`.
+    comp_start: Vec<usize>,
+    comp: Vec<(usize, f32)>,
+}
+
+impl Groups {
+    fn competitors(&self, row: usize) -> &[(usize, f32)] {
+        &self.comp[self.comp_start[row]..self.comp_start[row + 1]]
+    }
+
+    /// CatBoost's PairLogit pairs (`GeneratePairLogitPairs`, all of them):
+    /// in each query, every row beats the rows of a smaller target, in row
+    /// order, with weight 1.
+    fn with_pairs(queries: Vec<usize>, target: &[f64]) -> Self {
+        let mut comp_start = vec![0];
+        let mut comp = Vec::new();
+        for q in queries.windows(2) {
+            for w in q[0]..q[1] {
+                let t = target[w] as f32;
+                comp.extend(
+                    (q[0]..q[1])
+                        .filter(|&l| (target[l] as f32) < t)
+                        .map(|l| (l, 1.0)),
+                );
+                comp_start.push(comp.len());
+            }
+        }
+        Self {
+            queries,
+            comp_start,
+            comp,
+        }
+    }
+
+    /// The groups of the rows in the order `perm` (row `i` is the row
+    /// `perm[i]`) with the query bounds `queries` (`GetGroupInfosSubset`:
+    /// each row keeps its competitors in their order).
+    fn permuted(&self, perm: &[usize], queries: Vec<usize>) -> Self {
+        if self.comp_start.is_empty() {
+            return Self {
+                queries,
+                ..Self::default()
+            };
+        }
+        let mut inverse = vec![0; perm.len()];
+        for (i, &r) in perm.iter().enumerate() {
+            inverse[r] = i;
+        }
+        let mut comp_start = vec![0];
+        let mut comp = Vec::with_capacity(self.comp.len());
+        for &r in perm {
+            comp.extend(self.competitors(r).iter().map(|&(l, w)| (inverse[l], w)));
+            comp_start.push(comp.len());
+        }
+        Self {
+            queries,
+            comp_start,
+            comp,
+        }
+    }
+
+    /// CatBoost's `CalcPairwiseWeights`: each row's summed pair weights
+    /// (float32).
+    fn pair_weights(&self, n: usize) -> Vec<f64> {
+        let mut w = vec![0f32; n];
+        for row in 0..n {
+            for &(l, cw) in self.competitors(row) {
+                w[row] += cw;
+                w[l] += cw;
+            }
+        }
+        w.into_iter().map(f64::from).collect()
+    }
+}
+
+/// CatBoost's `TPairLogitMetric` over the pairs of the rows `0..rows`, at
+/// `approx` moved by `leaves` when given. An eval set (`raw`) keeps raw
+/// approximations: shifted by the query maximum, through fast exp, plus
+/// 1e-38.
+fn pair_logit_metric(
+    approx: &[f64],
+    leaves: &[f64],
+    leaf_of: &[u32],
+    groups: &Groups,
+    rows: usize,
+    raw: bool,
+) -> f64 {
+    let (mut sum, mut sum_w) = (0.0, 0.0);
+    let mut e = Vec::new();
+    for q in query_prefix(&groups.queries, rows).windows(2) {
+        e.clear();
+        e.extend((q[0]..q[1]).map(|i| {
+            let delta = if leaves.is_empty() {
+                0.0
+            } else {
+                leaves[leaf_of[i] as usize]
+            };
+            approx[i] + delta
+        }));
+        if raw {
+            let max = e.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            e.iter_mut().for_each(|v| *v -= max);
+            fast_exp_with_inf(&mut e);
+            e.iter_mut().for_each(|v| *v += 1e-38);
+        } else {
+            e.iter_mut().for_each(|v| *v = v.exp());
+        }
+        for w in q[0]..q[1] {
+            for &(l, cw) in groups.competitors(w) {
+                let (ew, el) = (e[w - q[0]], e[l - q[0]]);
+                let cw = f64::from(cw);
+                sum += -cw * (ew / (ew + el)).ln();
+                sum_w += cw;
+            }
+        }
+    }
+    sum / sum_w
 }
 
 /// The query bounds `queries` (row offsets, first 0) of the rows `0..rows`,
@@ -3036,6 +3198,7 @@ fn grow_depthwise(
     min_data: usize,
     used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
     model_size_reg: f64,
+    object_weights: bool,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
     let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
@@ -3047,7 +3210,7 @@ fn grow_depthwise(
     let mut leaf_parent: Vec<i32> = vec![-1];
     let l2 = part.scaled_l2;
     let trick = k == 1;
-    let stats_of = |rows: &[usize]| -> Vec<Vec<BucketStats>> {
+    let stats_of = |rows: &[usize], w: &[f64]| -> Vec<Vec<BucketStats>> {
         candidates
             .iter()
             .map(|c| {
@@ -3059,7 +3222,7 @@ fn grow_depthwise(
                     for d in 0..k {
                         let h = &mut st[d * nb + b];
                         h.swd += part.swder[i * k + d];
-                        h.sw += sample.weights[i];
+                        h.sw += w[i];
                     }
                 }
                 st
@@ -3069,6 +3232,7 @@ fn grow_depthwise(
     // `CalcBestScoreAndCandidate`: (gain, best split) of a leaf's stats.
     let score = |stats: &[Vec<BucketStats>],
                  rows: &[usize],
+                 w: &[f64],
                  rng: &mut CatRng,
                  used: &std::collections::HashSet<(Projection, bool)>| {
         let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
@@ -3082,7 +3246,7 @@ fn grow_depthwise(
             }
         }
         for &i in rows {
-            sw += sample.weights[i];
+            sw += w[i];
         }
         let a = average(swd, sw, l2);
         let before = match score_function {
@@ -3119,6 +3283,7 @@ fn grow_depthwise(
     };
     let mut parents: std::collections::VecDeque<Vec<Vec<BucketStats>>> = Default::default();
     let mut current: Vec<usize> = vec![0];
+    let wts = sample.leafwise_weights(object_weights);
     for _ in 0..depth {
         for _ in 0..level_draws {
             rng.real1();
@@ -3144,28 +3309,28 @@ fn grow_depthwise(
             let (gain, best) = if let (false, Some(p)) = (even, pending.take()) {
                 p
             } else if even && next_considered && trick && size <= next_size {
-                let small = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&small, &rows_of[current[id]], rng, used_ctrs);
+                let small = stats_of(&rows_of[current[id]], &wts);
+                let (g, b) = score(&small, &rows_of[current[id]], &wts, rng, used_ctrs);
                 let large = subtract(&parents[0], &small);
-                let (g2, b2) = score(&large, &rows_of[current[id + 1]], rng, used_ctrs);
+                let (g2, b2) = score(&large, &rows_of[current[id + 1]], &wts, rng, used_ctrs);
                 parents.pop_front();
                 push(&mut parents, g, &b, small);
                 push(&mut parents, g2, &b2, large);
                 pending = Some((g2, b2));
                 (g, b)
             } else if even && next_considered && trick {
-                let small = stats_of(&rows_of[current[id + 1]]);
-                let (g2, b2) = score(&small, &rows_of[current[id + 1]], rng, used_ctrs);
+                let small = stats_of(&rows_of[current[id + 1]], &wts);
+                let (g2, b2) = score(&small, &rows_of[current[id + 1]], &wts, rng, used_ctrs);
                 let large = subtract(&parents[0], &small);
-                let (g, b) = score(&large, &rows_of[current[id]], rng, used_ctrs);
+                let (g, b) = score(&large, &rows_of[current[id]], &wts, rng, used_ctrs);
                 parents.pop_front();
                 push(&mut parents, g, &b, large);
                 push(&mut parents, g2, &b2, small);
                 pending = Some((g2, b2));
                 (g, b)
             } else {
-                let st = stats_of(&rows_of[current[id]]);
-                let (g, b) = score(&st, &rows_of[current[id]], rng, used_ctrs);
+                let st = stats_of(&rows_of[current[id]], &wts);
+                let (g, b) = score(&st, &rows_of[current[id]], &wts, rng, used_ctrs);
                 parents.pop_front();
                 if trick {
                     push(&mut parents, g, &b, st);
@@ -3249,7 +3414,9 @@ fn grow_lossguide(
     min_data: usize,
     used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
     model_size_reg: f64,
+    object_weights: bool,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
+    let wts = sample.leafwise_weights(object_weights);
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
     let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
     let entries = candidate_entries(q, &candidates);
@@ -3273,7 +3440,7 @@ fn grow_lossguide(
                     for d in 0..k {
                         let h = &mut st[d * nb + b];
                         h.swd += part.swder[i * k + d];
-                        h.sw += sample.weights[i];
+                        h.sw += wts[i];
                     }
                 }
                 st
@@ -3294,7 +3461,7 @@ fn grow_lossguide(
             }
         }
         for &i in rows {
-            sw += sample.weights[i];
+            sw += wts[i];
         }
         let a = average(swd, sw, l2);
         let before = match score_function {
@@ -3647,8 +3814,8 @@ struct LeafProblem<'a> {
     orders: &'a [Vec<usize>],
     /// The weights of Exact leaves (CatBoost's `SampleWeights`).
     exact_weights: &'a [f64],
-    /// Query bounds (querywise losses; else empty).
-    queries: &'a [usize],
+    /// Query groups (querywise losses; else empty).
+    groups: &'a Groups,
 }
 
 /// CatBoost's `CalculateWeightedTargetVariance` (float32 squares).
@@ -3797,7 +3964,7 @@ fn estimate_leaves(
             logloss_metric_exp_at(lp.target, cached, leaves, lp.leaf_of, lp.weights)
         } else {
             lp.loss.metric_with_leaves(
-                lp.target, approx, leaves, lp.leaf_of, lp.weights, rows, lp.queries,
+                lp.target, approx, leaves, lp.leaf_of, lp.weights, rows, lp.groups,
             )
         }
     };
@@ -3819,7 +3986,7 @@ fn estimate_leaves(
             logloss_ders_at(lp.target, &point_exp, lp.weights)
         } else {
             lp.loss
-                .all_ders(lp.target, &point, lp.weights, rows, lp.queries)
+                .all_ders(lp.target, &point, lp.weights, rows, lp.groups)
         };
         let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
         let mut step = vec![0.0; n_leaves * k];
@@ -3913,8 +4080,8 @@ fn estimate_leaves(
 /// approximations.
 struct LearnFold {
     q: Quantized,
-    /// Query bounds in the fold's order (querywise losses; else empty).
-    queries: Vec<usize>,
+    /// Query groups in the fold's order (querywise losses; else empty).
+    groups: Groups,
     target: Vec<f64>,
     weights: Vec<f64>,
     tails: Vec<(usize, usize, f64)>,
@@ -4071,6 +4238,23 @@ struct Sample {
     boot: Vec<f64>,
     weights: Vec<f64>,
     taken: Vec<bool>,
+}
+
+impl Sample {
+    /// The weights a non-symmetric tree is scored with. With
+    /// `object_weights` (a pairwise loss, whose `weights` are pairwise),
+    /// CatBoost's leafwise scoring takes the rows' sample weights instead:
+    /// the bootstrap weight (no sample weights).
+    fn leafwise_weights(&self, object_weights: bool) -> Vec<f64> {
+        if !object_weights {
+            return self.weights.clone();
+        }
+        self.boot
+            .iter()
+            .zip(&self.taken)
+            .map(|(&b, &t)| if t { f64::from(b as f32) } else { 0.0 })
+            .collect()
+    }
 }
 
 /// libc++'s `std::partition` (the bidirectional algorithm): the elements
@@ -4321,7 +4505,7 @@ fn update_fold(
             moving: false,
             orders,
             exact_weights,
-            queries: &fold.queries,
+            groups: &fold.groups,
         };
         if k == 1 {
             // Each prefix's approximation moves by the leaf values of its
@@ -4396,8 +4580,8 @@ struct EvalSet<'a> {
     x: ArrayView2<'a, f64>,
     target: Vec<f64>,
     weights: Vec<f64>,
-    /// Query bounds (querywise losses; else empty).
-    queries: Vec<usize>,
+    /// Query groups (querywise losses; else empty).
+    groups: Groups,
 }
 
 /// An eval set for `fit_with_eval` (CatBoost's `eval_set`): features,
@@ -4510,7 +4694,7 @@ fn boost(
     p: TrainParams,
     mut rng: CatRng,
     eval: Option<&EvalSet<'_>>,
-    queries: &[usize],
+    groups: &Groups,
 ) -> Boosted {
     let n = weights.len();
     let k = loss.dims();
@@ -4522,7 +4706,7 @@ fn boost(
     } else {
         1
     };
-    let block = if !queries.is_empty() {
+    let block = if !groups.queries.is_empty() {
         1
     } else if learn_permuted {
         (n / 1000 + 1).min(256)
@@ -4531,18 +4715,23 @@ fn boost(
     };
     let start = |rows: usize| -> Vec<f64> { bias.iter().copied().cycle().take(rows * k).collect() };
     let identity: Vec<usize> = (0..n).collect();
-    let make_fold = |perm: &[usize], queries: Vec<usize>| -> LearnFold {
+    let make_fold = |perm: &[usize], groups: Groups| -> LearnFold {
         let target = permute_rows(target, perm, loss.target_dims());
-        let weights = permute_rows(weights, perm, 1);
+        let mut weights = permute_rows(weights, perm, 1);
         let sum_w: f64 = weights.iter().sum();
         let tails = if p.ordered {
-            body_tails(n, p.fold_len_multiplier, &weights, &queries)
+            body_tails(n, p.fold_len_multiplier, &weights, &groups.queries)
         } else {
             vec![(n, n, sum_w)]
         };
+        // Pairwise losses weigh leaves and scores by the rows' pairs
+        // (`PairwiseWeights`); the L2 scaling keeps the sample weights.
+        if loss.pairwise() {
+            weights = groups.pair_weights(n);
+        }
         LearnFold {
             q: q.permuted(perm),
-            queries,
+            groups,
             approx: tails.iter().map(|&(_, t, _)| start(t)).collect(),
             target,
             weights,
@@ -4554,20 +4743,23 @@ fn boost(
     let mut folds: Vec<LearnFold> = (0..n_folds)
         .map(|f| {
             let (perm, bounds) = if f > 0 && learn_permuted {
-                rng.fold_permutation(n, block, queries)
+                rng.fold_permutation(n, block, &groups.queries)
             } else {
-                (identity.clone(), queries.to_vec())
+                (identity.clone(), groups.queries.clone())
             };
-            make_fold(&perm, bounds)
+            make_fold(&perm, groups.permuted(&perm, bounds))
         })
         .collect();
     let (average_perm, average_queries) = if average_permuted {
-        rng.fold_permutation(n, block, queries)
+        rng.fold_permutation(n, block, &groups.queries)
     } else {
-        (identity.clone(), queries.to_vec())
+        (identity.clone(), groups.queries.clone())
     };
-    let mut average = make_fold(&average_perm, average_queries);
-    let avg_sum_w: f64 = average.weights.iter().sum();
+    let mut average = make_fold(
+        &average_perm,
+        groups.permuted(&average_perm, average_queries),
+    );
+    let avg_sum_w: f64 = weights.iter().sum();
     let mut approx = start(n);
     // Plain boosting with an unpermuted averaging fold shares its
     // approximations with fold 0 (`UseAveragingFoldAsFoldZero`).
@@ -4626,7 +4818,7 @@ fn boost(
             .tails
             .iter()
             .zip(&fold.approx)
-            .map(|(&(_, t, _), a)| loss.all_ders(&fold.target, a, &fold.weights, t, &fold.queries))
+            .map(|(&(_, t, _), a)| loss.all_ders(&fold.target, a, &fold.weights, t, &fold.groups))
             .collect();
         let previous = trees
             .last()
@@ -4671,6 +4863,7 @@ fn boost(
                 p.min_data_in_leaf,
                 &mut used_ctrs,
                 p.model_size_reg,
+                loss.pairwise(),
             )
         } else if p.grow_policy == CatBoostGrowPolicy::Depthwise {
             grow_depthwise(
@@ -4685,6 +4878,7 @@ fn boost(
                 p.min_data_in_leaf,
                 &mut used_ctrs,
                 p.model_size_reg,
+                loss.pairwise(),
             )
         } else {
             let (splits, _) = grow_tree(
@@ -4738,13 +4932,27 @@ fn boost(
             orders: &orders,
             // The averaging fold is never bootstrapped.
             exact_weights: &unit_weights,
-            queries: &average.queries,
+            groups: &average.groups,
         };
         let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
             // `CalcLeafValuesSimple` draws a seed per step.
             for _ in 0..steps {
                 rng.gen();
+            }
+        }
+        let mut leaves = leaves;
+        if loss.pairwise() {
+            // `NormalizeLeafValues`: a pairwise model's leaves have weighted
+            // mean 0 (the sample weights of the averaging fold's rows).
+            let mut leaf_w = vec![0.0; n_leaves];
+            for (i, &leaf) in leaf_of.iter().enumerate() {
+                leaf_w[leaf as usize] += weights[average_perm[i]];
+            }
+            let mean = leaves.iter().zip(&leaf_w).map(|(v, w)| v * w).sum::<f64>()
+                / leaf_w.iter().sum::<f64>();
+            for (v, &w) in leaves.iter_mut().zip(&leaf_w) {
+                *v = if w.abs() > 1e-9 { *v - mean } else { 0.0 };
             }
         }
         let leaf_values: Vec<f64> = leaves.into_iter().map(|v| v * p.learning_rate).collect();
@@ -4779,7 +4987,7 @@ fn boost(
                     eval_approx[i * k + d] += tree.leaf_values[leaf * k + d];
                 }
             }
-            let metric = loss.eval_metric(&e.target, &eval_approx, &e.weights, &e.queries);
+            let metric = loss.eval_metric(&e.target, &eval_approx, &e.weights, &e.groups);
             eval_metrics.push(metric);
             trees.push(tree);
             if tracker.add(metric, iteration) {
@@ -4888,6 +5096,18 @@ fn validate(
         ));
     }
     Ok(())
+}
+
+/// The query groups of `loss` (with pairs for a pairwise one).
+fn groups_of(loss: Loss, queries: Vec<usize>, target: &[f64]) -> Groups {
+    if loss.pairwise() {
+        Groups::with_pairs(queries, target)
+    } else {
+        Groups {
+            queries,
+            ..Groups::default()
+        }
+    }
 }
 
 /// Query bounds (row offsets from 0 to `n`) of the query sizes `group`.
@@ -5227,7 +5447,8 @@ macro_rules! catboost_config {
                 let (newton, gradient) = match loss {
                     Loss::Rmse | Loss::Quantile { .. } | Loss::Tweedie { .. } => (1, 1),
                     Loss::Huber { .. } | Loss::LogCosh | Loss::Lq { .. } => (1, 1),
-                    Loss::RmseWithUncertainty | Loss::MultiRmse(_) | Loss::QueryRmse => (1, 1),
+                    Loss::RmseWithUncertainty | Loss::MultiRmse(_) => (1, 1),
+                    Loss::QueryRmse | Loss::PairLogit => (1, 1),
                     Loss::LogLinQuantile { .. } => (1, 1),
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
@@ -5665,6 +5886,7 @@ impl CatBoostRegressor {
             CatBoostRegressionLoss::RmseWithUncertainty => Loss::RmseWithUncertainty,
             CatBoostRegressionLoss::MultiRmse => Loss::MultiRmse(targets),
             CatBoostRegressionLoss::QueryRmse => Loss::QueryRmse,
+            CatBoostRegressionLoss::PairLogit => Loss::PairLogit,
         }
     }
 }
@@ -5916,10 +6138,15 @@ impl CatBoostRegressor {
         group: Option<&[usize]>,
         eval: Option<(CatBoostEvalSet<'_>, Option<&[usize]>)>,
     ) -> Result<FittedCatBoostRegressor> {
-        let querywise = self.loss_function == CatBoostRegressionLoss::QueryRmse;
-        if group.is_some() != querywise {
+        let loss = self.loss(1);
+        if group.is_some() != loss.querywise() {
             return Err(RustMlError::InvalidParameter(
-                "query groups go with a querywise loss (QueryRMSE)".into(),
+                "query groups go with a querywise loss (QueryRMSE, PairLogit)".into(),
+            ));
+        }
+        if loss.pairwise() && sample_weight.is_some() {
+            return Err(RustMlError::InvalidParameter(
+                "PairLogit does not take sample weights".into(),
             ));
         }
         let use_best = self.use_best_model_with(eval.as_ref().map(|e| &e.0), x.ncols())?;
@@ -5932,9 +6159,9 @@ impl CatBoostRegressor {
                     weights: e
                         .sample_weight
                         .map_or_else(|| vec![1.0; e.y.len()], f32_values),
-                    queries: match g {
-                        Some(g) => query_bounds(g, e.y.len())?,
-                        None => Vec::new(),
+                    groups: match g {
+                        Some(g) => groups_of(loss, query_bounds(g, e.y.len())?, &f32_values(e.y)),
+                        None => Groups::default(),
                     },
                 })
             })
@@ -6010,7 +6237,7 @@ impl CatBoostRegressor {
             weights: e
                 .sample_weight
                 .map_or_else(|| vec![1.0; e.y.nrows()], f32_values),
-            queries: Vec::new(),
+            groups: Groups::default(),
         });
         self.fit_targets(x, y, sample_weight, eval, use_best, None)
     }
@@ -6040,14 +6267,18 @@ impl CatBoostRegressor {
         }
         let loss = self.loss(y.ncols());
         let mut rng = CatRng::new(self.random_seed);
-        let mut queries = queries.unwrap_or_default();
+        // Pairs come from the given order (then follow the shuffle).
+        let mut groups = match queries {
+            Some(q) => groups_of(loss, q, &f32_values(y.column(0))),
+            None => Groups::default(),
+        };
         // Grouped rows shuffle by query (`ShuffleLearnDataIfNeeded`).
-        let order = if queries.is_empty() {
+        let order = if groups.queries.is_empty() {
             self.learn_order(x.nrows(), &mut rng)
         } else {
             self.learn_order(0, &mut rng).map(|_| {
-                let (order, bounds) = rng.group_permutation(&queries);
-                queries = bounds;
+                let (order, bounds) = rng.group_permutation(&groups.queries);
+                groups = groups.permuted(&order, bounds);
                 order
             })
         };
@@ -6133,7 +6364,7 @@ impl CatBoostRegressor {
                 p,
                 rng,
                 eval_set.as_ref(),
-                &queries,
+                &groups,
             )
         });
         Ok(FittedCatBoostRegressor {
@@ -6417,7 +6648,7 @@ impl CatBoostClassifier {
                     x: e.x,
                     weights: apply_class_weights(w, &of, class_weights.as_deref()),
                     target,
-                    queries: Vec::new(),
+                    groups: Groups::default(),
                 })
             }
         };
@@ -6469,7 +6700,7 @@ impl CatBoostClassifier {
                 p,
                 rng,
                 eval_set.as_ref(),
-                &[],
+                &Groups::default(),
             )
         });
         Ok(FittedCatBoostClassifier {
@@ -6977,6 +7208,17 @@ mod tests {
         let rmse = CatBoostRegressor::new().with_iterations(3);
         assert!(rmse
             .fit_with_groups(x.view(), y.view(), None, &groups)
+            .is_err());
+        // PairLogit: shift-invariant leaves, no sample weights.
+        let pl = CatBoostRegressor::new()
+            .with_iterations(5)
+            .with_loss_function(CatBoostRegressionLoss::PairLogit);
+        let labels = y.mapv(|v| (v * 2.0).round());
+        assert!(pl
+            .fit_with_groups(x.view(), labels.view(), None, &groups)
+            .is_ok());
+        assert!(pl
+            .fit_with_groups(x.view(), labels.view(), Some(labels.view()), &groups)
             .is_err());
     }
 }

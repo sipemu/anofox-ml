@@ -1066,7 +1066,8 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
 
 
 class CatBoostRanker(CatBoostRegressor):
-    """catboost's ``CatBoostRanker`` with ``loss_function="QueryRMSE"``:
+    """catboost's ``CatBoostRanker`` with ``loss_function="QueryRMSE"`` or
+    ``"PairLogit"`` (pairs from the targets; no sample weights):
     ``fit(X, y, group_id=...)`` takes a query id per row, with the rows of
     a query consecutive. ``predict`` gives the ranking scores."""
 
@@ -1077,7 +1078,7 @@ class CatBoostRanker(CatBoostRegressor):
     def fit(self, X, y, group_id=None, sample_weight=None):
         if group_id is None:
             raise ValueError("CatBoostRanker.fit needs group_id")
-        if (self.loss_function or "QueryRMSE") != "QueryRMSE":
+        if (self.loss_function or "QueryRMSE") not in ("QueryRMSE", "PairLogit"):
             raise ValueError(f"unsupported loss_function {self.loss_function!r}")
         X = self._encode(X, fit=True)
         y = _check_1d(y)
@@ -1102,7 +1103,7 @@ class CatBoostRanker(CatBoostRegressor):
             params = super()._rust_params(X, y)
         finally:
             self.loss_function = saved
-        params["loss_function"] = "QueryRMSE"
+        params["loss_function"] = self.loss_function or "QueryRMSE"
         return params
 
 

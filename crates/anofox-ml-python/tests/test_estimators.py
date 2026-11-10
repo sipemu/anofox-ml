@@ -1281,6 +1281,25 @@ def test_catboost_ranker_query_rmse_matches_catboost():
         am.CatBoostRanker(**kw).fit(X, y, group_id=np.r_[gid[1:], gid[:1]])
 
 
+def test_catboost_ranker_pair_logit_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    r = np.random.RandomState(12)
+    sizes = r.randint(2, 10, size=40)
+    gid = np.repeat(np.arange(40), sizes)
+    n = len(gid)
+    X = r.normal(size=(n, 3))
+    y = np.digitize(X[:, 0] - X[:, 1] + r.normal(size=n), [-1, 0, 1]).astype(float)
+    kw = dict(iterations=30, depth=4, loss_function="PairLogit", random_seed=0)
+    for extra in (dict(random_strength=0, bootstrap_type="No", has_time=True),
+                  dict(grow_policy="Depthwise")):
+        ref = cb.CatBoostRanker(**kw, **extra, thread_count=1, verbose=0,
+                                allow_writing_files=False).fit(X, y, group_id=gid)
+        ours = am.CatBoostRanker(**kw, **extra).fit(X, y, group_id=gid)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+    with pytest.raises(ValueError):
+        am.CatBoostRanker(**kw).fit(X, y, group_id=gid, sample_weight=np.ones(n))
+
+
 def test_catboost_multirmse_matches_catboost():
     cb = pytest.importorskip("catboost")
     r = np.random.RandomState(10)
