@@ -2452,6 +2452,10 @@ struct Quantized {
     draws: (usize, usize),
     /// The categorical features (sorted), for per-type feature indices.
     cat_features: Vec<usize>,
+    /// The columns of offline estimated features (text BoW; CatBoost's
+    /// `EstimatedObjectsData`): scored after the CTRs in their own packs of
+    /// 8, with their own `rsm` draws.
+    estimated: std::ops::Range<usize>,
 }
 
 /// A categorical feature with CTRs: every row's category id (in the order
@@ -2698,12 +2702,14 @@ fn quantize(
     }
 
     let draws = feature_draws(&columns, &two_valued);
+    let n_main = columns.len();
     let mut q = Quantized {
         columns,
         borders,
         ctr: None,
         draws,
         cat_features: cat_features.clone(),
+        estimated: n_main..n_main,
     };
     if !ctr_features.is_empty() {
         let (classes, n_classes) = cat.classes.ok_or_else(|| {
@@ -3022,8 +3028,13 @@ fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(us
     let mut packed: Vec<Option<(usize, usize)>> = Vec::new();
     let mut packed_cats: Vec<(usize, Option<(usize, usize)>)> = Vec::new();
     let mut ctr_groups: Vec<(Projection, Vec<(usize, usize)>)> = Vec::new();
+    let mut estimated = Vec::new();
     for (c, cand) in candidates.iter().enumerate() {
         let column = cand.get(q);
+        if matches!(cand, ColumnRef::Base(i) if q.estimated.contains(i)) {
+            estimated.push((c, 0));
+            continue;
+        }
         match &column.split {
             ColumnSplit::Float { borders, .. } if borders.len() == 1 => packed.push(Some((c, 0))),
             ColumnSplit::Float { borders, .. } => {
@@ -3069,6 +3080,10 @@ fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(us
                 })
                 .collect(),
         );
+    }
+    // The offline estimated features' packs of 8 come after the CTRs.
+    for pack in estimated.chunks(8) {
+        entries.push(vec![pack.to_vec()]);
     }
     entries
 }
@@ -3128,7 +3143,7 @@ fn grow_tree(
         // per simple CTR feature and per tree CTR, then the seed of the
         // candidates' score noise.
         let n_ctr_features = q.ctr.as_ref().map_or(0, |c| c.features.len());
-        for _ in 0..q.draws.0 + n_ctr_features + tree_ctr_draws {
+        for _ in 0..q.draws.0 + n_ctr_features + tree_ctr_draws + q.estimated.len() {
             rng.real1();
         }
         let noise_seed = rng.gen();
@@ -3589,7 +3604,8 @@ fn grow_depthwise(
     object_weights: bool,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
-    let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
+    let level_draws =
+        q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len()) + q.estimated.len();
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -3806,7 +3822,8 @@ fn grow_lossguide(
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let wts = sample.leafwise_weights(object_weights);
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
-    let level_draws = q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len());
+    let level_draws =
+        q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len()) + q.estimated.len();
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -4497,6 +4514,29 @@ impl Quantized {
     /// The data in the order `perm` (row `i` is the original row
     /// `perm[i]`): the same columns, the CTRs recomputed online in that
     /// order.
+    /// Append binary offline estimated features (features `first..`, the
+    /// buckets 0 / 1 of every row, border 0.5) before the CTR columns.
+    fn add_estimated(&mut self, first: usize, columns: Vec<Vec<u8>>) {
+        let at = self.estimated.start;
+        let n = columns.len();
+        let new: Vec<Column> = columns
+            .into_iter()
+            .enumerate()
+            .map(|(j, buckets)| Column {
+                split: ColumnSplit::Float {
+                    feature: first + j,
+                    borders: vec![0.5],
+                },
+                buckets,
+                n_buckets: 2,
+                ctr_key: None,
+            })
+            .collect();
+        self.columns.splice(at..at, new);
+        self.borders.extend(std::iter::repeat_n(vec![0.5f32], n));
+        self.estimated = at..at + n;
+    }
+
     fn permuted(&self, perm: &[usize]) -> Quantized {
         let rows = |b: &[u8]| perm.iter().map(|&r| b[r]).collect::<Vec<u8>>();
         let mut columns: Vec<Column> = self
@@ -4540,6 +4580,7 @@ impl Quantized {
             ctr,
             draws: self.draws,
             cat_features: self.cat_features.clone(),
+            estimated: self.estimated.clone(),
         };
         std::mem::swap(&mut q.columns, &mut columns);
         if let Some(src) = &q.ctr {
@@ -5711,6 +5752,113 @@ struct PairwiseScoring {
     prior: f64,
 }
 
+/// CatBoost's default text processing for regression, per text column: the
+/// `Space` tokenizer (split on `' '`, empty tokens skipped), a `BiGram` and
+/// a `Word` frequency dictionary (`TDictionaryBuilder`: tokens counted at
+/// least `min_count` times, ids by count descending then by the tokens),
+/// and `BoW` features over both (BiGram first).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TextProcessing {
+    /// Per text column: its bigrams and words in id order.
+    columns: Vec<(Vec<(String, String)>, Vec<String>)>,
+}
+
+impl TextProcessing {
+    fn tokens(text: &str) -> Vec<&str> {
+        text.split(' ').filter(|t| !t.is_empty()).collect()
+    }
+
+    fn fit(text: &[Vec<String>], min_count: u64) -> Self {
+        use std::collections::HashMap;
+        let columns = text
+            .iter()
+            .map(|col| {
+                let mut words: HashMap<&str, u64> = HashMap::new();
+                let mut bigrams: HashMap<(&str, &str), u64> = HashMap::new();
+                for t in col {
+                    let tokens = Self::tokens(t);
+                    for &w in &tokens {
+                        *words.entry(w).or_default() += 1;
+                    }
+                    for pair in tokens.windows(2) {
+                        *bigrams.entry((pair[0], pair[1])).or_default() += 1;
+                    }
+                }
+                let mut words: Vec<(&str, u64)> =
+                    words.into_iter().filter(|&(_, c)| c >= min_count).collect();
+                words.sort_by(|a, b| {
+                    b.1.cmp(&a.1)
+                        .then_with(|| a.0.as_bytes().cmp(b.0.as_bytes()))
+                });
+                let mut bigrams: Vec<((&str, &str), u64)> = bigrams
+                    .into_iter()
+                    .filter(|&(_, c)| c >= min_count)
+                    .collect();
+                bigrams.sort_by(|a, b| {
+                    b.1.cmp(&a.1).then_with(|| {
+                        (a.0 .0.as_bytes(), a.0 .1.as_bytes())
+                            .cmp(&(b.0 .0.as_bytes(), b.0 .1.as_bytes()))
+                    })
+                });
+                (
+                    bigrams
+                        .into_iter()
+                        .map(|((a, b), _)| (a.to_string(), b.to_string()))
+                        .collect(),
+                    words.into_iter().map(|(w, _)| w.to_string()).collect(),
+                )
+            })
+            .collect();
+        Self { columns }
+    }
+
+    fn n_features(&self) -> usize {
+        self.columns.iter().map(|(b, w)| b.len() + w.len()).sum()
+    }
+
+    /// `[x | BoW(text)]`.
+    fn augment(&self, x: ArrayView2<f64>, text: &[Vec<String>]) -> Result<Array2<f64>> {
+        use std::collections::HashMap;
+        if text.len() != self.columns.len() || text.iter().any(|c| c.len() != x.nrows()) {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "expected {} text columns of {} rows",
+                self.columns.len(),
+                x.nrows()
+            )));
+        }
+        let mut out = Array2::zeros((x.nrows(), x.ncols() + self.n_features()));
+        out.slice_mut(ndarray::s![.., ..x.ncols()]).assign(&x);
+        let mut offset = x.ncols();
+        for ((bigrams, words), col) in self.columns.iter().zip(text) {
+            let bi: HashMap<(&str, &str), usize> = bigrams
+                .iter()
+                .enumerate()
+                .map(|(i, (a, b))| ((a.as_str(), b.as_str()), i))
+                .collect();
+            let wi: HashMap<&str, usize> = words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| (w.as_str(), i))
+                .collect();
+            for (r, t) in col.iter().enumerate() {
+                let tokens = Self::tokens(t);
+                for pair in tokens.windows(2) {
+                    if let Some(&i) = bi.get(&(pair[0], pair[1])) {
+                        out[[r, offset + i]] = 1.0;
+                    }
+                }
+                for w in &tokens {
+                    if let Some(&i) = wi.get(w) {
+                        out[[r, offset + bigrams.len() + i]] = 1.0;
+                    }
+                }
+            }
+            offset += bigrams.len() + words.len();
+        }
+        Ok(out)
+    }
+}
+
 /// One pair cell's statistics (CatBoost's `TBucketPairWeightStatistics`).
 #[derive(Clone, Copy, Default)]
 struct PairCell {
@@ -6867,6 +7015,10 @@ pub struct FittedCatBoostRegressor {
     /// first (the model then has one approximation per target).
     #[serde(default)]
     multi_bias: Vec<f64>,
+    /// Text features: their dictionaries (the model's trailing features are
+    /// their bag-of-words).
+    #[serde(default)]
+    text: Option<TextProcessing>,
 }
 
 impl FittedCatBoostRegressor {
@@ -7104,7 +7256,49 @@ impl CatBoostRegressor {
             eval,
             use_best,
             queries,
+            None,
         )
+    }
+
+    /// Fit with text features (CatBoost's `text_features` with its default
+    /// processing for regression): `text[j][i]` is the text column `j` of
+    /// row `i`. Each column is split on spaces into a BiGram and a Word
+    /// dictionary (tokens seen at least 3 times), whose tokens become binary
+    /// bag-of-words features (binary, packed 8 per candidate).
+    pub fn fit_with_text(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostRegressor> {
+        let loss = self.loss(1);
+        if loss.querywise() || matches!(loss, Loss::MultiRmse(_)) {
+            return Err(RustMlError::InvalidParameter(
+                "text features support the pointwise regression losses".into(),
+            ));
+        }
+        if text.is_empty() || text.iter().any(|c| c.len() != x.nrows()) {
+            return Err(RustMlError::ShapeMismatch(
+                "every text column needs one text per row".into(),
+            ));
+        }
+        // catboost's (Python package) effective default
+        // `occurrence_lower_bound` is 3, whatever the row count.
+        let processing = TextProcessing::fit(text, 3);
+        let augmented = processing.augment(x, text)?;
+        let mut f = self.fit_targets(
+            augmented.view(),
+            y.insert_axis(ndarray::Axis(1)),
+            sample_weight,
+            None,
+            self.use_best_model_with(None, x.ncols())?,
+            None,
+            Some((processing.n_features(), x.ncols() + text.len())),
+        )?;
+        f.n_features = x.ncols();
+        f.text = Some(processing);
+        Ok(f)
     }
 
     /// MultiRMSE (CatBoost's multi-regression): `y` holds one column per
@@ -7171,7 +7365,7 @@ impl CatBoostRegressor {
             groups: Groups::default(),
             pfound: false,
         });
-        self.fit_targets(x, y, sample_weight, eval, use_best, None)
+        self.fit_targets(x, y, sample_weight, eval, use_best, None, None)
     }
 
     /// Fit on the target columns `y` (one, or MultiRMSE's k).
@@ -7183,7 +7377,11 @@ impl CatBoostRegressor {
         eval_set: Option<EvalSet<'_>>,
         use_best: bool,
         queries: Option<Vec<usize>>,
+        // Text: the trailing estimated (0 / 1) columns of `x` and the
+        // external feature count.
+        estimated: Option<(usize, usize)>,
     ) -> Result<FittedCatBoostRegressor> {
+        let (n_estimated, n_external) = estimated.unwrap_or((0, x.ncols()));
         let p = self.train_params();
         validate(
             x,
@@ -7276,7 +7474,18 @@ impl CatBoostRegressor {
             classes: Some((&classes_of, 2)),
             max_ctr_complexity: self.max_ctr_complexity(),
         };
-        let q = quantize(x, self.border_count_for(loss), cat)?;
+        let n_main = x.ncols() - n_estimated;
+        let mut q = quantize(
+            x.slice(ndarray::s![.., ..n_main]),
+            self.border_count_for(loss),
+            cat,
+        )?;
+        if n_estimated > 0 {
+            let columns = (n_main..x.ncols())
+                .map(|c| x.column(c).iter().map(|&v| u8::from(v > 0.5)).collect())
+                .collect();
+            q.add_estimated(n_main, columns);
+        }
         self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         // CatBoost's YetiRank default `l2_leaf_reg` is 0 (made 1e-20).
@@ -7296,7 +7505,7 @@ impl CatBoostRegressor {
             random_strength,
             pairwise_prior: f64::from(self.bayesian_matrix_reg as f32),
             learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
-            leaf_iterations: self.leaf_iterations(loss, x.ncols()),
+            leaf_iterations: self.leaf_iterations(loss, n_external),
             leaf_estimation: self.leaf_method(loss),
             bootstrap,
             subsample,
@@ -7335,6 +7544,7 @@ impl CatBoostRegressor {
             exp_prediction: loss.exp_prediction(),
             borders: q.borders,
             n_features: x.ncols(),
+            text: None,
         })
     }
 }
@@ -7347,9 +7557,39 @@ impl Fit<f64> for CatBoostRegressor {
     }
 }
 
+impl FittedCatBoostRegressor {
+    /// Predictions of a model fitted with text features
+    /// ([`CatBoostRegressor::fit_with_text`]).
+    pub fn predict_with_text(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+    ) -> Result<Array1<f64>> {
+        check_features(x, self.n_features)?;
+        let Some(processing) = &self.text else {
+            return Err(RustMlError::InvalidParameter(
+                "the model has no text features: use predict".into(),
+            ));
+        };
+        let augmented = processing.augment(x, text)?;
+        let raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), augmented.view());
+        let raw = raw.column(0).to_owned();
+        Ok(if self.exp_prediction {
+            raw.mapv(f64::exp)
+        } else {
+            raw
+        })
+    }
+}
+
 impl Predict<f64> for FittedCatBoostRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         check_features(x, self.n_features)?;
+        if self.text.is_some() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has text features: use predict_with_text".into(),
+            ));
+        }
         if !self.multi_bias.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "a MultiRMSE model predicts one column per target: use predict_multi".into(),
@@ -8163,6 +8403,30 @@ mod tests {
         assert!(rmse
             .fit_with_groups(x.view(), y.view(), None, &groups)
             .is_err());
+        // Text features: bag-of-words of space-split tokens.
+        let words = ["red", "green", "blue", "cat"];
+        let text: Vec<String> = (0..60)
+            .map(|i| format!("{} {}", words[i % 4], words[(i / 4) % 4]))
+            .collect();
+        let tf = CatBoostRegressor::new()
+            .with_iterations(5)
+            .fit_with_text(x.view(), &[text.clone()], y.view(), None)
+            .unwrap();
+        assert_eq!(
+            tf.predict_with_text(x.view(), &[text.clone()])
+                .unwrap()
+                .len(),
+            60
+        );
+        assert!(tf.predict(&x).is_err());
+        assert!(tf.predict_with_text(x.view(), &[]).is_err());
+        let bytes = anofox_ml_core::persistence::to_binary_bytes(&tf).unwrap();
+        let back: FittedCatBoostRegressor =
+            anofox_ml_core::persistence::from_binary_bytes(&bytes).unwrap();
+        assert_eq!(
+            back.predict_with_text(x.view(), &[text.clone()]).unwrap(),
+            tf.predict_with_text(x.view(), &[text]).unwrap()
+        );
         // PairLogit: shift-invariant leaves, no sample weights.
         let pl = CatBoostRegressor::new()
             .with_iterations(5)

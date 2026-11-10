@@ -690,6 +690,49 @@ def generate():
               loss_function="PairLogitPairwise", has_time=False), Xb, y_rel, sizes)
     add_group("loss_yetirank_pairwise_defaults", dict(pw_defaults, iterations=60, depth=4,
               loss_function="YetiRankPairwise", has_time=False), Xb, y_rel, sizes)
+
+    # Text features (#211): the default processing for regression, BoW over
+    # BiGram and Word dictionaries of space-split tokens.
+    import pandas as pd
+    vocab = ["red", "green", "blue", "big", "small", "fast", "slow", "old", "new", "cat"]
+    def texts(rows, eff):
+        out = []
+        for _ in range(rows):
+            k = int(rng.integers(0, 6))
+            out.append(" ".join(vocab[int(i)] for i in rng.integers(0, len(vocab), size=k)))
+        return out
+    def add_text(name, params, Xd, cols, y, sw=None, rows_test=None):
+        frame = pd.DataFrame({f"f{j}": Xd[:, j] for j in range(Xd.shape[1])})
+        for t, col in enumerate(cols):
+            frame[f"t{t}"] = col
+        text_idx = list(range(Xd.shape[1], Xd.shape[1] + len(cols)))
+        m = cb.CatBoostRegressor(**params).fit(cb.Pool(frame, y, weight=sw, text_features=text_idx))
+        test = frame.iloc[::4]
+        out["models"].append({
+            "name": name, "kind": "regressor",
+            "params": dict({k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+                           **({"defaults": [k for k in ("random_strength", "bootstrap_type")
+                                            if k not in params]}
+                              if any(k not in params for k in ("random_strength",
+                                                                "bootstrap_type")) else {})),
+            "X": nulls(Xd), "y": y.tolist(), "text": [list(c) for c in cols],
+            "sample_weight": None if sw is None else sw.tolist(),
+            "X_test": nulls(Xd[::4]), "text_test": [list(c[::4]) for c in cols],
+            "predictions": m.predict(cb.Pool(test, text_features=text_idx)).tolist(),
+        })
+    t0 = texts(n, None)
+    t1 = texts(n, None)
+    has = lambda col, w: np.array([w in s.split(" ") for s in col], float)
+    y_text = 0.5 * X[:, 0] + has(t0, "red") - 0.7 * has(t0, "slow") + 0.4 * has(t1, "cat") \
+        + rng.normal(scale=0.3, size=n)
+    add_text("text_bow", base, X, [t0], y_text)
+    add_text("text_bow_two_columns", base, X, [t0, t1], y_text)
+    add_text("text_bow_weighted", base, X, [t0], y_text, sw=weights)
+    add_text("text_bow_ordered", dict(base, boosting_type="Ordered", has_time=False), X, [t0],
+             y_text)
+    add_text("text_bow_defaults", dict({k: v for k, v in COMMON.items()
+                                        if k not in ("random_strength", "bootstrap_type")},
+                                       iterations=60, depth=4, has_time=False), X, [t0, t1], y_text)
     return out
 
 

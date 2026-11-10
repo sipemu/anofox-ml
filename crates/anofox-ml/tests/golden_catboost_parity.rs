@@ -331,6 +331,31 @@ fn catboost_models_match_catboost() {
                     .collect()
             };
             let w = sw.as_ref().map(|w| w.view());
+            let text_of = |v: &Value| -> Vec<Vec<String>> {
+                v.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| {
+                        c.as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|t| t.as_str().unwrap().to_string())
+                            .collect()
+                    })
+                    .collect()
+            };
+            if let Some(t) = case.get("text") {
+                let f = m.fit_with_text(x.view(), &text_of(t), y.view(), w).unwrap();
+                let pred = f
+                    .predict_with_text(x_test.view(), &text_of(&case["text_test"]))
+                    .unwrap();
+                let err = worst(pred, json_to_array1(&case["predictions"]));
+                report.push(format!("{name}: {err:e}"));
+                if err > TOL {
+                    failures.push(format!("{name}: worst {err:e}"));
+                }
+                continue;
+            }
             let f = match (eval_set, case.get("group")) {
                 (Some(e), Some(g)) => m
                     .fit_with_groups_eval(x.view(), y.view(), w, &sizes(g), e, &sizes(&ev["group"]))
