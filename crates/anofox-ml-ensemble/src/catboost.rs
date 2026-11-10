@@ -801,6 +801,10 @@ pub enum CatBoostClassifierLoss {
     /// `CrossEntropy`); classes 0 and 1, no categorical features or class
     /// weights.
     CrossEntropy,
+    /// One binary Logloss per class (CatBoost's `MultiClassOneVsAll`):
+    /// `predict_proba` gives each class's sigmoid, which CatBoost does not
+    /// normalize.
+    MultiClassOneVsAll,
 }
 
 /// CatBoost's `auto_class_weights`, from the classes' weight sums `S_c`.
@@ -901,13 +905,16 @@ enum Loss {
     /// Softmax over `k` approximations (CatBoost's `MultiClass`); the target
     /// is the class index.
     MultiClass(usize),
+    /// A sigmoid per class (CatBoost's `MultiClassOneVsAll`), with a
+    /// diagonal Hessian.
+    MultiClassOneVsAll(usize),
 }
 
 impl Loss {
     /// Approximations per row.
     fn dims(self) -> usize {
         match self {
-            Loss::MultiClass(k) => k,
+            Loss::MultiClass(k) | Loss::MultiClassOneVsAll(k) => k,
             _ => 1,
         }
     }
@@ -916,7 +923,10 @@ impl Loss {
     /// by row (CatBoost's packed `THessianInfo`).
     fn hessian_len(self) -> usize {
         let k = self.dims();
-        k * (k + 1) / 2
+        match self {
+            Loss::MultiClassOneVsAll(_) => k,
+            _ => k * (k + 1) / 2,
+        }
     }
 
     /// The weighted derivatives of one row into `der` (`dims`) and `der2`
@@ -1005,6 +1015,21 @@ impl Loss {
                 der[0] = w * (target - p);
                 der2[0] = w * (-p * (1.0 - p));
             }
+            // CatBoost's `TMultiClassOneVsAllError::CalcDersMulti`.
+            Loss::MultiClassOneVsAll(_) => {
+                der.copy_from_slice(approx);
+                fast_exp_with_inf(der);
+                for (d, h) in der.iter_mut().zip(der2.iter_mut()) {
+                    let p = *d / (1.0 + *d);
+                    *d = -p;
+                    *h = -p * (1.0 - p);
+                }
+                der[target as usize] += 1.0;
+                if w != 1.0 {
+                    der.iter_mut().for_each(|d| *d *= w);
+                    der2.iter_mut().for_each(|d| *d *= w);
+                }
+            }
             // CatBoost's `TMultiClassError::CalcDersMulti`.
             Loss::MultiClass(k) => {
                 let max = approx.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -1071,6 +1096,16 @@ impl Loss {
                 let max = approx.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let sum: f64 = approx.iter().map(|&a| (a - max).exp()).sum();
                 -((approx[target as usize] - max) - sum.ln())
+            }
+            // `TMultiClassOneVsAllMetric`.
+            Loss::MultiClassOneVsAll(k) => {
+                let mut sum = 0.0;
+                for &a in approx {
+                    let e = a.exp();
+                    sum += if e.is_finite() { -(1.0 + e).ln() } else { -a };
+                }
+                sum += approx[target as usize];
+                -(sum / k as f64)
             }
         }
     }
@@ -3215,12 +3250,20 @@ impl LeafSums {
         out: &mut [f64],
     ) {
         let k = out.len();
-        let h = k * (k + 1) / 2;
+        let h = self.der2.len() / self.w.len().max(1);
         let der = &self.der[leaf * k..(leaf + 1) * k];
         let scaled_l2 = l2 * (sum_w / count);
         match p.leaf_estimation {
             CatBoostLeafEstimation::Newton if k == 1 => {
                 out[0] = der[0] / (-self.der2[leaf] + scaled_l2);
+            }
+            // A diagonal Hessian (`TDiagonalHessian::SolveNewtonEquation`).
+            CatBoostLeafEstimation::Newton if h == k => {
+                let der2 = &self.der2[leaf * h..(leaf + 1) * h];
+                let l2 = f64::from((l2 * (sum_w / count)) as f32);
+                for ((o, &d), &d2) in out.iter_mut().zip(der).zip(der2) {
+                    *o = -d / (d2 - l2);
+                }
             }
             CatBoostLeafEstimation::Newton => {
                 let der2 = &self.der2[leaf * h..(leaf + 1) * h];
@@ -3336,6 +3379,54 @@ struct LeafProblem<'a> {
     orders: &'a [Vec<usize>],
     /// The weights of Exact leaves (CatBoost's `SampleWeights`).
     exact_weights: &'a [f64],
+}
+
+/// fmath's table of `2^(i / 2048)` mantissas (`ExpdVar`).
+fn expd_table() -> &'static [u64; 2048] {
+    static TABLE: std::sync::OnceLock<[u64; 2048]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [0u64; 2048];
+        for (i, v) in t.iter_mut().enumerate() {
+            *v = 2f64.powf(i as f64 * (1.0 / 2048.0)).to_bits() & ((1u64 << 52) - 1);
+        }
+        t
+    })
+}
+
+/// fmath's `expd` arithmetic on a clamped `x`.
+#[inline]
+fn expd_core(x: f64) -> f64 {
+    const B: f64 = (3u64 << 51) as f64;
+    let a = 2048.0 / 2f64.ln();
+    let ra = 1.0 / a;
+    let adj: u64 = (1 << (11 + 10)) - (1 << 11);
+    let d = x * a + B;
+    let bits = d.to_bits();
+    let iax = expd_table()[(bits & 2047) as usize];
+    let t = (d - B) * ra - x;
+    let u = ((bits.wrapping_add(adj) >> 11) << 52) | iax;
+    let y = (3.0000000027955394 - t) * (t * t) * 0.16666666685227835064 - t + 1.0;
+    y * f64::from_bits(u)
+}
+
+/// CatBoost's `FastExpWithInfInplace` with AVX2: fmath's `expd_v`, which
+/// clamps blocks of four values and computes the rest with `expd` (0 and
+/// inf outside its range).
+fn fast_exp_with_inf(x: &mut [f64]) {
+    let blocks = x.len() / 4 * 4;
+    let (head, tail) = x.split_at_mut(blocks);
+    for v in head {
+        *v = expd_core(v.clamp(-708.39641853226408, 709.78272569338397));
+    }
+    for v in tail {
+        *v = if *v <= -708.39641853226408 {
+            0.0
+        } else if *v >= 709.78271289338397 {
+            f64::INFINITY
+        } else {
+            expd_core(*v)
+        };
+    }
 }
 
 /// CatBoost's `CalculateOptimalConstApproxForLogCosh`: the root of
@@ -4807,7 +4898,7 @@ macro_rules! catboost_config {
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
                     Loss::Logloss => (10, 40),
-                    Loss::MultiClass(_) => (1, 10),
+                    Loss::MultiClass(_) | Loss::MultiClassOneVsAll(_) => (1, 10),
                 };
                 match method {
                     CatBoostLeafEstimation::Newton => newton,
@@ -4937,7 +5028,9 @@ macro_rules! catboost_config {
             /// CatBoost's bootstrap defaults for `loss` and `n` rows.
             fn sampling(&self, loss: Loss, n: usize) -> (CatBoostBootstrap, f64) {
                 let kind = self.bootstrap_type.unwrap_or(match loss {
-                    Loss::MultiClass(_) => CatBoostBootstrap::Bayesian,
+                    Loss::MultiClass(_) | Loss::MultiClassOneVsAll(_) => {
+                        CatBoostBootstrap::Bayesian
+                    }
                     _ => CatBoostBootstrap::Mvs,
                 });
                 let rate = self.subsample.unwrap_or(if n < 100 {
@@ -5492,6 +5585,9 @@ pub struct FittedCatBoostClassifier {
     eval_metrics: Vec<f64>,
     #[serde(default)]
     best_iteration: Option<usize>,
+    /// MultiClassOneVsAll: a sigmoid per class.
+    #[serde(default)]
+    one_vs_all: bool,
 }
 
 impl FittedCatBoostClassifier {
@@ -5535,6 +5631,9 @@ impl FittedCatBoostClassifier {
     /// the log-odds, or the softmax of the class scores.
     pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
         let raw = self.raw_predictions(x)?;
+        if self.one_vs_all {
+            return Ok(raw.mapv(|v| 1.0 / (1.0 + (-v).exp())));
+        }
         if self.classes.len() == 2 {
             let mut proba = Array2::zeros((raw.nrows(), 2));
             for (i, &r) in raw.column(0).iter().enumerate() {
@@ -5644,7 +5743,8 @@ impl CatBoostClassifier {
                 classes.len()
             )));
         }
-        let multiclass = classes.len() > 2;
+        let one_vs_all = self.loss_function == CatBoostClassifierLoss::MultiClassOneVsAll;
+        let multiclass = classes.len() > 2 || one_vs_all;
         if multiclass && !p.monotone.is_empty() {
             return Err(RustMlError::InvalidParameter(
                 "monotone constraints are not supported for more than two classes".into(),
@@ -5708,7 +5808,12 @@ impl CatBoostClassifier {
                 })
             }
         };
-        let (loss, bias) = if multiclass {
+        let (loss, bias) = if one_vs_all {
+            (
+                Loss::MultiClassOneVsAll(classes.len()),
+                vec![0.0; classes.len()],
+            )
+        } else if multiclass {
             (Loss::MultiClass(classes.len()), vec![0.0; classes.len()])
         } else if boost_from_average {
             let p1 = f64::from(weighted_target_average(&target, &weights));
@@ -5762,6 +5867,7 @@ impl CatBoostClassifier {
             borders: q.borders,
             classes,
             n_features: x.ncols(),
+            one_vs_all,
         })
     }
 }

@@ -241,6 +241,9 @@ fn catboost_models_match_catboost() {
             if p["loss_function"] == "CrossEntropy" {
                 m = m.with_loss_function(CatBoostClassifierLoss::CrossEntropy);
             }
+            if p["loss_function"] == "MultiClassOneVsAll" {
+                m = m.with_loss_function(CatBoostClassifierLoss::MultiClassOneVsAll);
+            }
             if let Some(w) = p["class_weights"].as_array() {
                 m = m.with_class_weights(w.iter().map(|v| v.as_f64().unwrap()).collect());
             }
