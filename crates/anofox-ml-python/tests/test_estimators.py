@@ -906,6 +906,44 @@ def test_catboost_text_features_match_catboost():
         ours.fit(frame, labels, eval_set=(frame, labels))
 
 
+def test_catboost_text_processing_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    pd = pytest.importorskip("pandas")
+    off = dict(random_strength=0, bootstrap_type="No", has_time=True, thread_count=1)
+    kw = dict(iterations=20, learning_rate=0.2, depth=4)
+    r = np.random.RandomState(5)
+    n = 300
+    vocab = ["Red", "green", "BLUE", "big", "small", "fast", "slow", "old"]
+    words = [",".join(vocab[i] for i in r.randint(0, len(vocab), r.randint(0, 5)))
+             for _ in range(n)]
+    frame = pd.DataFrame({"x0": r.randn(n), "words": words})
+    labels = r.randint(0, 3, n)
+    tp = {"tokenizers": [{"tokenizer_id": "T", "separator_type": "ByDelimiter",
+                          "delimiter": ",", "lowercasing": "true"}],
+          "dictionaries": [{"dictionary_id": "W", "gram_order": "1"},
+                           {"dictionary_id": "Bi", "gram_order": "2",
+                            "occurrence_lower_bound": "2", "max_dictionary_size": "10"}],
+          "feature_processing": {"default": [
+              {"dictionaries_names": ["Bi", "W"], "feature_calcers": ["BoW:top_tokens_count=6"],
+               "tokenizers_names": ["T"]},
+              {"dictionaries_names": ["W"], "feature_calcers": ["BM25", "NaiveBayes"],
+               "tokenizers_names": ["T"]}]}}
+    ref = cb.CatBoostClassifier(**kw, **off, verbose=0, allow_writing_files=False,
+                                text_processing=tp).fit(
+        cb.Pool(frame, labels, text_features=[1]))
+    ours = am.CatBoostClassifier(**kw, **off, text_features=[1], text_processing=tp).fit(
+        frame, labels)
+    np.testing.assert_allclose(ours.predict_proba(frame),
+                               ref.predict_proba(cb.Pool(frame, text_features=[1])),
+                               rtol=1e-12, atol=1e-12)
+    with pytest.raises(ValueError):
+        am.CatBoostRegressor(text_features=[1], text_processing=tp, **kw).fit(frame, r.randn(n))
+    with pytest.raises(ValueError):
+        am.CatBoostClassifier(text_features=[1], text_processing=dict(
+            tp, dictionaries=[{"dictionary_id": "W", "token_level_type": "Letter"}]),
+            **kw).fit(frame, labels)
+
+
 def test_catboost_categorical_features_match_catboost():
     cb = pytest.importorskip("catboost")
     off = dict(random_strength=0, bootstrap_type="No", boosting_type="Plain", has_time=True,

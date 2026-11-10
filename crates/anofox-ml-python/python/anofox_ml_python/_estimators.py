@@ -770,6 +770,67 @@ class LGBMRanker(LGBMRegressor):
         return self
 
 
+def _text_options(tp):
+    """The Rust ``CatBoostTextOptions`` of a catboost ``text_processing``
+    dict: one ``ByDelimiter`` tokenizer, Word-level dictionaries and the
+    ``"default"`` feature processing."""
+    def flag(v, default):
+        return default if v is None else str(v).lower() in ("true", "1")
+    tokenizers = tp.get("tokenizers", [{"tokenizer_id": "Space"}])
+    if len(tokenizers) != 1:
+        raise ValueError("text_processing: exactly one tokenizer is supported")
+    tok = tokenizers[0]
+    if tok.get("separator_type", "ByDelimiter") != "ByDelimiter":
+        raise ValueError("text_processing: only separator_type='ByDelimiter' is supported")
+    for key, default in (("split_by_set", False), ("lemmatizing", False)):
+        if flag(tok.get(key), default) != default:
+            raise ValueError(f"text_processing: tokenizer option {key} is not supported")
+    if not flag(tok.get("skip_empty"), True):
+        raise ValueError("text_processing: skip_empty=false is not supported")
+    dictionaries = []
+    for d in tp.get("dictionaries", []):
+        if d.get("token_level_type", "Word") != "Word":
+            raise ValueError("text_processing: only Word-level dictionaries are supported")
+        if int(d.get("skip_step", 0)) != 0:
+            raise ValueError("text_processing: skip_step is not supported")
+        if d.get("end_of_sentence_token_policy", "Skip") != "Skip":
+            raise ValueError("text_processing: end_of_sentence_token_policy is not supported")
+        size = int(d.get("max_dictionary_size", 50000))
+        dictionaries.append({
+            "name": d["dictionary_id"],
+            "gram_order": int(d.get("gram_order", 1)),
+            # catboost's Python package default.
+            "occurrence_lower_bound": int(d.get("occurrence_lower_bound", 3)),
+            "max_dictionary_size": None if size == -1 else size,
+        })
+    processing = tp.get("feature_processing", {})
+    if set(processing) != {"default"}:
+        raise ValueError("text_processing: only feature_processing['default'] is supported")
+    calcer_names = {"NaiveBayes": "NaiveBayes", "BM25": "Bm25"}
+    entries = []
+    for f in processing["default"]:
+        calcers = []
+        for c in f["feature_calcers"]:
+            name, _, rest = c.partition(":")
+            args = dict(kv.split("=", 1) for kv in rest.split(",") if kv)
+            if name == "BoW":
+                if set(args) - {"top_tokens_count"}:
+                    raise ValueError(f"text_processing: unsupported BoW options {c!r}")
+                calcers.append({"BoW": {"top_tokens_count": int(args.get("top_tokens_count",
+                                                                          2000))}})
+            elif name in calcer_names and not args:
+                calcers.append(calcer_names[name])
+            else:
+                raise ValueError(f"text_processing: unsupported feature calcer {c!r}")
+        entries.append({"dictionaries": list(f["dictionaries_names"]), "calcers": calcers})
+    return {
+        "delimiter": tok.get("delimiter", " "),
+        "lowercasing": flag(tok.get("lowercasing"), False),
+        "dictionaries": dictionaries,
+        "processing": entries,
+    }
+
+
 class _CatBoost(BaseEstimator):
     """CatBoost-style boosting on oblivious trees; parameters follow
     ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""
@@ -786,8 +847,9 @@ class _CatBoost(BaseEstimator):
                  auto_class_weights=None, loss_function=None, use_best_model=None,
                  early_stopping_rounds=None, od_type=None, od_wait=None, od_pval=None,
                  grow_policy="SymmetricTree", min_data_in_leaf=1, max_leaves=31,
-                 thread_count=-1, text_features=None):
+                 thread_count=-1, text_features=None, text_processing=None):
         self.text_features = text_features
+        self.text_processing = text_processing
         self.thread_count = thread_count
         self.grow_policy = grow_policy
         self.min_data_in_leaf = min_data_in_leaf
@@ -845,6 +907,8 @@ class _CatBoost(BaseEstimator):
         if self.boost_from_average is not None:
             params["boost_from_average"] = bool(self.boost_from_average)
         params["cat_features"] = self._cat_indices(self._n_raw_)
+        if self.text_processing is not None:
+            params["text_options"] = _text_options(self.text_processing)
         if self.one_hot_max_size is not None:
             params["one_hot_max_size"] = int(self.one_hot_max_size)
         params["model_size_reg"] = float(self.model_size_reg)
