@@ -164,6 +164,22 @@ fn sup<C: Fit<f64>>(
     c.fit(x, need_y(k, y)?)
 }
 
+/// A LightGBM fit with query groups (the ranking objectives).
+fn fit_lgbm_groups(
+    c: &ensemble::LgbmRegressor,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    w: Option<ArrayView1<f64>>,
+    group: &[usize],
+) -> Result<ensemble::FittedLgbmRegressor> {
+    let opts = ensemble::LgbmFitOptions {
+        sample_weight: w.as_ref().map(|w| w.view()),
+        group: Some(group),
+        ..Default::default()
+    };
+    c.fit_with_eval(x, y, &opts)
+}
+
 /// Supervised fit with optional weights.
 fn wsup<C: FitWeighted<f64>>(
     k: &str,
@@ -1008,6 +1024,22 @@ registry! {
             };
             c.fit_warm_start(&prev, x, need_y(K, y)?, &opts)
         },
+        fit_with_group: |c, x, y, w, g| fit_lgbm_groups(c, x, need_y(K, y)?, w, g),
+    }
+    // LightGBM's `LGBMRanker`: `LgbmRegressor` with the LambdaRank
+    // objective by default; fit with `fit_with_group`.
+    LgbmRanker {
+        config: ensemble::LgbmRegressor = ensemble::LgbmRegressor::ranker(),
+        fitted: ensemble::FittedLgbmRegressor,
+        fit: |c, x, y, w| Err::<ensemble::FittedLgbmRegressor, _>(
+            anofox_ml_core::RustMlError::InvalidParameter(format!(
+                "{K} needs query groups: use fit_with_group"
+            ))
+        ),
+        predict: |m, x| m.predict(x),
+        feature_importances: |m| m.feature_importances(),
+        staged_predict: |m, x| stages_to_columns(m.staged_predict(x)?),
+        fit_with_group: |c, x, y, w, g| fit_lgbm_groups(c, x, need_y(K, y)?, w, g),
     }
     CatBoostRegressor {
         config: ensemble::CatBoostRegressor = Default::default(),

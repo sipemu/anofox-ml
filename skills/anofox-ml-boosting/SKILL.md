@@ -100,6 +100,11 @@ default 1.5; zero-inflated counts / intermittent demand) and
 `predict_proba` rows are per-class sigmoids that do not sum to 1. Python
 takes LightGBM's names: `objective="tweedie"`, `"cross_entropy"`,
 `"multiclassova"`. All match LightGBM 4.7 to ~1e-16.
+Ranking: `LgbmRegressor::ranker()` (LambdaRank) or
+`with_objective(LgbmObjective::RankXendcg)`, fit with
+`LgbmFitOptions { group: Some(&query_sizes), .. }` and integer relevance
+labels; Python `LGBMRanker().fit(X, y, group=sizes)`; registry kind
+`LgbmRanker` with `fit_with_group`.
 `with_linear_tree(true, lambda)` (Python `linear_tree=True`) fits a ridge
 model per leaf on its path's numeric features: use it when a global model
 must extrapolate trends.

@@ -174,6 +174,17 @@ pub trait DynModel: Send + Sync {
     ) -> Result<()> {
         Err(unsupported(self.kind(), "fit_with_offset"))
     }
+    /// Fit with query groups (the ranking objectives): `group` holds the
+    /// sizes of the queries, whose rows are consecutive.
+    fn fit_with_group<'a>(
+        &mut self,
+        _x: ArrayView2<'a, f64>,
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
+        _group: &[usize],
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "fit_with_group"))
+    }
     /// Predictions with an offset on the link scale (the GLMs).
     fn predict_with_offset(&self, _x: ArrayView2<f64>, _offset: ArrayView1<f64>) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_with_offset"))
@@ -318,7 +329,7 @@ pub(crate) fn no_weight(kind: &str, w: Option<ArrayView1<f64>>) -> Result<()> {
 /// model as `prev`) and returns the new fitted model; `partial_fit`
 /// receives `|c, prev, x, y, w, classes|` (`prev`: the fitted model, if any);
 /// `fit_with_offset` receives `|c, x, y, w, offset|`, `predict_with_offset`
-/// `|m, x, offset|`;
+/// `|m, x, offset|`; `fit_with_group` receives `|c, x, y, w, group|`;
 /// `fit_with_validation` receives `|c, x, y, w, x_val, y_val, w_val|`;
 /// `fit_text` receives `|c, docs|` and returns the fitted model,
 /// `transform_text` `|m, docs|`.
@@ -523,6 +534,23 @@ macro_rules! registry {
             $y: Option<ndarray::ArrayView1<'a, f64>>,
             $w: Option<ndarray::ArrayView1<'a, f64>>,
             $off: ndarray::ArrayView1<'a, f64>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    (@cap $kind:ident, fit_with_group, $c:ident, $x:ident, $y:ident, $w:ident, $g:ident,
+     $body:expr) => {
+        #[allow(unused_variables)]
+        fn fit_with_group<'a>(
+            &mut self,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
+            $g: &[usize],
         ) -> anofox_ml_core::Result<()> {
             #[allow(non_snake_case, dead_code)]
             const K: &str = stringify!($kind);

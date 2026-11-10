@@ -106,7 +106,7 @@ pub use lgbm::{
     BinningMethod, BoostingType, CategoricalSplitParams, DartParams, FittedLgbmBooster,
     FittedLgbmClassifier, FittedLgbmRegressor, LgbmClassWeight, LgbmClassifier,
     LgbmCustomObjective, LgbmDataset, LgbmDatasetBuilder, LgbmFitOptions, LgbmFloat, LgbmObjective,
-    LgbmRegressor,
+    LgbmRankingParams, LgbmRegressor,
 };
 pub use random_forest_classifier::{FittedRandomForestClassifier, RandomForestClassifier};
 pub use random_forest_regressor::{FittedRandomForestRegressor, RandomForestRegressor};
