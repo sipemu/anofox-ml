@@ -531,20 +531,67 @@ fn add_tree_scores(scores: &mut [f64], tree: &TreeNode, binned_rows: &Array2<u8>
 fn add_leaf_scores(
     scores: &mut [f64],
     tree: &TreeNode,
-    leaf_rows: &[Vec<usize>],
+    leaf_rows: &[Vec<u32>],
     binned_rows: &Array2<u8>,
     factor: f64,
 ) {
-    if leaf_rows.iter().map(Vec::len).sum::<usize>() != scores.len() {
+    use rayon::prelude::*;
+    let n = scores.len();
+    let covered = leaf_rows.iter().map(Vec::len).sum::<usize>();
+    if covered * 2 < n {
         return add_tree_scores(scores, tree, binned_rows, factor);
     }
-    for rows in leaf_rows {
-        let Some(&first) = rows.first() else { continue };
-        let value = tree.predict_bins(row_of(binned_rows, first));
-        for &i in rows {
-            scores[i] += factor * value;
-        }
+    let values: Vec<f64> = leaf_rows
+        .iter()
+        .map(|rows| {
+            rows.first().map_or(0.0, |&first| {
+                factor * tree.predict_bins(row_of(binned_rows, first as usize))
+            })
+        })
+        .collect();
+    // The leaves hold disjoint rows: their scores (and in-bag flags) are
+    // updated in parallel.
+    struct Rows(*mut f64, *mut bool);
+    // SAFETY: shared only for writes to disjoint rows (below).
+    unsafe impl Sync for Rows {}
+    let mut in_bag = vec![false; if covered == n { 0 } else { n }];
+    let flag = covered != n;
+    let out = Rows(scores.as_mut_ptr(), in_bag.as_mut_ptr());
+    let out = &out;
+    debug_assert!({
+        let mut seen = vec![false; n];
+        leaf_rows
+            .iter()
+            .flatten()
+            .all(|&i| !std::mem::replace(&mut seen[i as usize], true))
+    });
+    leaf_rows
+        .par_iter()
+        .zip(&values)
+        .flat_map(|(rows, &v)| rows.par_chunks(1 << 14).map(move |c| (c, v)))
+        .for_each(|(chunk, v)| {
+            for &i in chunk {
+                assert!((i as usize) < n);
+                // SAFETY: `i < n`, and no other task writes row `i` (the
+                // leaves' rows are disjoint).
+                unsafe {
+                    *out.0.add(i as usize) += v;
+                    if flag {
+                        *out.1.add(i as usize) = true;
+                    }
+                }
+            }
+        });
+    if covered == n {
+        return;
     }
+    // The rows out of the bag walk the tree (LightGBM's out-of-bag update).
+    scores
+        .par_iter_mut()
+        .with_min_len(4096)
+        .enumerate()
+        .filter(|(i, _)| !in_bag[*i])
+        .for_each(|(i, s)| *s += factor * tree.predict_bins(row_of(binned_rows, i)));
 }
 
 /// Row `i` of a row-major binned matrix.
@@ -769,6 +816,22 @@ struct BinSums {
     count: [u32; 256],
 }
 
+/// Rows ahead a histogram pass prefetches (LightGBM's `64 / sizeof(bin)`).
+const PREFETCH_ROWS: usize = 64;
+
+/// Hint the CPU to load `data[i]` into the cache.
+#[inline(always)]
+fn prefetch(data: &[u8], i: usize) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch hint never faults; `i` is a valid index.
+    unsafe {
+        use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+        _mm_prefetch(data.as_ptr().add(i) as *const i8, _MM_HINT_T0);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (data, i);
+}
+
 /// Bin sums of the bin column `col` over the rows `rows` (`None`: every row,
 /// in order), `gh` holding their gradients and hessians in that order.
 /// Counts are kept with `COUNT`.
@@ -777,6 +840,7 @@ fn bin_sums<const COUNT: bool>(col: &[u8], rows: Option<&[u32]>, gh: &[(f32, f32
         gh: [(0.0, 0.0); 256],
         count: [0; 256],
     };
+
     let mut add = |b: u8, (g, h): (f32, f32)| {
         let a = &mut s.gh[b as usize];
         a.0 += f64::from(g);
@@ -787,7 +851,13 @@ fn bin_sums<const COUNT: bool>(col: &[u8], rows: Option<&[u32]>, gh: &[(f32, f32
     };
     match rows {
         Some(rows) => {
-            for (&i, &gh) in rows.iter().zip(gh) {
+            // LightGBM's prefetch of the bin `PREFETCH_ROWS` rows ahead.
+            let ahead = rows.len().saturating_sub(PREFETCH_ROWS);
+            for (k, (&i, &gh)) in rows[..ahead].iter().zip(gh).enumerate() {
+                prefetch(col, rows[k + PREFETCH_ROWS] as usize);
+                add(col[i as usize], gh);
+            }
+            for (&i, &gh) in rows[ahead..].iter().zip(&gh[ahead..]) {
                 add(col[i as usize], gh);
             }
         }
@@ -796,6 +866,52 @@ fn bin_sums<const COUNT: bool>(col: &[u8], rows: Option<&[u32]>, gh: &[(f32, f32
                 add(b, gh);
             }
         }
+    }
+    s
+}
+
+/// `bin_sums` without counts when every hessian is `h`: LightGBM's
+/// constant-hessian histograms, which sum the gradients and count the rows.
+/// `count · h` equals the sum of `count` copies of the float32 `h` exactly
+/// (below 2^29 rows), so the sums are those of `bin_sums`.
+fn bin_sums_constant_hessian(col: &[u8], rows: Option<&[u32]>, grads: &[f32], h: f32) -> BinSums {
+    let mut g = [0.0f64; 256];
+    let mut count = [0u32; 256];
+    let mut add = |b: u8, grad: f32| {
+        g[b as usize] += f64::from(grad);
+        count[b as usize] += 1;
+    };
+    match rows {
+        Some(rows) => {
+            let ahead = rows.len().saturating_sub(PREFETCH_ROWS);
+            for (k, (&i, &grad)) in rows[..ahead].iter().zip(grads).enumerate() {
+                prefetch(col, rows[k + PREFETCH_ROWS] as usize);
+                add(col[i as usize], grad);
+            }
+            for (&i, &grad) in rows[ahead..].iter().zip(&grads[ahead..]) {
+                add(col[i as usize], grad);
+            }
+        }
+        None => {
+            for (&b, &grad) in col.iter().zip(grads) {
+                add(b, grad);
+            }
+        }
+    }
+    let mut s = BinSums {
+        gh: [(0.0, 0.0); 256],
+        count: [0; 256],
+    };
+    for b in 0..256 {
+        // An empty bin keeps the 0.0 of `bin_sums`.
+        s.gh[b] = (
+            g[b],
+            if count[b] == 0 {
+                0.0
+            } else {
+                f64::from(count[b]) * f64::from(h)
+            },
+        );
     }
     s
 }
@@ -896,9 +1012,9 @@ const PARTITION_CHUNK_ROWS: usize = 16_384;
 
 /// Gradient / hessian totals of `rows`, summed in row order (as
 /// `node_totals`).
-fn row_totals(rows: &[usize], gradients: &[f64], hessians: &[f64]) -> (f64, f64) {
+fn row_totals(rows: &[u32], gradients: &[f64], hessians: &[f64]) -> (f64, f64) {
     rows.iter().fold((-0.0, -0.0), |t, &i| {
-        (t.0 + gradients[i], t.1 + hessians[i])
+        (t.0 + gradients[i as usize], t.1 + hessians[i as usize])
     })
 }
 
@@ -906,16 +1022,20 @@ fn row_totals(rows: &[usize], gradients: &[f64], hessians: &[f64]) -> (f64, f64)
 /// returns their number. Branch-free: every row is written to both sides
 /// (the right ones to `scratch`), and only the side it goes to advances.
 fn partition_in_place(
-    rows: &mut [usize],
-    goes_left: impl Fn(usize) -> bool,
-    scratch: &mut Vec<usize>,
+    rows: &mut [u32],
+    col: &[u8],
+    goes_left: impl Fn(u8) -> bool,
+    scratch: &mut Vec<u32>,
 ) -> usize {
     scratch.clear();
     scratch.resize(rows.len(), 0);
     let (mut n_left, mut n_right) = (0, 0);
     for k in 0..rows.len() {
         let i = rows[k];
-        let l = goes_left(i);
+        if let Some(&ahead) = rows.get(k + PREFETCH_ROWS) {
+            prefetch(col, ahead as usize);
+        }
+        let l = goes_left(col[i as usize]);
         rows[n_left] = i;
         scratch[n_right] = i;
         n_left += usize::from(l);
@@ -927,6 +1047,9 @@ fn partition_in_place(
 
 /// Below this many (sample, feature) pairs histograms are built serially.
 const PARALLEL_HISTOGRAM_WORK: usize = 1 << 16;
+
+/// Rows from which a node's gradient gathers run in parallel.
+const PARALLEL_GATHER_ROWS: usize = 1 << 15;
 
 /// Per-feature gradient/hessian histograms of the rows `indices` (whose
 /// gradient / hessian totals are `totals`), one per entry of
@@ -946,7 +1069,7 @@ fn build_histograms(
     with_counts: bool,
     gradients: &[f64],
     hessians: &[f64],
-    indices: &[usize],
+    indices: &[u32],
     totals: (f64, f64),
     feature_indices: &[usize],
     fixed_bins: &[Option<u8>],
@@ -963,17 +1086,46 @@ fn build_histograms(
         );
         r
     };
-    let ordered: Vec<(f32, f32)> = indices
-        .iter()
-        .map(|&i| (to_f32(gradients[i]), to_f32(hessians[i])))
-        .collect();
-    let rows32: Option<Vec<u32>> =
-        (!all_in_order).then(|| indices.iter().map(|&i| i as u32).collect());
-    let sums = |col: &[u8]| {
-        if with_counts {
-            bin_sums::<true>(col, rows32.as_deref(), &ordered)
+    // The gathers run in parallel on large nodes (order is kept).
+    fn gather<T: Send>(indices: &[u32], f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
+        if indices.len() >= PARALLEL_GATHER_ROWS {
+            indices
+                .par_iter()
+                .with_min_len(4096)
+                .map(|&i| f(i as usize))
+                .collect()
         } else {
-            bin_sums::<false>(col, rows32.as_deref(), &ordered)
+            indices.iter().map(|&i| f(i as usize)).collect()
+        }
+    }
+    // Every hessian equal (and no counts needed): sum the gradients only.
+    let constant_h = (!with_counts)
+        .then(|| {
+            let h = hessians[*indices.first()? as usize];
+            let same = |&i: &u32| hessians[i as usize] == h;
+            let all = if indices.len() >= PARALLEL_GATHER_ROWS {
+                indices.par_iter().with_min_len(4096).all(same)
+            } else {
+                indices.iter().all(same)
+            };
+            all.then_some(to_f32(h))
+        })
+        .flatten();
+    let (ordered, grads): (Vec<(f32, f32)>, Vec<f32>) = match constant_h {
+        Some(_) => (Vec::new(), gather(indices, |i| to_f32(gradients[i]))),
+        None => (
+            gather(indices, |i| (to_f32(gradients[i]), to_f32(hessians[i]))),
+            Vec::new(),
+        ),
+    };
+    let rows32: Option<&[u32]> = (!all_in_order).then_some(indices);
+    let sums = |col: &[u8]| {
+        if let Some(h) = constant_h {
+            bin_sums_constant_hessian(col, rows32, &grads, h)
+        } else if with_counts {
+            bin_sums::<true>(col, rows32, &ordered)
+        } else {
+            bin_sums::<false>(col, rows32, &ordered)
         }
     };
 
@@ -1271,11 +1423,12 @@ fn set_bin(hist: &mut Histogram, bin: u8, grad: f64, hess: f64, count: u32) {
 }
 
 /// Gradient / hessian totals of a node.
-fn node_totals(gradients: &[f64], hessians: &[f64], indices: &[usize]) -> (f64, f64) {
-    (
-        indices.iter().map(|&i| gradients[i]).sum(),
-        indices.iter().map(|&i| hessians[i]).sum(),
-    )
+fn node_totals(gradients: &[f64], hessians: &[f64], indices: &[u32]) -> (f64, f64) {
+    // One pass, each sum in row order (as `Iterator::sum`, from its zero).
+    let zero: f64 = std::iter::empty::<f64>().sum();
+    indices.iter().fold((zero, zero), |(g, h), &i| {
+        (g + gradients[i as usize], h + hessians[i as usize])
+    })
 }
 
 /// Best split of categorical feature `feat` (LightGBM's
@@ -2012,7 +2165,7 @@ struct LeafCandidate {
     node_id: usize,
     gain: f64,
     split: BestSplit,
-    indices: Vec<usize>,
+    indices: Vec<u32>,
     /// The node's histograms (for the children's histogram subtraction).
     hists: Vec<Histogram>,
     depth: usize,
@@ -2069,7 +2222,7 @@ fn build_lgbm_tree(
     bundles: Option<&FeatureBundles>,
     gradients: &[f64],
     hessians: &[f64],
-    root_indices: Vec<usize>,
+    root_indices: Vec<u32>,
     feature_indices: &[usize],
     all_bins: &[FeatureBins],
     params: &LgbmParams,
@@ -2077,7 +2230,7 @@ fn build_lgbm_tree(
     feature_split_count_out: &mut [u32],
     feature_rng: &mut Option<Generator>,
     mut col_sampler: Option<&mut LgbmColSampler>,
-) -> (TreeNode, Vec<Vec<usize>>) {
+) -> (TreeNode, Vec<Vec<u32>>) {
     let mut nodes: Vec<BuildNode> = Vec::new();
 
     // Root is initially a leaf with its value (0 in sklearn, whose root
@@ -2152,7 +2305,7 @@ fn build_lgbm_tree(
         .flatten();
 
     // The rows of the finished leaves.
-    let mut leaf_rows: Vec<Vec<usize>> = Vec::new();
+    let mut leaf_rows: Vec<Vec<u32>> = Vec::new();
     let mut heap: BinaryHeap<LeafCandidate> = BinaryHeap::new();
     if let Some(split) = root_split {
         heap.push(LeafCandidate {
@@ -2197,9 +2350,9 @@ fn build_lgbm_tree(
             .map(|order| categorical_left_mask(order, split.bin_threshold));
         let col = binned_x.column(split.feature);
         let col = col.as_slice().expect("column-major binned matrix");
-        let left = |i: usize| {
+        let left = |bin: u8| {
             goes_left(
-                col[i],
+                bin,
                 split.bin_threshold,
                 split.missing_left,
                 mask.as_deref(),
@@ -2209,7 +2362,7 @@ fn build_lgbm_tree(
         let with_totals = split.lgbm_left_sums.is_none();
         let (left_idx, right_idx, left_totals, right_totals) = {
             let mut indices = indices;
-            let totals = |rows: &[usize]| {
+            let totals = |rows: &[u32]| {
                 if with_totals {
                     row_totals(rows, gradients, hessians)
                 } else {
@@ -2217,7 +2370,7 @@ fn build_lgbm_tree(
                 }
             };
             if params.sklearn_compat || indices.len() <= PARTITION_CHUNK_ROWS {
-                let n_left = partition_in_place(&mut indices, left, &mut Vec::new());
+                let n_left = partition_in_place(&mut indices, col, left, &mut Vec::new());
                 let right = indices.split_off(n_left);
                 let (lt, rt) = (totals(&indices), totals(&right));
                 (indices, right, lt, rt)
@@ -2229,29 +2382,36 @@ fn build_lgbm_tree(
                 let parts: Vec<_> = indices
                     .par_chunks_mut(PARTITION_CHUNK_ROWS)
                     .map_init(Vec::new, |scratch, chunk| {
-                        let n_left = partition_in_place(chunk, left, scratch);
+                        let n_left = partition_in_place(chunk, col, left, scratch);
                         let (l, r) = chunk.split_at(n_left);
                         (n_left, totals(l), totals(r))
                     })
                     .collect();
-                // The left rows are compacted in place (each chunk's move
-                // only overwrites rows already copied), the right ones
-                // copied out.
-                let n_left = parts.iter().map(|p| p.0).sum();
-                let mut right = Vec::with_capacity(indices.len() - n_left);
+                // Each chunk's left and right rows are copied, in parallel,
+                // to their place in the children.
+                let n_left: usize = parts.iter().map(|p| p.0).sum();
+                let mut left_rows = vec![0u32; n_left];
+                let mut right_rows = vec![0u32; indices.len() - n_left];
+                let mut slots = Vec::with_capacity(parts.len());
+                let (mut l_rest, mut r_rest) = (&mut left_rows[..], &mut right_rows[..]);
+                for (k, chunk) in indices.chunks(PARTITION_CHUNK_ROWS).enumerate() {
+                    let nl = parts[k].0;
+                    let (l, lr) = std::mem::take(&mut l_rest).split_at_mut(nl);
+                    let (r, rr) = std::mem::take(&mut r_rest).split_at_mut(chunk.len() - nl);
+                    (l_rest, r_rest) = (lr, rr);
+                    slots.push((chunk, l, r));
+                }
+                slots.into_par_iter().for_each(|(chunk, l, r)| {
+                    let (cl, cr) = chunk.split_at(l.len());
+                    l.copy_from_slice(cl);
+                    r.copy_from_slice(cr);
+                });
                 let (mut lt, mut rt) = ((-0.0f64, -0.0f64), (-0.0f64, -0.0f64));
-                let mut at = 0;
-                for (k, (nl, ls, rs)) in parts.into_iter().enumerate() {
-                    let start = k * PARTITION_CHUNK_ROWS;
-                    let end = (start + PARTITION_CHUNK_ROWS).min(indices.len());
-                    right.extend_from_slice(&indices[start + nl..end]);
-                    indices.copy_within(start..start + nl, at);
-                    at += nl;
+                for (_, ls, rs) in parts {
                     lt = (lt.0 + ls.0, lt.1 + ls.1);
                     rt = (rt.0 + rs.0, rt.1 + rs.1);
                 }
-                indices.truncate(n_left);
-                (indices, right, lt, rt)
+                (left_rows, right_rows, lt, rt)
             }
         };
 
@@ -2615,7 +2775,7 @@ struct LgbmBagging {
     freq: usize,
     /// `(is positive, pos_fraction, neg_fraction)` for balanced bagging.
     balanced: Option<(Vec<bool>, f64, f64)>,
-    bag: Option<Vec<usize>>,
+    bag: Option<Vec<u32>>,
 }
 
 impl LgbmBagging {
@@ -2640,31 +2800,49 @@ impl LgbmBagging {
 
     /// The bag of iteration `iter` (re-drawn on the first iteration and
     /// every `freq` iterations while it is not the whole data).
-    fn rows(&mut self, iter: usize, n: usize) -> Vec<usize> {
+    fn rows(&mut self, iter: usize, n: usize) -> Vec<u32> {
         let redraw = match &self.bag {
             None => true,
             Some(bag) => bag.len() < n && iter % self.freq == 0,
         };
         if redraw {
-            let mut bag = Vec::new();
-            for i in 0..n {
-                let fraction = match &self.balanced {
-                    Some((pos, p, q)) => {
-                        if pos[i] {
-                            *p
-                        } else {
-                            *q
-                        }
-                    }
-                    None => self.fraction,
-                };
-                if f64::from(self.rands[i / LGBM_BAGGING_BLOCK].next_float()) < fraction {
-                    bag.push(i);
-                }
-            }
-            self.bag = Some(bag);
+            // One generator per block of rows: the blocks draw in parallel.
+            use rayon::prelude::*;
+            let (balanced, fraction) = (&self.balanced, self.fraction);
+            let blocks: Vec<Vec<u32>> = self
+                .rands
+                .par_iter_mut()
+                .enumerate()
+                .map(|(b, rand)| {
+                    let start = b * LGBM_BAGGING_BLOCK;
+                    (start..(start + LGBM_BAGGING_BLOCK).min(n))
+                        .filter(|&i| {
+                            let fraction = match balanced {
+                                Some((pos, p, q)) => {
+                                    if pos[i] {
+                                        *p
+                                    } else {
+                                        *q
+                                    }
+                                }
+                                None => fraction,
+                            };
+                            f64::from(rand.next_float()) < fraction
+                        })
+                        .map(|i| i as u32)
+                        .collect()
+                })
+                .collect();
+            self.bag = Some(blocks.concat());
         }
-        self.bag.clone().unwrap_or_default()
+        // A parallel copy (the tree builder partitions its rows in place).
+        use rayon::prelude::*;
+        let bag = self.bag.as_deref().unwrap_or_default();
+        let mut rows = vec![0u32; bag.len()];
+        rows.par_chunks_mut(1 << 16)
+            .zip(bag.par_chunks(1 << 16))
+            .for_each(|(o, b)| o.copy_from_slice(b));
+        rows
     }
 }
 
@@ -2944,7 +3122,8 @@ impl LgbmSamplers {
         n: usize,
         gradients: &mut [&mut [f64]],
         hessians: &mut [&mut [f64]],
-    ) -> Vec<usize> {
+    ) -> Vec<u32> {
+        assert!(u32::try_from(n).is_ok(), "at most 2^32 - 1 rows");
         if let Some(b) = self.bagging.as_mut() {
             return b.rows(iter, n);
         }
@@ -2955,8 +3134,14 @@ impl LgbmSamplers {
                 hessians,
                 self.p.goss_top_rate,
                 self.p.goss_other_rate,
-            ),
-            _ => (0..n).collect(),
+            )
+            .into_iter()
+            .map(|i| i as u32)
+            .collect(),
+            _ => {
+                use rayon::prelude::*;
+                (0..n as u32).into_par_iter().collect()
+            }
         }
     }
 
@@ -3607,9 +3792,11 @@ impl FittedLgbmRegressor {
 /// Round to float32, the precision sklearn keeps gradients and hessians in
 /// (their sums are float64 there too).
 fn round_to_f32(values: &mut [f64]) {
-    for v in values {
-        *v = f64::from(*v as f32);
-    }
+    use rayon::prelude::*;
+    values
+        .par_iter_mut()
+        .with_min_len(1 << 14)
+        .for_each(|v| *v = f64::from(*v as f32));
 }
 
 fn default_one() -> f64 {
@@ -3655,98 +3842,73 @@ fn compute_regression_gradients(
         sklearn_compat,
         ..
     } = *model;
-    let n = y.len();
-    let mut grad = vec![0.0; n];
-    let mut hess = vec![1.0; n];
-
-    match objective {
-        LgbmObjective::Regression => {
-            for i in 0..n {
-                grad[i] = preds[i] - y[i];
-                hess[i] = 1.0;
-            }
-        }
-        LgbmObjective::RegressionL1 => {
-            // LightGBM's sign has sign(0) = 0; leaf outputs are refit to
-            // residual medians afterwards (`renew_leaf_outputs`).
-            for i in 0..n {
-                let r = preds[i] - y[i];
-                grad[i] = match (r == 0.0, sklearn_compat) {
+    // The gradient and hessian of one row (prediction `p`, target `y`).
+    let row = move |y: f64, p: f64| -> (f64, f64) {
+        match objective {
+            LgbmObjective::Regression => (p - y, 1.0),
+            LgbmObjective::RegressionL1 => {
+                // LightGBM's sign has sign(0) = 0; leaf outputs are refit to
+                // residual medians afterwards (`renew_leaf_outputs`).
+                let r = p - y;
+                let g = match (r == 0.0, sklearn_compat) {
                     (false, _) => r.signum(),
                     (true, false) => 0.0,
                     (true, true) => -1.0,
                 };
-                hess[i] = 1.0;
+                (g, 1.0)
             }
-        }
-        LgbmObjective::Huber => {
-            for i in 0..n {
-                let r = preds[i] - y[i];
-                if r.abs() <= huber_delta {
-                    grad[i] = r;
+            LgbmObjective::Huber => {
+                let r = p - y;
+                let g = if r.abs() <= huber_delta {
+                    r
                 } else {
-                    grad[i] = huber_delta * r.signum();
-                }
-                hess[i] = 1.0;
-            }
-        }
-        LgbmObjective::Quantile { alpha } => {
-            // LightGBM: 1 − alpha above the target, −alpha below; sklearn
-            // counts a tie as below.
-            for i in 0..n {
-                let above = if sklearn_compat {
-                    preds[i] > y[i]
-                } else {
-                    preds[i] >= y[i]
+                    huber_delta * r.signum()
                 };
-                grad[i] = if above { 1.0 - alpha } else { -alpha };
-                hess[i] = 1.0;
+                (g, 1.0)
             }
-        }
-        LgbmObjective::Poisson => {
-            for i in 0..n {
-                grad[i] = preds[i].exp() - y[i];
-                hess[i] = (preds[i] + poisson_max_delta_step).exp();
+            LgbmObjective::Quantile { alpha } => {
+                // LightGBM: 1 − alpha above the target, −alpha below; sklearn
+                // counts a tie as below.
+                let above = if sklearn_compat { p > y } else { p >= y };
+                (if above { 1.0 - alpha } else { -alpha }, 1.0)
             }
-        }
-        LgbmObjective::Gamma => {
-            for i in 0..n {
-                let e = y[i] * (-preds[i]).exp();
-                grad[i] = 1.0 - e;
-                hess[i] = e;
+            LgbmObjective::Poisson => (p.exp() - y, (p + poisson_max_delta_step).exp()),
+            LgbmObjective::Gamma => {
+                let e = y * (-p).exp();
+                (1.0 - e, e)
             }
-        }
-        LgbmObjective::Tweedie {
-            variance_power: rho,
-        } => {
-            // LightGBM's RegressionTweedieLoss (no max_delta_step).
-            for i in 0..n {
-                let e1 = ((1.0 - rho) * preds[i]).exp();
-                let e2 = ((2.0 - rho) * preds[i]).exp();
-                grad[i] = -y[i] * e1 + e2;
-                hess[i] = -y[i] * (1.0 - rho) * e1 + (2.0 - rho) * e2;
+            LgbmObjective::Tweedie {
+                variance_power: rho,
+            } => {
+                // LightGBM's RegressionTweedieLoss (no max_delta_step).
+                let e1 = ((1.0 - rho) * p).exp();
+                let e2 = ((2.0 - rho) * p).exp();
+                (-y * e1 + e2, -y * (1.0 - rho) * e1 + (2.0 - rho) * e2)
             }
-        }
-        LgbmObjective::CrossEntropy => {
-            // LightGBM's CrossEntropy::GetGradients, including its float32
-            // `1 - y` and the branch for very negative scores.
-            for i in 0..n {
-                if preds[i] > -37.0 {
-                    let e = (-preds[i]).exp();
-                    let one_minus_y = (1.0f32 - y[i] as f32) as f64;
-                    grad[i] = (one_minus_y - y[i] * e) / (1.0 + e);
-                    hess[i] = e / ((1.0 + e) * (1.0 + e));
+            LgbmObjective::CrossEntropy => {
+                // LightGBM's CrossEntropy::GetGradients, including its
+                // float32 `1 - y` and the branch for very negative scores.
+                if p > -37.0 {
+                    let e = (-p).exp();
+                    let one_minus_y = (1.0f32 - y as f32) as f64;
+                    (
+                        (one_minus_y - y * e) / (1.0 + e),
+                        e / ((1.0 + e) * (1.0 + e)),
+                    )
                 } else {
-                    let e = preds[i].exp();
-                    grad[i] = e - y[i];
-                    hess[i] = e;
+                    let e = p.exp();
+                    (e - y, e)
                 }
             }
+            _ => unreachable!("regressor only supports regression objectives"),
         }
-        _ => unreachable!("regressor only supports regression objectives"),
-    }
-
-    (grad, hess)
+    };
+    use rayon::prelude::*;
+    y.par_iter()
+        .zip(preds)
+        .with_min_len(1 << 14)
+        .map(|(&y, &p)| row(y, p))
+        .unzip()
 }
 
 fn validate_regression_objective(objective: LgbmObjective, y: ArrayView1<f64>) -> Result<()> {
@@ -4544,7 +4706,12 @@ impl LgbmRegressor {
             // gradients of its sampled rows).
             let row_indices = samplers.rows(iter, n, &mut [&mut gradients], &mut [&mut hessians]);
             let feature_indices = samplers.tree_features(p);
-            let refit = refit_percentile(self.objective).map(|a| (a, row_indices.clone()));
+            let refit = refit_percentile(self.objective).map(|a| {
+                (
+                    a,
+                    row_indices.iter().map(|&i| i as usize).collect::<Vec<_>>(),
+                )
+            });
             let (mut tree, leaf_rows) = build_lgbm_tree(
                 &binned_x,
                 bundles.as_ref(),
@@ -8359,7 +8526,7 @@ mod bundling_tests {
         let mut hess: Vec<f64> = (0..300).map(|_| 0.5 + lcg(&mut s)).collect();
         round_to_f32(&mut grad);
         round_to_f32(&mut hess);
-        let rows: Vec<usize> = (0..300).filter(|i| i % 3 != 0).collect();
+        let rows: Vec<u32> = (0..300).filter(|i| i % 3 != 0).collect();
         let feats: Vec<usize> = (0..15).collect();
         let totals = node_totals(&grad, &hess, &rows);
         let plain = build_histograms(

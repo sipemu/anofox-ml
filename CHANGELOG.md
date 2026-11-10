@@ -6,6 +6,22 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM at panel scale (#215)
+
+- `LgbmRegressor` / `LgbmClassifier` fits at 10M × 60 now take 72 s, 1.13×
+  LightGBM 4.7 on 14 threads (they took 96 s), with 4.0 GB peak against
+  LightGBM's 7.2 GB; at 2M rows 1.06–1.08× for regression, Poisson and
+  categorical features. Models are unchanged (all parity suites pass):
+  row indices as `u32`, LightGBM's constant-hessian histograms (gradient
+  sums and counts), prefetching in the histogram and partition passes, a
+  parallel merge of partitioned rows, parallel gradients / bagging draws /
+  ordered-gradient gathers / bag copies, and in-bag score updates from the
+  leaves' rows with only the out-of-bag rows walking the tree.
+- Fits called from a rayon worker (e.g. parallel folds) share the caller's
+  pool and give the same models (tested).
+- `examples/lgbm_panel_bench.rs` and `benchmarks/lgbm_panel_benchmark.py`;
+  results in the README.
+
 ### LightGBM datasets: f32 input, binning once, large data (#214)
 
 - `LgbmDataset`: features binned once (one byte per value) from `f64` or

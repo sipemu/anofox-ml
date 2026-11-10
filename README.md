@@ -279,6 +279,33 @@ physical cores, which `n_jobs=None` uses.
 python benchmarks/boosting_benchmark.py   # needs the anofox_ml_python wheel, lightgbm, scikit-learn
 ```
 
+#### Panel scale (#215)
+
+`examples/lgbm_panel_bench.rs` against `benchmarks/lgbm_panel_benchmark.py`
+(LightGBM 4.7.0), on the shapes of a global forecasting model: `rows × 60`
+float32 features, 200 iterations, 31 leaves, bagging 0.9 every 5
+iterations, feature fraction 0.9, 14 threads (LightGBM auto-picks its
+col-wise histograms here). Same laptop, minimum of 2–3 alternating runs.
+anofox-ml bins through `LgbmDataset` from f32; its peak includes the raw
+matrix, as LightGBM's does.
+
+| Data | fit (s) anofox / LightGBM | predict (s) anofox / LightGBM | peak memory anofox / LightGBM |
+|---|--:|--:|--:|
+| 2M × 60 regression | 14.2 / **13.2** | – | – |
+| 2M × 60, 3 categorical (10 / 100 / 1000 levels) | 16.1 / **15.1** | – | – |
+| 2M × 60 Poisson | 16.0 / **15.1** | – | – |
+| 10M × 60 regression | 71.7 / **63.7** (1.13×) | **7.4** / 12.0 | **4.0 GB** / 7.2 GB |
+
+Single-threaded at 200 000 rows anofox-ml is slightly faster (7.5 s against
+7.8 s). Its histograms keep LightGBM's per-bin summation order (exact
+parity), so they scale over features, not rows. Before #215 the 10M fit
+took 96 s, and the 1M fit took 11.2 s against 7.0 s.
+
+```bash
+cargo run --release --example lgbm_panel_bench -- 10000000 [cat] [poisson] [threads=N]
+python benchmarks/lgbm_panel_benchmark.py 10000000 [cat] [poisson] [threads=N]
+```
+
 The CatBoost-style estimators were checked on the same laptop against
 catboost 1.2.10 with `thread_count=1`. The fit used 20 000 rows (5 numeric
 and 3 categorical features with 50 levels), 300 trees of depth 6, and
