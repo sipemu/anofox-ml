@@ -449,6 +449,41 @@ mod tests {
     }
 
     #[test]
+    fn fits_inside_a_rayon_pool_equal_standalone_fits() {
+        // Per-fold fits run in parallel by the caller share its pool (no
+        // pool of their own) and give the same models.
+        use rayon::prelude::*;
+        let (x, y) = xy();
+        let models: Vec<LgbmRegressor> = (0..4)
+            .map(|k| {
+                LgbmRegressor::new()
+                    .with_n_estimators(10)
+                    .with_subsample(0.8)
+                    .with_subsample_freq(1)
+                    .with_seed(k)
+            })
+            .collect();
+        let alone: Vec<Array1<f64>> = models
+            .iter()
+            .map(|m| m.fit(&x, &y).unwrap().predict(&x).unwrap())
+            .collect();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+        let pooled: Vec<Array1<f64>> = pool.install(|| {
+            models
+                .par_iter()
+                .map(|m| {
+                    assert_eq!(rayon::current_num_threads(), 3);
+                    m.fit(&x, &y).unwrap().predict(&x).unwrap()
+                })
+                .collect()
+        });
+        assert_eq!(pooled, alone);
+    }
+
+    #[test]
     fn builder_checks_its_rows() {
         let (x, _) = xy();
         let m = LgbmRegressor::new();
