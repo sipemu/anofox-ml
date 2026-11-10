@@ -3898,7 +3898,7 @@ impl HeapKey for SplitCandidate {
     }
 }
 
-/// CatBoost's `GreedyTensorSearchLossguide` (plain boosting, no CTRs): the
+/// CatBoost's `GreedyTensorSearchLossguide` (plain boosting, CTRs too): the
 /// leaf of the largest gain is split next (libc++'s `priority_queue`)
 /// until `max_leaves`; its children are scored if within `max_depth` with
 /// at least `min_data` sampled rows (the smaller one directly, the other as
