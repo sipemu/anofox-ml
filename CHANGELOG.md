@@ -22,6 +22,29 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style ranking: pairwise scoring (#210)
+
+- `CatBoostRegressionLoss::PairLogitPairwise` and `YetiRankPairwise {
+  permutations, decay }`: splits and leaves scored on the pairs, as
+  CatBoost's `IsPairwiseScoring` losses. Per-leaf-pair bucket statistics
+  (`ComputePairwiseStats`, binary features packed 8 to a candidate), the
+  `2L` pairwise systems solved per split (`CalculatePairwiseScore`,
+  reference LAPACK `dposv`, SSE summation order), pairwise leaf values
+  (`CalculatePairwiseLeafValues` with `bayesian_matrix_reg`), and the
+  pairs' bootstrap (Bernoulli / Bayesian per pair). CatBoost's defaults:
+  Gradient leaves (PairLogitPairwise 50 steps from 200 iterations,
+  `l2_leaf_reg` 5; YetiRankPairwise 1 step, 0), `border_count` 32,
+  `random_strength` 0, Bernoulli bootstrap of half the pairs. Plain, L2 /
+  border count, Bernoulli, Bayesian, depth 6, 50-step and full-default
+  fits match catboost 1.2.10's `CatBoostRanker` to ~3e-15. Plain symmetric
+  trees on numeric features up to depth 6.
+- **Breaking:** `border_count` and `random_strength` are now `Option`s;
+  `None` is CatBoost's default (254 and 1, or 32 and 0 for pairwise
+  scoring). New `bayesian_matrix_reg` (default 0.1).
+- Python: `CatBoostRanker(loss_function="PairLogitPairwise" |
+  "YetiRankPairwise")`; `border_count` and `random_strength` default to
+  None.
+
 ### CatBoost-style ranking: PFound / NDCG eval metrics (#210)
 
 - YetiRank eval sets (`fit_with_groups_eval`): CatBoost's objective

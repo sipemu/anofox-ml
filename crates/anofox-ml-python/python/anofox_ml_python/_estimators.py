@@ -775,12 +775,12 @@ class _CatBoost(BaseEstimator):
     ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""
 
     def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=None,
-                 border_count=254, score_function="Cosine", leaf_estimation_method=None,
+                 border_count=None, score_function="Cosine", leaf_estimation_method=None,
                  boost_from_average=None, cat_features=None, one_hot_max_size=None,
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
                  max_ctr_complexity=None, leaf_estimation_iterations=None,
                  leaf_estimation_backtracking="AnyImprovement", has_time=False, random_seed=0,
-                 random_strength=1.0, bootstrap_type=None, subsample=None,
+                 random_strength=None, bootstrap_type=None, subsample=None,
                  bagging_temperature=1.0, mvs_reg=None, monotone_constraints=None,
                  model_shrink_rate=None, model_shrink_mode="Constant", class_weights=None,
                  auto_class_weights=None, loss_function=None, use_best_model=None,
@@ -830,7 +830,7 @@ class _CatBoost(BaseEstimator):
         params = {
             "iterations": int(self.iterations),
             "depth": int(self.depth),
-            "border_count": int(self.border_count),
+
             "score_function": _choice(self.score_function, {"Cosine": "Cosine", "L2": "L2"},
                                       "score_function"),
         }
@@ -857,7 +857,10 @@ class _CatBoost(BaseEstimator):
             params["learning_rate"] = float(self.learning_rate)
         params["has_time"] = bool(self.has_time)
         params["random_seed"] = int(self.random_seed)
-        params["random_strength"] = float(self.random_strength)
+        if self.random_strength is not None:
+            params["random_strength"] = float(self.random_strength)
+        if self.border_count is not None:
+            params["border_count"] = int(self.border_count)
         if self.bootstrap_type is not None:
             params["bootstrap_type"] = _choice(
                 self.bootstrap_type,
@@ -1069,9 +1072,10 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
 
 class CatBoostRanker(CatBoostRegressor):
     """catboost's ``CatBoostRanker``: ``loss_function="YetiRank"`` (the
-    default; ``"YetiRank:permutations=10;decay=0.85"``, plain boosting, no
-    eval set), ``"PairLogit"`` (no sample weights for either) or
-    ``"QueryRMSE"``:
+    default; ``"YetiRank:permutations=10;decay=0.85"``, plain boosting),
+    ``"PairLogit"`` (no sample weights for either), ``"QueryRMSE"``, or the
+    pairwise-scoring ``"YetiRankPairwise"`` / ``"PairLogitPairwise"``
+    (plain symmetric trees, numeric features):
     ``fit(X, y, group_id=...)`` takes a query id per row, with the rows of
     a query consecutive. ``predict`` gives the ranking scores."""
 
@@ -1112,11 +1116,11 @@ class CatBoostRanker(CatBoostRegressor):
     def _ranking_loss(self):
         name, _, rest = str(self.loss_function or "YetiRank").partition(":")
         args = dict(kv.split("=", 1) for kv in rest.split(";") if kv)
-        if name in ("QueryRMSE", "PairLogit") and not args:
+        if name in ("QueryRMSE", "PairLogit", "PairLogitPairwise") and not args:
             return name
-        if name == "YetiRank" and set(args) <= {"permutations", "decay"}:
-            return {"YetiRank": {"permutations": int(args.get("permutations", 10)),
-                                 "decay": float(args.get("decay", 0.85))}}
+        if name in ("YetiRank", "YetiRankPairwise") and set(args) <= {"permutations", "decay"}:
+            return {name: {"permutations": int(args.get("permutations", 10)),
+                           "decay": float(args.get("decay", 0.85))}}
         raise ValueError(f"unsupported loss_function {self.loss_function!r}")
 
 

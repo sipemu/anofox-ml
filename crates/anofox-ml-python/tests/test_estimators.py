@@ -1319,6 +1319,25 @@ def test_catboost_ranker_yetirank_matches_catboost():
         am.CatBoostRanker(**kw, boosting_type="Ordered").fit(X, y, group_id=gid)
 
 
+def test_catboost_ranker_pairwise_scoring_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    r = np.random.RandomState(14)
+    sizes = r.randint(1, 12, size=40)
+    gid = np.repeat(np.arange(40), sizes)
+    n = len(gid)
+    X = np.column_stack([r.normal(size=(n, 3)), r.randint(0, 2, size=n)])
+    y = np.digitize(X[:, 0] - X[:, 1] + r.normal(size=n), [-1, 0, 1]).astype(float)
+    for loss in ("PairLogitPairwise", "YetiRankPairwise"):
+        kw = dict(iterations=30, depth=4, random_seed=0, loss_function=loss)
+        ref = cb.CatBoostRanker(**kw, thread_count=1, verbose=0,
+                                allow_writing_files=False).fit(X, y, group_id=gid)
+        ours = am.CatBoostRanker(**kw).fit(X, y, group_id=gid)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+    with pytest.raises(ValueError):
+        am.CatBoostRanker(loss_function="YetiRankPairwise", grow_policy="Depthwise",
+                          iterations=3).fit(X, y, group_id=gid)
+
+
 def test_catboost_multirmse_matches_catboost():
     cb = pytest.importorskip("catboost")
     r = np.random.RandomState(10)

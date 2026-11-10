@@ -592,7 +592,12 @@ def generate():
         X_test = Xd[::4]
         case = {
             "name": name, "kind": "regressor",
-            "params": {k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+            "params": dict({k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+                           # COMMON settings left at catboost's defaults.
+                           **({"defaults": [k for k in ("random_strength", "bootstrap_type")
+                                            if k not in params]}
+                              if any(k not in params for k in ("random_strength",
+                                                                "bootstrap_type")) else {})),
             "X": nulls(Xd), "y": y.tolist(), "group": sizes,
             "sample_weight": None if sw is None else sw.tolist(),
             "X_test": nulls(X_test), "predictions": m.predict(typed(X_test)).tolist(),
@@ -662,6 +667,29 @@ def generate():
               eval_data=(Xv, yv_rel, sizes_v))
     add_group("eval_yetirank_pfound", yr_over, X, y_rel / 3, sizes,
               eval_data=(Xv, yv_rel / 3, sizes_v))
+    # Pairwise scoring (#210): splits and leaves scored on the pairs
+    # (Gradient leaves, border_count 32, Bernoulli 0.5 pairs by default);
+    # X has a binary feature for the binary-pack scores.
+    Xb = np.column_stack([X, (X[:, 0] > 0.3).astype(float)])
+    plp = dict(base, loss_function="PairLogitPairwise")
+    add_group("loss_pair_logit_pairwise", plp, Xb, y_rel, sizes)
+    add_group("loss_pair_logit_pairwise_l2", dict(plp, l2_leaf_reg=1.0, border_count=16), Xb, y_rel, sizes)
+    add_group("loss_pair_logit_pairwise_bernoulli",
+              dict(plp, bootstrap_type="Bernoulli", subsample=0.5), Xb, y_rel, sizes)
+    add_group("loss_pair_logit_pairwise_depth6", dict(plp, depth=6, iterations=10), Xb, y_rel,
+              sizes)
+    # From 200 iterations: 50 Gradient leaf steps with backtracking.
+    add_group("loss_pair_logit_pairwise_steps", dict(plp, iterations=200, depth=3,
+              learning_rate=0.1), Xb, y_rel, sizes)
+    yrp = dict(base, loss_function="YetiRankPairwise")
+    add_group("loss_yetirank_pairwise", yrp, Xb, y_rel, sizes)
+    add_group("loss_yetirank_pairwise_bayesian",
+              dict(yrp, bootstrap_type="Bayesian", bagging_temperature=1.0), Xb, y_rel, sizes)
+    pw_defaults = {k: v for k, v in COMMON.items() if k not in ("random_strength", "bootstrap_type")}
+    add_group("loss_pair_logit_pairwise_defaults", dict(pw_defaults, iterations=60, depth=4,
+              loss_function="PairLogitPairwise", has_time=False), Xb, y_rel, sizes)
+    add_group("loss_yetirank_pairwise_defaults", dict(pw_defaults, iterations=60, depth=4,
+              loss_function="YetiRankPairwise", has_time=False), Xb, y_rel, sizes)
     return out
 
 
