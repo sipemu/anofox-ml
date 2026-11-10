@@ -1244,3 +1244,17 @@ def test_catboost_one_vs_all_matches_catboost():
     np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
                                atol=1e-14)
     np.testing.assert_array_equal(ours.predict(X), ref.predict(X).ravel())
+
+
+def test_catboost_uncertainty_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    r = np.random.RandomState(9)
+    X = r.normal(size=(300, 3))
+    y = X[:, 0] + r.normal(size=300) * np.exp(0.4 * X[:, 1])
+    kw = dict(iterations=30, depth=4, loss_function="RMSEWithUncertainty", random_seed=0)
+    ref = cb.CatBoostRegressor(**kw, thread_count=1, verbose=0, random_strength=0,
+                               bootstrap_type="No", has_time=True,
+                               allow_writing_files=False).fit(X, y)
+    ours = am.CatBoostRegressor(**kw, random_strength=0, bootstrap_type="No",
+                                has_time=True).fit(X, y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)

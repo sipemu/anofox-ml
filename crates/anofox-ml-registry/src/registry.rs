@@ -1054,6 +1054,8 @@ registry! {
             c.fit_with_eval(x, need_y(K, y)?, w, eval)
         },
         predict: |m, x| m.predict(x),
+        // RMSEWithUncertainty: the predicted standard deviation.
+        predict_std: |m, x| m.predict_uncertainty(x).map(|u| u.column(1).mapv(f64::sqrt)),
     }
     CatBoostClassifier {
         config: ensemble::CatBoostClassifier = Default::default(),

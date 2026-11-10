@@ -221,6 +221,7 @@ fn catboost_models_match_catboost() {
                     "Huber" => CatBoostRegressionLoss::Huber { delta: value() },
                     "LogCosh" => CatBoostRegressionLoss::LogCosh,
                     "Lq" => CatBoostRegressionLoss::Lq { q: value() },
+                    "RMSEWithUncertainty" => CatBoostRegressionLoss::RmseWithUncertainty,
                     other => panic!("unknown loss {other}"),
                 });
             }
@@ -231,10 +232,17 @@ fn catboost_models_match_catboost() {
                 None => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
             };
             check_eval(f.eval_metrics(), f.n_estimators());
-            worst(
-                f.predict(&x_test).unwrap(),
-                json_to_array1(&case["predictions"]),
-            )
+            if p["loss_function"] == "RMSEWithUncertainty" {
+                worst(
+                    f.predict_uncertainty(&x_test).unwrap(),
+                    array2_with_nan(&case["predictions"]),
+                )
+            } else {
+                worst(
+                    f.predict(&x_test).unwrap(),
+                    json_to_array1(&case["predictions"]),
+                )
+            }
         } else {
             let p = &case["params"];
             let mut m = configure!(CatBoostClassifier::new(), p);

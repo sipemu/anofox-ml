@@ -529,6 +529,16 @@ def generate():
     add("loss_ova_defaults", "classifier",
         dict(COMMON, iterations=60, depth=4, loss_function="MultiClassOneVsAll",
              random_strength=1.0, has_time=False), X, y5)
+    # RMSEWithUncertainty (#209): mean and log standard deviation, starting
+    # from the target's mean and log std; predictions are [mean, variance].
+    y_het = eta + rng.normal(size=n) * np.exp(0.4 * X[:, 1])
+    unc = dict(base, loss_function="RMSEWithUncertainty")
+    add("loss_uncertainty", "regressor", unc, X, y_het)
+    add("loss_uncertainty_weighted", "regressor", unc, X, y_het, sw=weights)
+    add("loss_uncertainty_ordered", "regressor", dict(unc, boosting_type="Ordered"), X, y_het)
+    add("loss_uncertainty_defaults", "regressor",
+        dict(COMMON, iterations=60, depth=4, loss_function="RMSEWithUncertainty",
+             random_strength=1.0, has_time=False, bootstrap_type="MVS"), X, y_het)
     return out
 
 
