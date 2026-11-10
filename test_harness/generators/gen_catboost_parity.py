@@ -825,6 +825,23 @@ def generate():
                processing([{"dictionary_id": "W", "gram_order": "1"}],
                           [{"dictionaries_names": ["W"], "feature_calcers": ["BoW"]}],
                           delimiter=","), [t2], y_rare, "regressor")
+    # YetiRank with several leaf steps (#232): the model's leaves redraw the
+    # pairs every step, the folds keep theirs.
+    add_group("loss_yetirank_steps", dict(yr, leaf_estimation_iterations=3), X, y_rel, sizes)
+    add_group("loss_yetirank_steps_permuted", dict(yr, leaf_estimation_iterations=4,
+              has_time=False, cat_features=cat_cols), Xc, y_rel, sizes)
+    add_group("loss_yetirank_steps_defaults", dict(COMMON, iterations=60, depth=4,
+              loss_function="YetiRank", random_strength=1.0, has_time=False,
+              bootstrap_type="MVS", leaf_estimation_iterations=2), X, y_rel, sizes)
+    # Ordered YetiRank (#232): pairs per body / tail part.
+    add_group("loss_yetirank_ordered", dict(yr, boosting_type="Ordered"), X, y_rel, sizes)
+    add_group("loss_yetirank_ordered_permuted", dict(yr, boosting_type="Ordered", has_time=False,
+              cat_features=cat_cols), Xc, y_rel, sizes)
+    add_group("loss_yetirank_ordered_steps", dict(yr, boosting_type="Ordered", has_time=False,
+              leaf_estimation_iterations=3), X, y_rel, sizes)
+    add_group("loss_yetirank_ordered_defaults", dict(COMMON, iterations=60, depth=4,
+              loss_function="YetiRank", random_strength=1.0, has_time=False,
+              boosting_type="Ordered", bootstrap_type="Bayesian"), X, y_rel, sizes)
     return out
 
 

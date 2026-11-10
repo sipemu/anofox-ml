@@ -2871,6 +2871,10 @@ struct ScorePart<'a> {
     body: usize,
     tail: usize,
     scaled_l2: f64,
+    /// The part's own (body, scored) row weights: ordered YetiRank's pairs
+    /// per part (`bt.PairwiseWeights` / `SamplePairwiseWeights`). `None`:
+    /// the fold's weights and the sample's.
+    weights: Option<(&'a [f64], &'a [f64])>,
 }
 
 /// Bucket statistics: weighted derivative and weight sums of the scored
@@ -3333,6 +3337,7 @@ fn grow_tree(
                     }
                 }
                 for (pi, part) in parts.iter().enumerate().filter(|_| plain_rows.is_none()) {
+                    let (bw, sw) = part.weights.unwrap_or((w, &sample.weights));
                     for i in 0..part.tail {
                         if !sample.taken[i] {
                             continue;
@@ -3342,10 +3347,10 @@ fn grow_tree(
                             let h = &mut hist[(pi * k + d) * leaves * nb + cell];
                             if i < part.body {
                                 h.sd += part.wder[i * k + d];
-                                h.count += w[i];
+                                h.count += bw[i];
                             } else {
                                 h.swd += part.swder[i * k + d];
-                                h.sw += sample.weights[i];
+                                h.sw += sw[i];
                             }
                         }
                     }
@@ -4317,6 +4322,10 @@ struct LeafProblem<'a> {
     exact_weights: &'a [f64],
     /// Query groups (querywise losses; else empty).
     groups: &'a Groups,
+    /// YetiRank's pair seeds per leaf step (`CalcLeafValuesSimple` draws
+    /// one per step, at the unmoved `approx`): steps after the first redraw
+    /// the pairs. Empty: the pairs of `groups` in every step.
+    yeti_seeds: &'a [u64],
 }
 
 /// CatBoost's `CalculateWeightedTargetVariance` (float32 squares).
@@ -4450,7 +4459,9 @@ fn estimate_leaves(
         return (step, 0);
     }
     let mut steps = 0;
-    let backtracking = p.backtracking && p.leaf_iterations > 1;
+    // CatBoost forces YetiRank's backtracking off (it has no metric).
+    let backtracking = p.backtracking && p.leaf_iterations > 1 && lp.loss.yeti_rank().is_none();
+    let mut redrawn: Option<(Groups, Vec<f64>)> = None;
     // Logloss: the approximations' exponentials and logarithms, cached for
     // the base and the current point (the metric is evaluated many times).
     let logloss = lp.loss == Loss::Logloss;
@@ -4483,18 +4494,36 @@ fn estimate_leaves(
     let mut it = 0;
     while it < p.leaf_iterations {
         steps += 1;
+        if let (Some(&seed), Some((permutations, decay))) = (
+            lp.yeti_seeds.get(it).filter(|_| it > 0),
+            lp.loss.yeti_rank(),
+        ) {
+            let groups = yeti_rank_groups(
+                &lp.groups.queries,
+                lp.target,
+                &lp.approx[..rows],
+                rows,
+                seed,
+                permutations,
+                decay,
+            );
+            let weights = groups.pair_weights(rows);
+            redrawn = Some((groups, weights));
+        }
+        let (groups, weights) = redrawn
+            .as_ref()
+            .map_or((lp.groups, lp.weights), |(g, w)| (g, w.as_slice()));
         let ders = if logloss && !point_exp.is_empty() {
-            logloss_ders_at(lp.target, &point_exp, lp.weights)
+            logloss_ders_at(lp.target, &point_exp, weights)
         } else {
-            lp.loss
-                .all_ders(lp.target, &point, lp.weights, rows, lp.groups)
+            lp.loss.all_ders(lp.target, &point, weights, rows, groups)
         };
-        let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
+        let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, weights, rows);
         let mut step = vec![0.0; n_leaves * k];
         if lp.loss.pairwise_scoring() {
             // CatBoost's `CalculatePairwiseLeafValues` of the leaves' pair
             // weights and derivative sums.
-            let weights = pairwise_weight_sums(lp.groups, lp.leaf_of, n_leaves, rows);
+            let weights = pairwise_weight_sums(groups, lp.leaf_of, n_leaves, rows);
             step = pairwise_leaf_values(&weights, &sums.der, p.l2_leaf_reg, p.pairwise_prior);
         } else if lp.orders.is_empty() {
             for (leaf, o) in step.chunks_mut(k).enumerate() {
@@ -5055,24 +5084,31 @@ fn update_fold(
     seed: u64,
 ) {
     let k = loss.dims();
-    if let Some((permutations, decay)) = loss.yeti_rank() {
-        // `CalcApproxDeltaSimple`: pairs drawn at the fold's scores.
-        let seed = seed_vector(fold.tails.len(), seed)[0];
-        let n = fold.weights.len();
-        fold.groups = yeti_rank_groups(
-            &fold.groups.queries,
-            &fold.target,
-            &fold.approx[0],
-            n,
-            seed,
-            permutations,
-            decay,
-        );
-        fold.weights = fold.groups.pair_weights(n);
-    }
-    let (target, weights) = (&fold.target, &fold.weights);
+    let n = fold.weights.len();
+    // `CalcApproxDeltaSimple`: YetiRank's pairs drawn per body / tail part
+    // at its scores (its seed, the same in every leaf step).
+    let seeds = seed_vector(fold.tails.len(), seed);
+    let (target, fold_weights) = (&fold.target, &fold.weights);
     let exact_weights = &fold.sample_weights;
-    for (&(body, tail, bw), a) in fold.tails.iter().zip(&mut fold.approx) {
+    for (b, (&(body, tail, bw), a)) in fold.tails.iter().zip(&mut fold.approx).enumerate() {
+        let redrawn = loss.yeti_rank().map(|(permutations, decay)| {
+            let groups = yeti_rank_groups(
+                &fold.groups.queries,
+                target,
+                &a[..],
+                tail,
+                seeds[b],
+                permutations,
+                decay,
+            );
+            let weights = groups.pair_weights(n);
+            (groups, weights)
+        });
+        let (groups, weights) = redrawn
+            .as_ref()
+            .map_or((&fold.groups, fold_weights.as_slice()), |(g, w)| {
+                (g, w.as_slice())
+            });
         let lp = LeafProblem {
             loss,
             target,
@@ -5085,7 +5121,8 @@ fn update_fold(
             moving: false,
             orders,
             exact_weights,
-            groups: &fold.groups,
+            groups,
+            yeti_seeds: &[],
         };
         if k == 1 {
             // Each prefix's approximation moves by the leaf values of its
@@ -5397,26 +5434,39 @@ fn boost(
         let taken = (rng.gen() % n_folds as u64) as usize;
         let der_seed = rng.gen(); // the derivatives' seeds
         let fold = &mut folds[taken];
+        // `CalcWeightedDerivatives`: YetiRank's pairs drawn per body / tail
+        // part at its scores, over its queries (each part's seed).
+        let mut yeti_parts: Vec<(Groups, Vec<f64>)> = Vec::new();
         if let Some((permutations, decay)) = loss.yeti_rank() {
-            // `CalcWeightedDerivatives`: pairs drawn at the fold's scores
-            // (one body / tail: no ordered boosting).
-            let seed = seed_vector(fold.tails.len(), der_seed)[0];
-            fold.groups = yeti_rank_groups(
-                &fold.groups.queries,
-                &fold.target,
-                &fold.approx[0],
-                n,
-                seed,
-                permutations,
-                decay,
-            );
-            fold.weights = fold.groups.pair_weights(n);
+            let seeds = seed_vector(fold.tails.len(), der_seed);
+            for (b, (&(_, tail, _), a)) in fold.tails.iter().zip(&fold.approx).enumerate() {
+                let groups = yeti_rank_groups(
+                    &fold.groups.queries,
+                    &fold.target,
+                    a,
+                    tail,
+                    seeds[b],
+                    permutations,
+                    decay,
+                );
+                let weights = groups.pair_weights(n);
+                yeti_parts.push((groups, weights));
+            }
+            if yeti_parts.len() == 1 {
+                let (groups, weights) = yeti_parts.pop().expect("one part");
+                fold.groups = groups;
+                fold.weights = weights;
+            }
         }
         let ders: Vec<Ders> = fold
             .tails
             .iter()
             .zip(&fold.approx)
-            .map(|(&(_, t, _), a)| loss.all_ders(&fold.target, a, &fold.weights, t, &fold.groups))
+            .enumerate()
+            .map(|(b, (&(_, t, _), a))| match yeti_parts.get(b) {
+                Some((groups, weights)) => loss.all_ders(&fold.target, a, weights, t, groups),
+                None => loss.all_ders(&fold.target, a, &fold.weights, t, &fold.groups),
+            })
             .collect();
         let previous = trees
             .last()
@@ -5444,17 +5494,32 @@ fn boost(
                     .collect()
             })
             .collect();
+        // Ordered YetiRank: each part's scored rows weigh its pairs times
+        // the bootstrap (`CalcWeightedData`, float32).
+        let part_sample: Vec<Vec<f64>> = yeti_parts
+            .iter()
+            .map(|(_, w)| {
+                w.iter()
+                    .zip(&sample.boot)
+                    .map(|(&w, &b)| f64::from(w as f32 * b as f32))
+                    .collect()
+            })
+            .collect();
         let parts: Vec<ScorePart<'_>> = fold
             .tails
             .iter()
             .zip(&ders)
             .zip(&sampled)
-            .map(|((&(body, tail, bw), d), sd)| ScorePart {
+            .enumerate()
+            .map(|(b, ((&(body, tail, bw), d), sd))| ScorePart {
                 wder: &d.der,
                 swder: sd,
                 body: if p.ordered { body } else { 0 },
                 tail,
                 scaled_l2: p.l2_leaf_reg * (bw / body as f64),
+                weights: yeti_parts
+                    .get(b)
+                    .map(|(_, w)| (w.as_slice(), part_sample[b].as_slice())),
             })
             .collect();
         let std = score_std(&ders, &fold.tails, p.ordered, n, iteration, &p);
@@ -5534,15 +5599,18 @@ fn boost(
             .q
             .tree_leaves(&splits, &children, &mut average.cache);
         let mut seeded_steps = 0;
+        let mut yeti_seeds = Vec::new();
         if let Some((permutations, decay)) = loss.yeti_rank() {
-            // `CalcLeafValuesSimple`'s seed of its one step.
-            seeded_steps = 1;
+            // `CalcLeafValuesSimple`'s seed of every step (no backtracking:
+            // all steps run), the pairs at the unmoved approximations.
+            seeded_steps = p.leaf_iterations;
+            yeti_seeds = (0..p.leaf_iterations).map(|_| rng.gen()).collect();
             average.groups = yeti_rank_groups(
                 &average.groups.queries,
                 &average.target,
                 &approx,
                 n,
-                rng.gen(),
+                yeti_seeds[0],
                 permutations,
                 decay,
             );
@@ -5562,6 +5630,7 @@ fn boost(
             // The averaging fold is never bootstrapped.
             exact_weights: &unit_weights,
             groups: &average.groups,
+            yeti_seeds: &yeti_seeds,
         };
         let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
@@ -7245,17 +7314,14 @@ impl CatBoostRegressor {
             if permutations == 0 || !(decay > 0.0 && decay <= 1.0) {
                 return invalid("YetiRank needs permutations >= 1 and decay in (0, 1]");
             }
-            // Not ported: pairs per body / tail prefix, the PFound / NDCG
-            // eval metrics, pairs per leaf iteration.
-            if self.boosting_type == CatBoostBoostingType::Ordered {
-                return invalid("YetiRank supports plain boosting only");
-            }
-            if self.leaf_estimation_iterations.is_some_and(|i| i != 1)
-                || self
-                    .leaf_estimation_method
-                    .is_some_and(|m| m != CatBoostLeafEstimation::Newton)
+            if self
+                .leaf_estimation_method
+                .is_some_and(|m| m != CatBoostLeafEstimation::Newton)
             {
-                return invalid("YetiRank takes one Newton leaf step");
+                return invalid("YetiRank takes Newton leaf steps");
+            }
+            if self.leaf_estimation_iterations == Some(0) {
+                return invalid("leaf_estimation_iterations must be at least 1");
             }
         }
         let use_best = self.use_best_model_with(eval.as_ref().map(|e| &e.0), x.ncols())?;
@@ -8666,7 +8732,7 @@ mod tests {
         assert!(pl
             .fit_with_groups(x.view(), labels.view(), Some(labels.view()), &groups)
             .is_err());
-        // YetiRank: plain boosting, one Newton step; NDCG on an eval set.
+        // YetiRank: plain or ordered, Newton steps; NDCG on an eval set.
         let yr = CatBoostRegressor::new()
             .with_iterations(5)
             .with_loss_function(CatBoostRegressionLoss::YetiRank {
@@ -8679,6 +8745,12 @@ mod tests {
         assert!(yr
             .clone()
             .with_boosting_type(CatBoostBoostingType::Ordered)
+            .with_leaf_estimation_iterations(2)
+            .fit_with_groups(x.view(), labels.view(), None, &groups)
+            .is_ok());
+        assert!(yr
+            .clone()
+            .with_leaf_estimation_method(CatBoostLeafEstimation::Gradient)
             .fit_with_groups(x.view(), labels.view(), None, &groups)
             .is_err());
         let eval = CatBoostEvalSet {

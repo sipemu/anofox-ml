@@ -1190,7 +1190,7 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
 
 class CatBoostRanker(CatBoostRegressor):
     """catboost's ``CatBoostRanker``: ``loss_function="YetiRank"`` (the
-    default; ``"YetiRank:permutations=10;decay=0.85"``, plain boosting),
+    default; ``"YetiRank:permutations=10;decay=0.85"``),
     ``"PairLogit"`` (no sample weights for either), ``"QueryRMSE"``, or the
     pairwise-scoring ``"YetiRankPairwise"`` / ``"PairLogitPairwise"``
     (plain symmetric trees, numeric features):
