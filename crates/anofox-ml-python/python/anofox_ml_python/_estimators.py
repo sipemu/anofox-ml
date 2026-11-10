@@ -665,7 +665,8 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
     """``objective``: ``None`` / ``"regression"``, ``"regression_l1"``,
     ``"huber"`` (``alpha``), ``"quantile"`` (``alpha``), ``"poisson"``,
     ``"gamma"``, ``"tweedie"`` (``tweedie_variance_power``) or
-    ``"cross_entropy"`` (targets in [0, 1])."""
+    ``"cross_entropy"`` (targets in [0, 1]). ``linear_tree=True`` fits a
+    ridge model (``linear_lambda``) in every leaf, as LightGBM."""
 
     _kind = "LgbmRegressor"
 
@@ -676,7 +677,7 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
                  uniform_drop=False, xgboost_dart_mode=False, drop_seed=4, enable_bundle=True,
                  n_jobs=None, subsample=1.0, subsample_freq=0, feature_fraction_bynode=1.0,
                  top_rate=0.2, other_rate=0.1, objective=None, alpha=0.9,
-                 tweedie_variance_power=1.5):
+                 tweedie_variance_power=1.5, linear_tree=False, linear_lambda=0.0):
         super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
                          min_split_gain, min_child_weight, min_child_samples,
                          colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
@@ -686,6 +687,8 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
         self.objective = objective
         self.alpha = alpha
         self.tweedie_variance_power = tweedie_variance_power
+        self.linear_tree = linear_tree
+        self.linear_lambda = linear_lambda
 
     def _rust_params(self, X, y):
         p = super()._rust_params(X, y)
@@ -702,6 +705,8 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
             p["objective"] = _choice(obj, simple, "objective")
         if obj == "huber":
             p["huber_delta"] = float(self.alpha)
+        p["linear_tree"] = bool(self.linear_tree)
+        p["linear_lambda"] = float(self.linear_lambda)
         return p
 
 

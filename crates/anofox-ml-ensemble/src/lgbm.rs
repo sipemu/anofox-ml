@@ -29,6 +29,7 @@ use std::collections::BinaryHeap;
 
 mod custom;
 mod dataset;
+mod linear;
 pub use custom::{FittedLgbmBooster, LgbmCustomObjective};
 use dataset::BinningSettings;
 pub use dataset::{LgbmDataset, LgbmDatasetBuilder, LgbmFloat};
@@ -349,6 +350,7 @@ fn compute_bins(
         categorical_features: categorical_features.to_vec(),
         method,
         seed: Some(seed),
+        keep_raw: false,
     };
     let data = LgbmDataset::build(x, settings, None);
     (data.binned, data.bins)
@@ -2072,6 +2074,16 @@ enum TreeNode {
         left: Box<TreeNode>,
         right: Box<TreeNode>,
     },
+    /// A leaf with a linear model (`linear_tree`): `constant + Σ coeffs ·
+    /// x[features]`, shrunk by the learning rate as LightGBM stores it;
+    /// `value` (not shrunk) is the output for rows missing one of the
+    /// features.
+    LinearLeaf {
+        value: f64,
+        constant: f64,
+        features: Vec<usize>,
+        coeffs: Vec<f64>,
+    },
 }
 
 /// Bins routed left by a categorical split: those up to and including the
@@ -2107,6 +2119,16 @@ impl TreeNode {
     fn scale(&mut self, f: f64) {
         match self {
             TreeNode::Leaf { value } => *value *= f,
+            TreeNode::LinearLeaf {
+                value,
+                constant,
+                coeffs,
+                ..
+            } => {
+                *value *= f;
+                *constant *= f;
+                coeffs.iter_mut().for_each(|c| *c *= f);
+            }
             TreeNode::Internal { left, right, .. } => {
                 left.scale(f);
                 right.scale(f);
@@ -2118,6 +2140,12 @@ impl TreeNode {
     fn add_bias(&mut self, b: f64) {
         match self {
             TreeNode::Leaf { value } => *value += b,
+            TreeNode::LinearLeaf {
+                value, constant, ..
+            } => {
+                *value += b;
+                *constant += b;
+            }
             TreeNode::Internal { left, right, .. } => {
                 left.add_bias(b);
                 right.add_bias(b);
@@ -2130,7 +2158,7 @@ impl TreeNode {
         let mut node = self;
         loop {
             match node {
-                TreeNode::Leaf { value } => return *value,
+                TreeNode::Leaf { value } | TreeNode::LinearLeaf { value, .. } => return *value,
                 TreeNode::Internal {
                     feature,
                     bin_threshold,
@@ -3473,6 +3501,15 @@ pub struct LgbmRegressor {
     /// `None` (default): LightGBM's default seeds (and `dart.drop_seed`).
     #[serde(default)]
     pub seed: Option<u64>,
+    /// LightGBM's `linear_tree`: from the second tree on, every leaf fits a
+    /// ridge model on the numeric features of its path (`linear_lambda` is
+    /// the penalty), so trends extrapolate past the leaves. A row missing one
+    /// of a leaf's features gets the leaf's constant. Not with DART or the
+    /// L1 / quantile objectives (as LightGBM).
+    #[serde(default)]
+    pub linear_tree: bool,
+    #[serde(default)]
+    pub linear_lambda: f64,
     /// sklearn's numerics instead of LightGBM's: float32 gradients and
     /// hessians, its L1 / quantile gradient at ties (prediction == target
     /// counts as below), split search (see `find_best_split`), weighted
@@ -3525,11 +3562,20 @@ impl LgbmRegressor {
             enable_bundle: true,
             n_jobs: None,
             seed: None,
+            linear_tree: false,
+            linear_lambda: 0.0,
             sklearn_compat: false,
             interaction_cst: Vec::new(),
             feature_fraction_per_split: 1.0,
             feature_subsample_seed: 0,
         }
+    }
+
+    /// Linear trees (LightGBM's `linear_tree`, `linear_lambda`).
+    pub fn with_linear_tree(mut self, on: bool, lambda: f64) -> Self {
+        self.linear_tree = on;
+        self.linear_lambda = lambda;
+        self
     }
 
     // Builder methods
@@ -4090,7 +4136,8 @@ fn renew_leaf_outputs(
     sklearn: bool,
 ) {
     match node {
-        TreeNode::Leaf { value } => {
+        // Linear trees are not refit (L1 and quantile reject them).
+        TreeNode::Leaf { value } | TreeNode::LinearLeaf { value, .. } => {
             if !rows.is_empty() {
                 *value = rows_percentile(residuals, &rows, weights, alpha, sklearn);
             }
@@ -4380,6 +4427,7 @@ impl LgbmRegressor {
             categorical_features: self.categorical_features.clone(),
             method: self.binning,
             seed: self.seed,
+            keep_raw: self.linear_tree,
         }
     }
 
@@ -4519,6 +4567,21 @@ impl LgbmRegressor {
         validate_max_bins(self.max_bins)?;
         self.sampling().validate()?;
         validate_regression_objective(self.objective, y)?;
+        if self.linear_tree {
+            if self.boosting_type == BoostingType::Dart
+                || refit_percentile(self.objective).is_some()
+                || self.sklearn_compat
+            {
+                return Err(RustMlError::InvalidParameter(
+                    "linear_tree supports neither DART nor the L1 / quantile objectives".into(),
+                ));
+            }
+            if data.raw.is_none() {
+                return Err(RustMlError::InvalidParameter(
+                    "linear_tree needs a dataset binned with linear_tree on".into(),
+                ));
+            }
+        }
         if let Some(f) = prev {
             check_warm_start(
                 f.trees.len(),
@@ -4611,6 +4674,13 @@ impl LgbmRegressor {
             .eval_set
             .as_ref()
             .map(|(xe, _)| bin_matrix(xe.view(), &bins));
+        // Linear trees: the eval rows' values as float32 (as LightGBM keeps
+        // a validation set).
+        let eval_raw: Option<Array2<f32>> = opts
+            .eval_set
+            .as_ref()
+            .filter(|_| self.linear_tree)
+            .map(|(xe, _)| xe.mapv(|v| v as f32));
         let eval_y: Option<Vec<f64>> = opts.eval_set.as_ref().map(|(_, ye)| ye.to_vec());
         let mut eval_preds: Option<Vec<f64>> = opts
             .eval_set
@@ -4726,6 +4796,25 @@ impl LgbmRegressor {
                 &mut feature_rng,
                 samplers.node_sampler(),
             );
+            // Linear leaves from the second tree on (LightGBM's first tree is
+            // constant).
+            if let (Some(raw), false) = (data.raw.as_ref(), trees.is_empty()) {
+                let categorical: Vec<bool> = bins.iter().map(|b| b.is_categorical).collect();
+                linear::fit_linear_leaves(
+                    &mut tree,
+                    &leaf_rows,
+                    &binned_rows,
+                    &linear::LinearData {
+                        raw,
+                        categorical: &categorical,
+                        has_nan: &data.has_missing,
+                        lambda: self.linear_lambda,
+                    },
+                    &gradients,
+                    &hessians,
+                    self.learning_rate,
+                );
+            }
             if let Some((alpha, rows)) = refit {
                 let residuals: Vec<f64> = y_vec.iter().zip(&preds).map(|(y, p)| y - p).collect();
                 renew_leaf_outputs(
@@ -4759,18 +4848,30 @@ impl LgbmRegressor {
                 continue;
             }
             // Update predictions (on ALL rows, not just sampled)
-            add_leaf_scores(
-                &mut preds[..],
-                &tree,
-                &leaf_rows,
-                &binned_rows,
-                self.learning_rate,
-            );
+            if let (Some(raw), true) = (data.raw.as_ref(), tree.is_linear()) {
+                linear::add_linear_scores(&mut preds, &tree, &binned_rows, raw, self.learning_rate);
+            } else {
+                add_leaf_scores(
+                    &mut preds[..],
+                    &tree,
+                    &leaf_rows,
+                    &binned_rows,
+                    self.learning_rate,
+                );
+            }
+            // A tree's output on eval row `i`.
+            let linear = tree.is_linear();
+            let eval_out = |eb: &Array2<u8>, i: usize| match eval_raw.as_ref() {
+                Some(r) if linear => {
+                    tree.predict_linear(row_of(eb, i), |f| f64::from(r[[i, f]]), self.learning_rate)
+                }
+                _ => self.learning_rate * tree.predict_bins(row_of(eb, i)),
+            };
 
             if let Some(t) = tracker.as_mut() {
                 if let (Some(eb), Some(ep)) = (eval_binned.as_ref(), eval_preds.as_mut()) {
                     for (i, e) in ep.iter_mut().enumerate() {
-                        *e += self.learning_rate * tree.predict_bins(row_of(eb, i));
+                        *e += eval_out(eb, i);
                     }
                 }
                 let (train, validation) = losses(&preds, eval_preds.as_ref());
@@ -4787,7 +4888,7 @@ impl LgbmRegressor {
                 (eval_binned.as_ref(), eval_y.as_ref(), eval_preds.as_mut())
             {
                 for i in 0..eb.nrows() {
-                    ep[i] += self.learning_rate * tree.predict_bins(row_of(eb, i));
+                    ep[i] += eval_out(eb, i);
                 }
                 let loss = eval_loss(
                     ye,
@@ -4964,9 +5065,20 @@ impl FittedLgbmRegressor {
         }
         let binned = bin_matrix(x, &self.bins);
         let mut raw = Array1::from_elem(x.nrows(), self.baseline);
+        // Linear trees read the raw values.
+        let values: Array2<f64> = if self.trees.iter().any(TreeNode::is_linear) {
+            x.to_owned()
+        } else {
+            Array2::zeros((x.nrows(), 0))
+        };
         Ok(self.trees.iter().map(move |tree| {
+            let linear = tree.is_linear();
             for (i, v) in raw.iter_mut().enumerate() {
-                *v += self.learning_rate * tree.predict_bins(row_of(&binned, i));
+                *v += if linear {
+                    tree.predict_linear(row_of(&binned, i), |f| values[[i, f]], self.learning_rate)
+                } else {
+                    self.learning_rate * tree.predict_bins(row_of(&binned, i))
+                };
             }
             if self.log_link {
                 raw.mapv(f64::exp)
@@ -5018,6 +5130,7 @@ impl FittedLgbmRegressor {
         let binned = bin_matrix(x, &self.bins);
         let p = binned.ncols();
         let flat = binned.as_slice().expect("row-major binned matrix");
+        let linear: Vec<bool> = self.trees.iter().map(TreeNode::is_linear).collect();
         {
             use rayon::prelude::*;
             preds
@@ -5026,9 +5139,16 @@ impl FittedLgbmRegressor {
                 .par_iter_mut()
                 .with_min_len(PREDICT_BLOCK_ROWS)
                 .zip(flat.par_chunks_exact(p.max(1)))
-                .for_each(|(pred, bins)| {
-                    for tree in &self.trees {
-                        *pred += self.learning_rate * tree.predict_bins(bins);
+                .enumerate()
+                .for_each(|(i, (pred, bins))| {
+                    for (tree, &linear) in self.trees.iter().zip(&linear) {
+                        // Linear leaves read the row's raw values.
+                        *pred += if linear {
+                            let row = x.row(i);
+                            tree.predict_linear(bins, |f| row[f].to_f64(), self.learning_rate)
+                        } else {
+                            self.learning_rate * tree.predict_bins(bins)
+                        };
                     }
                 });
         }
@@ -5643,6 +5763,7 @@ impl LgbmClassifier {
             categorical_features: self.categorical_features.clone(),
             method: self.binning,
             seed: self.seed,
+            keep_raw: false,
         }
     }
 

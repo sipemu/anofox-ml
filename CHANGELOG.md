@@ -6,6 +6,21 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM linear trees (#208)
+
+- `LgbmRegressor::with_linear_tree(true, linear_lambda)` (LightGBM's
+  `linear_tree` / `linear_lambda`; Python `linear_tree=`, `linear_lambda=`):
+  from the second tree on, every leaf fits `-(XᵀHX + λ)⁻¹ Xᵀg` on the
+  numeric features of its path, from the training values kept as float32,
+  so global models extrapolate trends instead of saturating. Rows missing a
+  leaf feature get the leaf's constant. The solve ports Eigen's full-pivot
+  LU with its numerical rank (a feature constant in a leaf gets no effect).
+  Plain, `linear_lambda`, missing values, categorical features, bagging,
+  weights and Poisson match LightGBM 4.7 to ~2e-14 (`gen_lgbm_linear.py`).
+  Not with DART or the L1 / quantile objectives, as in LightGBM.
+- `LgbmDataset` keeps the float32 values when the estimator has linear
+  trees (also when streamed).
+
 ### LightGBM at panel scale (#215)
 
 - `LgbmRegressor` / `LgbmClassifier` fits at 10M × 60 now take 72 s, 1.13×

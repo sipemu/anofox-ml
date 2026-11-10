@@ -1164,3 +1164,16 @@ def test_lgbm_multiclassova_matches_lightgbm(weighted):
     np.testing.assert_array_equal(ours.predict(X), ref.predict(X))
     with pytest.raises(ValueError, match="objective"):
         am.LGBMClassifier(objective="lambdarank").fit(X, y)
+
+
+@pytest.mark.parametrize("extra", [{}, {"linear_lambda": 1.5}])
+def test_lgbm_linear_tree_matches_lightgbm(extra):
+    lgb = pytest.importorskip("lightgbm")
+    r = np.random.RandomState(8)
+    X = r.normal(size=(400, 3))
+    y = 2 * X[:, 0] + np.sin(X[:, 1]) + r.normal(scale=0.2, size=400)
+    kw = dict(n_estimators=30, learning_rate=0.1, num_leaves=8, linear_tree=True, **extra)
+    ref = lgb.LGBMRegressor(**kw, verbose=-1, n_jobs=1, deterministic=True).fit(X, y)
+    ours = am.LGBMRegressor(**kw).fit(X, y)
+    X_new = np.vstack([X[:50], [[4.0, 0.0, 0.0], [-4.0, 0.0, 0.0]]])
+    np.testing.assert_allclose(ours.predict(X_new), ref.predict(X_new), rtol=1e-11, atol=1e-12)
