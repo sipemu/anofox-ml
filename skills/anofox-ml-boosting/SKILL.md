@@ -92,7 +92,13 @@ CatBoost text features (catboost's default processing, matching catboost):
 pass `text_features=[...]` in Python (a DataFrame or object array), or call
 `fit_with_text(x, &text, y, w)` / `predict_with_text` in Rust. Regression
 gets BoW over word bigrams and words. Classification also gets the online
-NaiveBayes. No eval sets, rankers or MultiRMSE with text yet.
+NaiveBayes. Custom processing goes through catboost's `text_processing` dict
+in Python, or `with_text_options(CatBoostTextOptions { .. })` in Rust: one
+`ByDelimiter` tokenizer (delimiter, lowercasing), Word dictionaries
+(`gram_order`, `occurrence_lower_bound`, `max_dictionary_size`) and the
+calcers `BoW:top_tokens_count=N`, `NaiveBayes` and `BM25`. NaiveBayes and
+BM25 are classification only. No eval sets, rankers or MultiRMSE with text
+yet.
 
 ## LightGBM: objectives
 

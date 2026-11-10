@@ -345,6 +345,9 @@ fn catboost_models_match_catboost() {
                     .collect()
             };
             if let Some(t) = case.get("text") {
+                if let Some(o) = case.get("text_options") {
+                    m = m.with_text_options(serde_json::from_value(o.clone()).unwrap());
+                }
                 let f = m.fit_with_text(x.view(), &text_of(t), y.view(), w).unwrap();
                 let pred = f
                     .predict_with_text(x_test.view(), &text_of(&case["text_test"]))
@@ -380,6 +383,9 @@ fn catboost_models_match_catboost() {
             let p = &case["params"];
             let mut m = configure!(CatBoostClassifier::new(), p);
             if let Some(t) = case.get("text") {
+                if let Some(o) = case.get("text_options") {
+                    m = m.with_text_options(serde_json::from_value(o.clone()).unwrap());
+                }
                 let text_of = |v: &Value| -> Vec<Vec<String>> {
                     v.as_array()
                         .unwrap()

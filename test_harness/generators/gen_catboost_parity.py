@@ -747,6 +747,84 @@ def generate():
                                        if k not in ("random_strength", "bootstrap_type")},
                                       iterations=60, depth=4, has_time=False), X, [t0, t1], y_tb,
              kind="classifier")
+
+    # Custom text processing (`text_processing`) and BM25.
+    def text_options(tp):
+        """Our CatBoostTextOptions for a catboost text_processing dict."""
+        tok = tp["tokenizers"][0]
+        calcer = {"NaiveBayes": "NaiveBayes", "BM25": "Bm25"}
+        def calcers(names):
+            out_c = []
+            for c in names:
+                name, _, rest = c.partition(":")
+                args = dict(kv.split("=", 1) for kv in rest.split(",") if kv)
+                out_c.append({"BoW": {"top_tokens_count": int(args.get("top_tokens_count", 2000))}}
+                             if name == "BoW" else calcer[name])
+            return out_c
+        return {
+            "delimiter": tok.get("delimiter", " "),
+            "lowercasing": tok.get("lowercasing", "false") == "true",
+            "dictionaries": [{"name": d["dictionary_id"], "gram_order": int(d.get("gram_order", 1)),
+                              "occurrence_lower_bound": int(d.get("occurrence_lower_bound", 3)),
+                              "max_dictionary_size": int(d.get("max_dictionary_size", 50000))}
+                             for d in tp["dictionaries"]],
+            "processing": [{"dictionaries": f["dictionaries_names"],
+                            "calcers": calcers(f["feature_calcers"])}
+                           for f in tp["feature_processing"]["default"]],
+        }
+    def add_custom(name, params, tp, cols, y, kind):
+        add_text(name, dict(params, text_processing=tp), X, cols, y, kind=kind)
+        case = out["models"][-1]
+        case["params"].pop("text_processing")
+        case["text_options"] = text_options(tp)
+    def processing(dicts, feats, delimiter=" ", lowercasing="false"):
+        return {"tokenizers": [{"tokenizer_id": "T", "separator_type": "ByDelimiter",
+                                "delimiter": delimiter, "lowercasing": lowercasing}],
+                "dictionaries": dicts,
+                "feature_processing": {"default": [dict(f, tokenizers_names=["T"])
+                                                   for f in feats]}}
+    word = {"dictionary_id": "W", "gram_order": "1", "occurrence_lower_bound": "2"}
+    add_custom("text_bm25_binary", base,
+               processing([word], [{"dictionaries_names": ["W"],
+                                    "feature_calcers": ["BoW", "BM25"]}]), [t0], y_tb,
+               "classifier")
+    add_custom("text_nb_bm25_multiclass", dict(base, iterations=20),
+               processing([word], [{"dictionaries_names": ["W"],
+                                    "feature_calcers": ["BM25", "NaiveBayes"]}]), [t0, t1], y_tm,
+               "classifier")
+    add_custom("text_bm25_permuted", dict(base, has_time=False, boosting_type="Ordered"),
+               processing([word], [{"dictionaries_names": ["W"],
+                                    "feature_calcers": ["BM25"]}]), [t0], y_tb, "classifier")
+    # Rare and mixed-case words, comma separated: lowercasing, trigrams,
+    # dictionary bounds and sizes, BoW top tokens.
+    big = [f"w{i}" for i in range(60)]
+    def rare_texts(rows):
+        res = []
+        for _ in range(rows):
+            k = int(rng.integers(0, 7))
+            words = [big[min(int(rng.zipf(1.3)) - 1, 59)] for _ in range(k)]
+            res.append(",".join(w.upper() if rng.random() < 0.3 else w for w in words))
+        return res
+    t2 = rare_texts(n)
+    y_rare = 0.5 * X[:, 0] + np.array([("w0" in s.lower().split(",")) for s in t2], float) \
+        + rng.normal(scale=0.3, size=n)
+    custom = processing(
+        [{"dictionary_id": "Tri", "gram_order": "3", "occurrence_lower_bound": "2"},
+         {"dictionary_id": "W", "gram_order": "1", "occurrence_lower_bound": "4",
+          "max_dictionary_size": "12"}],
+        [{"dictionaries_names": ["W", "Tri"], "feature_calcers": ["BoW:top_tokens_count=8"]}],
+        delimiter=",", lowercasing="true")
+    add_custom("text_custom_regressor", base, custom, [t2], y_rare, "regressor")
+    add_custom("text_custom_classifier", base, dict(custom, feature_processing={"default": [
+        dict(custom["feature_processing"]["default"][0]),
+        {"dictionaries_names": ["W"], "feature_calcers": ["NaiveBayes", "BM25"],
+         "tokenizers_names": ["T"]}]}), [t2], (y_rare > np.median(y_rare)).astype(float),
+        "classifier")
+    # A dictionary without occurrence_lower_bound: catboost's default.
+    add_custom("text_default_bound", base,
+               processing([{"dictionary_id": "W", "gram_order": "1"}],
+                          [{"dictionaries_names": ["W"], "feature_calcers": ["BoW"]}],
+                          delimiter=","), [t2], y_rare, "regressor")
     return out
 
 
