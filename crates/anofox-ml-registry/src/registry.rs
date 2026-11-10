@@ -1126,6 +1126,8 @@ registry! {
         predict: |m, x| m.predict(x),
         // RMSEWithUncertainty: the predicted standard deviation.
         predict_std: |m, x| m.predict_uncertainty(x).map(|u| u.column(1).mapv(f64::sqrt)),
+        // QueryRMSE: the query sizes.
+        fit_with_group: |c, x, y, w, g| c.fit_with_groups(x, need_y(K, y)?, w, g),
     }
     CatBoostMultiRegressor {
         config: CatBoostMultiConfig = Default::default(),

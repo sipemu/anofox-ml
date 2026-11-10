@@ -98,7 +98,7 @@ def _data(name, cls):
 
 
 # LGBMRanker needs query groups in fit (test_lgbm_ranker_matches_lightgbm).
-@pytest.mark.parametrize("name", sorted(set(CLASSES) - {"LGBMRanker"}))
+@pytest.mark.parametrize("name", sorted(set(CLASSES) - {"LGBMRanker", "CatBoostRanker"}))
 def test_fit_predict_pickle_clone(name):
     cls = CLASSES[name]
     Xd, yd, params = _data(name, cls)
@@ -1258,6 +1258,27 @@ def test_catboost_uncertainty_matches_catboost():
     ours = am.CatBoostRegressor(**kw, random_strength=0, bootstrap_type="No",
                                 has_time=True).fit(X, y)
     np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+
+
+def test_catboost_ranker_query_rmse_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    r = np.random.RandomState(11)
+    sizes = r.randint(1, 12, size=40)
+    gid = np.repeat(np.arange(40), sizes)
+    n = len(gid)
+    X = r.normal(size=(n, 3))
+    y = X[:, 0] - X[:, 1] + np.repeat(r.normal(scale=2, size=40), sizes) + r.normal(size=n)
+    kw = dict(iterations=30, depth=4, loss_function="QueryRMSE", random_seed=0)
+    for extra in (dict(random_strength=0, bootstrap_type="No", has_time=True),
+                  dict(boosting_type="Ordered")):
+        ref = cb.CatBoostRanker(**kw, **extra, thread_count=1, verbose=0,
+                                allow_writing_files=False).fit(X, y, group_id=gid)
+        ours = am.CatBoostRanker(**kw, **extra).fit(X, y, group_id=gid)
+        np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+    back = pickle.loads(pickle.dumps(ours))
+    np.testing.assert_array_equal(back.predict(X), ours.predict(X))
+    with pytest.raises(ValueError):
+        am.CatBoostRanker(**kw).fit(X, y, group_id=np.r_[gid[1:], gid[:1]])
 
 
 def test_catboost_multirmse_matches_catboost():

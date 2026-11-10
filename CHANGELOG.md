@@ -22,6 +22,22 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style ranking: QueryRMSE (#210, part)
+
+- `CatBoostRegressionLoss::QueryRmse` with query groups through
+  `CatBoostRegressor::fit_with_groups` / `fit_with_groups_eval` (query
+  sizes, rows consecutive): CatBoost's `TQueryRmseError` derivatives
+  around each query's mean residual and its `QueryRMSE` metric; the data
+  and fold permutations shuffle whole queries and then the rows inside
+  each, and ordered body / tail prefixes end on query bounds. Plain,
+  weighted, ordered, permuted, Depthwise, categorical, full-default and
+  eval-set fits match catboost 1.2.10's `CatBoostRanker` to ~6e-16.
+- **Breaking:** `one_hot_max_size` is now `Option<usize>`; `None` (the
+  default) is CatBoost's: 2, or 10 for a groupwise loss.
+- Registry: `CatBoostRegressor` gains `fit_with_group`.
+- Python: `CatBoostRanker(loss_function="QueryRMSE").fit(X, y,
+  group_id=...)`, as catboost's; `one_hot_max_size` defaults to None.
+
 ### CatBoost-style boosting: MultiRMSE (#209)
 
 - `CatBoostRegressionLoss::MultiRmse`: multi-regression on a target
