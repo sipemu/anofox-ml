@@ -1159,7 +1159,7 @@ impl Loss {
             }
             Loss::Logloss => {
                 let e = approx[0].exp();
-                let p = e / (1.0 + e);
+                let p = 1.0 - 1.0 / (1.0 + e);
                 let p = if p.is_nan() { 1.0 } else { p };
                 der[0] = w * (target - p);
                 der2[0] = w * (-p * (1.0 - p));
@@ -2106,7 +2106,7 @@ fn logloss_ders_at(target: &[f64], point: &[(f64, f32)], weights: &[f64]) -> Der
         .zip(target)
         .zip(weights)
         .map(|((&(e, _), &t), &w)| {
-            let p = e / (1.0 + e);
+            let p = 1.0 - 1.0 / (1.0 + e);
             let p = if p.is_nan() { 1.0 } else { p };
             (w * (t - p), w * (-p * (1.0 - p)))
         })
@@ -2128,7 +2128,8 @@ fn logloss_metric_exp_at(
     weights: &[f64],
 ) -> f64 {
     let rows = point.len();
-    let exp_leaves: Vec<f64> = leaves.iter().map(|v| v.exp()).collect();
+    // `EvalErrorsWithLeaves`: the leaf deltas by `FastExpWithInfInplace`.
+    let exp_leaves = expd_of(leaves);
     let log_leaves: Vec<f32> = exp_leaves.iter().map(|&d| fast_logf(d as f32)).collect();
     // The blocks in parallel, added in order.
     use rayon::prelude::*;
@@ -4322,6 +4323,9 @@ struct LeafProblem<'a> {
     exact_weights: &'a [f64],
     /// Query groups (querywise losses; else empty).
     groups: &'a Groups,
+    /// Logloss: CatBoost's stored `exp(a)` of `approx` (`StoreExpApprox`),
+    /// what the derivatives and the metric are taken from.
+    exp: Option<&'a [f64]>,
     /// YetiRank's pair seeds per leaf step (`CalcLeafValuesSimple` draws
     /// one per step, at the unmoved `approx`): steps after the first redraw
     /// the pairs. Empty: the pairs of `groups` in every step.
@@ -4368,6 +4372,33 @@ fn expd_core(x: f64) -> f64 {
     let u = ((bits.wrapping_add(adj) >> 11) << 52) | iax;
     let y = (3.0000000027955394 - t) * (t * t) * 0.16666666685227835064 - t + 1.0;
     y * f64::from_bits(u)
+}
+
+/// library/cpp/fast_exp's scalar `fast_exp` (CatBoost's `ExpApproxIf` of
+/// one value and `ApplyLearningRate` on stored `exp(a)`): four lookups of
+/// `exp` at the top 16 bits, then `1 + rest`.
+fn fast_exp_scalar(x: f64) -> f64 {
+    static TABLE: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        (0u64..65536)
+            .map(|i| f64::from_bits(i << 48).exp())
+            .collect()
+    });
+    let (mut arg, mut res) = (x, 1.0f64);
+    for _ in 0..4 {
+        let bits = arg.to_bits();
+        res *= table[(bits >> 48) as usize];
+        arg -= f64::from_bits(bits & 0xffff_0000_0000_0000);
+    }
+    res * (1.0 + arg)
+}
+
+/// `FastExpWithInf` of a copy of `v` (leaf deltas applied to stored
+/// `exp(a)`).
+fn expd_of(v: &[f64]) -> Vec<f64> {
+    let mut out = v.to_vec();
+    fast_exp_with_inf(&mut out);
+    out
 }
 
 /// CatBoost's `FastExpWithInfInplace` with AVX2: fmath's `expd_v`, which
@@ -4432,7 +4463,7 @@ fn estimate_leaves(
     lp: &LeafProblem<'_>,
     p: &TrainParams,
     mut accepted: impl FnMut(&[f64], &mut LeafSums),
-) -> (Vec<f64>, usize) {
+) -> (Vec<f64>, usize, Vec<f64>) {
     let k = lp.loss.dims();
     let (n_leaves, rows) = (lp.n_leaves, lp.rows);
     if p.leaf_estimation == CatBoostLeafEstimation::Exact {
@@ -4456,7 +4487,7 @@ fn estimate_leaves(
                 _ => unreachable!("Exact leaves are validated to Quantile, MAE and LogCosh"),
             })
             .collect();
-        return (step, 0);
+        return (step, 0, Vec::new());
     }
     let mut steps = 0;
     // CatBoost forces YetiRank's backtracking off (it has no metric).
@@ -4465,10 +4496,21 @@ fn estimate_leaves(
     // Logloss: the approximations' exponentials and logarithms, cached for
     // the base and the current point (the metric is evaluated many times).
     let logloss = lp.loss == Loss::Logloss;
-    let base_exp = if logloss && !lp.moving {
-        exp_point(&lp.approx[..rows])
-    } else {
-        Vec::new()
+    let pairs =
+        |e: &[f64]| -> Vec<(f64, f32)> { e.iter().map(|&e| (e, fast_logf(e as f32))).collect() };
+    // Stored `exp(a)`: the model's point moves by `exp` of each step (its
+    // leaves' `FastExpWithInf`), a fold's rows by the product of those of
+    // their leaf (`approxDeltas`).
+    let stored = lp.exp.filter(|_| logloss);
+    let mut point_e: Vec<f64> = match stored {
+        Some(e) if lp.moving => e[..rows].to_vec(),
+        _ => Vec::new(),
+    };
+    let mut leaf_e = vec![1.0f64; n_leaves];
+    let base_exp = match stored {
+        Some(e) if !lp.moving => pairs(&e[..rows]),
+        None if logloss && !lp.moving => exp_point(&lp.approx[..rows]),
+        _ => Vec::new(),
     };
     let mut point_exp: Vec<(f64, f32)> = Vec::new();
     let metric = |approx: &[f64], leaves: &[f64], cached: &[(f64, f32)]| {
@@ -4482,7 +4524,9 @@ fn estimate_leaves(
     };
     let mut total = vec![0.0; n_leaves * k];
     let mut point = lp.approx[..rows * k].to_vec();
-    if logloss && backtracking && lp.moving {
+    if !point_e.is_empty() {
+        point_exp = pairs(&point_e);
+    } else if logloss && backtracking && lp.moving {
         point_exp = exp_point(&point);
     }
     let mut value = if backtracking {
@@ -4513,7 +4557,12 @@ fn estimate_leaves(
         let (groups, weights) = redrawn
             .as_ref()
             .map_or((lp.groups, lp.weights), |(g, w)| (g, w.as_slice()));
-        let ders = if logloss && !point_exp.is_empty() {
+        let ders = if let (Some(e), false) = (stored, lp.moving) {
+            let at: Vec<(f64, f32)> = (0..rows)
+                .map(|i| (e[i] * leaf_e[lp.leaf_of[i] as usize], 0.0))
+                .collect();
+            logloss_ders_at(lp.target, &at, weights)
+        } else if logloss && !point_exp.is_empty() {
             logloss_ders_at(lp.target, &point_exp, weights)
         } else {
             lp.loss.all_ders(lp.target, &point, weights, rows, groups)
@@ -4574,8 +4623,25 @@ fn estimate_leaves(
                     }
                 });
         };
+        let mut move_exp = |scaled: &[f64], point_exp: &mut Vec<(f64, f32)>| {
+            if stored.is_none() {
+                return;
+            }
+            let ex = expd_of(scaled);
+            if lp.moving {
+                for (e, &leaf) in point_e.iter_mut().zip(lp.leaf_of) {
+                    *e *= ex[leaf as usize];
+                }
+                *point_exp = pairs(&point_e);
+            } else {
+                for (d, x) in leaf_e.iter_mut().zip(&ex) {
+                    *d *= x;
+                }
+            }
+        };
         if !backtracking {
             take(&step, &mut total, &mut point);
+            move_exp(&step, &mut point_exp);
             accepted(&step, &mut sums);
             it += 1;
             continue;
@@ -4592,7 +4658,9 @@ fn estimate_leaves(
             if after < value {
                 value = after;
                 take(&scaled, &mut total, &mut point);
-                if logloss && lp.moving {
+                if stored.is_some() {
+                    move_exp(&scaled, &mut point_exp);
+                } else if logloss && lp.moving {
                     point_exp = exp_point(&point);
                 }
                 accepted(&scaled, &mut sums);
@@ -4606,7 +4674,7 @@ fn estimate_leaves(
         }
         it += 1;
     }
-    (total, steps)
+    (total, steps, leaf_e)
 }
 
 /// A learning fold (CatBoost's `TFold`): the training rows in the fold's
@@ -4621,6 +4689,8 @@ struct LearnFold {
     weights: Vec<f64>,
     tails: Vec<(usize, usize, f64)>,
     approx: Vec<Vec<f64>>,
+    /// Logloss: CatBoost's stored `exp(a)` of every prefix (else empty).
+    exp: Vec<Vec<f64>>,
     cache: CombinationCache,
     /// CatBoost's `TFold::SampleWeights`: the bootstrap times the sample
     /// weights of the fold's last turn as the taken fold (1 before), what
@@ -5109,6 +5179,7 @@ fn update_fold(
             .map_or((&fold.groups, fold_weights.as_slice()), |(g, w)| {
                 (g, w.as_slice())
             });
+        let fold_exp = fold.exp.get(b).map(Vec::as_slice);
         let lp = LeafProblem {
             loss,
             target,
@@ -5123,13 +5194,31 @@ fn update_fold(
             exact_weights,
             groups,
             yeti_seeds: &[],
+            exp: fold_exp,
         };
         if k == 1 {
             // Each prefix's approximation moves by the leaf values of its
             // body rows.
-            let (leaves, _) = estimate_leaves(&lp, p, |_, _| {});
-            for i in 0..tail {
-                a[i] += loss.fold_step(leaves[leaf_of[i] as usize], p.learning_rate);
+            let (leaves, _, leaf_e) = estimate_leaves(&lp, p, |_, _| {});
+            if let Some(e) = fold.exp.get_mut(b) {
+                // `UpdateBodyTailApprox`: `exp(a)` times
+                // `fast_exp(FastLogf(approxDelta) · lr)`.
+                let moves: Vec<(f64, f64)> = leaf_e
+                    .iter()
+                    .map(|&d| {
+                        let m = f64::from(fast_logf(d as f32)) * p.learning_rate;
+                        (m, fast_exp_scalar(m))
+                    })
+                    .collect();
+                for i in 0..tail {
+                    let (m, x) = moves[leaf_of[i] as usize];
+                    a[i] += m;
+                    e[i] *= x;
+                }
+            } else {
+                for i in 0..tail {
+                    a[i] += loss.fold_step(leaves[leaf_of[i] as usize], p.learning_rate);
+                }
             }
         } else {
             // Multiclass (CatBoost's `CalcApproxDeltaMulti`): the body rows
@@ -5138,7 +5227,7 @@ fn update_fold(
             // at its moved approximation.
             let mut tail_delta = vec![0.0; (tail - body) * k];
             let (mut der, mut der2) = (vec![0.0; k], vec![0.0; loss.hessian_len()]);
-            let (leaves, _) = estimate_leaves(&lp, p, |_, sums| {
+            let (leaves, _, _) = estimate_leaves(&lp, p, |_, sums| {
                 for i in body..tail {
                     let leaf = leaf_of[i] as usize;
                     let o = &mut tail_delta[(i - body) * k..(i - body + 1) * k];
@@ -5333,6 +5422,10 @@ fn boost(
         n
     };
     let start = |rows: usize| -> Vec<f64> { bias.iter().copied().cycle().take(rows * k).collect() };
+    // Logloss stores `exp(a)` (`InitApproxes`: the scalar `fast_exp` of the
+    // start).
+    let logloss = loss == Loss::Logloss;
+    let start_exp = |rows: usize| -> Vec<f64> { vec![fast_exp_scalar(bias[0]); rows] };
     let identity: Vec<usize> = (0..n).collect();
     let make_fold = |perm: &[usize], groups: Groups| -> LearnFold {
         let target = permute_rows(target, perm, loss.target_dims());
@@ -5352,6 +5445,11 @@ fn boost(
             q: q.permuted(perm),
             groups,
             approx: tails.iter().map(|&(_, t, _)| start(t)).collect(),
+            exp: if logloss {
+                tails.iter().map(|&(_, t, _)| start_exp(t)).collect()
+            } else {
+                Vec::new()
+            },
             target,
             weights,
             tails,
@@ -5380,6 +5478,7 @@ fn boost(
     );
     let avg_sum_w: f64 = weights.iter().sum();
     let mut approx = start(n);
+    let mut avg_exp = if logloss { start_exp(n) } else { Vec::new() };
     // Plain boosting with an unpermuted averaging fold shares its
     // approximations with fold 0 (`UseAveragingFoldAsFoldZero`).
     // (`UseAveragingFoldAsFoldZero`: not for pairwise losses.)
@@ -5422,6 +5521,14 @@ fn boost(
                         *v = loss.fold_step(*v, factor);
                     }
                 }
+                for e in folds
+                    .iter_mut()
+                    .flat_map(|f| f.exp.iter_mut())
+                    .chain(std::iter::once(&mut avg_exp))
+                    .flat_map(|e| e.iter_mut())
+                {
+                    *e = fast_exp_scalar(f64::from(fast_logf(*e as f32)) * factor);
+                }
                 for b in &mut bias {
                     *b *= factor;
                 }
@@ -5463,10 +5570,19 @@ fn boost(
             .iter()
             .zip(&fold.approx)
             .enumerate()
-            .map(|(b, (&(_, t, _), a))| match yeti_parts.get(b) {
-                Some((groups, weights)) => loss.all_ders(&fold.target, a, weights, t, groups),
-                None => loss.all_ders(&fold.target, a, &fold.weights, t, &fold.groups),
-            })
+            .map(
+                |(b, (&(_, t, _), a))| match (yeti_parts.get(b), fold.exp.get(b)) {
+                    (Some((groups, weights)), _) => {
+                        loss.all_ders(&fold.target, a, weights, t, groups)
+                    }
+                    // Logloss: at the stored `exp(a)`.
+                    (None, Some(e)) => {
+                        let at: Vec<(f64, f32)> = e[..t].iter().map(|&e| (e, 0.0)).collect();
+                        logloss_ders_at(&fold.target[..t], &at, &fold.weights[..t])
+                    }
+                    (None, None) => loss.all_ders(&fold.target, a, &fold.weights, t, &fold.groups),
+                },
+            )
             .collect();
         let previous = trees
             .last()
@@ -5631,8 +5747,9 @@ fn boost(
             exact_weights: &unit_weights,
             groups: &average.groups,
             yeti_seeds: &yeti_seeds,
+            exp: (!avg_exp.is_empty()).then_some(avg_exp.as_slice()),
         };
-        let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
+        let (leaves, steps, _) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
             // `CalcLeafValuesSimple` draws a seed per step.
             for _ in seeded_steps..steps {
@@ -5660,9 +5777,20 @@ fn boost(
                 approx[i * k + d] += leaf_values[leaf * k + d];
             }
         }
+        if logloss {
+            // `UpdateLearnAvrgApprox`: the stored `exp(a)` times
+            // `FastExpWithInf` of the tree's deltas.
+            let ex = expd_of(&leaf_values);
+            for (e, &leaf) in avg_exp.iter_mut().zip(&leaf_of) {
+                *e *= ex[leaf as usize];
+            }
+        }
         for (f, fold) in folds.iter_mut().enumerate() {
             if f == 0 && shared {
                 fold.approx[0].clone_from(&approx);
+                if logloss {
+                    fold.exp[0].clone_from(&avg_exp);
+                }
                 continue;
             }
             let leaf_of = fold.q.tree_leaves(&splits, &children, &mut fold.cache);
