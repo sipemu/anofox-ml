@@ -85,8 +85,9 @@ pub use calibrated_classifier::{CalibratedClassifierCV, CalibrationMethod};
 pub use catboost::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
     CatBoostClassifier, CatBoostClassifierLoss, CatBoostEvalSet, CatBoostGrowPolicy,
-    CatBoostLeafEstimation, CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor,
-    CatBoostScoreFunction, CatBoostShrinkMode, FittedCatBoostClassifier, FittedCatBoostRegressor,
+    CatBoostLeafEstimation, CatBoostMultiEvalSet, CatBoostOdType, CatBoostRegressionLoss,
+    CatBoostRegressor, CatBoostScoreFunction, CatBoostShrinkMode, FittedCatBoostClassifier,
+    FittedCatBoostRegressor,
 };
 pub use extra_trees_classifier::{ExtraTreesClassifier, FittedExtraTreesClassifier};
 pub use extra_trees_regressor::{ExtraTreesRegressor, FittedExtraTreesRegressor};

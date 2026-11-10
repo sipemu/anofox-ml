@@ -121,3 +121,63 @@ fn multi_output_checks_columns_and_round_trips() {
         out2(m.predict(x.view()).unwrap())
     );
 }
+
+#[test]
+fn catboost_multi_regressor_is_the_typed_multi_rmse_fit() {
+    use anofox_ml_ensemble::{CatBoostRegressionLoss, CatBoostRegressor};
+    let (x, y) = data();
+    let xy = concatenate(Axis(1), &[x.view(), y.view()]).unwrap();
+    let w = Array2::from_shape_fn((30, 1), |(i, _)| 0.5 + (i % 3) as f64)
+        .column(0)
+        .to_owned();
+    let params = json!({"iterations": 15, "learning_rate": 0.3, "depth": 3, "y_columns": 2});
+    let mut m = make("CatBoostMultiRegressor", &params).unwrap();
+    m.fit(xy.view(), None, Some(w.view())).unwrap();
+    let typed = CatBoostRegressor::new()
+        .with_iterations(15)
+        .with_learning_rate(0.3)
+        .with_depth(3)
+        .with_loss_function(CatBoostRegressionLoss::MultiRmse)
+        .fit_multi(x.view(), y.view(), Some(w.view()))
+        .unwrap();
+    assert_eq!(
+        out2(m.predict(x.view()).unwrap()),
+        typed.predict_multi(&x).unwrap()
+    );
+    // An eval set `[X_val | Y_val]`, as fit_multi_with_eval.
+    let xy_val = xy.slice(ndarray::s![..10, ..]).mapv(|v| v + 0.05);
+    let mut m = make("CatBoostMultiRegressor", &params).unwrap();
+    let y0 = y.column(0);
+    m.fit_with_validation(
+        xy.view(),
+        Some(y0),
+        None,
+        xy_val.view(),
+        Some(y0.slice(ndarray::s![..10])),
+        None,
+    )
+    .unwrap();
+    let typed = CatBoostRegressor::new()
+        .with_iterations(15)
+        .with_learning_rate(0.3)
+        .with_depth(3)
+        .with_loss_function(CatBoostRegressionLoss::MultiRmse)
+        .fit_multi_with_eval(
+            x.view(),
+            y.view(),
+            None,
+            anofox_ml_ensemble::CatBoostMultiEvalSet {
+                x: xy_val.slice(ndarray::s![.., ..3]),
+                y: xy_val.slice(ndarray::s![.., 3..]),
+                sample_weight: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(typed.eval_metrics().len(), 15);
+    assert_eq!(
+        out2(m.predict(x.view()).unwrap()),
+        typed.predict_multi(&x).unwrap()
+    );
+    let bad = make("CatBoostMultiRegressor", &json!({"y_columns": 1}));
+    assert!(bad.unwrap().fit(xy.view(), None, None).is_err());
+}

@@ -987,11 +987,16 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
     """``loss_function`` as in catboost: ``"RMSE"``, ``"MAE"``,
     ``"Quantile:alpha=0.3"``, ``"Expectile:alpha=0.3"``, ``"Poisson"``,
     ``"Tweedie:variance_power=1.5"``, ``"LogLinQuantile:alpha=0.5"``,
-    ``"Huber:delta=1.0"``, ``"LogCosh"``, ``"Lq:q=2"`` or
+    ``"Huber:delta=1.0"``, ``"LogCosh"``, ``"Lq:q=2"``,
     ``"RMSEWithUncertainty"`` (``predict`` then gives ``[mean, variance]``
-    per row, as catboost)."""
+    per row, as catboost) or ``"MultiRMSE"`` (``y`` of shape ``n × k``,
+    ``predict`` gives ``n × k``)."""
 
-    _kind = "CatBoostRegressor"
+    @property
+    def _kind(self):
+        if self.loss_function == "MultiRMSE":
+            return "CatBoostMultiRegressor"
+        return "CatBoostRegressor"
 
     def predict(self, X):
         if self.loss_function != "RMSEWithUncertainty":
@@ -1004,10 +1009,41 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
 
     def fit(self, X, y, sample_weight=None, eval_set=None):
         """``eval_set``: ``(X_val, y_val)`` or ``(X_val, y_val, weight_val)``."""
+        if self.loss_function == "MultiRMSE":
+            return self._fit_multi(X, y, sample_weight, eval_set)
         return self._fit_model(X, _check_1d(y), sample_weight, eval_set)
+
+    def _fit_multi(self, X, y, sample_weight, eval_set):
+        """MultiRMSE: the registry model is fitted on ``[X | Y]``."""
+        X = self._encode(X, fit=True)
+        Y = _check_2d_y(y, X.shape[0])
+        if Y.shape[1] < 2:
+            raise ValueError("MultiRMSE needs at least two target columns (RMSE for one)")
+        w = None if sample_weight is None else _check_1d(sample_weight, "sample_weight")
+        model = self._new_model(X, Y)
+        if eval_set is None:
+            model.fit(np.hstack([X, Y]), None, w)
+        else:
+            Xv, yv, wv = (tuple(eval_set) + (None,))[:3]
+            Xv = self._encode(Xv, fit=False)
+            if Xv.shape[1] != X.shape[1]:
+                raise ValueError("eval_set must have the features of X")
+            Yv = _check_2d_y(yv, Xv.shape[0])
+            if Yv.shape[1] != Y.shape[1]:
+                raise ValueError("eval_set must have the target columns of y")
+            wv = None if wv is None else _check_1d(wv, "eval_set weight")
+            # The targets travel in [X | Y]; the y arguments are ignored.
+            model.fit_with_validation(np.hstack([X, Y]), Y[:, 0].copy(), w,
+                                      np.hstack([Xv, Yv]), Yv[:, 0].copy(), wv)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
 
     def _rust_params(self, X, y):
         params = super()._rust_params(X, y)
+        if self.loss_function == "MultiRMSE":
+            params["y_columns"] = int(np.shape(y)[1])
+            return params
         name, _, rest = str(self.loss_function or "RMSE").partition(":")
         args = dict(kv.split("=", 1) for kv in rest.split(";") if kv)
         param = {"Quantile": "alpha", "Expectile": "alpha", "LogLinQuantile": "alpha",

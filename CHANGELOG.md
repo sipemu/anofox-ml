@@ -22,6 +22,22 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style boosting: MultiRMSE (#209)
+
+- `CatBoostRegressionLoss::MultiRmse`: multi-regression on a target
+  matrix through `CatBoostRegressor::fit_multi` / `fit_multi_with_eval`
+  (`CatBoostMultiEvalSet`) and `FittedCatBoostRegressor::predict_multi`
+  (n × k). CatBoost's `TMultiRMSEError` derivatives, a diagonal Newton
+  step per target, each target starting from its float32 mean, and its
+  `MultiRMSE` eval metric. Plain, two-target, weighted, L2, no-average,
+  ordered, Depthwise, Lossguide, full-default and eval-set fits match
+  catboost 1.2.10 to ~8e-16. Not ported: categorical features (CatBoost
+  builds a CTR target border per target), so they are rejected.
+- Registry: kind `CatBoostMultiRegressor`, fitted on `[X | Y]` (the last
+  `y_columns` columns are the targets, an eval set the same way).
+- Python: `CatBoostRegressor(loss_function="MultiRMSE").fit(X, Y)` with
+  `Y` of shape n × k; `predict` gives n × k, as catboost.
+
 ### CatBoost-style boosting: RMSEWithUncertainty (#209, part)
 
 - `CatBoostRegressionLoss::RmseWithUncertainty`: two approximations per

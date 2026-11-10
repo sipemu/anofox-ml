@@ -8,8 +8,8 @@ use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
     CatBoostClassifier, CatBoostClassifierLoss, CatBoostEvalSet, CatBoostGrowPolicy,
-    CatBoostLeafEstimation, CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor,
-    CatBoostScoreFunction, CatBoostShrinkMode,
+    CatBoostLeafEstimation, CatBoostMultiEvalSet, CatBoostOdType, CatBoostRegressionLoss,
+    CatBoostRegressor, CatBoostScoreFunction, CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -164,6 +164,51 @@ macro_rules! configure {
     }};
 }
 
+/// A MultiRMSE case (a target matrix): the worst prediction error, and an
+/// eval set mismatch.
+fn multi_rmse_case(case: &Value, x: &Array2<f64>) -> (f64, Option<String>) {
+    let p = &case["params"];
+    let m = configure!(CatBoostRegressor::new(), p)
+        .with_loss_function(CatBoostRegressionLoss::MultiRmse);
+    let y = array2_with_nan(&case["y"]);
+    let sw: Option<Array1<f64>> =
+        (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
+    let sw = sw.as_ref().map(|w| w.view());
+    let ev = &case["eval"];
+    let mut eval_err = None;
+    let f = if ev.is_null() {
+        m.fit_multi(x.view(), y.view(), sw).unwrap()
+    } else {
+        let (xe, ye) = (array2_with_nan(&ev["X"]), array2_with_nan(&ev["y"]));
+        let we: Option<Array1<f64>> =
+            (!ev["sample_weight"].is_null()).then(|| json_to_array1(&ev["sample_weight"]));
+        let e = CatBoostMultiEvalSet {
+            x: xe.view(),
+            y: ye.view(),
+            sample_weight: we.as_ref().map(|w| w.view()),
+        };
+        let f = m.fit_multi_with_eval(x.view(), y.view(), sw, e).unwrap();
+        let expected = json_to_array1(&ev["metrics"]);
+        let e = worst(f.eval_metrics().iter().copied(), expected.iter().copied());
+        let n = ev["tree_count"].as_u64().unwrap() as usize;
+        if f.eval_metrics().len() != expected.len() || e > TOL || f.n_estimators() != n {
+            eval_err = Some(format!(
+                "eval {} vs {} metrics (worst {e:e}), {} vs {n} trees",
+                f.eval_metrics().len(),
+                expected.len(),
+                f.n_estimators()
+            ));
+        }
+        f
+    };
+    let x_test = array2_with_nan(&case["X_test"]);
+    let err = worst(
+        f.predict_multi(&x_test).unwrap(),
+        array2_with_nan(&case["predictions"]),
+    );
+    (err, eval_err)
+}
+
 #[test]
 fn catboost_models_match_catboost() {
     let data = load_golden_file("catboost_parity.json");
@@ -172,6 +217,17 @@ fn catboost_models_match_catboost() {
     for case in data["models"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let x = array2_with_nan(&case["X"]);
+        if case["params"]["loss_function"] == "MultiRMSE" {
+            let (err, eval_err) = multi_rmse_case(case, &x);
+            report.push(format!("{name}: {err:e}"));
+            if err > TOL || eval_err.is_some() {
+                failures.push(format!(
+                    "{name}: worst {err:e} {}",
+                    eval_err.unwrap_or_default()
+                ));
+            }
+            continue;
+        }
         let y = json_to_array1(&case["y"]);
         let sw: Option<Array1<f64>> =
             (!case["sample_weight"].is_null()).then(|| json_to_array1(&case["sample_weight"]));
