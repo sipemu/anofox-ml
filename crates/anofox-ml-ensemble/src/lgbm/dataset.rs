@@ -36,6 +36,8 @@ pub(super) struct BinningSettings {
     pub categorical_features: Vec<usize>,
     pub method: BinningMethod,
     pub seed: Option<u64>,
+    /// Keep the raw values as float32 (linear trees fit on them).
+    pub keep_raw: bool,
 }
 
 /// Features binned once (LightGBM's `Dataset`), to fit on with
@@ -72,6 +74,15 @@ pub struct LgbmDataset {
     /// LightGBM's `most_freq_bin` per feature (see `lgbm_fixed_bins`).
     pub(super) fixed_bins: Vec<Option<u8>>,
     pub(super) settings: BinningSettings,
+    /// The raw values as float32, column-major (`keep_raw`).
+    pub(super) raw: Option<Array2<f32>>,
+}
+
+/// `x` as float32, column-major.
+fn raw_f32<T: LgbmFloat>(x: ArrayView2<T>) -> Array2<f32> {
+    let mut raw = Array2::zeros(x.raw_dim().f());
+    raw.zip_mut_with(&x, |o, &v| *o = v.to_f64() as f32);
+    raw
 }
 
 impl LgbmDataset {
@@ -102,12 +113,17 @@ impl LgbmDataset {
         let has_missing = (0..self.n_features())
             .map(|j| binned.column(j).iter().any(|&b| b == MISSING_BIN) && self.has_missing[j])
             .collect();
+        let raw = self
+            .raw
+            .as_ref()
+            .map(|r| raw_f32(r.select(ndarray::Axis(0), rows).view()));
         Ok(LgbmDataset {
             binned,
             bins: self.bins.clone(),
             has_missing,
             fixed_bins: self.fixed_bins.clone(),
             settings: self.settings.clone(),
+            raw,
         })
     }
 
@@ -186,12 +202,14 @@ impl LgbmDataset {
             }
             _ => lgbm_fixed_bins_of(&binned, &bins, &has_missing, None),
         };
+        let raw = settings.keep_raw.then(|| raw_f32(x));
         LgbmDataset {
             binned,
             bins,
             has_missing,
             fixed_bins,
             settings,
+            raw,
         }
     }
 }
@@ -247,6 +265,8 @@ pub struct LgbmDatasetBuilder {
     n_rows: usize,
     filled: usize,
     has_missing: Vec<bool>,
+    /// Column-major float32 values (`keep_raw`).
+    raw: Option<Vec<f32>>,
 }
 
 impl LgbmDatasetBuilder {
@@ -271,6 +291,7 @@ impl LgbmDatasetBuilder {
         // `build` would have sampled the sample itself.
         debug_assert!(expected <= LGBM_BIN_SAMPLE);
         let p = sample.ncols();
+        let raw = settings.keep_raw.then(|| vec![0f32; n_rows * p]);
         Ok(Self {
             bins: sampled.bins,
             settings,
@@ -279,6 +300,7 @@ impl LgbmDatasetBuilder {
             n_rows,
             filled: 0,
             has_missing: vec![false; p],
+            raw,
         })
     }
 
@@ -321,6 +343,16 @@ impl LgbmDatasetBuilder {
         for (h, m) in self.has_missing.iter_mut().zip(missing) {
             *h |= m;
         }
+        if let Some(raw) = self.raw.as_mut() {
+            raw.par_chunks_mut(n).enumerate().for_each(|(j, col)| {
+                for (o, &v) in col[start..start + rows.nrows()]
+                    .iter_mut()
+                    .zip(rows.column(j))
+                {
+                    *o = v.to_f64() as f32;
+                }
+            });
+        }
         self.filled += rows.nrows();
         Ok(())
     }
@@ -338,12 +370,16 @@ impl LgbmDatasetBuilder {
             Array2::from_shape_vec((self.n_rows, p).f(), self.binned).expect("column-major bins");
         let fixed_bins =
             lgbm_fixed_bins_of(&self.sample_binned, &self.bins, &self.has_missing, None);
+        let raw = self
+            .raw
+            .map(|r| Array2::from_shape_vec((self.n_rows, p).f(), r).expect("column-major values"));
         Ok(LgbmDataset {
             binned,
             bins: self.bins,
             has_missing: self.has_missing,
             fixed_bins,
             settings: self.settings,
+            raw,
         })
     }
 }
