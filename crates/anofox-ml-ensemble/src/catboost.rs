@@ -747,6 +747,12 @@ pub enum CatBoostRegressionLoss {
     /// fit with [`CatBoostRegressor::fit_with_groups`].
     #[serde(rename = "PairLogit")]
     PairLogit,
+    /// PairLogit on pairs drawn anew every iteration from `permutations`
+    /// noisy rankings by the current scores, neighbours weighted by
+    /// `decay` (CatBoost's `YetiRank`, Classic mode, Gumbel noise; CatBoost
+    /// defaults 10 and 0.85, and `l2_leaf_reg` 0).
+    #[serde(rename = "YetiRank")]
+    YetiRank { permutations: usize, decay: f64 },
 }
 
 /// CatBoost's `grow_policy`.
@@ -974,6 +980,12 @@ enum Loss {
     /// The logistic loss of a query's pairs (CatBoost's `PairLogit`, a
     /// pairwise error on stored `exp(a)`).
     PairLogit,
+    /// PairLogit on pairs regenerated every iteration (CatBoost's
+    /// `YetiRank`).
+    YetiRank {
+        permutations: usize,
+        decay: f64,
+    },
 }
 
 impl Loss {
@@ -988,12 +1000,15 @@ impl Loss {
 
     /// A querywise loss: derivatives and metric need the query bounds.
     fn querywise(self) -> bool {
-        matches!(self, Loss::QueryRmse | Loss::PairLogit)
+        matches!(
+            self,
+            Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. }
+        )
     }
 
     /// A pairwise loss: leaves and scores weigh rows by their pairs.
     fn pairwise(self) -> bool {
-        self == Loss::PairLogit
+        matches!(self, Loss::PairLogit | Loss::YetiRank { .. })
     }
 
     /// Target values per row (the engine's targets are row-major).
@@ -1112,7 +1127,7 @@ impl Loss {
                 der2[0] = -w;
                 der2[1] = -2.0 * w * sq * prec[0];
             }
-            Loss::QueryRmse | Loss::PairLogit => {
+            Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. } => {
                 unreachable!("querywise derivatives need the queries")
             }
             // CatBoost's `TMultiRMSEError::CalcDers`.
@@ -1213,7 +1228,7 @@ impl Loss {
                 let d = approx[0] - target;
                 0.9189385332046 + approx[1] + 0.5 * e[0] * (d * d)
             }
-            Loss::QueryRmse | Loss::PairLogit => {
+            Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. } => {
                 unreachable!("the querywise metric needs the queries")
             }
             // `TMultiRMSEMetric`'s squared errors.
@@ -1338,7 +1353,11 @@ impl Loss {
     fn exp_approx(self) -> bool {
         matches!(
             self,
-            Loss::Logloss | Loss::Poisson | Loss::LogLinQuantile { .. } | Loss::PairLogit
+            Loss::Logloss
+                | Loss::Poisson
+                | Loss::LogLinQuantile { .. }
+                | Loss::PairLogit
+                | Loss::YetiRank { .. }
         )
     }
 
@@ -1381,7 +1400,7 @@ impl Loss {
         rows: usize,
         groups: &Groups,
     ) -> f64 {
-        if self == Loss::PairLogit {
+        if self.pairwise() {
             return pair_logit_metric(approx, leaves, leaf_of, groups, rows, false);
         }
         if self == Loss::Logloss {
@@ -1464,7 +1483,7 @@ impl Loss {
             }
             return out;
         }
-        if self == Loss::PairLogit {
+        if self.pairwise() {
             // CatBoost's `TPairLogitError::CalcDersForQueries` on `exp(a)`;
             // the competitors of the rows `0..rows` are among them.
             let e: Vec<f64> = approx[..rows].iter().map(|a| a.exp()).collect();
@@ -1575,6 +1594,95 @@ impl Groups {
             }
         }
         w.into_iter().map(f64::from).collect()
+    }
+}
+
+/// CatBoost's `GenRandUI64Vector`: `n` draws of a generator seeded `seed`.
+fn seed_vector(n: usize, seed: u64) -> Vec<u64> {
+    let mut rng = CatRng::new(seed);
+    (0..n).map(|_| rng.gen()).collect()
+}
+
+/// CatBoost's `UpdatePairsForYetiRank` (Classic mode, Gumbel noise) on the
+/// queries of the rows `0..rows` at the raw approximations `approx`: per
+/// query `permutations` rankings by `exp(a)` times Gumbel noise, each
+/// neighbouring pair of different relevance weighted `0.15 · decay^pos ·
+/// |Δ relevance|`, averaged.
+fn yeti_rank_groups(
+    all_queries: &[usize],
+    target: &[f64],
+    approx: &[f64],
+    rows: usize,
+    seed: u64,
+    permutations: usize,
+    decay: f64,
+) -> Groups {
+    let queries = query_prefix(all_queries, rows);
+    let n_queries = queries.len() - 1;
+    // `TExecRangeParams::SetBlockCount(CB_THREAD_LIMIT)`.
+    let block_size = n_queries.div_ceil(128).max(1);
+    let block_seeds = seed_vector(n_queries.div_ceil(block_size), seed);
+    let mut comp_start = vec![0];
+    let mut comp = Vec::new();
+    let mut weights = Vec::new();
+    for (b, &block_seed) in block_seeds.iter().enumerate() {
+        let mut block_rng = CatRng::new(block_seed);
+        for q in b * block_size..((b + 1) * block_size).min(n_queries) {
+            let (begin, end) = (queries[q], queries[q + 1]);
+            let size = end - begin;
+            let rel: Vec<f32> = target[begin..end].iter().map(|&t| t as f32).collect();
+            let mut rng = CatRng::new(block_rng.gen());
+            weights.clear();
+            weights.resize(size * size, 0f32);
+            let mut order: Vec<usize> = Vec::with_capacity(size);
+            for _ in 0..permutations {
+                let noisy: Vec<f64> = approx[begin..end]
+                    .iter()
+                    .map(|a| {
+                        let u = rng.real1() as f32;
+                        a.exp() * f64::from(u / (1.000001f32 - u))
+                    })
+                    .collect();
+                order.clear();
+                order.extend(0..size);
+                // `StableSort` by the noisy score, descending.
+                order.sort_by(|&i, &j| {
+                    noisy[j]
+                        .partial_cmp(&noisy[i])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mut coef = 1.0f64;
+                for d in 1..size {
+                    let (f, s) = (order[d - 1], order[d]);
+                    let w = (0.15 * coef * f64::from((rel[f] - rel[s]).abs())) as f32;
+                    if rel[f] > rel[s] {
+                        weights[f * size + s] += w;
+                    } else if rel[f] < rel[s] {
+                        weights[s * size + f] += w;
+                    }
+                    coef *= decay;
+                }
+            }
+            for w in 0..size {
+                for l in 0..size {
+                    let cw = 1.0f32 * weights[w * size + l] / permutations as f32;
+                    if cw != 0.0 {
+                        comp.push((begin + l, cw));
+                    }
+                }
+                comp_start.push(comp.len());
+            }
+        }
+    }
+    // Rows past the queries have no competitors.
+    let n = target.len();
+    while comp_start.len() <= n {
+        comp_start.push(comp.len());
+    }
+    Groups {
+        queries: all_queries.to_vec(),
+        comp_start,
+        comp,
     }
 }
 
@@ -4488,8 +4596,28 @@ fn update_fold(
     loss: Loss,
     p: &TrainParams,
     orders: &[Vec<usize>],
+    seed: u64,
 ) {
     let k = loss.dims();
+    if let Loss::YetiRank {
+        permutations,
+        decay,
+    } = loss
+    {
+        // `CalcApproxDeltaSimple`: pairs drawn at the fold's scores.
+        let seed = seed_vector(fold.tails.len(), seed)[0];
+        let n = fold.weights.len();
+        fold.groups = yeti_rank_groups(
+            &fold.groups.queries,
+            &fold.target,
+            &fold.approx[0],
+            n,
+            seed,
+            permutations,
+            decay,
+        );
+        fold.weights = fold.groups.pair_weights(n);
+    }
     let (target, weights) = (&fold.target, &fold.weights);
     let exact_weights = &fold.sample_weights;
     for (&(body, tail, bw), a) in fold.tails.iter().zip(&mut fold.approx) {
@@ -4763,7 +4891,8 @@ fn boost(
     let mut approx = start(n);
     // Plain boosting with an unpermuted averaging fold shares its
     // approximations with fold 0 (`UseAveragingFoldAsFoldZero`).
-    let shared = !p.ordered && !average_permuted;
+    // (`UseAveragingFoldAsFoldZero`: not for pairwise losses.)
+    let shared = !p.ordered && !average_permuted && !loss.pairwise();
     let mut trees = Vec::with_capacity(p.iterations);
     let mut used_ctrs = std::collections::HashSet::new();
     let mut ctrs = CtrModel::default();
@@ -4812,8 +4941,27 @@ fn boost(
             shrink_history.push(factor);
         }
         let taken = (rng.gen() % n_folds as u64) as usize;
-        rng.gen(); // the derivatives' seeds
+        let der_seed = rng.gen(); // the derivatives' seeds
         let fold = &mut folds[taken];
+        if let Loss::YetiRank {
+            permutations,
+            decay,
+        } = loss
+        {
+            // `CalcWeightedDerivatives`: pairs drawn at the fold's scores
+            // (one body / tail: no ordered boosting).
+            let seed = seed_vector(fold.tails.len(), der_seed)[0];
+            fold.groups = yeti_rank_groups(
+                &fold.groups.queries,
+                &fold.target,
+                &fold.approx[0],
+                n,
+                seed,
+                permutations,
+                decay,
+            );
+            fold.weights = fold.groups.pair_weights(n);
+        }
         let ders: Vec<Ders> = fold
             .tails
             .iter()
@@ -4899,7 +5047,7 @@ fn boost(
             );
             (splits, Vec::new())
         };
-        rng.gen(); // the folds' seeds
+        let fold_seeds = seed_vector(n_folds, rng.gen()); // the folds' seeds
         let n_leaves = if p.grow_policy == CatBoostGrowPolicy::SymmetricTree {
             1usize << splits.len()
         } else {
@@ -4919,6 +5067,25 @@ fn boost(
         let leaf_of = average
             .q
             .tree_leaves(&splits, &children, &mut average.cache);
+        let mut seeded_steps = 0;
+        if let Loss::YetiRank {
+            permutations,
+            decay,
+        } = loss
+        {
+            // `CalcLeafValuesSimple`'s seed of its one step.
+            seeded_steps = 1;
+            average.groups = yeti_rank_groups(
+                &average.groups.queries,
+                &average.target,
+                &approx,
+                n,
+                rng.gen(),
+                permutations,
+                decay,
+            );
+            average.weights = average.groups.pair_weights(n);
+        }
         let lp = LeafProblem {
             loss,
             target: &average.target,
@@ -4937,7 +5104,7 @@ fn boost(
         let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
             // `CalcLeafValuesSimple` draws a seed per step.
-            for _ in 0..steps {
+            for _ in seeded_steps..steps {
                 rng.gen();
             }
         }
@@ -4968,7 +5135,7 @@ fn boost(
                 continue;
             }
             let leaf_of = fold.q.tree_leaves(&splits, &children, &mut fold.cache);
-            update_fold(fold, &leaf_of, n_leaves, loss, &p, &orders);
+            update_fold(fold, &leaf_of, n_leaves, loss, &p, &orders, fold_seeds[f]);
         }
         let source = &folds[taken];
         let tree_splits = splits
@@ -5204,9 +5371,10 @@ macro_rules! catboost_config {
             pub learning_rate: Option<f64>,
             /// Tree depth (levels of the symmetric tree, default 6).
             pub depth: usize,
-            /// L2 regularization of the leaf values (default 3), scaled by
-            /// the mean sample weight as in CatBoost.
-            pub l2_leaf_reg: f64,
+            /// L2 regularization of the leaf values, scaled by the mean
+            /// sample weight as in CatBoost. Default (`None`): CatBoost's, 3,
+            /// or 0 for YetiRank.
+            pub l2_leaf_reg: Option<f64>,
             /// Borders per numeric feature (default 254).
             pub border_count: usize,
             pub score_function: CatBoostScoreFunction,
@@ -5315,7 +5483,7 @@ macro_rules! catboost_config {
                     iterations: 1000,
                     learning_rate: None,
                     depth: 6,
-                    l2_leaf_reg: 3.0,
+                    l2_leaf_reg: None,
                     border_count: 254,
                     score_function: CatBoostScoreFunction::Cosine,
                     leaf_estimation_method: None,
@@ -5369,7 +5537,7 @@ macro_rules! catboost_config {
                 self
             }
             pub fn with_l2_leaf_reg(mut self, l2: f64) -> Self {
-                self.l2_leaf_reg = l2;
+                self.l2_leaf_reg = Some(l2);
                 self
             }
             pub fn with_border_count(mut self, b: usize) -> Self {
@@ -5448,7 +5616,7 @@ macro_rules! catboost_config {
                     Loss::Rmse | Loss::Quantile { .. } | Loss::Tweedie { .. } => (1, 1),
                     Loss::Huber { .. } | Loss::LogCosh | Loss::Lq { .. } => (1, 1),
                     Loss::RmseWithUncertainty | Loss::MultiRmse(_) => (1, 1),
-                    Loss::QueryRmse | Loss::PairLogit => (1, 1),
+                    Loss::QueryRmse | Loss::PairLogit | Loss::YetiRank { .. } => (1, 1),
                     Loss::LogLinQuantile { .. } => (1, 1),
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
@@ -5546,7 +5714,7 @@ macro_rules! catboost_config {
                 if let Some(lr) = self.learning_rate {
                     return lr;
                 }
-                let defaults = self.l2_leaf_reg == 3.0
+                let defaults = self.l2_leaf_reg.unwrap_or(3.0) == 3.0
                     && self.leaf_estimation_method.is_none()
                     && self.leaf_estimation_iterations.is_none();
                 // (A, B, C, D): dataset size and iteration coefficients.
@@ -5725,7 +5893,11 @@ macro_rules! catboost_config {
                     iterations: self.iterations,
                     learning_rate: f64::from(self.learning_rate.unwrap_or(0.03) as f32),
                     depth: self.depth,
-                    l2_leaf_reg: f64::from(self.l2_leaf_reg as f32),
+                    // CatBoost makes an L2 of 0 1e-20 (`SetLeavesEstimationDefault`).
+                    l2_leaf_reg: f64::from(match self.l2_leaf_reg.unwrap_or(3.0) as f32 {
+                        0.0 => 1e-20,
+                        l2 => l2,
+                    }),
                     score_function: self.score_function,
                     leaf_estimation: self.leaf_estimation_method.unwrap_or_default(),
                     model_size_reg: self.model_size_reg,
@@ -5887,6 +6059,13 @@ impl CatBoostRegressor {
             CatBoostRegressionLoss::MultiRmse => Loss::MultiRmse(targets),
             CatBoostRegressionLoss::QueryRmse => Loss::QueryRmse,
             CatBoostRegressionLoss::PairLogit => Loss::PairLogit,
+            CatBoostRegressionLoss::YetiRank {
+                permutations,
+                decay,
+            } => Loss::YetiRank {
+                permutations,
+                decay,
+            },
         }
     }
 }
@@ -6146,8 +6325,33 @@ impl CatBoostRegressor {
         }
         if loss.pairwise() && sample_weight.is_some() {
             return Err(RustMlError::InvalidParameter(
-                "PairLogit does not take sample weights".into(),
+                "PairLogit and YetiRank do not take sample weights".into(),
             ));
+        }
+        if let Loss::YetiRank {
+            permutations,
+            decay,
+        } = loss
+        {
+            let invalid = |m: &str| Err(RustMlError::InvalidParameter(m.into()));
+            if permutations == 0 || !(decay > 0.0 && decay <= 1.0) {
+                return invalid("YetiRank needs permutations >= 1 and decay in (0, 1]");
+            }
+            // Not ported: pairs per body / tail prefix, the PFound / NDCG
+            // eval metrics, pairs per leaf iteration.
+            if self.boosting_type == CatBoostBoostingType::Ordered {
+                return invalid("YetiRank supports plain boosting only");
+            }
+            if eval.is_some() {
+                return invalid("YetiRank does not support eval sets");
+            }
+            if self.leaf_estimation_iterations.is_some_and(|i| i != 1)
+                || self
+                    .leaf_estimation_method
+                    .is_some_and(|m| m != CatBoostLeafEstimation::Newton)
+            {
+                return invalid("YetiRank takes one Newton leaf step");
+            }
         }
         let use_best = self.use_best_model_with(eval.as_ref().map(|e| &e.0), x.ncols())?;
         let queries = group.map(|g| query_bounds(g, x.nrows())).transpose()?;
@@ -6341,7 +6545,13 @@ impl CatBoostRegressor {
         let q = quantize(x, self.border_count, cat)?;
         self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
+        // CatBoost's YetiRank default `l2_leaf_reg` is 0 (made 1e-20).
+        let l2 = match (self.l2_leaf_reg, loss) {
+            (None, Loss::YetiRank { .. }) => f64::from(1e-20f32),
+            _ => p.l2_leaf_reg,
+        };
         let p = TrainParams {
+            l2_leaf_reg: l2,
             learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             leaf_estimation: self.leaf_method(loss),
@@ -7219,6 +7429,29 @@ mod tests {
             .is_ok());
         assert!(pl
             .fit_with_groups(x.view(), labels.view(), Some(labels.view()), &groups)
+            .is_err());
+        // YetiRank: plain boosting, one Newton step, no eval set.
+        let yr = CatBoostRegressor::new()
+            .with_iterations(5)
+            .with_loss_function(CatBoostRegressionLoss::YetiRank {
+                permutations: 3,
+                decay: 0.85,
+            });
+        assert!(yr
+            .fit_with_groups(x.view(), labels.view(), None, &groups)
+            .is_ok());
+        assert!(yr
+            .clone()
+            .with_boosting_type(CatBoostBoostingType::Ordered)
+            .fit_with_groups(x.view(), labels.view(), None, &groups)
+            .is_err());
+        let eval = CatBoostEvalSet {
+            x: x.view(),
+            y: labels.view(),
+            sample_weight: None,
+        };
+        assert!(yr
+            .fit_with_groups_eval(x.view(), labels.view(), None, &groups, eval, &groups)
             .is_err());
     }
 }
