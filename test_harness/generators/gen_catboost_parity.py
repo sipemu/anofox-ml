@@ -656,6 +656,12 @@ def generate():
     add_group("loss_yetirank_defaults", dict(COMMON, iterations=60, depth=4,
               loss_function="YetiRank", random_strength=1.0, has_time=False,
               bootstrap_type="MVS"), X, y_rel, sizes)
+    # Its eval metric: NDCG, or PFound for targets in [0, 1] (maximized).
+    yr_over = dict(over, loss_function="YetiRank")
+    add_group("eval_yetirank_ndcg", yr_over, X, y_rel, sizes,
+              eval_data=(Xv, yv_rel, sizes_v))
+    add_group("eval_yetirank_pfound", yr_over, X, y_rel / 3, sizes,
+              eval_data=(Xv, yv_rel / 3, sizes_v))
     return out
 
 
