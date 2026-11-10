@@ -854,6 +854,9 @@ def generate():
     add_cat("lg_ctr_long", dict(cat, grow_policy="Lossguide", iterations=80, depth=6), y_cat)
     add_cat("lg_ctr_long_perm", dict(cat, grow_policy="Lossguide", iterations=80,
                                      has_time=False), y_cat)
+    # MultiClass learning folds over many trees (softmax by FastExpWithInf).
+    add_cat("cat_mc_perm_long", dict(cat_mc, has_time=False, iterations=80, depth=5), y_cat_mc)
+    add_cat("dw_ctr_mc", dict(cat_mc, grow_policy="Depthwise", iterations=60), y_cat_mc)
     return out
 
 
