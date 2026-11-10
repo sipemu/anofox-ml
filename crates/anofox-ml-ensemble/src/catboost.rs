@@ -1597,6 +1597,106 @@ impl Groups {
     }
 }
 
+/// library/cpp/dot_product's `DotProduct` of doubles as CatBoost runs it
+/// on AVX2 + FMA: SSE pairs below 16 values, else four lanes with the
+/// leftover first and fused multiply-adds.
+fn catboost_dot(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    if n < 16 {
+        let (mut s1, mut s2) = ([0.0f64; 2], [0.0f64; 2]);
+        let mut i = 0;
+        while n - i >= 4 {
+            s1[0] += a[i] * b[i];
+            s1[1] += a[i + 1] * b[i + 1];
+            s2[0] += a[i + 2] * b[i + 2];
+            s2[1] += a[i + 3] * b[i + 3];
+            i += 4;
+        }
+        if n - i >= 2 {
+            s1[0] += a[i] * b[i];
+            s1[1] += a[i + 1] * b[i + 1];
+            i += 2;
+        }
+        s1[0] += s2[0];
+        s1[1] += s2[1];
+        if n - i > 0 {
+            s1[0] += 0.0;
+            s1[1] += a[i] * b[i];
+        }
+        return s1[0] + s1[1];
+    }
+    let (mut s1, mut s2) = ([0.0f64; 4], [0.0f64; 4]);
+    let mut i = n % 4;
+    for l in 0..i {
+        s1[l] = a[l] * b[l];
+    }
+    while n - i >= 8 {
+        for l in 0..4 {
+            s1[l] = a[i + l].mul_add(b[i + l], s1[l]);
+            s2[l] = a[i + 4 + l].mul_add(b[i + 4 + l], s2[l]);
+        }
+        i += 8;
+    }
+    if n - i > 0 {
+        for l in 0..4 {
+            s1[l] = a[i + l].mul_add(b[i + l], s1[l]);
+        }
+    }
+    let s: Vec<f64> = (0..4).map(|l| s1[l] + s2[l]).collect();
+    (s[0] + s[2]) + (s[1] + s[3])
+}
+
+/// CatBoost's `PFound` (decay 0.85, all positions) or `NDCG` (Base,
+/// LogPosition, all positions) of raw approximations over the queries:
+/// rows ranked by score, ties pessimistically (`CompareDocs`).
+fn ranking_metric(target: &[f64], approx: &[f64], queries: &[usize], pfound: bool) -> f64 {
+    let (mut sum, mut count) = (0.0, 0.0);
+    let mut decay: Vec<f64> = Vec::new();
+    for q in queries.windows(2) {
+        let (begin, end) = (q[0], q[1]);
+        let rel = &target[begin..end];
+        let score = &approx[begin..end];
+        let mut order: Vec<usize> = (0..end - begin).collect();
+        order.sort_by(|&l, &r| {
+            use std::cmp::Ordering;
+            if score[l] != score[r] {
+                score[r].partial_cmp(&score[l]).unwrap_or(Ordering::Equal)
+            } else {
+                rel[l].partial_cmp(&rel[r]).unwrap_or(Ordering::Equal)
+            }
+        });
+        if pfound {
+            let (mut look, mut found) = (1.0f64, 0.0f64);
+            for &d in &order {
+                found += rel[d] * look;
+                look *= (1.0 - rel[d]) * 0.85;
+            }
+            sum += found;
+        } else {
+            while decay.len() < order.len() {
+                let i = decay.len();
+                decay.push(if i == 0 {
+                    1.0
+                } else {
+                    1.0 / ((i + 2) as f64).log2()
+                });
+            }
+            let ranked: Vec<f64> = order.iter().map(|&d| rel[d]).collect();
+            let dcg = catboost_dot(&ranked, &decay[..ranked.len()]);
+            let mut ideal = rel.to_vec();
+            ideal.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let idcg = catboost_dot(&ideal, &decay[..ideal.len()]);
+            sum += if idcg > 0.0 { dcg / idcg } else { 1.0 };
+        }
+        count += 1.0;
+    }
+    if count != 0.0 {
+        sum / count
+    } else {
+        0.0
+    }
+}
+
 /// CatBoost's `GenRandUI64Vector`: `n` draws of a generator seeded `seed`.
 fn seed_vector(n: usize, seed: u64) -> Vec<u64> {
     let mut rng = CatRng::new(seed);
@@ -4710,6 +4810,8 @@ struct EvalSet<'a> {
     weights: Vec<f64>,
     /// Query groups (querywise losses; else empty).
     groups: Groups,
+    /// YetiRank's eval metric is PFound (targets in [0, 1]), else NDCG.
+    pfound: bool,
 }
 
 /// An eval set for `fit_with_eval` (CatBoost's `eval_set`): features,
@@ -5154,10 +5256,17 @@ fn boost(
                     eval_approx[i * k + d] += tree.leaf_values[leaf * k + d];
                 }
             }
-            let metric = loss.eval_metric(&e.target, &eval_approx, &e.weights, &e.groups);
+            // YetiRank's PFound / NDCG are maximized.
+            let (metric, tracked) = if matches!(loss, Loss::YetiRank { .. }) {
+                let m = ranking_metric(&e.target, &eval_approx, &e.groups.queries, e.pfound);
+                (m, -m)
+            } else {
+                let m = loss.eval_metric(&e.target, &eval_approx, &e.weights, &e.groups);
+                (m, m)
+            };
             eval_metrics.push(metric);
             trees.push(tree);
-            if tracker.add(metric, iteration) {
+            if tracker.add(tracked, iteration) {
                 break;
             }
             continue;
@@ -6342,9 +6451,6 @@ impl CatBoostRegressor {
             if self.boosting_type == CatBoostBoostingType::Ordered {
                 return invalid("YetiRank supports plain boosting only");
             }
-            if eval.is_some() {
-                return invalid("YetiRank does not support eval sets");
-            }
             if self.leaf_estimation_iterations.is_some_and(|i| i != 1)
                 || self
                     .leaf_estimation_method
@@ -6355,6 +6461,9 @@ impl CatBoostRegressor {
         }
         let use_best = self.use_best_model_with(eval.as_ref().map(|e| &e.0), x.ncols())?;
         let queries = group.map(|g| query_bounds(g, x.nrows())).transpose()?;
+        let in_unit = |mut t: ndarray::iter::Iter<'_, f64, ndarray::Ix1>| {
+            t.all(|&v| (0.0..=1.0).contains(&(v as f32)))
+        };
         let eval = eval
             .map(|(e, g)| -> Result<EvalSet<'_>> {
                 Ok(EvalSet {
@@ -6367,6 +6476,9 @@ impl CatBoostRegressor {
                         Some(g) => groups_of(loss, query_bounds(g, e.y.len())?, &f32_values(e.y)),
                         None => Groups::default(),
                     },
+                    // `UpdateYetiRankEvalMetric`: PFound when the learn and
+                    // eval targets are in [0, 1], else NDCG.
+                    pfound: in_unit(y.iter()) && in_unit(e.y.iter()),
                 })
             })
             .transpose()?;
@@ -6442,6 +6554,7 @@ impl CatBoostRegressor {
                 .sample_weight
                 .map_or_else(|| vec![1.0; e.y.nrows()], f32_values),
             groups: Groups::default(),
+            pfound: false,
         });
         self.fit_targets(x, y, sample_weight, eval, use_best, None)
     }
@@ -6859,6 +6972,7 @@ impl CatBoostClassifier {
                     weights: apply_class_weights(w, &of, class_weights.as_deref()),
                     target,
                     groups: Groups::default(),
+                    pfound: false,
                 })
             }
         };
@@ -7430,7 +7544,7 @@ mod tests {
         assert!(pl
             .fit_with_groups(x.view(), labels.view(), Some(labels.view()), &groups)
             .is_err());
-        // YetiRank: plain boosting, one Newton step, no eval set.
+        // YetiRank: plain boosting, one Newton step; NDCG on an eval set.
         let yr = CatBoostRegressor::new()
             .with_iterations(5)
             .with_loss_function(CatBoostRegressionLoss::YetiRank {
@@ -7450,8 +7564,9 @@ mod tests {
             y: labels.view(),
             sample_weight: None,
         };
-        assert!(yr
+        let f = yr
             .fit_with_groups_eval(x.view(), labels.view(), None, &groups, eval, &groups)
-            .is_err());
+            .unwrap();
+        assert_eq!(f.eval_metrics().len(), 5);
     }
 }

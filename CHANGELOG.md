@@ -22,6 +22,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style ranking: PFound / NDCG eval metrics (#210)
+
+- YetiRank eval sets (`fit_with_groups_eval`): CatBoost's objective
+  metric `PFound` (decay 0.85) when the learn and eval targets are in
+  [0, 1], else `NDCG` (Base, LogPosition; library/cpp's SSE / AVX2+FMA
+  dot product order), both maximized by the overfitting detector and
+  `use_best_model`. NDCG and PFound eval sets match catboost 1.2.10
+  (metric curves, best iteration, tree count; predictions to ~1e-15).
+
 ### CatBoost-style ranking: YetiRank (#210)
 
 - `CatBoostRegressionLoss::YetiRank { permutations, decay }` through
@@ -32,8 +41,8 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   Pairwise losses no longer share fold 0 with the averaging fold
   (`UseAveragingFoldAsFoldZero`). Plain, L2, custom parameters,
   Depthwise, permuted / categorical and full-default fits match catboost
-  1.2.10's `CatBoostRanker` to ~9e-16. Not ported: ordered boosting, eval
-  sets (PFound / NDCG), more than one leaf step.
+  1.2.10's `CatBoostRanker` to ~9e-16. Not ported: ordered boosting, more
+  than one leaf step.
 - **Breaking:** `l2_leaf_reg` is now `Option<f64>`; `None` is CatBoost's
   default, 3, or 0 for YetiRank. An L2 of 0 becomes 1e-20, as in CatBoost
   (it was a 0/0 for leaves without derivatives).
