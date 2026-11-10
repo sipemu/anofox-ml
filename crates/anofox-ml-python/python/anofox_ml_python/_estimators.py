@@ -776,7 +776,7 @@ class _CatBoost(BaseEstimator):
 
     def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
                  border_count=254, score_function="Cosine", leaf_estimation_method=None,
-                 boost_from_average=None, cat_features=None, one_hot_max_size=2,
+                 boost_from_average=None, cat_features=None, one_hot_max_size=None,
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
                  max_ctr_complexity=None, leaf_estimation_iterations=None,
                  leaf_estimation_backtracking="AnyImprovement", has_time=False, random_seed=0,
@@ -842,7 +842,8 @@ class _CatBoost(BaseEstimator):
         if self.boost_from_average is not None:
             params["boost_from_average"] = bool(self.boost_from_average)
         params["cat_features"] = self._cat_indices(np.shape(X)[1])
-        params["one_hot_max_size"] = int(self.one_hot_max_size)
+        if self.one_hot_max_size is not None:
+            params["one_hot_max_size"] = int(self.one_hot_max_size)
         params["model_size_reg"] = float(self.model_size_reg)
         params["boosting_type"] = _choice(self.boosting_type,
                                           {"Plain": "Plain", "Ordered": "Ordered"},
@@ -1061,6 +1062,47 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
             params["loss_function"] = {name: {key: float(args[key])}}
         else:
             raise ValueError(f"unsupported loss_function {self.loss_function!r}")
+        return params
+
+
+class CatBoostRanker(CatBoostRegressor):
+    """catboost's ``CatBoostRanker`` with ``loss_function="QueryRMSE"``:
+    ``fit(X, y, group_id=...)`` takes a query id per row, with the rows of
+    a query consecutive. ``predict`` gives the ranking scores."""
+
+    @property
+    def _kind(self):
+        return "CatBoostRegressor"
+
+    def fit(self, X, y, group_id=None, sample_weight=None):
+        if group_id is None:
+            raise ValueError("CatBoostRanker.fit needs group_id")
+        if (self.loss_function or "QueryRMSE") != "QueryRMSE":
+            raise ValueError(f"unsupported loss_function {self.loss_function!r}")
+        X = self._encode(X, fit=True)
+        y = _check_1d(y)
+        gid = np.asarray(group_id).ravel()
+        if gid.shape[0] != X.shape[0]:
+            raise ValueError("group_id needs one id per row")
+        starts = np.flatnonzero(np.r_[True, gid[1:] != gid[:-1]])
+        if len(np.unique(gid)) != len(starts):
+            raise ValueError("the rows of a query must be consecutive")
+        sizes = np.diff(np.r_[starts, len(gid)])
+        if sample_weight is not None:
+            sample_weight = _check_1d(sample_weight, "sample_weight")
+        model = self._new_model(X, y)
+        model.fit_with_group(X, y, [int(g) for g in sizes], sample_weight)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def _rust_params(self, X, y):
+        saved, self.loss_function = self.loss_function, "RMSE"
+        try:
+            params = super()._rust_params(X, y)
+        finally:
+            self.loss_function = saved
+        params["loss_function"] = "QueryRMSE"
         return params
 
 

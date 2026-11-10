@@ -278,14 +278,25 @@ fn catboost_models_match_catboost() {
                     "LogCosh" => CatBoostRegressionLoss::LogCosh,
                     "Lq" => CatBoostRegressionLoss::Lq { q: value() },
                     "RMSEWithUncertainty" => CatBoostRegressionLoss::RmseWithUncertainty,
+                    "QueryRMSE" => CatBoostRegressionLoss::QueryRmse,
                     other => panic!("unknown loss {other}"),
                 });
             }
-            let f = match eval_set {
-                Some(e) => m
-                    .fit_with_eval(x.view(), y.view(), sw.as_ref().map(|w| w.view()), e)
+            let sizes = |v: &Value| -> Vec<usize> {
+                v.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|g| g.as_u64().unwrap() as usize)
+                    .collect()
+            };
+            let w = sw.as_ref().map(|w| w.view());
+            let f = match (eval_set, case.get("group")) {
+                (Some(e), Some(g)) => m
+                    .fit_with_groups_eval(x.view(), y.view(), w, &sizes(g), e, &sizes(&ev["group"]))
                     .unwrap(),
-                None => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
+                (None, Some(g)) => m.fit_with_groups(x.view(), y.view(), w, &sizes(g)).unwrap(),
+                (Some(e), None) => m.fit_with_eval(x.view(), y.view(), w, e).unwrap(),
+                (None, None) => m.fit_weighted(&x, &y, sw.as_ref()).unwrap(),
             };
             check_eval(f.eval_metrics(), f.n_estimators());
             if p["loss_function"] == "RMSEWithUncertainty" {

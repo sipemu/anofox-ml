@@ -369,6 +369,41 @@ impl CatRng {
             .flat_map(|b| b * block..((b + 1) * block).min(n))
             .collect()
     }
+
+    /// The permutation of grouped rows (`Shuffle` of a non-trivial
+    /// grouping): the queries `queries` (row bounds) in shuffled order, the
+    /// rows of each shuffled in turn; also the new query bounds.
+    fn group_permutation(&mut self, queries: &[usize]) -> (Vec<usize>, Vec<usize>) {
+        let order = self.permutation(queries.len() - 1, 1);
+        let mut perm = Vec::with_capacity(queries[queries.len() - 1]);
+        let mut bounds = vec![0];
+        for q in order {
+            let start = perm.len();
+            perm.extend(queries[q]..queries[q + 1]);
+            let rows = &mut perm[start..];
+            for i in 1..rows.len() {
+                let j = self.uniform(i as u64 + 1) as usize;
+                rows.swap(i, j);
+            }
+            bounds.push(perm.len());
+        }
+        (perm, bounds)
+    }
+
+    /// A fold permutation of `n` rows: in blocks, or by query when
+    /// `queries` is non-empty (with its query bounds).
+    fn fold_permutation(
+        &mut self,
+        n: usize,
+        block: usize,
+        queries: &[usize],
+    ) -> (Vec<usize>, Vec<usize>) {
+        if queries.is_empty() {
+            (self.permutation(n, block), Vec::new())
+        } else {
+            self.group_permutation(queries)
+        }
+    }
 }
 
 // ============================================================
@@ -703,6 +738,10 @@ pub enum CatBoostRegressionLoss {
     /// [`FittedCatBoostRegressor::predict_multi`].
     #[serde(rename = "MultiRMSE")]
     MultiRmse,
+    /// The RMSE after removing each query's mean residual (CatBoost's
+    /// `QueryRMSE`): fit with [`CatBoostRegressor::fit_with_groups`].
+    #[serde(rename = "QueryRMSE")]
+    QueryRmse,
 }
 
 /// CatBoost's `grow_policy`.
@@ -924,6 +963,9 @@ enum Loss {
     /// The RMSE over `k` targets per row (CatBoost's `MultiRMSE`), with a
     /// diagonal Hessian.
     MultiRmse(usize),
+    /// The RMSE of the residuals around each query's mean residual
+    /// (CatBoost's `QueryRMSE`, a querywise error).
+    QueryRmse,
 }
 
 impl Loss {
@@ -934,6 +976,11 @@ impl Loss {
             Loss::RmseWithUncertainty => 2,
             _ => 1,
         }
+    }
+
+    /// A querywise loss: derivatives and metric need the query bounds.
+    fn querywise(self) -> bool {
+        self == Loss::QueryRmse
     }
 
     /// Target values per row (the engine's targets are row-major).
@@ -1052,6 +1099,7 @@ impl Loss {
                 der2[0] = -w;
                 der2[1] = -2.0 * w * sq * prec[0];
             }
+            Loss::QueryRmse => unreachable!("querywise derivatives need the queries"),
             // CatBoost's `TMultiRMSEError::CalcDers`.
             Loss::MultiRmse(_) => {
                 for (d, (&t, &a)) in targets.iter().zip(approx).enumerate() {
@@ -1150,6 +1198,7 @@ impl Loss {
                 let d = approx[0] - target;
                 0.9189385332046 + approx[1] + 0.5 * e[0] * (d * d)
             }
+            Loss::QueryRmse => unreachable!("the querywise metric needs the queries"),
             // `TMultiRMSEMetric`'s squared errors.
             Loss::MultiRmse(_) => targets
                 .iter()
@@ -1233,7 +1282,16 @@ impl Loss {
 
     /// CatBoost's objective metric on an eval set, whose approximations it
     /// keeps on the raw scale (`TestApprox`).
-    fn eval_metric(self, target: &[f64], approx: &[f64], weights: &[f64]) -> f64 {
+    fn eval_metric(
+        self,
+        target: &[f64],
+        approx: &[f64],
+        weights: &[f64],
+        queries: &[usize],
+    ) -> f64 {
+        if self == Loss::QueryRmse {
+            return query_rmse(target, approx, &[], &[], weights, queries);
+        }
         if let Loss::MultiRmse(k) = self {
             return multi_rmse(target, approx, &[], &[], weights, k);
         }
@@ -1307,9 +1365,20 @@ impl Loss {
         leaf_of: &[u32],
         weights: &[f64],
         rows: usize,
+        queries: &[usize],
     ) -> f64 {
         if self == Loss::Logloss {
             return logloss_metric_exp(target, approx, leaves, leaf_of, weights, rows);
+        }
+        if self == Loss::QueryRmse {
+            return query_rmse(
+                target,
+                approx,
+                leaves,
+                leaf_of,
+                weights,
+                query_prefix(queries, rows),
+            );
         }
         if let Loss::MultiRmse(k) = self {
             return multi_rmse(
@@ -1352,7 +1421,14 @@ impl Loss {
     }
 
     /// The weighted derivatives of the rows `0..rows`.
-    fn all_ders(self, target: &[f64], approx: &[f64], weights: &[f64], rows: usize) -> Ders {
+    fn all_ders(
+        self,
+        target: &[f64],
+        approx: &[f64],
+        weights: &[f64],
+        rows: usize,
+        queries: &[usize],
+    ) -> Ders {
         let (k, h, t) = (self.dims(), self.hessian_len(), self.target_dims());
         let mut out = Ders {
             k,
@@ -1360,6 +1436,17 @@ impl Loss {
             der: vec![0.0; rows * k],
             der2: vec![0.0; rows * h],
         };
+        if self == Loss::QueryRmse {
+            // CatBoost's `TQueryRmseError::CalcDersForQueries`.
+            for q in query_prefix(queries, rows).windows(2) {
+                let avg = query_average(target, approx, &[], &[], weights, q[0], q[1]);
+                for i in q[0]..q[1] {
+                    out.der[i] = (target[i] - approx[i] - avg) * weights[i];
+                    out.der2[i] = -weights[i];
+                }
+            }
+            return out;
+        }
         for i in 0..rows {
             self.ders(
                 &target[i * t..(i + 1) * t],
@@ -1371,6 +1458,68 @@ impl Loss {
         }
         out
     }
+}
+
+/// The query bounds `queries` (row offsets, first 0) of the rows `0..rows`,
+/// which end on a query bound.
+fn query_prefix(queries: &[usize], rows: usize) -> &[usize] {
+    let end = queries.partition_point(|&b| b <= rows);
+    debug_assert_eq!(queries[end - 1], rows);
+    &queries[..end]
+}
+
+/// The weighted mean residual of the rows `begin..end` (CatBoost's
+/// `CalcQueryAvrg`), at `approx` moved by `leaves` when given.
+fn query_average(
+    target: &[f64],
+    approx: &[f64],
+    leaves: &[f64],
+    leaf_of: &[u32],
+    weights: &[f64],
+    begin: usize,
+    end: usize,
+) -> f64 {
+    let (mut sum, mut count) = (0.0, 0.0);
+    for i in begin..end {
+        let delta = if leaves.is_empty() {
+            0.0
+        } else {
+            leaves[leaf_of[i] as usize]
+        };
+        sum += (target[i] - approx[i] - delta) * weights[i];
+        count += weights[i];
+    }
+    if count > 0.0 {
+        sum / count
+    } else {
+        0.0
+    }
+}
+
+/// CatBoost's `TQueryRMSEMetric` over the queries `queries`.
+fn query_rmse(
+    target: &[f64],
+    approx: &[f64],
+    leaves: &[f64],
+    leaf_of: &[u32],
+    weights: &[f64],
+    queries: &[usize],
+) -> f64 {
+    let (mut sum, mut sum_w) = (0.0, 0.0);
+    for q in queries.windows(2) {
+        let avg = query_average(target, approx, leaves, leaf_of, weights, q[0], q[1]);
+        for i in q[0]..q[1] {
+            let delta = if leaves.is_empty() {
+                0.0
+            } else {
+                leaves[leaf_of[i] as usize]
+            };
+            let e = target[i] - approx[i] - delta - avg;
+            sum += (e * e) * weights[i];
+            sum_w += weights[i];
+        }
+    }
+    (sum / (sum_w + 1e-38)).sqrt()
 }
 
 /// CatBoost's `TMultiRMSEMetric` of row-major targets and approximations
@@ -3283,12 +3432,26 @@ fn grow_lossguide(
 /// CatBoost's body / tail prefixes of a fold for ordered boosting: the
 /// first body is 1 row (`min(100, n / 50)` above 500 rows), every tail
 /// ends at `ceil(body · fold_len_multiplier)`.
-fn body_tails(n: usize, multiplier: f64, weights: &[f64]) -> Vec<(usize, usize, f64)> {
-    let mut left = if n > 500 { 100.min(n / 50) } else { 1 }.min(n);
+fn body_tails(
+    n: usize,
+    multiplier: f64,
+    weights: &[f64],
+    queries: &[usize],
+) -> Vec<(usize, usize, f64)> {
+    // CatBoost's `UpdateSize`: sizes extend to the end of their query.
+    let snap = |size: usize| {
+        let size = size.min(n);
+        if queries.is_empty() {
+            size
+        } else {
+            queries[queries.partition_point(|&b| b < size)]
+        }
+    };
+    let mut left = snap(if n > 500 { 100.min(n / 50) } else { 1 });
     let mut out = Vec::new();
     while out.is_empty() || left < n {
         let body = left;
-        let tail = ((left as f64 * multiplier).ceil() as usize).min(n);
+        let tail = snap((left as f64 * multiplier).ceil() as usize);
         let body_weight: f64 = weights[..body].iter().sum();
         out.push((body, tail, body_weight));
         left = tail;
@@ -3484,6 +3647,8 @@ struct LeafProblem<'a> {
     orders: &'a [Vec<usize>],
     /// The weights of Exact leaves (CatBoost's `SampleWeights`).
     exact_weights: &'a [f64],
+    /// Query bounds (querywise losses; else empty).
+    queries: &'a [usize],
 }
 
 /// CatBoost's `CalculateWeightedTargetVariance` (float32 squares).
@@ -3631,8 +3796,9 @@ fn estimate_leaves(
         if logloss {
             logloss_metric_exp_at(lp.target, cached, leaves, lp.leaf_of, lp.weights)
         } else {
-            lp.loss
-                .metric_with_leaves(lp.target, approx, leaves, lp.leaf_of, lp.weights, rows)
+            lp.loss.metric_with_leaves(
+                lp.target, approx, leaves, lp.leaf_of, lp.weights, rows, lp.queries,
+            )
         }
     };
     let mut total = vec![0.0; n_leaves * k];
@@ -3652,7 +3818,8 @@ fn estimate_leaves(
         let ders = if logloss && !point_exp.is_empty() {
             logloss_ders_at(lp.target, &point_exp, lp.weights)
         } else {
-            lp.loss.all_ders(lp.target, &point, lp.weights, rows)
+            lp.loss
+                .all_ders(lp.target, &point, lp.weights, rows, lp.queries)
         };
         let mut sums = LeafSums::of(lp.leaf_of, n_leaves, &ders, lp.weights, rows);
         let mut step = vec![0.0; n_leaves * k];
@@ -3746,6 +3913,8 @@ fn estimate_leaves(
 /// approximations.
 struct LearnFold {
     q: Quantized,
+    /// Query bounds in the fold's order (querywise losses; else empty).
+    queries: Vec<usize>,
     target: Vec<f64>,
     weights: Vec<f64>,
     tails: Vec<(usize, usize, f64)>,
@@ -4152,6 +4321,7 @@ fn update_fold(
             moving: false,
             orders,
             exact_weights,
+            queries: &fold.queries,
         };
         if k == 1 {
             // Each prefix's approximation moves by the leaf values of its
@@ -4226,6 +4396,8 @@ struct EvalSet<'a> {
     x: ArrayView2<'a, f64>,
     target: Vec<f64>,
     weights: Vec<f64>,
+    /// Query bounds (querywise losses; else empty).
+    queries: Vec<usize>,
 }
 
 /// An eval set for `fit_with_eval` (CatBoost's `eval_set`): features,
@@ -4338,6 +4510,7 @@ fn boost(
     p: TrainParams,
     mut rng: CatRng,
     eval: Option<&EvalSet<'_>>,
+    queries: &[usize],
 ) -> Boosted {
     let n = weights.len();
     let k = loss.dims();
@@ -4349,24 +4522,27 @@ fn boost(
     } else {
         1
     };
-    let block = if learn_permuted {
+    let block = if !queries.is_empty() {
+        1
+    } else if learn_permuted {
         (n / 1000 + 1).min(256)
     } else {
         n
     };
     let start = |rows: usize| -> Vec<f64> { bias.iter().copied().cycle().take(rows * k).collect() };
     let identity: Vec<usize> = (0..n).collect();
-    let make_fold = |perm: &[usize]| -> LearnFold {
+    let make_fold = |perm: &[usize], queries: Vec<usize>| -> LearnFold {
         let target = permute_rows(target, perm, loss.target_dims());
         let weights = permute_rows(weights, perm, 1);
         let sum_w: f64 = weights.iter().sum();
         let tails = if p.ordered {
-            body_tails(n, p.fold_len_multiplier, &weights)
+            body_tails(n, p.fold_len_multiplier, &weights, &queries)
         } else {
             vec![(n, n, sum_w)]
         };
         LearnFold {
             q: q.permuted(perm),
+            queries,
             approx: tails.iter().map(|&(_, t, _)| start(t)).collect(),
             target,
             weights,
@@ -4377,20 +4553,20 @@ fn boost(
     };
     let mut folds: Vec<LearnFold> = (0..n_folds)
         .map(|f| {
-            let perm = if f > 0 && learn_permuted {
-                rng.permutation(n, block)
+            let (perm, bounds) = if f > 0 && learn_permuted {
+                rng.fold_permutation(n, block, queries)
             } else {
-                identity.clone()
+                (identity.clone(), queries.to_vec())
             };
-            make_fold(&perm)
+            make_fold(&perm, bounds)
         })
         .collect();
-    let average_perm = if average_permuted {
-        rng.permutation(n, block)
+    let (average_perm, average_queries) = if average_permuted {
+        rng.fold_permutation(n, block, queries)
     } else {
-        identity.clone()
+        (identity.clone(), queries.to_vec())
     };
-    let mut average = make_fold(&average_perm);
+    let mut average = make_fold(&average_perm, average_queries);
     let avg_sum_w: f64 = average.weights.iter().sum();
     let mut approx = start(n);
     // Plain boosting with an unpermuted averaging fold shares its
@@ -4450,7 +4626,7 @@ fn boost(
             .tails
             .iter()
             .zip(&fold.approx)
-            .map(|(&(_, t, _), a)| loss.all_ders(&fold.target, a, &fold.weights, t))
+            .map(|(&(_, t, _), a)| loss.all_ders(&fold.target, a, &fold.weights, t, &fold.queries))
             .collect();
         let previous = trees
             .last()
@@ -4562,6 +4738,7 @@ fn boost(
             orders: &orders,
             // The averaging fold is never bootstrapped.
             exact_weights: &unit_weights,
+            queries: &average.queries,
         };
         let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
@@ -4602,7 +4779,7 @@ fn boost(
                     eval_approx[i * k + d] += tree.leaf_values[leaf * k + d];
                 }
             }
-            let metric = loss.eval_metric(&e.target, &eval_approx, &e.weights);
+            let metric = loss.eval_metric(&e.target, &eval_approx, &e.weights, &e.queries);
             eval_metrics.push(metric);
             trees.push(tree);
             if tracker.add(metric, iteration) {
@@ -4713,6 +4890,20 @@ fn validate(
     Ok(())
 }
 
+/// Query bounds (row offsets from 0 to `n`) of the query sizes `group`.
+fn query_bounds(group: &[usize], n: usize) -> Result<Vec<usize>> {
+    if group.contains(&0) || group.iter().sum::<usize>() != n {
+        return Err(RustMlError::InvalidParameter(format!(
+            "the query sizes must be positive and sum to the {n} rows"
+        )));
+    }
+    let mut bounds = vec![0];
+    for &g in group {
+        bounds.push(bounds[bounds.len() - 1] + g);
+    }
+    Ok(bounds)
+}
+
 fn check_features(x: ArrayView2<f64>, n_features: usize) -> Result<()> {
     if x.ncols() != n_features {
         return Err(RustMlError::ShapeMismatch(format!(
@@ -4811,8 +5002,9 @@ macro_rules! catboost_config {
             /// statistics (CTRs), of single features and of combinations
             /// (`max_ctr_complexity`).
             pub cat_features: Vec<usize>,
-            /// Default 2.
-            pub one_hot_max_size: usize,
+            /// Default (`None`): CatBoost's, 2, or 10 for a groupwise loss
+            /// (QueryRMSE).
+            pub one_hot_max_size: Option<usize>,
             /// The most features a CTR combines (CatBoost's
             /// `max_ctr_complexity`; the conditions of a tree's float and
             /// one-hot splits count as one). Default (`None`): 4, or 1 for
@@ -4909,7 +5101,7 @@ macro_rules! catboost_config {
                     leaf_estimation_method: None,
                     boost_from_average: None,
                     cat_features: Vec::new(),
-                    one_hot_max_size: 2,
+                    one_hot_max_size: None,
                     max_ctr_complexity: None,
                     model_size_reg: 0.5,
                     boosting_type: CatBoostBoostingType::Plain,
@@ -4980,8 +5172,14 @@ macro_rules! catboost_config {
                 self.cat_features = features;
                 self
             }
+            /// CatBoost's `one_hot_max_size`: 2, or 10 for a groupwise
+            /// loss (`SetOneHotMaxSizeAndPrintNotice`).
+            fn one_hot_max_size_for(&self, loss: Loss) -> usize {
+                self.one_hot_max_size
+                    .unwrap_or(if loss.querywise() { 10 } else { 2 })
+            }
             pub fn with_one_hot_max_size(mut self, n: usize) -> Self {
-                self.one_hot_max_size = n;
+                self.one_hot_max_size = Some(n);
                 self
             }
             pub fn with_leaf_estimation_iterations(mut self, n: usize) -> Self {
@@ -5029,7 +5227,7 @@ macro_rules! catboost_config {
                 let (newton, gradient) = match loss {
                     Loss::Rmse | Loss::Quantile { .. } | Loss::Tweedie { .. } => (1, 1),
                     Loss::Huber { .. } | Loss::LogCosh | Loss::Lq { .. } => (1, 1),
-                    Loss::RmseWithUncertainty | Loss::MultiRmse(_) => (1, 1),
+                    Loss::RmseWithUncertainty | Loss::MultiRmse(_) | Loss::QueryRmse => (1, 1),
                     Loss::LogLinQuantile { .. } => (1, 1),
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
@@ -5466,6 +5664,7 @@ impl CatBoostRegressor {
             CatBoostRegressionLoss::Lq { q } => Loss::Lq { q },
             CatBoostRegressionLoss::RmseWithUncertainty => Loss::RmseWithUncertainty,
             CatBoostRegressionLoss::MultiRmse => Loss::MultiRmse(targets),
+            CatBoostRegressionLoss::QueryRmse => Loss::QueryRmse,
         }
     }
 }
@@ -5668,20 +5867,85 @@ impl CatBoostRegressor {
                 "MultiRMSE has a target matrix: use fit_multi".into(),
             ));
         }
-        let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
-        let eval = eval.map(|e| EvalSet {
-            x: e.x,
-            target: f32_values(e.y),
-            weights: e
-                .sample_weight
-                .map_or_else(|| vec![1.0; e.y.len()], f32_values),
-        });
+        if self.loss_function == CatBoostRegressionLoss::QueryRmse {
+            return Err(RustMlError::InvalidParameter(
+                "QueryRMSE needs query groups: use fit_with_groups".into(),
+            ));
+        }
+        self.fit_grouped(x, y, sample_weight, None, eval.map(|e| (e, None)))
+    }
+
+    /// Fit a querywise loss (QueryRMSE) on query groups: `group` holds the
+    /// sizes of the queries, whose rows are consecutive (CatBoost's
+    /// `group_id`).
+    pub fn fit_with_groups(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        group: &[usize],
+    ) -> Result<FittedCatBoostRegressor> {
+        self.fit_grouped(x, y, sample_weight, Some(group), None)
+    }
+
+    /// [`fit_with_groups`](Self::fit_with_groups) with an eval set and its
+    /// query sizes `eval_group`.
+    pub fn fit_with_groups_eval(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        group: &[usize],
+        eval: CatBoostEvalSet<'_>,
+        eval_group: &[usize],
+    ) -> Result<FittedCatBoostRegressor> {
+        self.fit_grouped(
+            x,
+            y,
+            sample_weight,
+            Some(group),
+            Some((eval, Some(eval_group))),
+        )
+    }
+
+    fn fit_grouped(
+        &self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+        group: Option<&[usize]>,
+        eval: Option<(CatBoostEvalSet<'_>, Option<&[usize]>)>,
+    ) -> Result<FittedCatBoostRegressor> {
+        let querywise = self.loss_function == CatBoostRegressionLoss::QueryRmse;
+        if group.is_some() != querywise {
+            return Err(RustMlError::InvalidParameter(
+                "query groups go with a querywise loss (QueryRMSE)".into(),
+            ));
+        }
+        let use_best = self.use_best_model_with(eval.as_ref().map(|e| &e.0), x.ncols())?;
+        let queries = group.map(|g| query_bounds(g, x.nrows())).transpose()?;
+        let eval = eval
+            .map(|(e, g)| -> Result<EvalSet<'_>> {
+                Ok(EvalSet {
+                    x: e.x,
+                    target: f32_values(e.y),
+                    weights: e
+                        .sample_weight
+                        .map_or_else(|| vec![1.0; e.y.len()], f32_values),
+                    queries: match g {
+                        Some(g) => query_bounds(g, e.y.len())?,
+                        None => Vec::new(),
+                    },
+                })
+            })
+            .transpose()?;
         self.fit_targets(
             x,
             y.insert_axis(ndarray::Axis(1)),
             sample_weight,
             eval,
             use_best,
+            queries,
         )
     }
 
@@ -5746,8 +6010,9 @@ impl CatBoostRegressor {
             weights: e
                 .sample_weight
                 .map_or_else(|| vec![1.0; e.y.nrows()], f32_values),
+            queries: Vec::new(),
         });
-        self.fit_targets(x, y, sample_weight, eval, use_best)
+        self.fit_targets(x, y, sample_weight, eval, use_best, None)
     }
 
     /// Fit on the target columns `y` (one, or MultiRMSE's k).
@@ -5758,6 +6023,7 @@ impl CatBoostRegressor {
         sample_weight: Option<ArrayView1<f64>>,
         eval_set: Option<EvalSet<'_>>,
         use_best: bool,
+        queries: Option<Vec<usize>>,
     ) -> Result<FittedCatBoostRegressor> {
         let p = self.train_params();
         validate(x, y.column(0), sample_weight, &p, self.border_count)?;
@@ -5774,7 +6040,18 @@ impl CatBoostRegressor {
         }
         let loss = self.loss(y.ncols());
         let mut rng = CatRng::new(self.random_seed);
-        let shuffled = self.learn_order(x.nrows(), &mut rng).map(|order| {
+        let mut queries = queries.unwrap_or_default();
+        // Grouped rows shuffle by query (`ShuffleLearnDataIfNeeded`).
+        let order = if queries.is_empty() {
+            self.learn_order(x.nrows(), &mut rng)
+        } else {
+            self.learn_order(0, &mut rng).map(|_| {
+                let (order, bounds) = rng.group_permutation(&queries);
+                queries = bounds;
+                order
+            })
+        };
+        let shuffled = order.map(|order| {
             (
                 x.select(ndarray::Axis(0), &order),
                 y.select(ndarray::Axis(0), &order),
@@ -5826,7 +6103,7 @@ impl CatBoostRegressor {
         let classes_of = target_classes(target0);
         let cat = CategoricalParams {
             features: &self.cat_features,
-            one_hot_max_size: self.one_hot_max_size,
+            one_hot_max_size: self.one_hot_max_size_for(loss),
             classes: Some((&classes_of, 2)),
             max_ctr_complexity: self.max_ctr_complexity(),
         };
@@ -5856,6 +6133,7 @@ impl CatBoostRegressor {
                 p,
                 rng,
                 eval_set.as_ref(),
+                &queries,
             )
         });
         Ok(FittedCatBoostRegressor {
@@ -6139,6 +6417,7 @@ impl CatBoostClassifier {
                     x: e.x,
                     weights: apply_class_weights(w, &of, class_weights.as_deref()),
                     target,
+                    queries: Vec::new(),
                 })
             }
         };
@@ -6157,7 +6436,7 @@ impl CatBoostClassifier {
         };
         let cat = CategoricalParams {
             features: &self.cat_features,
-            one_hot_max_size: self.one_hot_max_size,
+            one_hot_max_size: self.one_hot_max_size_for(loss),
             classes: Some((&classes_of, classes.len())),
             max_ctr_complexity: self.max_ctr_complexity(),
         };
@@ -6190,6 +6469,7 @@ impl CatBoostClassifier {
                 p,
                 rng,
                 eval_set.as_ref(),
+                &[],
             )
         });
         Ok(FittedCatBoostClassifier {
@@ -6484,11 +6764,13 @@ mod tests {
     #[test]
     fn ordered_boosting_prefixes_double() {
         let w = vec![1.0; 10];
-        let tails: Vec<(usize, usize)> =
-            body_tails(10, 2.0, &w).iter().map(|t| (t.0, t.1)).collect();
+        let tails: Vec<(usize, usize)> = body_tails(10, 2.0, &w, &[])
+            .iter()
+            .map(|t| (t.0, t.1))
+            .collect();
         assert_eq!(tails, vec![(1, 2), (2, 4), (4, 8), (8, 10)]);
         let w = vec![1.0; 1200];
-        assert_eq!(body_tails(1200, 2.0, &w)[0].0, 24);
+        assert_eq!(body_tails(1200, 2.0, &w, &[])[0].0, 24);
         let (x, y) = data(150);
         let m = |b| {
             CatBoostRegressor::new()
@@ -6661,5 +6943,40 @@ mod tests {
         let rmse = CatBoostRegressor::new().with_iterations(5);
         assert!(rmse.fit_multi(x.view(), ys.view(), None).is_err());
         assert!(rmse.fit(&x, &y).unwrap().predict_multi(&x).is_err());
+    }
+
+    #[test]
+    fn query_rmse_needs_and_checks_query_groups() {
+        let (x, y) = data(60);
+        let groups = [10, 20, 5, 25];
+        let q = CatBoostRegressor::new()
+            .with_iterations(10)
+            .with_loss_function(CatBoostRegressionLoss::QueryRmse);
+        let f = q
+            .fit_with_groups(x.view(), y.view(), None, &groups)
+            .unwrap();
+        assert_eq!(f.n_estimators(), 10);
+        // A query-wise shift of the targets leaves the model unchanged.
+        let shifted: Array1<f64> = y
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| v + if i < 30 { 3.0 } else { -1.0 })
+            .collect();
+        let g = q
+            .fit_with_groups(x.view(), shifted.view(), None, &groups)
+            .unwrap();
+        let (a, b) = (f.predict(&x).unwrap(), g.predict(&x).unwrap());
+        assert!(a.iter().zip(&b).all(|(a, b)| (a - b).abs() < 1e-5));
+        assert!(q.fit(&x, &y).is_err());
+        assert!(q
+            .fit_with_groups(x.view(), y.view(), None, &[30, 29])
+            .is_err());
+        assert!(q
+            .fit_with_groups(x.view(), y.view(), None, &[60, 0])
+            .is_err());
+        let rmse = CatBoostRegressor::new().with_iterations(3);
+        assert!(rmse
+            .fit_with_groups(x.view(), y.view(), None, &groups)
+            .is_err());
     }
 }

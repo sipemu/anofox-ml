@@ -558,6 +558,72 @@ def generate():
              random_strength=1.0, has_time=False, bootstrap_type="MVS"), X, Y)
     add_eval("eval_multirmse", "regressor", dict(over, loss_function="MultiRMSE"), X, Y, Xv, Yv,
              sw=weights, we=wv)
+
+    # QueryRMSE (#210): consecutive query groups (CatBoost's group_id);
+    # fold and data permutations shuffle whole queries.
+    def groups_of(rows):
+        sizes = []
+        while sum(sizes) < rows:
+            sizes.append(int(rng.integers(1, 13)))
+        sizes[-1] -= sum(sizes) - rows
+        return sizes
+
+    def add_group(name, params, Xd, y, sizes, sw=None, eval_data=None):
+        gid = np.repeat(np.arange(len(sizes)), sizes)
+        cats = params.get("cat_features") or []
+
+        def typed(A):
+            if not cats:
+                return A
+            Ao = A.astype(object)
+            for c in cats:
+                Ao[:, c] = A[:, c].astype(int)
+            return Ao
+
+        pool = cb.Pool(typed(Xd), y, weight=sw, group_id=gid, cat_features=cats or None)
+        fit_kw = {}
+        if eval_data is not None:
+            Xe, ye, ge = eval_data
+            fit_kw["eval_set"] = cb.Pool(typed(Xe), ye,
+                                         group_id=np.repeat(np.arange(len(ge)), ge),
+                                         cat_features=cats or None)
+        kw = {k: v for k, v in params.items() if k != "cat_features"}
+        m = cb.CatBoostRanker(**kw).fit(pool, **fit_kw)
+        X_test = Xd[::4]
+        case = {
+            "name": name, "kind": "regressor",
+            "params": {k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+            "X": nulls(Xd), "y": y.tolist(), "group": sizes,
+            "sample_weight": None if sw is None else sw.tolist(),
+            "X_test": nulls(X_test), "predictions": m.predict(typed(X_test)).tolist(),
+        }
+        if eval_data is not None:
+            evals = m.get_evals_result()["validation"]
+            case["eval"] = {"X": nulls(Xe), "y": ye.tolist(), "group": ge,
+                            "sample_weight": None, "metrics": evals[next(iter(evals))],
+                            "best_iteration": m.get_best_iteration(),
+                            "tree_count": m.tree_count_}
+        out["models"].append(case)
+
+    sizes = groups_of(n)
+    y_q = y_reg + np.repeat(rng.normal(scale=2.0, size=len(sizes)), sizes)
+    qr = dict(base, loss_function="QueryRMSE")
+    add_group("loss_query_rmse", qr, X, y_q, sizes)
+    add_group("loss_query_rmse_weighted", qr, X, y_q, sizes, sw=weights)
+    add_group("loss_query_rmse_ordered", dict(qr, boosting_type="Ordered"), X, y_q, sizes)
+    add_group("loss_query_rmse_permuted", dict(qr, boosting_type="Ordered", has_time=False),
+              X, y_q, sizes)
+    add_group("loss_query_rmse_depthwise", dict(qr, grow_policy="Depthwise"), X, y_q, sizes)
+    # A groupwise loss defaults to one_hot_max_size=10.
+    add_group("loss_query_rmse_cat", dict(qr, cat_features=cat_cols, has_time=False), Xc, y_q,
+              sizes)
+    add_group("loss_query_rmse_defaults", dict(COMMON, iterations=60, depth=4,
+              loss_function="QueryRMSE", random_strength=1.0, has_time=False,
+              bootstrap_type="MVS"), X, y_q, sizes)
+    sizes_v = groups_of(150)
+    yv_q = yv_reg + np.repeat(rng.normal(scale=2.0, size=len(sizes_v)), sizes_v)
+    add_group("eval_query_rmse", dict(over, loss_function="QueryRMSE"), X, y_q, sizes,
+              eval_data=(Xv, yv_q, sizes_v))
     return out
 
 
@@ -565,6 +631,7 @@ if __name__ == "__main__":
     import json
     path = os.path.join(os.path.dirname(__file__), "..", "..",
                         "crates", "anofox-ml", "tests", "golden_data", "catboost_parity.json")
+    data = generate()
     with open(path, "w") as f:
-        json.dump(generate(), f, indent=1)
+        json.dump(data, f, indent=1)
     print(f"wrote {path}")
