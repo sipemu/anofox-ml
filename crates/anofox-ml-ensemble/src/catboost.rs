@@ -1159,7 +1159,7 @@ impl Loss {
             }
             Loss::Logloss => {
                 let e = approx[0].exp();
-                let p = e / (1.0 + e);
+                let p = 1.0 - 1.0 / (1.0 + e);
                 let p = if p.is_nan() { 1.0 } else { p };
                 der[0] = w * (target - p);
                 der2[0] = w * (-p * (1.0 - p));
@@ -2106,7 +2106,7 @@ fn logloss_ders_at(target: &[f64], point: &[(f64, f32)], weights: &[f64]) -> Der
         .zip(target)
         .zip(weights)
         .map(|((&(e, _), &t), &w)| {
-            let p = e / (1.0 + e);
+            let p = 1.0 - 1.0 / (1.0 + e);
             let p = if p.is_nan() { 1.0 } else { p };
             (w * (t - p), w * (-p * (1.0 - p)))
         })
@@ -2128,7 +2128,8 @@ fn logloss_metric_exp_at(
     weights: &[f64],
 ) -> f64 {
     let rows = point.len();
-    let exp_leaves: Vec<f64> = leaves.iter().map(|v| v.exp()).collect();
+    // `EvalErrorsWithLeaves`: the leaf deltas by `FastExpWithInfInplace`.
+    let exp_leaves = expd_of(leaves);
     let log_leaves: Vec<f32> = exp_leaves.iter().map(|&d| fast_logf(d as f32)).collect();
     // The blocks in parallel, added in order.
     use rayon::prelude::*;
@@ -3108,9 +3109,26 @@ impl YHashSet {
 /// CTR feature and per tree CTR projection. An entry holds its candidates,
 /// each the (column, split) bins it chooses its best from.
 fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(usize, usize)>>> {
+    candidate_entries_and_packs(q, candidates).0
+}
+
+/// A bit of a pack of binary features: a candidate's (column, split), or a
+/// two-valued categorical with CTRs (its index in `Quantized::ctr`; bit set
+/// for the second category).
+#[derive(Clone, Copy)]
+enum PackBit {
+    Column(usize, usize),
+    Cat(usize),
+}
+
+/// [`candidate_entries`] and the packs of binary features (8 bits each).
+fn candidate_entries_and_packs(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+) -> (Vec<Vec<Vec<(usize, usize)>>>, Vec<Vec<PackBit>>) {
     let mut single = Vec::new();
-    let mut packed: Vec<Option<(usize, usize)>> = Vec::new();
-    let mut packed_cats: Vec<(usize, Option<(usize, usize)>)> = Vec::new();
+    let mut packed: Vec<PackBit> = Vec::new();
+    let mut packed_cats: Vec<(usize, PackBit)> = Vec::new();
     let mut ctr_groups: Vec<(Projection, Vec<(usize, usize)>)> = Vec::new();
     let mut estimated = Vec::new();
     let mut online = Vec::new();
@@ -3125,13 +3143,15 @@ fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(us
             continue;
         }
         match &column.split {
-            ColumnSplit::Float { borders, .. } if borders.len() == 1 => packed.push(Some((c, 0))),
+            ColumnSplit::Float { borders, .. } if borders.len() == 1 => {
+                packed.push(PackBit::Column(c, 0))
+            }
             ColumnSplit::Float { borders, .. } => {
                 single.push(vec![(0..borders.len()).map(|s| (c, s)).collect()]);
             }
             // A two-valued categorical's bit is its second category.
             ColumnSplit::OneHot { feature, values } if values.len() == 2 => {
-                packed_cats.push((*feature, Some((c, 1))));
+                packed_cats.push((*feature, PackBit::Column(c, 1)));
             }
             ColumnSplit::OneHot { values, .. } => {
                 single.push(vec![(0..values.len()).map(|s| (c, s)).collect()]);
@@ -3146,15 +3166,24 @@ fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(us
     }
     // Two-valued categoricals with CTRs take a bit too, as no candidate.
     if let Some(src) = &q.ctr {
-        for cat in src.features.iter().filter(|c| c.values.len() == 2) {
-            packed_cats.push((cat.feature, None));
+        for (j, cat) in src.features.iter().enumerate() {
+            if cat.values.len() == 2 {
+                packed_cats.push((cat.feature, PackBit::Cat(j)));
+            }
         }
     }
     packed_cats.sort_by_key(|&(f, _)| f);
     packed.extend(packed_cats.into_iter().map(|(_, c)| c));
     let mut entries = single;
-    for pack in packed.chunks(8) {
-        let bins: Vec<(usize, usize)> = pack.iter().flatten().copied().collect();
+    let packs: Vec<Vec<PackBit>> = packed.chunks(8).map(<[PackBit]>::to_vec).collect();
+    for pack in &packs {
+        let bins: Vec<(usize, usize)> = pack
+            .iter()
+            .filter_map(|b| match *b {
+                PackBit::Column(c, s) => Some((c, s)),
+                PackBit::Cat(_) => None,
+            })
+            .collect();
         if !bins.is_empty() {
             entries.push(vec![bins]);
         }
@@ -3179,7 +3208,7 @@ fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(us
         let n_splits = candidates[c].get(q).n_buckets - 1;
         entries.push(vec![(0..n_splits).map(|s| (c, s)).collect()]);
     }
-    entries
+    (entries, packs)
 }
 
 /// Grow one oblivious tree on the weighted first derivatives of the
@@ -3551,6 +3580,112 @@ fn grow_tree(
     (splits, leaf_of)
 }
 
+/// Packs of binary features in leafwise scoring (CatBoost's
+/// `ESplitEnsembleType::BinarySplits`): each pack's statistics per pack
+/// value, and its bits' scores from them (true: the values with the bit,
+/// false: the others, each summed in value order).
+struct Packs {
+    /// Per pack: its bits and every row's pack value.
+    packs: Vec<(Vec<PackBit>, Vec<u8>)>,
+}
+
+impl Packs {
+    fn new(q: &Quantized, layout: &[Vec<PackBit>]) -> Self {
+        let n = q.columns.first().map_or(0, |c| c.buckets.len());
+        let packs = layout
+            .iter()
+            .filter(|bits| bits.iter().any(|b| matches!(b, PackBit::Column(..))))
+            .map(|bits| {
+                let mut values = vec![0u8; n];
+                for (j, bit) in bits.iter().enumerate() {
+                    for (i, v) in values.iter_mut().enumerate() {
+                        let set = match *bit {
+                            PackBit::Column(c, s) => {
+                                let column = &q.columns[c];
+                                column.goes_right(column.buckets[i], s)
+                            }
+                            PackBit::Cat(f) => {
+                                q.ctr.as_ref().expect("CTR source").features[f].ids[i] == 1
+                            }
+                        };
+                        *v |= u8::from(set) << j;
+                    }
+                }
+                (bits.clone(), values)
+            })
+            .collect();
+        Self { packs }
+    }
+
+    /// The packs' statistics of the rows (appended to the columns').
+    fn stats(&self, rows: &[usize], swder: &[f64], w: &[f64], k: usize) -> Vec<Vec<BucketStats>> {
+        self.packs
+            .iter()
+            .map(|(bits, values)| {
+                let nv = 1usize << bits.len();
+                let mut st = vec![BucketStats::default(); k * nv];
+                for &i in rows {
+                    let v = values[i] as usize;
+                    for d in 0..k {
+                        let h = &mut st[d * nv + v];
+                        h.swd += swder[i * k + d];
+                        h.sw += w[i];
+                    }
+                }
+                st
+            })
+            .collect()
+    }
+
+    /// Replace the pack bits' scores by those of the pack statistics
+    /// (`stats` past the columns').
+    fn rescore(
+        &self,
+        scores: &mut [Option<Vec<f64>>],
+        stats: &[Vec<BucketStats>],
+        k: usize,
+        l2: f64,
+        score_function: CatBoostScoreFunction,
+    ) {
+        for ((bits, _), st) in self.packs.iter().zip(stats) {
+            let nv = 1usize << bits.len();
+            for (j, bit) in bits.iter().enumerate() {
+                let PackBit::Column(c, s) = *bit else {
+                    continue;
+                };
+                let (mut num, mut den) = (0.0f64, 1e-100f64);
+                for d in 0..k {
+                    let (mut t, mut f) = (BucketStats::default(), BucketStats::default());
+                    for (v, h) in st[d * nv..(d + 1) * nv].iter().enumerate() {
+                        if (v >> j) & 1 == 1 {
+                            t.add(h);
+                        } else {
+                            f.add(h);
+                        }
+                    }
+                    let (at, af) = (average(t.swd, t.sw, l2), average(f.swd, f.sw, l2));
+                    match score_function {
+                        CatBoostScoreFunction::Cosine => {
+                            num += af * f.swd + at * t.swd;
+                            den += af * af * f.sw + at * at * t.sw;
+                        }
+                        CatBoostScoreFunction::L2 => {
+                            num += at * t.swd;
+                            num += af * f.swd;
+                        }
+                    }
+                }
+                if let Some(sc) = scores[c].as_mut() {
+                    sc[s] = match score_function {
+                        CatBoostScoreFunction::Cosine => num / den.sqrt(),
+                        CatBoostScoreFunction::L2 => num,
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// The split scores of one leaf's bucket statistics (`k` × buckets per
 /// column), CatBoost's `CalcScoresForSubCandidate` with `AddLeafPlain`.
 fn leaf_scores(
@@ -3657,12 +3792,36 @@ fn ctr_penalties(
     used_ctrs: &std::collections::HashSet<(Projection, bool)>,
     model_size_reg: f64,
 ) -> Vec<f64> {
-    let max = candidates
+    let max = max_ctr_count(q, candidates, |_| true);
+    ctr_penalties_with_max(q, candidates, used_ctrs, model_size_reg, max)
+}
+
+/// The largest combination count of the CTR candidates whose projection
+/// passes `computed` (CatBoost's `CalcMaxFeatureValueCount`: a CTR not yet
+/// computed in the fold counts 0), at least 1.
+fn max_ctr_count(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+    computed: impl Fn(&Projection) -> bool,
+) -> usize {
+    candidates
         .iter()
-        .filter_map(|c| c.get(q).ctr_key.as_ref().map(|(_, k)| *k))
+        .filter_map(|c| c.get(q).ctr_key.as_ref())
+        .filter(|((p, _), _)| computed(p))
+        .map(|(_, k)| *k)
         .max()
         .unwrap_or(1)
-        .max(1);
+        .max(1)
+}
+
+/// [`ctr_penalties`] relative to the combination count `max`.
+fn ctr_penalties_with_max(
+    q: &Quantized,
+    candidates: &[ColumnRef],
+    used_ctrs: &std::collections::HashSet<(Projection, bool)>,
+    model_size_reg: f64,
+    max: usize,
+) -> Vec<f64> {
     candidates
         .iter()
         .map(|c| match &c.get(q).ctr_key {
@@ -3678,7 +3837,7 @@ fn ctr_penalties(
 /// per node its split and children, a child `c < 0` being leaf `!c`.
 type NodeChildren = Vec<(i32, i32)>;
 
-/// CatBoost's `GreedyTensorSearchDepthwise` (plain boosting, no CTRs):
+/// CatBoost's `GreedyTensorSearchDepthwise` (plain boosting):
 /// level by level, every leaf with at least `min_data` sampled rows is
 /// split by its best candidate if that gains at least 1e-9. Of two
 /// siblings the smaller one's bucket statistics are computed, the larger
@@ -3699,13 +3858,15 @@ fn grow_depthwise(
     used_ctrs: &mut std::collections::HashSet<(Projection, bool)>,
     model_size_reg: f64,
     object_weights: bool,
+    computed_ctrs: &mut std::collections::HashSet<Projection>,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
     let level_draws = q.draws.0
         + q.ctr.as_ref().map_or(0, |c| c.features.len())
         + q.estimated.len()
         + q.online_cols.len();
-    let entries = candidate_entries(q, &candidates);
+    let (entries, layout) = candidate_entries_and_packs(q, &candidates);
+    let packs = Packs::new(q, &layout);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
     let mut splits: Vec<(ColumnRef, usize)> = Vec::new();
@@ -3714,7 +3875,7 @@ fn grow_depthwise(
     let l2 = part.scaled_l2;
     let trick = k == 1;
     let stats_of = |rows: &[usize], w: &[f64]| -> Vec<Vec<BucketStats>> {
-        candidates
+        let mut all: Vec<Vec<BucketStats>> = candidates
             .iter()
             .map(|c| {
                 let column = c.get(q);
@@ -3730,17 +3891,27 @@ fn grow_depthwise(
                 }
                 st
             })
-            .collect()
+            .collect();
+        all.extend(packs.stats(rows, part.swder, w, k));
+        all
     };
     // `CalcBestScoreAndCandidate`: (gain, best split) of a leaf's stats.
     let score = |stats: &[Vec<BucketStats>],
                  rows: &[usize],
                  w: &[f64],
                  rng: &mut CatRng,
-                 used: &std::collections::HashSet<(Projection, bool)>| {
-        let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
+                 used: &std::collections::HashSet<(Projection, bool)>,
+                 max_count: usize| {
+        let penalties = ctr_penalties_with_max(q, &candidates, used, model_size_reg, max_count);
         let noise_seed = rng.gen();
-        let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
+        let mut scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
+        packs.rescore(
+            &mut scores,
+            &stats[candidates.len()..],
+            k,
+            l2,
+            score_function,
+        );
         // `CalcScoreWithoutSplit`: the leaf's sums (all dimensions).
         let (mut swd, mut sw) = (0.0, 0.0);
         for d in 0..k {
@@ -3791,6 +3962,11 @@ fn grow_depthwise(
         for _ in 0..level_draws {
             rng.real1();
         }
+        // CatBoost's `TSubtractTrickInfo` (Depthwise) takes the CTRs'
+        // largest value count at the start of the level, when only the CTRs
+        // the fold computed before count.
+        let max_count = max_ctr_count(q, &candidates, |p| computed_ctrs.contains(p));
+        let mut scored = false;
         let mut next_level = Vec::new();
         let mut pending: Option<(f64, Option<(usize, usize)>)> = None;
         for id in 0..current.len() {
@@ -3801,6 +3977,7 @@ fn grow_depthwise(
                 continue;
             }
             let even = id % 2 == 0;
+            scored = true;
             let push = |parents: &mut std::collections::VecDeque<_>,
                         g: f64,
                         b: &Option<(usize, usize)>,
@@ -3813,9 +3990,23 @@ fn grow_depthwise(
                 p
             } else if even && next_considered && trick && size <= next_size {
                 let small = stats_of(&rows_of[current[id]], &wts);
-                let (g, b) = score(&small, &rows_of[current[id]], &wts, rng, used_ctrs);
+                let (g, b) = score(
+                    &small,
+                    &rows_of[current[id]],
+                    &wts,
+                    rng,
+                    used_ctrs,
+                    max_count,
+                );
                 let large = subtract(&parents[0], &small);
-                let (g2, b2) = score(&large, &rows_of[current[id + 1]], &wts, rng, used_ctrs);
+                let (g2, b2) = score(
+                    &large,
+                    &rows_of[current[id + 1]],
+                    &wts,
+                    rng,
+                    used_ctrs,
+                    max_count,
+                );
                 parents.pop_front();
                 push(&mut parents, g, &b, small);
                 push(&mut parents, g2, &b2, large);
@@ -3823,9 +4014,23 @@ fn grow_depthwise(
                 (g, b)
             } else if even && next_considered && trick {
                 let small = stats_of(&rows_of[current[id + 1]], &wts);
-                let (g2, b2) = score(&small, &rows_of[current[id + 1]], &wts, rng, used_ctrs);
+                let (g2, b2) = score(
+                    &small,
+                    &rows_of[current[id + 1]],
+                    &wts,
+                    rng,
+                    used_ctrs,
+                    max_count,
+                );
                 let large = subtract(&parents[0], &small);
-                let (g, b) = score(&large, &rows_of[current[id]], &wts, rng, used_ctrs);
+                let (g, b) = score(
+                    &large,
+                    &rows_of[current[id]],
+                    &wts,
+                    rng,
+                    used_ctrs,
+                    max_count,
+                );
                 parents.pop_front();
                 push(&mut parents, g, &b, large);
                 push(&mut parents, g2, &b2, small);
@@ -3833,7 +4038,7 @@ fn grow_depthwise(
                 (g, b)
             } else {
                 let st = stats_of(&rows_of[current[id]], &wts);
-                let (g, b) = score(&st, &rows_of[current[id]], &wts, rng, used_ctrs);
+                let (g, b) = score(&st, &rows_of[current[id]], &wts, rng, used_ctrs, max_count);
                 parents.pop_front();
                 if trick {
                     push(&mut parents, g, &b, st);
@@ -3875,6 +4080,14 @@ fn grow_depthwise(
             rows_of.push(right);
             next_level.push(leaf);
             next_level.push(new_leaf);
+        }
+        // Scoring a leaf computes the CTRs of every candidate.
+        if scored {
+            computed_ctrs.extend(
+                candidates
+                    .iter()
+                    .filter_map(|c| c.get(q).ctr_key.as_ref().map(|((p, _), _)| p.clone())),
+            );
         }
         current = next_level;
     }
@@ -3925,7 +4138,8 @@ fn grow_lossguide(
         + q.ctr.as_ref().map_or(0, |c| c.features.len())
         + q.estimated.len()
         + q.online_cols.len();
-    let entries = candidate_entries(q, &candidates);
+    let (entries, layout) = candidate_entries_and_packs(q, &candidates);
+    let packs = Packs::new(q, &layout);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
     let mut depth_of = vec![0usize];
@@ -3935,7 +4149,7 @@ fn grow_lossguide(
     let l2 = part.scaled_l2;
     let trick = k == 1;
     let stats_of = |rows: &[usize]| -> Vec<Vec<BucketStats>> {
-        candidates
+        let mut all: Vec<Vec<BucketStats>> = candidates
             .iter()
             .map(|c| {
                 let column = c.get(q);
@@ -3951,7 +4165,9 @@ fn grow_lossguide(
                 }
                 st
             })
-            .collect()
+            .collect();
+        all.extend(packs.stats(rows, part.swder, &wts, k));
+        all
     };
     let score = |stats: &[Vec<BucketStats>],
                  rows: &[usize],
@@ -3959,7 +4175,14 @@ fn grow_lossguide(
                  used: &std::collections::HashSet<(Projection, bool)>| {
         let penalties = ctr_penalties(q, &candidates, used, model_size_reg);
         let noise_seed = rng.gen();
-        let scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
+        let mut scores = leaf_scores(q, &candidates, stats, k, l2, score_function);
+        packs.rescore(
+            &mut scores,
+            &stats[candidates.len()..],
+            k,
+            l2,
+            score_function,
+        );
         let (mut swd, mut sw) = (0.0, 0.0);
         for d in 0..k {
             for &i in rows {
@@ -4322,6 +4545,9 @@ struct LeafProblem<'a> {
     exact_weights: &'a [f64],
     /// Query groups (querywise losses; else empty).
     groups: &'a Groups,
+    /// Logloss: CatBoost's stored `exp(a)` of `approx` (`StoreExpApprox`),
+    /// what the derivatives and the metric are taken from.
+    exp: Option<&'a [f64]>,
     /// YetiRank's pair seeds per leaf step (`CalcLeafValuesSimple` draws
     /// one per step, at the unmoved `approx`): steps after the first redraw
     /// the pairs. Empty: the pairs of `groups` in every step.
@@ -4368,6 +4594,33 @@ fn expd_core(x: f64) -> f64 {
     let u = ((bits.wrapping_add(adj) >> 11) << 52) | iax;
     let y = (3.0000000027955394 - t) * (t * t) * 0.16666666685227835064 - t + 1.0;
     y * f64::from_bits(u)
+}
+
+/// library/cpp/fast_exp's scalar `fast_exp` (CatBoost's `ExpApproxIf` of
+/// one value and `ApplyLearningRate` on stored `exp(a)`): four lookups of
+/// `exp` at the top 16 bits, then `1 + rest`.
+fn fast_exp_scalar(x: f64) -> f64 {
+    static TABLE: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        (0u64..65536)
+            .map(|i| f64::from_bits(i << 48).exp())
+            .collect()
+    });
+    let (mut arg, mut res) = (x, 1.0f64);
+    for _ in 0..4 {
+        let bits = arg.to_bits();
+        res *= table[(bits >> 48) as usize];
+        arg -= f64::from_bits(bits & 0xffff_0000_0000_0000);
+    }
+    res * (1.0 + arg)
+}
+
+/// `FastExpWithInf` of a copy of `v` (leaf deltas applied to stored
+/// `exp(a)`).
+fn expd_of(v: &[f64]) -> Vec<f64> {
+    let mut out = v.to_vec();
+    fast_exp_with_inf(&mut out);
+    out
 }
 
 /// CatBoost's `FastExpWithInfInplace` with AVX2: fmath's `expd_v`, which
@@ -4432,7 +4685,7 @@ fn estimate_leaves(
     lp: &LeafProblem<'_>,
     p: &TrainParams,
     mut accepted: impl FnMut(&[f64], &mut LeafSums),
-) -> (Vec<f64>, usize) {
+) -> (Vec<f64>, usize, Vec<f64>) {
     let k = lp.loss.dims();
     let (n_leaves, rows) = (lp.n_leaves, lp.rows);
     if p.leaf_estimation == CatBoostLeafEstimation::Exact {
@@ -4456,7 +4709,7 @@ fn estimate_leaves(
                 _ => unreachable!("Exact leaves are validated to Quantile, MAE and LogCosh"),
             })
             .collect();
-        return (step, 0);
+        return (step, 0, Vec::new());
     }
     let mut steps = 0;
     // CatBoost forces YetiRank's backtracking off (it has no metric).
@@ -4465,10 +4718,21 @@ fn estimate_leaves(
     // Logloss: the approximations' exponentials and logarithms, cached for
     // the base and the current point (the metric is evaluated many times).
     let logloss = lp.loss == Loss::Logloss;
-    let base_exp = if logloss && !lp.moving {
-        exp_point(&lp.approx[..rows])
-    } else {
-        Vec::new()
+    let pairs =
+        |e: &[f64]| -> Vec<(f64, f32)> { e.iter().map(|&e| (e, fast_logf(e as f32))).collect() };
+    // Stored `exp(a)`: the model's point moves by `exp` of each step (its
+    // leaves' `FastExpWithInf`), a fold's rows by the product of those of
+    // their leaf (`approxDeltas`).
+    let stored = lp.exp.filter(|_| logloss);
+    let mut point_e: Vec<f64> = match stored {
+        Some(e) if lp.moving => e[..rows].to_vec(),
+        _ => Vec::new(),
+    };
+    let mut leaf_e = vec![1.0f64; n_leaves];
+    let base_exp = match stored {
+        Some(e) if !lp.moving => pairs(&e[..rows]),
+        None if logloss && !lp.moving => exp_point(&lp.approx[..rows]),
+        _ => Vec::new(),
     };
     let mut point_exp: Vec<(f64, f32)> = Vec::new();
     let metric = |approx: &[f64], leaves: &[f64], cached: &[(f64, f32)]| {
@@ -4482,7 +4746,9 @@ fn estimate_leaves(
     };
     let mut total = vec![0.0; n_leaves * k];
     let mut point = lp.approx[..rows * k].to_vec();
-    if logloss && backtracking && lp.moving {
+    if !point_e.is_empty() {
+        point_exp = pairs(&point_e);
+    } else if logloss && backtracking && lp.moving {
         point_exp = exp_point(&point);
     }
     let mut value = if backtracking {
@@ -4513,7 +4779,12 @@ fn estimate_leaves(
         let (groups, weights) = redrawn
             .as_ref()
             .map_or((lp.groups, lp.weights), |(g, w)| (g, w.as_slice()));
-        let ders = if logloss && !point_exp.is_empty() {
+        let ders = if let (Some(e), false) = (stored, lp.moving) {
+            let at: Vec<(f64, f32)> = (0..rows)
+                .map(|i| (e[i] * leaf_e[lp.leaf_of[i] as usize], 0.0))
+                .collect();
+            logloss_ders_at(lp.target, &at, weights)
+        } else if logloss && !point_exp.is_empty() {
             logloss_ders_at(lp.target, &point_exp, weights)
         } else {
             lp.loss.all_ders(lp.target, &point, weights, rows, groups)
@@ -4574,8 +4845,25 @@ fn estimate_leaves(
                     }
                 });
         };
+        let mut move_exp = |scaled: &[f64], point_exp: &mut Vec<(f64, f32)>| {
+            if stored.is_none() {
+                return;
+            }
+            let ex = expd_of(scaled);
+            if lp.moving {
+                for (e, &leaf) in point_e.iter_mut().zip(lp.leaf_of) {
+                    *e *= ex[leaf as usize];
+                }
+                *point_exp = pairs(&point_e);
+            } else {
+                for (d, x) in leaf_e.iter_mut().zip(&ex) {
+                    *d *= x;
+                }
+            }
+        };
         if !backtracking {
             take(&step, &mut total, &mut point);
+            move_exp(&step, &mut point_exp);
             accepted(&step, &mut sums);
             it += 1;
             continue;
@@ -4592,7 +4880,9 @@ fn estimate_leaves(
             if after < value {
                 value = after;
                 take(&scaled, &mut total, &mut point);
-                if logloss && lp.moving {
+                if stored.is_some() {
+                    move_exp(&scaled, &mut point_exp);
+                } else if logloss && lp.moving {
                     point_exp = exp_point(&point);
                 }
                 accepted(&scaled, &mut sums);
@@ -4606,7 +4896,7 @@ fn estimate_leaves(
         }
         it += 1;
     }
-    (total, steps)
+    (total, steps, leaf_e)
 }
 
 /// A learning fold (CatBoost's `TFold`): the training rows in the fold's
@@ -4621,7 +4911,12 @@ struct LearnFold {
     weights: Vec<f64>,
     tails: Vec<(usize, usize, f64)>,
     approx: Vec<Vec<f64>>,
+    /// Logloss: CatBoost's stored `exp(a)` of every prefix (else empty).
+    exp: Vec<Vec<f64>>,
     cache: CombinationCache,
+    /// The projections whose CTRs CatBoost has computed in this fold
+    /// (which Depthwise trees' CTR penalties see).
+    computed_ctrs: std::collections::HashSet<Projection>,
     /// CatBoost's `TFold::SampleWeights`: the bootstrap times the sample
     /// weights of the fold's last turn as the taken fold (1 before), what
     /// its Exact leaves are weighted with.
@@ -5109,6 +5404,7 @@ fn update_fold(
             .map_or((&fold.groups, fold_weights.as_slice()), |(g, w)| {
                 (g, w.as_slice())
             });
+        let fold_exp = fold.exp.get(b).map(Vec::as_slice);
         let lp = LeafProblem {
             loss,
             target,
@@ -5123,13 +5419,31 @@ fn update_fold(
             exact_weights,
             groups,
             yeti_seeds: &[],
+            exp: fold_exp,
         };
         if k == 1 {
             // Each prefix's approximation moves by the leaf values of its
             // body rows.
-            let (leaves, _) = estimate_leaves(&lp, p, |_, _| {});
-            for i in 0..tail {
-                a[i] += loss.fold_step(leaves[leaf_of[i] as usize], p.learning_rate);
+            let (leaves, _, leaf_e) = estimate_leaves(&lp, p, |_, _| {});
+            if let Some(e) = fold.exp.get_mut(b) {
+                // `UpdateBodyTailApprox`: `exp(a)` times
+                // `fast_exp(FastLogf(approxDelta) · lr)`.
+                let moves: Vec<(f64, f64)> = leaf_e
+                    .iter()
+                    .map(|&d| {
+                        let m = f64::from(fast_logf(d as f32)) * p.learning_rate;
+                        (m, fast_exp_scalar(m))
+                    })
+                    .collect();
+                for i in 0..tail {
+                    let (m, x) = moves[leaf_of[i] as usize];
+                    a[i] += m;
+                    e[i] *= x;
+                }
+            } else {
+                for i in 0..tail {
+                    a[i] += loss.fold_step(leaves[leaf_of[i] as usize], p.learning_rate);
+                }
             }
         } else {
             // Multiclass (CatBoost's `CalcApproxDeltaMulti`): the body rows
@@ -5138,7 +5452,7 @@ fn update_fold(
             // at its moved approximation.
             let mut tail_delta = vec![0.0; (tail - body) * k];
             let (mut der, mut der2) = (vec![0.0; k], vec![0.0; loss.hessian_len()]);
-            let (leaves, _) = estimate_leaves(&lp, p, |_, sums| {
+            let (leaves, _, _) = estimate_leaves(&lp, p, |_, sums| {
                 for i in body..tail {
                     let leaf = leaf_of[i] as usize;
                     let o = &mut tail_delta[(i - body) * k..(i - body + 1) * k];
@@ -5333,6 +5647,10 @@ fn boost(
         n
     };
     let start = |rows: usize| -> Vec<f64> { bias.iter().copied().cycle().take(rows * k).collect() };
+    // Logloss stores `exp(a)` (`InitApproxes`: the scalar `fast_exp` of the
+    // start).
+    let logloss = loss == Loss::Logloss;
+    let start_exp = |rows: usize| -> Vec<f64> { vec![fast_exp_scalar(bias[0]); rows] };
     let identity: Vec<usize> = (0..n).collect();
     let make_fold = |perm: &[usize], groups: Groups| -> LearnFold {
         let target = permute_rows(target, perm, loss.target_dims());
@@ -5352,10 +5670,16 @@ fn boost(
             q: q.permuted(perm),
             groups,
             approx: tails.iter().map(|&(_, t, _)| start(t)).collect(),
+            exp: if logloss {
+                tails.iter().map(|&(_, t, _)| start_exp(t)).collect()
+            } else {
+                Vec::new()
+            },
             target,
             weights,
             tails,
             cache: CombinationCache::new(),
+            computed_ctrs: Default::default(),
             sample_weights: vec![1.0; n],
         }
     };
@@ -5380,6 +5704,7 @@ fn boost(
     );
     let avg_sum_w: f64 = weights.iter().sum();
     let mut approx = start(n);
+    let mut avg_exp = if logloss { start_exp(n) } else { Vec::new() };
     // Plain boosting with an unpermuted averaging fold shares its
     // approximations with fold 0 (`UseAveragingFoldAsFoldZero`).
     // (`UseAveragingFoldAsFoldZero`: not for pairwise losses.)
@@ -5422,6 +5747,14 @@ fn boost(
                         *v = loss.fold_step(*v, factor);
                     }
                 }
+                for e in folds
+                    .iter_mut()
+                    .flat_map(|f| f.exp.iter_mut())
+                    .chain(std::iter::once(&mut avg_exp))
+                    .flat_map(|e| e.iter_mut())
+                {
+                    *e = fast_exp_scalar(f64::from(fast_logf(*e as f32)) * factor);
+                }
                 for b in &mut bias {
                     *b *= factor;
                 }
@@ -5463,10 +5796,19 @@ fn boost(
             .iter()
             .zip(&fold.approx)
             .enumerate()
-            .map(|(b, (&(_, t, _), a))| match yeti_parts.get(b) {
-                Some((groups, weights)) => loss.all_ders(&fold.target, a, weights, t, groups),
-                None => loss.all_ders(&fold.target, a, &fold.weights, t, &fold.groups),
-            })
+            .map(
+                |(b, (&(_, t, _), a))| match (yeti_parts.get(b), fold.exp.get(b)) {
+                    (Some((groups, weights)), _) => {
+                        loss.all_ders(&fold.target, a, weights, t, groups)
+                    }
+                    // Logloss: at the stored `exp(a)`.
+                    (None, Some(e)) => {
+                        let at: Vec<(f64, f32)> = e[..t].iter().map(|&e| (e, 0.0)).collect();
+                        logloss_ders_at(&fold.target[..t], &at, &fold.weights[..t])
+                    }
+                    (None, None) => loss.all_ders(&fold.target, a, &fold.weights, t, &fold.groups),
+                },
+            )
             .collect();
         let previous = trees
             .last()
@@ -5553,6 +5895,7 @@ fn boost(
                 &mut used_ctrs,
                 p.model_size_reg,
                 loss.pairwise(),
+                &mut fold.computed_ctrs,
             )
         } else {
             let (splits, _) = grow_tree(
@@ -5631,8 +5974,9 @@ fn boost(
             exact_weights: &unit_weights,
             groups: &average.groups,
             yeti_seeds: &yeti_seeds,
+            exp: (!avg_exp.is_empty()).then_some(avg_exp.as_slice()),
         };
-        let (leaves, steps) = estimate_leaves(&lp, &p, |_, _| {});
+        let (leaves, steps, _) = estimate_leaves(&lp, &p, |_, _| {});
         if k == 1 {
             // `CalcLeafValuesSimple` draws a seed per step.
             for _ in seeded_steps..steps {
@@ -5660,13 +6004,33 @@ fn boost(
                 approx[i * k + d] += leaf_values[leaf * k + d];
             }
         }
+        if logloss {
+            // `UpdateLearnAvrgApprox`: the stored `exp(a)` times
+            // `FastExpWithInf` of the tree's deltas.
+            let ex = expd_of(&leaf_values);
+            for (e, &leaf) in avg_exp.iter_mut().zip(&leaf_of) {
+                *e *= ex[leaf as usize];
+            }
+        }
         for (f, fold) in folds.iter_mut().enumerate() {
             if f == 0 && shared {
                 fold.approx[0].clone_from(&approx);
+                if logloss {
+                    fold.exp[0].clone_from(&avg_exp);
+                }
                 continue;
             }
             let leaf_of = fold.q.tree_leaves(&splits, &children, &mut fold.cache);
             update_fold(fold, &leaf_of, n_leaves, loss, &p, &orders, fold_seeds[f]);
+        }
+        // The tree's CTRs are computed in every fold (`TrainOneIteration`).
+        let tree_ctrs: Vec<Projection> = splits
+            .iter()
+            .filter_map(|(c, _)| c.get(&folds[taken].q).ctr_key.as_ref())
+            .map(|((p, _), _)| p.clone())
+            .collect();
+        for fold in &mut folds {
+            fold.computed_ctrs.extend(tree_ctrs.iter().cloned());
         }
         let source = &folds[taken];
         let tree_splits = splits
@@ -6368,9 +6732,9 @@ macro_rules! catboost_config {
             /// `IncToDec`'s p-value threshold (default 0: off).
             pub od_pval: Option<f64>,
             /// CatBoost's `grow_policy`: oblivious trees (default), Depthwise
-            /// (plain boosting, numeric and one-hot features) or Lossguide
-            /// (also CTR features; classifiers with CTRs can differ from
-            /// CatBoost by picking another CTR in a leaf, #154).
+            /// or Lossguide (plain boosting, no monotone constraints). With
+            /// categorical features, near-ties can still go another way than
+            /// in CatBoost on some data, mostly multiclass (#154).
             pub grow_policy: CatBoostGrowPolicy,
             /// Depthwise: leaves with fewer sampled rows are not split
             /// (CatBoost's `min_data_in_leaf`, default 1).
@@ -6776,19 +7140,13 @@ macro_rules! catboost_config {
             }
 
             /// What Depthwise trees support here.
-            fn check_grow_policy(&self, has_ctrs: bool) -> Result<()> {
+            fn check_grow_policy(&self) -> Result<()> {
                 if self.grow_policy == CatBoostGrowPolicy::SymmetricTree {
                     return Ok(());
                 }
                 let invalid = |m: &str| Err(RustMlError::InvalidParameter(m.into()));
                 if self.boosting_type == CatBoostBoostingType::Ordered {
                     return invalid("Depthwise / Lossguide trees need plain boosting");
-                }
-                // Depthwise with CTRs does not match CatBoost yet (#154).
-                if has_ctrs && self.grow_policy == CatBoostGrowPolicy::Depthwise {
-                    return invalid(
-                        "Depthwise trees support numeric and one-hot features only (Lossguide also CTRs)",
-                    );
                 }
                 if self.monotone_constraints.iter().any(|&m| m != 0) {
                     return invalid("Depthwise / Lossguide trees do not support monotone constraints");
@@ -7586,7 +7944,7 @@ impl CatBoostRegressor {
                 .collect();
             q.add_estimated(n_main, columns);
         }
-        self.check_grow_policy(q.ctr.is_some())?;
+        self.check_grow_policy()?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         // CatBoost's YetiRank default `l2_leaf_reg` is 0 (made 1e-20).
         // PairLogitPairwise's is 5.
@@ -8145,7 +8503,7 @@ impl CatBoostClassifier {
             );
         }
         let n_external = x.ncols() - n_est + text_cols;
-        self.check_grow_policy(q.ctr.is_some())?;
+        self.check_grow_policy()?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         // CatBoost has no automatic learning rate for CrossEntropy.
         let learning_rate = match (cross_entropy, self.learning_rate) {
@@ -8517,7 +8875,7 @@ mod tests {
             .with_boost_from_average(true)
             .fit(&x, &y)
             .is_err());
-        // Depthwise / Lossguide: plain boosting, numeric and one-hot features.
+        // Depthwise / Lossguide: plain boosting.
         for g in [CatBoostGrowPolicy::Depthwise, CatBoostGrowPolicy::Lossguide] {
             assert!(CatBoostRegressor::new()
                 .with_iterations(2)
