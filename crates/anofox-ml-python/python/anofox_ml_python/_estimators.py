@@ -986,7 +986,8 @@ class _CatBoost(BaseEstimator):
 class CatBoostRegressor(RegressorMixin, _CatBoost):
     """``loss_function`` as in catboost: ``"RMSE"``, ``"MAE"``,
     ``"Quantile:alpha=0.3"``, ``"Expectile:alpha=0.3"``, ``"Poisson"``,
-    ``"Tweedie:variance_power=1.5"`` or ``"LogLinQuantile:alpha=0.5"``."""
+    ``"Tweedie:variance_power=1.5"``, ``"LogLinQuantile:alpha=0.5"``,
+    ``"Huber:delta=1.0"``, ``"LogCosh"`` or ``"Lq:q=2"``."""
 
     _kind = "CatBoostRegressor"
 
@@ -999,14 +1000,14 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
         name, _, rest = str(self.loss_function or "RMSE").partition(":")
         args = dict(kv.split("=", 1) for kv in rest.split(";") if kv)
         param = {"Quantile": "alpha", "Expectile": "alpha", "LogLinQuantile": "alpha",
-                 "Tweedie": "variance_power"}
-        if name in ("RMSE", "MAE", "Poisson"):
+                 "Tweedie": "variance_power", "Huber": "delta", "Lq": "q"}
+        if name in ("RMSE", "MAE", "Poisson", "LogCosh"):
             if args:
                 raise ValueError(f"{name} takes no parameters")
             params["loss_function"] = name
         elif name in param:
             key = param[name]
-            if key not in args and name != "Tweedie":
+            if key not in args and name not in ("Tweedie", "Huber", "Lq"):
                 args[key] = "0.5"
             if set(args) != {key}:
                 raise ValueError(f"{name} takes the parameter {key}")

@@ -218,6 +218,9 @@ fn catboost_models_match_catboost() {
                         variance_power: value(),
                     },
                     "LogLinQuantile" => CatBoostRegressionLoss::LogLinQuantile { alpha: value() },
+                    "Huber" => CatBoostRegressionLoss::Huber { delta: value() },
+                    "LogCosh" => CatBoostRegressionLoss::LogCosh,
+                    "Lq" => CatBoostRegressionLoss::Lq { q: value() },
                     other => panic!("unknown loss {other}"),
                 });
             }

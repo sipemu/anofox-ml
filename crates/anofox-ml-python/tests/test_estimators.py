@@ -1199,3 +1199,17 @@ def test_lgbm_ranker_matches_lightgbm(objective):
     from sklearn.base import clone
     np.testing.assert_array_equal(pickle.loads(pickle.dumps(ours)).predict(X), ours.predict(X))
     assert clone(ours).get_params() == ours.get_params()
+
+@pytest.mark.parametrize("loss", ["Huber:delta=0.7", "LogCosh", "Lq:q=1.5", "Lq:q=2.5"])
+def test_catboost_more_losses_match_catboost(loss):
+    cb = pytest.importorskip("catboost")
+    r = np.random.RandomState(2)
+    X = r.normal(size=(300, 3))
+    y = X[:, 0] + np.sin(X[:, 1]) + r.standard_t(3, size=300) * 0.3
+    kw = dict(iterations=30, depth=4, learning_rate=0.1, loss_function=loss, random_seed=0)
+    ref = cb.CatBoostRegressor(**kw, thread_count=1, verbose=0, random_strength=0,
+                               allow_writing_files=False,
+                               bootstrap_type="No", has_time=True).fit(X, y)
+    ours = am.CatBoostRegressor(**kw, random_strength=0, bootstrap_type="No",
+                                has_time=True).fit(X, y)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)

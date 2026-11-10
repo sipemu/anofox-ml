@@ -687,6 +687,12 @@ pub enum CatBoostRegressionLoss {
     /// The `alpha` quantile of `exp(raw)` (predictions stay raw, as in
     /// CatBoost).
     LogLinQuantile { alpha: f64 },
+    /// Huber loss with threshold `delta` (CatBoost's `Huber:delta`).
+    Huber { delta: f64 },
+    /// `log(cosh(raw - target))` (CatBoost's `LogCosh`; Exact leaves).
+    LogCosh,
+    /// `|raw - target|^q`, `q >= 1` (CatBoost's `Lq:q`).
+    Lq { q: f64 },
 }
 
 /// CatBoost's `grow_policy`.
@@ -872,6 +878,13 @@ enum Loss {
     LogLinQuantile {
         alpha: f64,
     },
+    Huber {
+        delta: f64,
+    },
+    LogCosh,
+    Lq {
+        q: f64,
+    },
     Logloss,
     /// Softmax over `k` approximations (CatBoost's `MultiClass`); the target
     /// is the class index.
@@ -949,6 +962,30 @@ impl Loss {
                 };
                 der2[0] = 0.0;
             }
+            // CatBoost's `THuberError`, `TLogCoshError`, `TLqError`.
+            Loss::Huber { delta } => {
+                let diff = target - approx[0];
+                let (d, d2) = if diff.abs() < delta {
+                    (diff, -1.0)
+                } else if diff > 0.0 {
+                    (delta, 0.0)
+                } else {
+                    (-delta, 0.0)
+                };
+                der[0] = w * d;
+                der2[0] = w * d2;
+            }
+            Loss::LogCosh => {
+                let c = (approx[0] - target).cosh();
+                der[0] = w * -(approx[0] - target).tanh();
+                der2[0] = w * (-1.0 / (c * c));
+            }
+            Loss::Lq { q } => {
+                let abs = (approx[0] - target).abs();
+                let sign = if target - approx[0] > 0.0 { 1.0 } else { -1.0 };
+                der[0] = w * (q * sign * abs.powf(q - 1.0));
+                der2[0] = w * (-q * (q - 1.0) * abs.powf(q - 2.0));
+            }
             Loss::Logloss => {
                 let e = approx[0].exp();
                 let p = e / (1.0 + e);
@@ -998,6 +1035,17 @@ impl Loss {
             | Loss::Poisson
             | Loss::Tweedie { .. }
             | Loss::LogLinQuantile { .. } => self.metric_moved(target, approx[0], 0.0),
+            // CatBoost's `THuberLossMetric`, `TLqMetric`.
+            Loss::Huber { delta } => {
+                let m = (approx[0] - target).abs();
+                if m < delta {
+                    0.5 * (m * m)
+                } else {
+                    delta * (m - 0.5 * delta)
+                }
+            }
+            Loss::LogCosh => self.metric_moved(target, approx[0], 0.0),
+            Loss::Lq { q } => (approx[0] - target).abs().powf(q),
             Loss::Logloss => {
                 let a = approx[0];
                 let e = a.exp();
@@ -1063,6 +1111,16 @@ impl Loss {
                 let val = target - approx.exp() * delta.exp();
                 (if val > 0.0 { alpha } else { -(1.0 - alpha) }) * val
             }
+            // `TLogCoshMetric`: FastLogf of cosh, linear far out.
+            Loss::LogCosh => {
+                let m = approx - target + delta;
+                if m.abs() >= 12.0 {
+                    m.abs() - f64::from(fast_logf(2.0))
+                } else {
+                    f64::from(fast_logf(m.cosh() as f32))
+                }
+            }
+            Loss::Lq { q } => (approx - target + delta).abs().powf(q),
             _ => self.metric(target, &[approx + delta]),
         }
     }
@@ -1087,6 +1145,8 @@ impl Loss {
         }
         match self {
             Loss::Rmse => (sum / (sum_w + 1e-38)).sqrt(),
+            Loss::LogCosh => sum / (sum_w + 1e-38),
+            _ if sum_w == 0.0 => 0.0,
             _ => sum / sum_w,
         }
     }
@@ -1146,7 +1206,11 @@ impl Loss {
                 sum += self.metric_moved(target[i], approx[i], leaves[leaf_of[i] as usize]) * w;
                 sum_w += w;
             }
-            return sum / sum_w;
+            return if self == Loss::LogCosh {
+                sum / (sum_w + 1e-38)
+            } else {
+                sum / sum_w
+            };
         }
         let k = self.dims();
         let (mut sum, mut sum_w) = (0.0, 0.0);
@@ -3262,6 +3326,37 @@ struct LeafProblem<'a> {
     exact_weights: &'a [f64],
 }
 
+/// CatBoost's `CalculateOptimalConstApproxForLogCosh`: the root of
+/// `Σ w tanh(a - r)` by bisection between the smallest and largest
+/// residual (100 halvings or a width of 1e-9), as float32.
+fn logcosh_optimum(residuals: &[f32], weights: &[f32]) -> f32 {
+    let Some(first) = residuals.first() else {
+        return 0.0;
+    };
+    let (mut left, mut right) = residuals
+        .iter()
+        .fold((f64::from(*first), f64::from(*first)), |(lo, hi), &r| {
+            (lo.min(f64::from(r)), hi.max(f64::from(r)))
+        });
+    for _ in 0..100 {
+        if right - left <= 1e-9 {
+            break;
+        }
+        let m = (left + right) / 2.0;
+        let value: f64 = residuals
+            .iter()
+            .zip(weights)
+            .map(|(&r, &w)| (m - f64::from(r)).tanh() * f64::from(w))
+            .sum();
+        if value > 0.0 {
+            right = m;
+        } else {
+            left = m;
+        }
+    }
+    left as f32
+}
+
 /// CatBoost's leaf estimation (`FastGradientWalker`): `leaf_iterations`
 /// Newton or Gradient steps, each from the derivatives at the moved
 /// approximations. With backtracking a step is halved until the metric
@@ -3279,9 +3374,6 @@ fn estimate_leaves(
     if p.leaf_estimation == CatBoostLeafEstimation::Exact {
         // CatBoost's `CalcExactLeafDeltas`: the loss-optimal constant of
         // each leaf's float32 residuals (one step, no generator draw).
-        let Loss::Quantile { alpha, delta, .. } = lp.loss else {
-            unreachable!("Exact leaves are validated to Quantile / MAE");
-        };
         let mut residuals = vec![Vec::new(); n_leaves];
         let mut weights = vec![Vec::new(); n_leaves];
         for i in 0..rows {
@@ -3292,7 +3384,13 @@ fn estimate_leaves(
         let step: Vec<f64> = residuals
             .iter()
             .zip(&weights)
-            .map(|(r, w)| f64::from(weighted_quantile(r, w, alpha, delta)))
+            .map(|(r, w)| match lp.loss {
+                Loss::Quantile { alpha, delta, .. } => {
+                    f64::from(weighted_quantile(r, w, alpha, delta))
+                }
+                Loss::LogCosh => f64::from(logcosh_optimum(r, w)),
+                _ => unreachable!("Exact leaves are validated to Quantile, MAE and LogCosh"),
+            })
             .collect();
         return (step, 0);
     }
@@ -4669,6 +4767,8 @@ macro_rules! catboost_config {
                     Loss::Quantile { .. } | Loss::LogLinQuantile { .. } => {
                         CatBoostLeafEstimation::Gradient
                     }
+                    Loss::LogCosh if !monotone => CatBoostLeafEstimation::Exact,
+                    Loss::Lq { q } if q < 2.0 => CatBoostLeafEstimation::Gradient,
                     _ => CatBoostLeafEstimation::Newton,
                 })
             }
@@ -4690,6 +4790,7 @@ macro_rules! catboost_config {
                 // Gradient steps.
                 let (newton, gradient) = match loss {
                     Loss::Rmse | Loss::Quantile { .. } | Loss::Tweedie { .. } => (1, 1),
+                    Loss::Huber { .. } | Loss::LogCosh | Loss::Lq { .. } => (1, 1),
                     Loss::LogLinQuantile { .. } => (1, 1),
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
@@ -5048,6 +5149,8 @@ impl CatBoostRegressor {
             Loss::Poisson | Loss::Tweedie { .. } if target.iter().any(|&t| t < 0.0) => {
                 return invalid("Poisson and Tweedie need non-negative targets");
             }
+            Loss::Huber { delta } if !(delta > 0.0) => return invalid("delta must be positive"),
+            Loss::Lq { q } if !(q >= 1.0) => return invalid("q must be at least 1"),
             _ => {}
         }
         if self.boost_from_average_for(loss) && !matches!(loss, Loss::Rmse | Loss::Quantile { .. })
@@ -5055,8 +5158,10 @@ impl CatBoostRegressor {
             return invalid("boost_from_average is supported for RMSE, MAE and Quantile");
         }
         if self.leaf_method(loss) == CatBoostLeafEstimation::Exact {
-            if !matches!(loss, Loss::Quantile { .. }) {
-                return invalid("Exact leaf estimation is only available for MAE and Quantile");
+            if !matches!(loss, Loss::Quantile { .. } | Loss::LogCosh) {
+                return invalid(
+                    "Exact leaf estimation is only available for MAE, Quantile and LogCosh",
+                );
             }
             if self.monotone_constraints.iter().any(|&m| m != 0) {
                 return invalid("monotone constraints are unsupported for Exact leaves");
@@ -5094,6 +5199,9 @@ impl CatBoostRegressor {
             CatBoostRegressionLoss::LogLinQuantile { alpha } => Loss::LogLinQuantile {
                 alpha: f64::from(alpha as f32),
             },
+            CatBoostRegressionLoss::Huber { delta } => Loss::Huber { delta },
+            CatBoostRegressionLoss::LogCosh => Loss::LogCosh,
+            CatBoostRegressionLoss::Lq { q } => Loss::Lq { q },
         }
     }
 }

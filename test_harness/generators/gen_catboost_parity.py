@@ -485,6 +485,26 @@ def generate():
                                     has_time=False, bootstrap_type="MVS"), y_cat)
     add_cat("dw_onehot", dict(cat, grow_policy="Depthwise", one_hot_max_size=255), y_cat_reg,
             kind="regressor")
+
+    # Huber, LogCosh and Lq (#209): Newton leaves for Huber and Lq with
+    # q >= 2, Gradient below, Exact for LogCosh.
+    y_heavy = y_reg + (rng.uniform(size=n) < 0.05) * rng.normal(scale=6.0, size=n)
+    add("loss_huber", "regressor", dict(base, loss_function="Huber:delta=0.5"), X, y_heavy)
+    add("loss_huber_weighted", "regressor", dict(base, loss_function="Huber:delta=1.5"), X,
+        y_heavy, sw=weights)
+    add("loss_logcosh", "regressor", dict(base, loss_function="LogCosh"), X, y_heavy)
+    add("loss_logcosh_weighted", "regressor", dict(base, loss_function="LogCosh"), X, y_heavy,
+        sw=weights)
+    add("loss_lq_15", "regressor", dict(base, loss_function="Lq:q=1.5"), X, y_heavy)
+    add("loss_lq_3", "regressor", dict(base, loss_function="Lq:q=3"), X, y_reg)
+    add("loss_lq_2_ordered", "regressor",
+        dict(base, loss_function="Lq:q=2", boosting_type="Ordered"), X, y_reg)
+    add("loss_huber_defaults", "regressor",
+        dict(COMMON, iterations=80, depth=4, loss_function="Huber:delta=1.0",
+             random_strength=1.0, has_time=False, bootstrap_type="MVS"), X, y_heavy)
+    add("loss_logcosh_defaults", "regressor",
+        dict(COMMON, iterations=80, depth=4, loss_function="LogCosh", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_heavy)
     return out
 
 
