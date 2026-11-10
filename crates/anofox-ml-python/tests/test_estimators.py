@@ -1383,13 +1383,13 @@ def test_catboost_ranker_yetirank_matches_catboost():
     y = np.digitize(X[:, 0] - X[:, 1] + r.normal(size=n), [-1, 0, 1]).astype(float)
     kw = dict(iterations=30, depth=4, random_seed=0)
     for extra in (dict(random_strength=0, bootstrap_type="No", has_time=True),
-                  dict(loss_function="YetiRank:permutations=4;decay=0.9")):
+                  dict(loss_function="YetiRank:permutations=4;decay=0.9"),
+                  dict(boosting_type="Ordered"),
+                  dict(leaf_estimation_iterations=3)):
         ref = cb.CatBoostRanker(**kw, **extra, thread_count=1, verbose=0,
                                 allow_writing_files=False).fit(X, y, group_id=gid)
         ours = am.CatBoostRanker(**kw, **extra).fit(X, y, group_id=gid)
         np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
-    with pytest.raises(ValueError):
-        am.CatBoostRanker(**kw, boosting_type="Ordered").fit(X, y, group_id=gid)
 
 
 def test_catboost_ranker_pairwise_scoring_matches_catboost():
