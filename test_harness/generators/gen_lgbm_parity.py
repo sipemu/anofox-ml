@@ -178,6 +178,22 @@ def generate():
     add("multiclassova_weighted", "classifier", dict(ova, min_child_samples=5), y_multi,
         sw=weights)
     add("multiclassova_balanced", "classifier", dict(ova, class_weight="balanced"), y_multi)
+    # Many-vs-many categorical splits (#240): a strong categorical of 7 and
+    # 30 levels, all well above min_data_per_group and cat_smooth.
+    def store_data(rows, ncat):
+        Xd, yd = [], []
+        for i in range(rows):
+            store, dow = i % ncat, i % 5
+            l1, l2, l3 = ((i * 37) % 101) / 10, ((i * 53) % 89) / 10, (i * 11) % 23
+            Xd.append([l1, l2, l3, dow, store])
+            yd.append(0.6 * l1 + 0.3 * l2 + 0.5 * dow + store + ((i * 7) % 13) / 13)
+        return np.array(Xd, dtype=np.float32).astype(float), np.array(yd)
+    cat_base = dict(learning_rate=0.1, num_leaves=15, min_child_samples=20, **COMMON)
+    for ncat, rows, iters in ((7, 3000, 1), (7, 3000, 50), (30, 6000, 1)):
+        Xd, yd = store_data(rows, ncat)
+        add(f"categorical_many_{ncat}_{iters}", "regressor", dict(cat_base, n_estimators=iters),
+            yd, fit_kw=dict(categorical_feature=[4]), extra={"categorical": [4]}, X=Xd,
+            X_test=Xd[::7])
     return out
 
 

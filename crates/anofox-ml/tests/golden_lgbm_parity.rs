@@ -112,7 +112,13 @@ fn lgbm_matches_lightgbm() {
         let y = json_to_array1(&case["y"]);
         let sw = sample_weight(&case);
         let x_test = array2_with_nan(&case["X_test"]);
-        let categorical = if name.contains("categorical") {
+        let categorical: Vec<usize> = if let Some(c) = case.get("categorical") {
+            c.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect()
+        } else if name.contains("categorical") {
             vec![2]
         } else {
             vec![]
