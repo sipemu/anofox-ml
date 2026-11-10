@@ -624,6 +624,25 @@ def generate():
     yv_q = yv_reg + np.repeat(rng.normal(scale=2.0, size=len(sizes_v)), sizes_v)
     add_group("eval_query_rmse", dict(over, loss_function="QueryRMSE"), X, y_q, sizes,
               eval_data=(Xv, yv_q, sizes_v))
+    # PairLogit (#210): every pair of a query's rows with different
+    # relevance, on stored exp(a).
+    y_rel = np.digitize(y_q - np.repeat([y_q[a:b].mean() for a, b in
+                        zip(np.cumsum([0] + sizes[:-1]), np.cumsum(sizes))], sizes),
+                        [-1.0, 0.0, 1.0]).astype(float)
+    pl = dict(base, loss_function="PairLogit")
+    add_group("loss_pair_logit", pl, X, y_rel, sizes)
+    add_group("loss_pair_logit_l2", dict(pl, score_function="L2"), X, y_rel, sizes)
+    add_group("loss_pair_logit_ordered", dict(pl, boosting_type="Ordered"), X, y_rel, sizes)
+    add_group("loss_pair_logit_permuted", dict(pl, boosting_type="Ordered", has_time=False),
+              X, y_rel, sizes)
+    add_group("loss_pair_logit_depthwise", dict(pl, grow_policy="Depthwise"), X, y_rel, sizes)
+    add_group("loss_pair_logit_lossguide", dict(pl, grow_policy="Lossguide"), X, y_rel, sizes)
+    add_group("loss_pair_logit_defaults", dict(COMMON, iterations=60, depth=4,
+              loss_function="PairLogit", random_strength=1.0, has_time=False,
+              bootstrap_type="MVS"), X, y_rel, sizes)
+    yv_rel = np.digitize(yv_q - yv_q.mean(), [-1.0, 0.0, 1.0]).astype(float)
+    add_group("eval_pair_logit", dict(over, loss_function="PairLogit"), X, y_rel, sizes,
+              eval_data=(Xv, yv_rel, sizes_v))
     return out
 
 

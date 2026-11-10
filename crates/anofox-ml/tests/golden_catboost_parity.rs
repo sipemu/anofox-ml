@@ -279,6 +279,7 @@ fn catboost_models_match_catboost() {
                     "Lq" => CatBoostRegressionLoss::Lq { q: value() },
                     "RMSEWithUncertainty" => CatBoostRegressionLoss::RmseWithUncertainty,
                     "QueryRMSE" => CatBoostRegressionLoss::QueryRmse,
+                    "PairLogit" => CatBoostRegressionLoss::PairLogit,
                     other => panic!("unknown loss {other}"),
                 });
             }

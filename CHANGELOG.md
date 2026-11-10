@@ -22,6 +22,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style ranking: PairLogit (#210, part)
+
+- `CatBoostRegressionLoss::PairLogit` through `fit_with_groups`: CatBoost's
+  generated pairs (every pair of a query's rows with different targets),
+  competitor lists that follow every permutation, `TPairLogitError`
+  derivatives on stored `exp(a)`, pairwise leaf and score weights
+  (`CalcPairwiseWeights`), model leaves shifted to weighted mean 0
+  (`NormalizeLeafValues`), sample weights for the scores of non-symmetric
+  trees, and the `PairLogit` eval metric. Plain, L2, ordered, permuted,
+  Depthwise, Lossguide, full-default and eval-set fits match catboost
+  1.2.10's `CatBoostRanker` to ~9e-16. Sample weights are rejected.
+- Python: `CatBoostRanker(loss_function="PairLogit")`.
+
 ### CatBoost-style ranking: QueryRMSE (#210, part)
 
 - `CatBoostRegressionLoss::QueryRmse` with query groups through
