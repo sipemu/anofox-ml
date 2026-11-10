@@ -22,6 +22,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style boosting: MultiClassOneVsAll (#209, part)
+
+- `CatBoostClassifierLoss::MultiClassOneVsAll` (Python
+  `loss_function="MultiClassOneVsAll"`): a binary Logloss per class with
+  CatBoost's diagonal-Hessian Newton step, its fmath `expd` (scalar and the
+  AVX2 blocks of `FastExpWithInfInplace`), Bayesian bootstrap by default,
+  and unnormalized per-class sigmoids from `predict_proba`. Three and five
+  classes, weighted, ordered, Depthwise and full defaults match catboost
+  1.2.10 to ~1e-16.
+
 ### CatBoost-style boosting: CrossEntropy (#209, part)
 
 - `CatBoostClassifier::with_loss_function(CatBoostClassifierLoss::CrossEntropy)`

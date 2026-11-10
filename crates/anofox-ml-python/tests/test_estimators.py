@@ -1228,3 +1228,19 @@ def test_catboost_crossentropy_matches_catboost():
                                  has_time=True).fit(X, y)
     np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
                                atol=1e-14)
+
+
+def test_catboost_one_vs_all_matches_catboost():
+    cb = pytest.importorskip("catboost")
+    r = np.random.RandomState(6)
+    X = r.normal(size=(300, 3))
+    y = np.digitize(X[:, 0] + 0.5 * r.normal(size=300), [-0.8, 0.0, 0.8])
+    kw = dict(iterations=30, depth=4, loss_function="MultiClassOneVsAll", random_seed=0)
+    ref = cb.CatBoostClassifier(**kw, thread_count=1, verbose=0, random_strength=0,
+                                bootstrap_type="No", has_time=True,
+                                allow_writing_files=False).fit(X, y)
+    ours = am.CatBoostClassifier(**kw, random_strength=0, bootstrap_type="No",
+                                 has_time=True).fit(X, y)
+    np.testing.assert_allclose(ours.predict_proba(X), ref.predict_proba(X), rtol=1e-12,
+                               atol=1e-14)
+    np.testing.assert_array_equal(ours.predict(X), ref.predict(X).ravel())

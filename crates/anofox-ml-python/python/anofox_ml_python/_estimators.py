@@ -1019,8 +1019,9 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
 
 class CatBoostClassifier(ClassifierMixin, _CatBoost):
     """Logloss for two classes, MultiClass for more (``loss_function`` may
-    name them), or ``loss_function="CrossEntropy"`` with probabilities in
-    [0, 1] as targets (classes 0 and 1)."""
+    name them), ``loss_function="CrossEntropy"`` with probabilities in
+    [0, 1] as targets (classes 0 and 1), or ``"MultiClassOneVsAll"`` (a
+    sigmoid per class; ``predict_proba`` is not normalized, as in catboost)."""
 
     _kind = "CatBoostClassifier"
 
@@ -1045,12 +1046,13 @@ class CatBoostClassifier(ClassifierMixin, _CatBoost):
         return idx.astype(np.float64)
 
     def _rust_params(self, X, y):
-        if self.loss_function not in (None, "Logloss", "MultiClass", "CrossEntropy"):
+        if self.loss_function not in (None, "Logloss", "MultiClass", "CrossEntropy",
+                                      "MultiClassOneVsAll"):
             raise ValueError(f"unsupported loss_function {self.loss_function!r}")
         params = super()._rust_params(X, y)
         params.pop("loss_function", None)
-        if self.loss_function == "CrossEntropy":
-            params["loss_function"] = "CrossEntropy"
+        if self.loss_function in ("CrossEntropy", "MultiClassOneVsAll"):
+            params["loss_function"] = self.loss_function
         return params
 
 

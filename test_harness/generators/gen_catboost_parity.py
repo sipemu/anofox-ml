@@ -516,6 +516,19 @@ def generate():
     add("loss_crossentropy_defaults", "classifier",
         dict(COMMON, iterations=60, depth=4, loss_function="CrossEntropy", random_strength=1.0,
              has_time=False, bootstrap_type="MVS"), X, y_soft)
+    # MultiClassOneVsAll (#209): a sigmoid per class, diagonal Newton steps,
+    # fmath's expd (scalar below four classes, its AVX2 blocks from four).
+    ova = dict(base, loss_function="MultiClassOneVsAll")
+    y5 = np.digitize(eta + rng.logistic(size=n) * 0.5, [-1.0, -0.2, 0.5, 1.2]).astype(float)
+    add("loss_ova", "classifier", ova, X, y_mc.astype(float))
+    add("loss_ova_weighted", "classifier", ova, X, y_mc.astype(float), sw=weights)
+    add("loss_ova_5", "classifier", ova, X, y5)
+    add("loss_ova_ordered", "classifier", dict(ova, boosting_type="Ordered"), X, y5)
+    add("loss_ova_depthwise", "classifier", dict(ova, grow_policy="Depthwise"), X,
+        y_mc.astype(float))
+    add("loss_ova_defaults", "classifier",
+        dict(COMMON, iterations=60, depth=4, loss_function="MultiClassOneVsAll",
+             random_strength=1.0, has_time=False), X, y5)
     return out
 
 
