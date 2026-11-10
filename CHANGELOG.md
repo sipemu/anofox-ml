@@ -22,6 +22,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style boosting: text features, bag of words (#211, part)
+
+- `CatBoostRegressor::fit_with_text(x, text, y, w)` /
+  `FittedCatBoostRegressor::predict_with_text`: catboost's default text
+  processing for regression. Per text column: the `Space` tokenizer, a
+  BiGram and a Word frequency dictionary (`TDictionaryBuilder`; catboost's
+  effective default `occurrence_lower_bound` 3, ids by count then token),
+  and `BoW` binary features (border 0.5) as offline estimated features:
+  scored after the CTRs in packs of 8 with their own `rsm` draws. Plain,
+  two-column, weighted, ordered and full-default fits match catboost
+  1.2.10 to ~6e-16. Not yet: classification (NaiveBayes / BM25), custom
+  text processing, embeddings, registry and Python.
+
 ### CatBoost-style ranking: pairwise scoring (#210)
 
 - `CatBoostRegressionLoss::PairLogitPairwise` and `YetiRankPairwise {
