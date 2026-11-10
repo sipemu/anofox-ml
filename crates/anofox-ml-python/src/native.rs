@@ -256,6 +256,26 @@ impl PyModel {
             .map_err(to_py_err)
     }
 
+    /// Fit with query groups (the ranking objectives).
+    #[pyo3(signature = (x, y, group, sample_weight=None))]
+    fn fit_with_group(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        y: PyReadonlyArray1<'_, f64>,
+        group: Vec<usize>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+    ) -> PyResult<()> {
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_array(),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let inner = &mut self.inner;
+        py.detach(|| inner.fit_with_group(x, Some(y), w, &group))
+            .map_err(to_py_err)
+    }
+
     /// Predictions with an offset on the link scale (the GLMs).
     fn predict_with_offset(
         &self,

@@ -30,9 +30,11 @@ use std::collections::BinaryHeap;
 mod custom;
 mod dataset;
 mod linear;
+mod rank;
 pub use custom::{FittedLgbmBooster, LgbmCustomObjective};
 use dataset::BinningSettings;
 pub use dataset::{LgbmDataset, LgbmDatasetBuilder, LgbmFloat};
+pub use rank::LgbmRankingParams;
 
 const DEFAULT_MAX_BINS: usize = 255;
 /// Special bin index reserved for NaN / missing values.
@@ -2757,6 +2759,8 @@ struct LgbmSeeds {
     bagging: u32,
     feature_fraction: u32,
     drop: u32,
+    /// `objective_seed` (rank_xendcg).
+    objective: u32,
 }
 
 impl LgbmSeeds {
@@ -2767,6 +2771,7 @@ impl LgbmSeeds {
                 bagging: 3,
                 feature_fraction: 2,
                 drop: drop_seed,
+                objective: 5,
             };
         };
         let mut rng = LgbmRandom(seed as u32);
@@ -2775,11 +2780,13 @@ impl LgbmSeeds {
         let bagging = next();
         let drop = next();
         let feature_fraction = next();
+        let objective = next();
         Self {
             data,
             bagging,
             feature_fraction,
             drop,
+            objective,
         }
     }
 }
@@ -3345,6 +3352,12 @@ pub enum LgbmObjective {
     /// `objective="cross_entropy"`): a logistic link, so predictions are
     /// the sigmoid of the raw score.
     CrossEntropy,
+    /// LambdaRank with NDCG (LightGBM's `objective="lambdarank"`): needs
+    /// query groups (`LgbmFitOptions::group`) and integer relevance labels;
+    /// see `LgbmRegressor::ranking`. Predictions are raw scores.
+    LambdaRank,
+    /// LightGBM's `objective="rank_xendcg"` (XE-NDCG), with query groups.
+    RankXendcg,
     /// Binary classification with log-loss.
     Binary,
     /// Multi-class classification with softmax.
@@ -3510,6 +3523,9 @@ pub struct LgbmRegressor {
     pub linear_tree: bool,
     #[serde(default)]
     pub linear_lambda: f64,
+    /// Parameters of the ranking objectives.
+    #[serde(default)]
+    pub ranking: LgbmRankingParams,
     /// sklearn's numerics instead of LightGBM's: float32 gradients and
     /// hessians, its L1 / quantile gradient at ties (prediction == target
     /// counts as below), split search (see `find_best_split`), weighted
@@ -3564,11 +3580,25 @@ impl LgbmRegressor {
             seed: None,
             linear_tree: false,
             linear_lambda: 0.0,
+            ranking: LgbmRankingParams::default(),
             sklearn_compat: false,
             interaction_cst: Vec::new(),
             feature_fraction_per_split: 1.0,
             feature_subsample_seed: 0,
         }
+    }
+
+    /// A ranker: LambdaRank with NDCG (LightGBM's `LGBMRanker`); fit with
+    /// `LgbmFitOptions::group`.
+    pub fn ranker() -> Self {
+        Self::new().with_objective(LgbmObjective::LambdaRank)
+    }
+
+    /// The ranking parameters (truncation level, normalization, sigmoid,
+    /// label gains, eval NDCG@k).
+    pub fn with_ranking(mut self, ranking: LgbmRankingParams) -> Self {
+        self.ranking = ranking;
+        self
     }
 
     /// Linear trees (LightGBM's `linear_tree`, `linear_lambda`).
@@ -3776,6 +3806,11 @@ pub struct LgbmFitOptions<'a> {
     pub eval_sample_weight: Option<ArrayView1<'a, f64>>,
     /// Print training progress every N iterations (0 = silent).
     pub verbose: usize,
+    /// Query group sizes in row order (LightGBM's `group`), for the ranking
+    /// objectives.
+    pub group: Option<&'a [usize]>,
+    /// Query group sizes of the eval set.
+    pub eval_group: Option<&'a [usize]>,
 }
 
 impl<'a> Default for LgbmFitOptions<'a> {
@@ -3786,6 +3821,8 @@ impl<'a> Default for LgbmFitOptions<'a> {
             eval_set: None,
             eval_sample_weight: None,
             verbose: 0,
+            group: None,
+            eval_group: None,
         }
     }
 }
@@ -4180,6 +4217,13 @@ fn regression_baseline(
     objective: LgbmObjective,
     sklearn: bool,
 ) -> f64 {
+    // Ranking objectives start from 0 (LightGBM's default `BoostFromScore`).
+    if matches!(
+        objective,
+        LgbmObjective::LambdaRank | LgbmObjective::RankXendcg
+    ) {
+        return 0.0;
+    }
     if let Some(alpha) = refit_percentile(objective) {
         let rows: Vec<usize> = (0..y.len()).collect();
         let v = rows_percentile(y, &rows, weights, alpha, sklearn);
@@ -4567,6 +4611,37 @@ impl LgbmRegressor {
         validate_max_bins(self.max_bins)?;
         self.sampling().validate()?;
         validate_regression_objective(self.objective, y)?;
+        let is_ranking = matches!(
+            self.objective,
+            LgbmObjective::LambdaRank | LgbmObjective::RankXendcg
+        );
+        // Query boundaries of the training rows and the eval rows.
+        let (boundaries, eval_boundaries) = if is_ranking {
+            let group = opts.group.ok_or_else(|| {
+                RustMlError::InvalidParameter("the ranking objectives need `group`".into())
+            })?;
+            rank::check_labels(y, &self.ranking)?;
+            let eval = match opts.eval_set {
+                Some((_, ye)) => {
+                    let g = opts.eval_group.ok_or_else(|| {
+                        RustMlError::InvalidParameter(
+                            "a ranking eval set needs `eval_group`".into(),
+                        )
+                    })?;
+                    rank::check_labels(ye.view(), &self.ranking)?;
+                    Some(rank::query_boundaries(g, ye.len())?)
+                }
+                None => None,
+            };
+            (Some(rank::query_boundaries(group, y.len())?), eval)
+        } else {
+            (None, None)
+        };
+        if is_ranking && (self.sklearn_compat || stopping.is_some()) {
+            return Err(RustMlError::InvalidParameter(
+                "the ranking objectives have no sklearn mode".into(),
+            ));
+        }
         if self.linear_tree {
             if self.boosting_type == BoostingType::Dart
                 || refit_percentile(self.objective).is_some()
@@ -4743,6 +4818,16 @@ impl LgbmRegressor {
         }
         let mut dart = (self.boosting_type == BoostingType::Dart)
             .then(|| DartState::new(self.dart, self.learning_rate, sampling.seeds.drop));
+        let mut ranker = match boundaries {
+            Some(b) => Some(rank::RankingObjective::new(
+                self.objective,
+                &y_vec,
+                b,
+                &self.ranking,
+                sampling.seeds.objective,
+            )?),
+            None => None,
+        };
 
         for iter in start..self.n_estimators {
             // DART: drop earlier trees before the gradients are computed.
@@ -4754,7 +4839,10 @@ impl LgbmRegressor {
                 }
                 (drops, shrinkage)
             });
-            let (mut gradients, mut hessians) = compute_regression_gradients(&y_vec, &preds, self);
+            let (mut gradients, mut hessians) = match ranker.as_mut() {
+                Some(r) => r.gradients(&preds),
+                None => compute_regression_gradients(&y_vec, &preds, self),
+            };
 
             // Apply sample weights (multiply into gradients and hessians)
             if let Some(sw) = sample_weight {
@@ -4890,13 +4978,17 @@ impl LgbmRegressor {
                 for i in 0..eb.nrows() {
                     ep[i] += eval_out(eb, i);
                 }
-                let loss = eval_loss(
-                    ye,
-                    ep,
-                    opts.eval_sample_weight,
-                    self.objective,
-                    self.huber_delta,
-                );
+                let loss = match (ranker.as_ref(), eval_boundaries.as_ref()) {
+                    // NDCG@k, higher is better.
+                    (Some(r), Some(b)) => -r.ndcg(ye, ep, b),
+                    _ => eval_loss(
+                        ye,
+                        ep,
+                        opts.eval_sample_weight,
+                        self.objective,
+                        self.huber_delta,
+                    ),
+                };
                 if loss < best_eval_loss - 1e-12 {
                     best_eval_loss = loss;
                     best_iteration = iter + 1;

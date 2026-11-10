@@ -710,6 +710,66 @@ class LGBMRegressor(RegressorMixin, _Lgbm):
         return p
 
 
+class LGBMRanker(LGBMRegressor):
+    """LightGBM's ``LGBMRanker``: ``objective="lambdarank"`` (default) or
+    ``"rank_xendcg"``; ``fit(X, y, group=...)`` takes the query sizes, whose
+    rows are consecutive, and integer relevance labels. ``predict`` gives
+    the ranking scores."""
+
+    _kind = "LgbmRanker"
+
+    def __init__(self, boosting_type="gbdt", num_leaves=31, max_depth=-1, learning_rate=0.1,
+                 n_estimators=100, min_split_gain=0.0, min_child_weight=1e-3,
+                 min_child_samples=20, colsample_bytree=1.0, reg_alpha=0.0, reg_lambda=0.0,
+                 max_bin=255, random_state=None, drop_rate=0.1, max_drop=50, skip_drop=0.5,
+                 uniform_drop=False, xgboost_dart_mode=False, drop_seed=4, enable_bundle=True,
+                 n_jobs=None, subsample=1.0, subsample_freq=0, feature_fraction_bynode=1.0,
+                 top_rate=0.2, other_rate=0.1, objective="lambdarank",
+                 lambdarank_truncation_level=30, lambdarank_norm=True, sigmoid=1.0,
+                 label_gain=None, linear_tree=False, linear_lambda=0.0):
+        super().__init__(boosting_type, num_leaves, max_depth, learning_rate, n_estimators,
+                         min_split_gain, min_child_weight, min_child_samples,
+                         colsample_bytree, reg_alpha, reg_lambda, max_bin, random_state,
+                         drop_rate, max_drop, skip_drop, uniform_drop, xgboost_dart_mode,
+                         drop_seed, enable_bundle, n_jobs, subsample, subsample_freq,
+                         feature_fraction_bynode, top_rate, other_rate, objective,
+                         linear_tree=linear_tree, linear_lambda=linear_lambda)
+        self.lambdarank_truncation_level = lambdarank_truncation_level
+        self.lambdarank_norm = lambdarank_norm
+        self.sigmoid = sigmoid
+        self.label_gain = label_gain
+
+    def _rust_params(self, X, y):
+        obj = self.objective
+        ranking = {None: "LambdaRank", "lambdarank": "LambdaRank", "rank_xendcg": "RankXendcg",
+                   "xendcg": "RankXendcg"}
+        saved, self.objective = self.objective, "regression"
+        try:
+            p = super()._rust_params(X, y)
+        finally:
+            self.objective = saved
+        p["objective"] = _choice(obj, ranking, "objective")
+        p["ranking"] = {"truncation_level": int(self.lambdarank_truncation_level),
+                        "norm": bool(self.lambdarank_norm), "sigmoid": float(self.sigmoid),
+                        "label_gain": [] if self.label_gain is None
+                        else [float(g) for g in self.label_gain],
+                        "eval_at": 1}
+        return p
+
+    def fit(self, X, y, group=None, sample_weight=None):
+        if group is None:
+            raise ValueError("LGBMRanker.fit needs group (the query sizes)")
+        X = _check_X(X)
+        y = _check_1d(y)
+        if sample_weight is not None:
+            sample_weight = _check_1d(sample_weight, "sample_weight")
+        model = self._new_model(X, y)
+        model.fit_with_group(X, y, [int(g) for g in np.asarray(group).ravel()], sample_weight)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+
 class _CatBoost(BaseEstimator):
     """CatBoost-style boosting on oblivious trees; parameters follow
     ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""

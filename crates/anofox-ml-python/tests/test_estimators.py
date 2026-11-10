@@ -97,7 +97,8 @@ def _data(name, cls):
     return Xd, yd, spec.get("params", {})
 
 
-@pytest.mark.parametrize("name", sorted(CLASSES))
+# LGBMRanker needs query groups in fit (test_lgbm_ranker_matches_lightgbm).
+@pytest.mark.parametrize("name", sorted(set(CLASSES) - {"LGBMRanker"}))
 def test_fit_predict_pickle_clone(name):
     cls = CLASSES[name]
     Xd, yd, params = _data(name, cls)
@@ -1177,3 +1178,24 @@ def test_lgbm_linear_tree_matches_lightgbm(extra):
     ours = am.LGBMRegressor(**kw).fit(X, y)
     X_new = np.vstack([X[:50], [[4.0, 0.0, 0.0], [-4.0, 0.0, 0.0]]])
     np.testing.assert_allclose(ours.predict(X_new), ref.predict(X_new), rtol=1e-11, atol=1e-12)
+
+
+@pytest.mark.parametrize("objective", ["lambdarank", "rank_xendcg"])
+def test_lgbm_ranker_matches_lightgbm(objective):
+    lgb = pytest.importorskip("lightgbm")
+    r = np.random.RandomState(7)
+    group = r.randint(3, 20, size=40)
+    n = group.sum()
+    X = r.normal(size=(n, 3))
+    y = np.digitize(X[:, 0] + 0.5 * r.normal(size=n), [-0.5, 0.5, 1.5]).astype(float)
+    kw = dict(n_estimators=20, learning_rate=0.1, num_leaves=8, min_child_samples=10,
+              objective=objective)
+    ref = lgb.LGBMRanker(**kw, verbose=-1, n_jobs=1, deterministic=True).fit(X, y, group=group)
+    ours = am.LGBMRanker(**kw).fit(X, y, group=group)
+    np.testing.assert_allclose(ours.predict(X), ref.predict(X), rtol=1e-12, atol=1e-14)
+    with pytest.raises(ValueError, match="group"):
+        am.LGBMRanker().fit(X, y)
+    import pickle
+    from sklearn.base import clone
+    np.testing.assert_array_equal(pickle.loads(pickle.dumps(ours)).predict(X), ours.predict(X))
+    assert clone(ours).get_params() == ours.get_params()

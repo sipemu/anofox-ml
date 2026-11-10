@@ -6,6 +6,23 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM learning to rank (#207)
+
+- `LgbmObjective::LambdaRank` and `LgbmObjective::RankXendcg` with query
+  groups (`LgbmFitOptions::group`, `eval_group`) and `LgbmRankingParams`
+  (`lambdarank_truncation_level`, `lambdarank_norm`, `sigmoid`,
+  `label_gain`, the eval NDCG@k); `LgbmRegressor::ranker()`. LambdaRank
+  accumulates its pairwise lambdas in float32 through LightGBM's sigmoid
+  table; XE-NDCG draws from one LightGBM generator per query
+  (`objective_seed`). Early stopping on an eval set uses NDCG@k. Plain,
+  truncated / unnormalized, custom sigmoid and gains, weighted, bagged and
+  XE-NDCG (seeded) fits match LightGBM 4.7's `LGBMRanker` to ~4e-16
+  (`gen_lgbm_rank.py`).
+- Registry: kind `LgbmRanker` (LambdaRank by default) and
+  `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
+- Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
+  `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+
 ### LightGBM linear trees (#208)
 
 - `LgbmRegressor::with_linear_tree(true, linear_lambda)` (LightGBM's

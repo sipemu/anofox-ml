@@ -71,3 +71,37 @@ fn classifier_one_vs_all_from_json() {
         expected.iter().copied().collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn ranker_fits_with_groups() {
+    let (x, y) = data();
+    let labels = y.mapv(|v| (v.min(3.0)).floor());
+    let group = vec![20usize; 6];
+    let mut m = make(
+        "LgbmRanker",
+        &json!({"n_estimators": 10, "min_child_samples": 5}),
+    )
+    .unwrap();
+    assert!(m.fit(x.view(), Some(labels.view()), None).is_err());
+    m.fit_with_group(x.view(), Some(labels.view()), None, &group)
+        .unwrap();
+    let expected = LgbmRegressor::ranker()
+        .with_n_estimators(10)
+        .with_min_child_samples(5)
+        .fit_with_eval(
+            &x,
+            &labels,
+            &anofox_ml_ensemble::LgbmFitOptions {
+                group: Some(&group),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .predict(&x)
+        .unwrap();
+    assert_eq!(out(m.predict(x.view()).unwrap()), expected.to_vec());
+    // Groups that do not cover the rows are an error.
+    assert!(m
+        .fit_with_group(x.view(), Some(labels.view()), None, &[10, 10])
+        .is_err());
+}
