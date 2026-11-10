@@ -1206,11 +1206,15 @@ impl Loss {
             }
             // CatBoost's `TMultiClassError::CalcDersMulti`.
             Loss::MultiClass(k) => {
+                // `CalcSoftmax`: `FastExpWithInfInplace` of `a - max`.
                 let max = approx.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let mut sum = 0.0;
                 for (d, &a) in der.iter_mut().zip(approx) {
-                    *d = (a - max).exp();
-                    sum += *d;
+                    *d = a - max;
+                }
+                fast_exp_with_inf(der);
+                let mut sum = 0.0;
+                for &d in der.iter() {
+                    sum += d;
                 }
                 for d in der.iter_mut() {
                     *d /= sum;
@@ -1267,10 +1271,14 @@ impl Loss {
                     (1.0 - target) * a
                 }
             }
+            // `TMultiClassMetric`: `FastExpWithInfInplace` of `a - max`.
             Loss::MultiClass(_) => {
                 let max = approx.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                let sum: f64 = approx.iter().map(|&a| (a - max).exp()).sum();
-                -((approx[target as usize] - max) - sum.ln())
+                let mut e: Vec<f64> = approx.iter().map(|&a| a - max).collect();
+                let target_approx = e[target as usize];
+                fast_exp_with_inf(&mut e);
+                let sum: f64 = e.iter().sum();
+                -(target_approx - sum.ln())
             }
             // `TRMSEWithUncertaintyMetric`: the Gaussian negative
             // log-likelihood.
