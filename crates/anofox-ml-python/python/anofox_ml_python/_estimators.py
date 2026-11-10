@@ -987,9 +987,20 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
     """``loss_function`` as in catboost: ``"RMSE"``, ``"MAE"``,
     ``"Quantile:alpha=0.3"``, ``"Expectile:alpha=0.3"``, ``"Poisson"``,
     ``"Tweedie:variance_power=1.5"``, ``"LogLinQuantile:alpha=0.5"``,
-    ``"Huber:delta=1.0"``, ``"LogCosh"`` or ``"Lq:q=2"``."""
+    ``"Huber:delta=1.0"``, ``"LogCosh"``, ``"Lq:q=2"`` or
+    ``"RMSEWithUncertainty"`` (``predict`` then gives ``[mean, variance]``
+    per row, as catboost)."""
 
     _kind = "CatBoostRegressor"
+
+    def predict(self, X):
+        if self.loss_function != "RMSEWithUncertainty":
+            return super().predict(X)
+        X = self._checked(X)
+        model = self._model()
+        mean = np.asarray(model.predict(X))
+        std = np.asarray(model.predict_std(X))
+        return np.column_stack([mean, std ** 2])
 
     def fit(self, X, y, sample_weight=None, eval_set=None):
         """``eval_set``: ``(X_val, y_val)`` or ``(X_val, y_val, weight_val)``."""
@@ -1001,7 +1012,7 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
         args = dict(kv.split("=", 1) for kv in rest.split(";") if kv)
         param = {"Quantile": "alpha", "Expectile": "alpha", "LogLinQuantile": "alpha",
                  "Tweedie": "variance_power", "Huber": "delta", "Lq": "q"}
-        if name in ("RMSE", "MAE", "Poisson", "LogCosh"):
+        if name in ("RMSE", "MAE", "Poisson", "LogCosh", "RMSEWithUncertainty"):
             if args:
                 raise ValueError(f"{name} takes no parameters")
             params["loss_function"] = name

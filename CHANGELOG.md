@@ -22,6 +22,18 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style boosting: RMSEWithUncertainty (#209, part)
+
+- `CatBoostRegressionLoss::RmseWithUncertainty`: two approximations per
+  row (mean, log standard deviation) with CatBoost's natural-gradient
+  derivatives, diagonal Newton steps and fast exp, starting from the
+  target's mean and log standard deviation;
+  `FittedCatBoostRegressor::predict_uncertainty` gives `[mean, variance]`
+  (`predict`: the mean; registry `predict_std`). Plain, weighted, ordered
+  and full-default fits match catboost 1.2.10 to ~1e-15. Python
+  `loss_function="RMSEWithUncertainty"` predicts `[mean, variance]`, as
+  catboost.
+
 ### CatBoost-style boosting: MultiClassOneVsAll (#209, part)
 
 - `CatBoostClassifierLoss::MultiClassOneVsAll` (Python

@@ -693,6 +693,11 @@ pub enum CatBoostRegressionLoss {
     LogCosh,
     /// `|raw - target|^q`, `q >= 1` (CatBoost's `Lq:q`).
     Lq { q: f64 },
+    /// A mean and a log standard deviation per row (CatBoost's
+    /// `RMSEWithUncertainty`, NGBoost's natural gradient): `predict` gives
+    /// the mean, `predict_uncertainty` the mean and the variance.
+    #[serde(rename = "RMSEWithUncertainty")]
+    RmseWithUncertainty,
 }
 
 /// CatBoost's `grow_policy`.
@@ -908,6 +913,9 @@ enum Loss {
     /// A sigmoid per class (CatBoost's `MultiClassOneVsAll`), with a
     /// diagonal Hessian.
     MultiClassOneVsAll(usize),
+    /// Mean and log standard deviation (CatBoost's `RMSEWithUncertainty`),
+    /// with a diagonal Hessian.
+    RmseWithUncertainty,
 }
 
 impl Loss {
@@ -915,6 +923,7 @@ impl Loss {
     fn dims(self) -> usize {
         match self {
             Loss::MultiClass(k) | Loss::MultiClassOneVsAll(k) => k,
+            Loss::RmseWithUncertainty => 2,
             _ => 1,
         }
     }
@@ -924,7 +933,7 @@ impl Loss {
     fn hessian_len(self) -> usize {
         let k = self.dims();
         match self {
-            Loss::MultiClassOneVsAll(_) => k,
+            Loss::MultiClassOneVsAll(_) | Loss::RmseWithUncertainty => k,
             _ => k * (k + 1) / 2,
         }
     }
@@ -1015,6 +1024,17 @@ impl Loss {
                 der[0] = w * (target - p);
                 der2[0] = w * (-p * (1.0 - p));
             }
+            // CatBoost's `TRMSEWithUncertaintyError::CalcDers`.
+            Loss::RmseWithUncertainty => {
+                let diff = target - approx[0];
+                let mut prec = [-2.0 * approx[1]];
+                fast_exp_with_inf(&mut prec);
+                let sq = diff * diff;
+                der[0] = w * diff;
+                der[1] = w * (sq * prec[0] - 1.0);
+                der2[0] = -w;
+                der2[1] = -2.0 * w * sq * prec[0];
+            }
             // CatBoost's `TMultiClassOneVsAllError::CalcDersMulti`.
             Loss::MultiClassOneVsAll(_) => {
                 der.copy_from_slice(approx);
@@ -1096,6 +1116,14 @@ impl Loss {
                 let max = approx.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let sum: f64 = approx.iter().map(|&a| (a - max).exp()).sum();
                 -((approx[target as usize] - max) - sum.ln())
+            }
+            // `TRMSEWithUncertaintyMetric`: the Gaussian negative
+            // log-likelihood.
+            Loss::RmseWithUncertainty => {
+                let mut e = [-2.0 * approx[1]];
+                fast_exp_with_inf(&mut e);
+                let d = approx[0] - target;
+                0.9189385332046 + approx[1] + 0.5 * e[0] * (d * d)
             }
             // `TMultiClassOneVsAllMetric`.
             Loss::MultiClassOneVsAll(k) => {
@@ -3381,6 +3409,20 @@ struct LeafProblem<'a> {
     exact_weights: &'a [f64],
 }
 
+/// CatBoost's `CalculateWeightedTargetVariance` (float32 squares).
+fn weighted_target_variance(target: &[f64], weights: &[f64], mean: f32) -> f32 {
+    let total: f64 = weights.iter().sum();
+    let sum: f64 = target
+        .iter()
+        .zip(weights)
+        .map(|(&t, &w)| {
+            let d = t as f32 - mean;
+            f64::from(d * d * w as f32)
+        })
+        .sum();
+    (sum / total) as f32
+}
+
 /// fmath's table of `2^(i / 2048)` mantissas (`ExpdVar`).
 fn expd_table() -> &'static [u64; 2048] {
     static TABLE: std::sync::OnceLock<[u64; 2048]> = std::sync::OnceLock::new();
@@ -4894,6 +4936,7 @@ macro_rules! catboost_config {
                 let (newton, gradient) = match loss {
                     Loss::Rmse | Loss::Quantile { .. } | Loss::Tweedie { .. } => (1, 1),
                     Loss::Huber { .. } | Loss::LogCosh | Loss::Lq { .. } => (1, 1),
+                    Loss::RmseWithUncertainty => (1, 1),
                     Loss::LogLinQuantile { .. } => (1, 1),
                     Loss::Expectile { .. } => (5, 10),
                     Loss::Poisson => (10, 1),
@@ -5307,6 +5350,7 @@ impl CatBoostRegressor {
             CatBoostRegressionLoss::Huber { delta } => Loss::Huber { delta },
             CatBoostRegressionLoss::LogCosh => Loss::LogCosh,
             CatBoostRegressionLoss::Lq { q } => Loss::Lq { q },
+            CatBoostRegressionLoss::RmseWithUncertainty => Loss::RmseWithUncertainty,
         }
     }
 }
@@ -5404,9 +5448,33 @@ pub struct FittedCatBoostRegressor {
     best_iteration: Option<usize>,
     borders: Vec<Vec<f32>>,
     n_features: usize,
+    /// RMSEWithUncertainty: the starting log standard deviation (the model
+    /// then has two approximations per row).
+    #[serde(default)]
+    log_sigma_bias: Option<f64>,
 }
 
 impl FittedCatBoostRegressor {
+    fn biases(&self) -> Vec<f64> {
+        std::iter::once(self.bias)
+            .chain(self.log_sigma_bias)
+            .collect()
+    }
+
+    /// RMSEWithUncertainty: the mean and the variance `exp(2 raw₁)` of
+    /// every row (CatBoost's default prediction for the loss).
+    pub fn predict_uncertainty<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
+        let x: ArrayView2<f64> = x.into();
+        check_features(x, self.n_features)?;
+        if self.log_sigma_bias.is_none() {
+            return Err(RustMlError::InvalidParameter(
+                "predict_uncertainty needs RMSEWithUncertainty".into(),
+            ));
+        }
+        let mut raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), x);
+        raw.column_mut(1).mapv_inplace(|v| (2.0 * v).exp());
+        Ok(raw)
+    }
     pub fn n_estimators(&self) -> usize {
         self.trees.len()
     }
@@ -5495,7 +5563,15 @@ impl CatBoostRegressor {
         let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
         let loss = self.loss();
         self.check_loss(loss, &target)?;
-        let bias = if !self.boost_from_average_for(loss) {
+        // RMSEWithUncertainty always starts from the target's mean and log
+        // standard deviation (CatBoost's `CalcOptimumConstApprox`).
+        let start_sigma = (loss == Loss::RmseWithUncertainty).then(|| {
+            let mean = weighted_target_average(&target, &weights);
+            0.5 * f64::from(weighted_target_variance(&target, &weights, mean)).ln()
+        });
+        let bias = if loss == Loss::RmseWithUncertainty {
+            f64::from(weighted_target_average(&target, &weights))
+        } else if !self.boost_from_average_for(loss) {
             0.0
         } else if let Loss::Quantile { alpha, delta, .. } = loss {
             let t: Vec<f32> = target.iter().map(|&v| v as f32).collect();
@@ -5528,7 +5604,7 @@ impl CatBoostRegressor {
                 &q,
                 &target,
                 &weights,
-                &[bias],
+                &start_sigma.map_or_else(|| vec![bias], |s| vec![bias, s]),
                 loss,
                 p,
                 rng,
@@ -5539,6 +5615,7 @@ impl CatBoostRegressor {
             trees: b.trees,
             ctrs: b.ctrs,
             bias: b.bias[0],
+            log_sigma_bias: b.bias.get(1).copied(),
             eval_metrics: b.eval_metrics,
             best_iteration: b.best_iteration,
             exp_prediction: loss.exp_prediction(),
@@ -5559,7 +5636,7 @@ impl Fit<f64> for CatBoostRegressor {
 impl Predict<f64> for FittedCatBoostRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         check_features(x, self.n_features)?;
-        let raw = raw_scores(&self.trees, &self.ctrs, &[self.bias], x);
+        let raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), x);
         let raw = raw.column(0).to_owned();
         Ok(if self.exp_prediction {
             raw.mapv(f64::exp)
