@@ -7923,6 +7923,22 @@ impl FittedCatBoostClassifier {
         x: ArrayView2<f64>,
         text: &[Vec<String>],
     ) -> Result<Array2<f64>> {
+        Ok(self.proba_of(self.raw_with_text(x, text)?))
+    }
+
+    /// Classes of a model fitted with text features
+    /// ([`CatBoostClassifier::fit_with_text`]).
+    pub fn predict_with_text(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+    ) -> Result<Array1<f64>> {
+        Ok(self.classes_of(self.raw_with_text(x, text)?))
+    }
+
+    /// Raw scores of a model fitted with text features: `[x | BoW |
+    /// NaiveBayes]` through the trees.
+    fn raw_with_text(&self, x: ArrayView2<f64>, text: &[Vec<String>]) -> Result<Array2<f64>> {
         check_features(x, self.n_features)?;
         let Some(processing) = &self.text else {
             return Err(RustMlError::InvalidParameter(
@@ -7946,8 +7962,28 @@ impl FittedCatBoostClassifier {
                 }
             }
         }
-        let raw = raw_scores(&self.trees, &self.ctrs, &self.bias, augmented.view());
-        Ok(self.proba_of(raw))
+        Ok(raw_scores(
+            &self.trees,
+            &self.ctrs,
+            &self.bias,
+            augmented.view(),
+        ))
+    }
+
+    /// The most likely class of every row of raw scores (the first on
+    /// ties).
+    fn classes_of(&self, raw: Array2<f64>) -> Array1<f64> {
+        raw.rows()
+            .into_iter()
+            .map(|r| {
+                if r.len() == 1 {
+                    self.classes[usize::from(r[0] > 0.0)]
+                } else {
+                    let best = (1..r.len()).fold(0, |b, c| if r[c] > r[b] { c } else { b });
+                    self.classes[best]
+                }
+            })
+            .collect()
     }
 
     /// Log-odds of the second class (two classes; see
@@ -8308,20 +8344,7 @@ impl Fit<f64> for CatBoostClassifier {
 
 impl Predict<f64> for FittedCatBoostClassifier {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
-        let raw = self.raw_predictions(x)?;
-        Ok(raw
-            .rows()
-            .into_iter()
-            .map(|r| {
-                if r.len() == 1 {
-                    self.classes[usize::from(r[0] > 0.0)]
-                } else {
-                    // The first most likely class.
-                    let best = (1..r.len()).fold(0, |b, c| if r[c] > r[b] { c } else { b });
-                    self.classes[best]
-                }
-            })
-            .collect())
+        Ok(self.classes_of(self.raw_predictions(x)?))
     }
 }
 

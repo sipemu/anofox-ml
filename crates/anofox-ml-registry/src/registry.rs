@@ -1128,6 +1128,8 @@ registry! {
         predict_std: |m, x| m.predict_uncertainty(x).map(|u| u.column(1).mapv(f64::sqrt)),
         // QueryRMSE: the query sizes.
         fit_with_group: |c, x, y, w, g| c.fit_with_groups(x, need_y(K, y)?, w, g),
+        fit_with_text: |c, x, t, y, w| c.fit_with_text(x, t, need_y(K, y)?, w),
+        predict_with_text: |m, x, t| m.predict_with_text(x, t),
     }
     CatBoostMultiRegressor {
         config: CatBoostMultiConfig = Default::default(),
@@ -1156,6 +1158,9 @@ registry! {
             1 => crate::model::Out::from(r.column(0).to_owned()),
             _ => crate::model::Out::from(r),
         }),
+        fit_with_text: |c, x, t, y, w| c.fit_with_text(x, t, need_y(K, y)?, w),
+        predict_with_text: |m, x, t| m.predict_with_text(x, t),
+        predict_proba_with_text: |m, x, t| m.predict_proba_with_text(x, t),
     }
     #[cfg(feature = "perpetual")]
     PerpetualRegressor {
