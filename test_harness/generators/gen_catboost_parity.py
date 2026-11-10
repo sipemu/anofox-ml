@@ -58,7 +58,7 @@ def generate():
         out["quantization"].append({"name": name, "border_count": count, "X": nulls(data),
                                     "borders": borders_of(data, count)})
 
-    base = dict(iterations=30, learning_rate=0.2, depth=4, l2_leaf_reg=3.0, boosting_type="Plain",
+    base = dict(iterations=30, learning_rate=0.2, depth=4, boosting_type="Plain",
                 **COMMON)
 
     def add(name, kind, params, Xd, y, sw=None):
@@ -643,6 +643,19 @@ def generate():
     yv_rel = np.digitize(yv_q - yv_q.mean(), [-1.0, 0.0, 1.0]).astype(float)
     add_group("eval_pair_logit", dict(over, loss_function="PairLogit"), X, y_rel, sizes,
               eval_data=(Xv, yv_rel, sizes_v))
+    # YetiRank (#210): PairLogit on pairs drawn every iteration from noisy
+    # rankings by the current scores (CatBoost's default l2_leaf_reg 0).
+    yr = dict(base, loss_function="YetiRank")
+    add_group("loss_yetirank", yr, X, y_rel, sizes)
+    add_group("loss_yetirank_l2", dict(yr, l2_leaf_reg=3.0), X, y_rel, sizes)
+    add_group("loss_yetirank_params", dict(yr, loss_function="YetiRank:permutations=3;decay=0.9"),
+              X, y_rel, sizes)
+    add_group("loss_yetirank_depthwise", dict(yr, grow_policy="Depthwise"), X, y_rel, sizes)
+    add_group("loss_yetirank_permuted", dict(yr, has_time=False, cat_features=cat_cols),
+              Xc, y_rel, sizes)
+    add_group("loss_yetirank_defaults", dict(COMMON, iterations=60, depth=4,
+              loss_function="YetiRank", random_strength=1.0, has_time=False,
+              bootstrap_type="MVS"), X, y_rel, sizes)
     return out
 
 

@@ -33,7 +33,11 @@ fn worst(pred: impl IntoIterator<Item = f64>, expected: impl IntoIterator<Item =
     pred.into_iter()
         .zip(expected)
         .map(|(a, e)| (a - e).abs() / e.abs().max(1.0))
-        .fold(0.0, f64::max)
+        // A NaN prediction is a mismatch (`f64::max` would skip it).
+        .fold(
+            0.0,
+            |w, d| if d.is_nan() { f64::INFINITY } else { w.max(d) },
+        )
 }
 
 #[test]
@@ -280,6 +284,19 @@ fn catboost_models_match_catboost() {
                     "RMSEWithUncertainty" => CatBoostRegressionLoss::RmseWithUncertainty,
                     "QueryRMSE" => CatBoostRegressionLoss::QueryRmse,
                     "PairLogit" => CatBoostRegressionLoss::PairLogit,
+                    "YetiRank" => {
+                        let arg = |k: &str, d: f64| {
+                            param
+                                .split(';')
+                                .filter_map(|kv| kv.split_once('='))
+                                .find(|(key, _)| *key == k)
+                                .map_or(d, |(_, v)| v.parse().unwrap())
+                        };
+                        CatBoostRegressionLoss::YetiRank {
+                            permutations: arg("permutations", 10.0) as usize,
+                            decay: arg("decay", 0.85),
+                        }
+                    }
                     other => panic!("unknown loss {other}"),
                 });
             }

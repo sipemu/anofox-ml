@@ -774,7 +774,7 @@ class _CatBoost(BaseEstimator):
     """CatBoost-style boosting on oblivious trees; parameters follow
     ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""
 
-    def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=3.0,
+    def __init__(self, iterations=1000, learning_rate=None, depth=6, l2_leaf_reg=None,
                  border_count=254, score_function="Cosine", leaf_estimation_method=None,
                  boost_from_average=None, cat_features=None, one_hot_max_size=None,
                  model_size_reg=0.5, boosting_type="Plain", fold_len_multiplier=2.0,
@@ -829,11 +829,13 @@ class _CatBoost(BaseEstimator):
     def _rust_params(self, X, y):
         params = {
             "iterations": int(self.iterations),
-            "depth": int(self.depth), "l2_leaf_reg": float(self.l2_leaf_reg),
+            "depth": int(self.depth),
             "border_count": int(self.border_count),
             "score_function": _choice(self.score_function, {"Cosine": "Cosine", "L2": "L2"},
                                       "score_function"),
         }
+        if self.l2_leaf_reg is not None:
+            params["l2_leaf_reg"] = float(self.l2_leaf_reg)
         if self.leaf_estimation_method is not None:
             params["leaf_estimation_method"] = _choice(
                 self.leaf_estimation_method,
@@ -1066,8 +1068,10 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
 
 
 class CatBoostRanker(CatBoostRegressor):
-    """catboost's ``CatBoostRanker`` with ``loss_function="QueryRMSE"`` or
-    ``"PairLogit"`` (pairs from the targets; no sample weights):
+    """catboost's ``CatBoostRanker``: ``loss_function="YetiRank"`` (the
+    default; ``"YetiRank:permutations=10;decay=0.85"``, plain boosting, no
+    eval set), ``"PairLogit"`` (no sample weights for either) or
+    ``"QueryRMSE"``:
     ``fit(X, y, group_id=...)`` takes a query id per row, with the rows of
     a query consecutive. ``predict`` gives the ranking scores."""
 
@@ -1078,8 +1082,7 @@ class CatBoostRanker(CatBoostRegressor):
     def fit(self, X, y, group_id=None, sample_weight=None):
         if group_id is None:
             raise ValueError("CatBoostRanker.fit needs group_id")
-        if (self.loss_function or "QueryRMSE") not in ("QueryRMSE", "PairLogit"):
-            raise ValueError(f"unsupported loss_function {self.loss_function!r}")
+        self._ranking_loss()
         X = self._encode(X, fit=True)
         y = _check_1d(y)
         gid = np.asarray(group_id).ravel()
@@ -1103,8 +1106,18 @@ class CatBoostRanker(CatBoostRegressor):
             params = super()._rust_params(X, y)
         finally:
             self.loss_function = saved
-        params["loss_function"] = self.loss_function or "QueryRMSE"
+        params["loss_function"] = self._ranking_loss()
         return params
+
+    def _ranking_loss(self):
+        name, _, rest = str(self.loss_function or "YetiRank").partition(":")
+        args = dict(kv.split("=", 1) for kv in rest.split(";") if kv)
+        if name in ("QueryRMSE", "PairLogit") and not args:
+            return name
+        if name == "YetiRank" and set(args) <= {"permutations", "decay"}:
+            return {"YetiRank": {"permutations": int(args.get("permutations", 10)),
+                                 "decay": float(args.get("decay", 0.85))}}
+        raise ValueError(f"unsupported loss_function {self.loss_function!r}")
 
 
 class CatBoostClassifier(ClassifierMixin, _CatBoost):
