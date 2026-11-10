@@ -1019,7 +1019,8 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
 
 class CatBoostClassifier(ClassifierMixin, _CatBoost):
     """Logloss for two classes, MultiClass for more (``loss_function`` may
-    name them)."""
+    name them), or ``loss_function="CrossEntropy"`` with probabilities in
+    [0, 1] as targets (classes 0 and 1)."""
 
     _kind = "CatBoostClassifier"
 
@@ -1028,20 +1029,29 @@ class CatBoostClassifier(ClassifierMixin, _CatBoost):
         y = np.asarray(y)
         if y.ndim == 2 and y.shape[1] == 1:
             y = y.ravel()
+        if self.loss_function == "CrossEntropy":
+            self.classes_ = np.array([0, 1])
+            return self._fit_model(X, y.astype(np.float64), sample_weight, eval_set)
         self.classes_, y_enc = np.unique(y, return_inverse=True)
         return self._fit_model(X, y_enc.astype(np.float64), sample_weight, eval_set)
 
     def _eval_target(self, yv):
         yv = np.asarray(yv).ravel()
+        if self.loss_function == "CrossEntropy":
+            return yv.astype(np.float64)
         idx = np.searchsorted(self.classes_, yv)
         if np.any(idx >= len(self.classes_)) or np.any(self.classes_[np.minimum(idx, len(self.classes_) - 1)] != yv):
             raise ValueError("eval_set has labels that are not in y")
         return idx.astype(np.float64)
 
     def _rust_params(self, X, y):
-        if self.loss_function not in (None, "Logloss", "MultiClass"):
+        if self.loss_function not in (None, "Logloss", "MultiClass", "CrossEntropy"):
             raise ValueError(f"unsupported loss_function {self.loss_function!r}")
-        return super()._rust_params(X, y)
+        params = super()._rust_params(X, y)
+        params.pop("loss_function", None)
+        if self.loss_function == "CrossEntropy":
+            params["loss_function"] = "CrossEntropy"
+        return params
 
 
 class IsolationForest(OutlierMixin, BaseEstimator):
