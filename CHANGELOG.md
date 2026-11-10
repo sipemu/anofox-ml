@@ -22,6 +22,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `DynModel::fit_with_group(x, y, w, group)`, also for `LgbmRegressor`.
 - Python: `LGBMRanker(objective="lambdarank" | "rank_xendcg", ...)` with
   `fit(X, y, group=...)`, as `lightgbm.LGBMRanker`.
+### CatBoost-style boosting: CrossEntropy (#209, part)
+
+- `CatBoostClassifier::with_loss_function(CatBoostClassifierLoss::CrossEntropy)`
+  (Python `loss_function="CrossEntropy"`): probabilities in [0, 1] as
+  float32 targets on the Logloss machinery (10 Newton leaf steps with
+  backtracking), learning rate 0.03 as CatBoost has no automatic rate for
+  it. Plain, weighted, `boost_from_average` and full-default fits match
+  catboost 1.2.10 to ~3e-16. No categorical features or class weights yet.
+
 ### CatBoost-style boosting: Huber, LogCosh, Lq (#209, part)
 
 - `CatBoostRegressionLoss::Huber { delta }`, `LogCosh` and `Lq { q }` with

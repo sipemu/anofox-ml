@@ -791,6 +791,18 @@ fn isotonic(values: &mut [f64], weights: &[f64], order: &[usize]) {
     }
 }
 
+/// The classifier's loss (CatBoost's `loss_function`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CatBoostClassifierLoss {
+    /// Logloss for two classes, MultiClass for more.
+    #[default]
+    Auto,
+    /// Logloss on probabilities in [0, 1] as targets (CatBoost's
+    /// `CrossEntropy`); classes 0 and 1, no categorical features or class
+    /// weights.
+    CrossEntropy,
+}
+
 /// CatBoost's `auto_class_weights`, from the classes' weight sums `S_c`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CatBoostAutoClassWeights {
@@ -5216,10 +5228,16 @@ catboost_config!(
         class_weights: Option<Vec<f64>> = None,
         /// CatBoost's `auto_class_weights` (used without `class_weights`).
         auto_class_weights: Option<CatBoostAutoClassWeights> = None,
+        /// The loss: Logloss / MultiClass by the classes, or CrossEntropy.
+        loss_function: CatBoostClassifierLoss = CatBoostClassifierLoss::Auto,
     }
 );
 
 impl CatBoostClassifier {
+    pub fn with_loss_function(mut self, l: CatBoostClassifierLoss) -> Self {
+        self.loss_function = l;
+        self
+    }
     pub fn with_class_weights(mut self, w: Vec<f64>) -> Self {
         self.class_weights = Some(w);
         self
@@ -5597,7 +5615,27 @@ impl CatBoostClassifier {
             Some((x, y, w)) => (x.view(), y.view(), w.as_ref().map(|w| w.view())),
             None => (x.view(), y.view(), sample_weight.as_ref().map(|w| w.view())),
         };
-        let mut classes: Vec<f64> = y.to_vec();
+        let cross_entropy = self.loss_function == CatBoostClassifierLoss::CrossEntropy;
+        if cross_entropy {
+            if y.iter().any(|v| !(0.0..=1.0).contains(v)) {
+                return Err(RustMlError::InvalidParameter(
+                    "CrossEntropy needs targets in [0, 1]".into(),
+                ));
+            }
+            if !self.cat_features.is_empty()
+                || self.class_weights.is_some()
+                || self.auto_class_weights.is_some()
+            {
+                return Err(RustMlError::InvalidParameter(
+                    "CrossEntropy supports neither categorical features nor class weights".into(),
+                ));
+            }
+        }
+        let mut classes: Vec<f64> = if cross_entropy {
+            vec![0.0, 1.0]
+        } else {
+            y.to_vec()
+        };
         classes.sort_by(f64::total_cmp);
         classes.dedup();
         if !(2..=255).contains(&classes.len()) {
@@ -5623,11 +5661,15 @@ impl CatBoostClassifier {
                 "boost_from_average is not supported for more than two classes".into(),
             ));
         }
-        // The class index of every row (Logloss: 0 / 1, MultiClass: 0..k).
-        let target: Vec<f64> = y
-            .iter()
-            .map(|v| classes.partition_point(|c| c < v) as f64)
-            .collect();
+        // The class index of every row (Logloss: 0 / 1, MultiClass: 0..k),
+        // or the float32 probability (CrossEntropy).
+        let target: Vec<f64> = if cross_entropy {
+            y.iter().map(|&v| f64::from(v as f32)).collect()
+        } else {
+            y.iter()
+                .map(|v| classes.partition_point(|c| c < v) as f64)
+                .collect()
+        };
         let classes_of: Vec<u8> = target.iter().map(|&t| t as u8).collect();
         let weights = sample_weight.map_or_else(|| vec![1.0; y.len()], f32_values);
         let class_weights = self.class_weight_vector(&classes_of, classes.len(), &weights)?;
@@ -5637,6 +5679,15 @@ impl CatBoostClassifier {
             Some(e) => {
                 let mut target = Vec::with_capacity(e.y.len());
                 for &v in e.y.iter() {
+                    if cross_entropy {
+                        if !(0.0..=1.0).contains(&v) {
+                            return Err(RustMlError::InvalidParameter(
+                                "CrossEntropy needs eval targets in [0, 1]".into(),
+                            ));
+                        }
+                        target.push(f64::from(v as f32));
+                        continue;
+                    }
                     match classes.binary_search_by(|c| c.total_cmp(&v)) {
                         Ok(c) => target.push(c as f64),
                         Err(_) => {
@@ -5674,8 +5725,13 @@ impl CatBoostClassifier {
         let q = quantize(x, self.border_count, cat)?;
         self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
+        // CatBoost has no automatic learning rate for CrossEntropy.
+        let learning_rate = match (cross_entropy, self.learning_rate) {
+            (true, None) => 0.03,
+            _ => self.learning_rate_for(loss, x.nrows(), use_best),
+        };
         let p = TrainParams {
-            learning_rate: f64::from(self.learning_rate_for(loss, x.nrows(), use_best) as f32),
+            learning_rate: f64::from(learning_rate as f32),
             leaf_iterations: self.leaf_iterations(loss, x.ncols()),
             bootstrap,
             subsample,

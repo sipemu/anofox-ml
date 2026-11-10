@@ -7,9 +7,9 @@ use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
-    CatBoostClassifier, CatBoostEvalSet, CatBoostGrowPolicy, CatBoostLeafEstimation,
-    CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor, CatBoostScoreFunction,
-    CatBoostShrinkMode,
+    CatBoostClassifier, CatBoostClassifierLoss, CatBoostEvalSet, CatBoostGrowPolicy,
+    CatBoostLeafEstimation, CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor,
+    CatBoostScoreFunction, CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -238,6 +238,9 @@ fn catboost_models_match_catboost() {
         } else {
             let p = &case["params"];
             let mut m = configure!(CatBoostClassifier::new(), p);
+            if p["loss_function"] == "CrossEntropy" {
+                m = m.with_loss_function(CatBoostClassifierLoss::CrossEntropy);
+            }
             if let Some(w) = p["class_weights"].as_array() {
                 m = m.with_class_weights(w.iter().map(|v| v.as_f64().unwrap()).collect());
             }

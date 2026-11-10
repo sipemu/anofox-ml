@@ -505,6 +505,17 @@ def generate():
     add("loss_logcosh_defaults", "regressor",
         dict(COMMON, iterations=80, depth=4, loss_function="LogCosh", random_strength=1.0,
              has_time=False, bootstrap_type="MVS"), X, y_heavy)
+    # CrossEntropy on probabilities (#209): the Logloss machinery with soft
+    # targets, 10 Newton leaf steps with backtracking, learning rate 0.03.
+    y_soft = 1 / (1 + np.exp(-eta)) * 0.9 + 0.05 * rng.uniform(size=n)
+    add("loss_crossentropy", "classifier", dict(base, loss_function="CrossEntropy"), X, y_soft)
+    add("loss_crossentropy_weighted", "classifier", dict(base, loss_function="CrossEntropy"),
+        X, y_soft, sw=weights)
+    add("loss_crossentropy_bfa", "classifier",
+        dict(base, loss_function="CrossEntropy", boost_from_average=True), X, y_soft)
+    add("loss_crossentropy_defaults", "classifier",
+        dict(COMMON, iterations=60, depth=4, loss_function="CrossEntropy", random_strength=1.0,
+             has_time=False, bootstrap_type="MVS"), X, y_soft)
     return out
 
 
