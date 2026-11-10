@@ -701,15 +701,17 @@ def generate():
             k = int(rng.integers(0, 6))
             out.append(" ".join(vocab[int(i)] for i in rng.integers(0, len(vocab), size=k)))
         return out
-    def add_text(name, params, Xd, cols, y, sw=None, rows_test=None):
+    def add_text(name, params, Xd, cols, y, sw=None, kind="regressor"):
         frame = pd.DataFrame({f"f{j}": Xd[:, j] for j in range(Xd.shape[1])})
         for t, col in enumerate(cols):
             frame[f"t{t}"] = col
         text_idx = list(range(Xd.shape[1], Xd.shape[1] + len(cols)))
-        m = cb.CatBoostRegressor(**params).fit(cb.Pool(frame, y, weight=sw, text_features=text_idx))
+        cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
+        m = cls(**params).fit(cb.Pool(frame, y, weight=sw, text_features=text_idx))
         test = frame.iloc[::4]
+        tp = cb.Pool(test, text_features=text_idx)
         out["models"].append({
-            "name": name, "kind": "regressor",
+            "name": name, "kind": kind,
             "params": dict({k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
                            **({"defaults": [k for k in ("random_strength", "bootstrap_type")
                                             if k not in params]}
@@ -718,7 +720,7 @@ def generate():
             "X": nulls(Xd), "y": y.tolist(), "text": [list(c) for c in cols],
             "sample_weight": None if sw is None else sw.tolist(),
             "X_test": nulls(Xd[::4]), "text_test": [list(c[::4]) for c in cols],
-            "predictions": m.predict(cb.Pool(test, text_features=text_idx)).tolist(),
+            "predictions": (m.predict(tp) if kind == "regressor" else m.predict_proba(tp)).tolist(),
         })
     t0 = texts(n, None)
     t1 = texts(n, None)
@@ -733,6 +735,18 @@ def generate():
     add_text("text_bow_defaults", dict({k: v for k, v in COMMON.items()
                                         if k not in ("random_strength", "bootstrap_type")},
                                        iterations=60, depth=4, has_time=False), X, [t0, t1], y_text)
+    # Classification: BoW and the online NaiveBayes of the Word tokens.
+    y_tb = (y_text > np.median(y_text)).astype(float)
+    y_tm = np.digitize(y_text, np.quantile(y_text, [0.33, 0.66])).astype(float)
+    add_text("text_nb_binary", base, X, [t0], y_tb, kind="classifier")
+    add_text("text_nb_two_columns", base, X, [t0, t1], y_tb, kind="classifier")
+    add_text("text_nb_multiclass", dict(base, iterations=20), X, [t0], y_tm, kind="classifier")
+    add_text("text_nb_permuted", dict(base, has_time=False, boosting_type="Ordered"), X, [t0],
+             y_tb, kind="classifier")
+    add_text("text_nb_defaults", dict({k: v for k, v in COMMON.items()
+                                       if k not in ("random_strength", "bootstrap_type")},
+                                      iterations=60, depth=4, has_time=False), X, [t0, t1], y_tb,
+             kind="classifier")
     return out
 
 

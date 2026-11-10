@@ -2456,6 +2456,188 @@ struct Quantized {
     /// `EstimatedObjectsData`): scored after the CTRs in their own packs of
     /// 8, with their own `rsm` draws.
     estimated: std::ops::Range<usize>,
+    /// Online estimated features (text NaiveBayes; CatBoost's
+    /// `OnlineEstimatedFeatures`): recomputed in each fold's order, scored
+    /// after the offline ones.
+    online: Option<std::sync::Arc<OnlineText>>,
+    /// Their columns.
+    online_cols: std::ops::Range<usize>,
+}
+
+/// What text NaiveBayes features are computed from: per text column the
+/// rows' Word token ids with counts (sorted by id), the rows' classes, and
+/// the borders of every feature (from the given order, CatBoost's fold 0).
+#[derive(Debug)]
+struct OnlineText {
+    tokens: Vec<Vec<Vec<(u32, u32)>>>,
+    classes: Vec<u8>,
+    n_classes: usize,
+    /// The first model feature of the NaiveBayes features.
+    first: usize,
+    borders: Vec<Vec<f32>>,
+}
+
+/// Text input of a classifier fit: the trailing BoW columns of `x` and per
+/// text column the rows' Word tokens.
+struct TextFit {
+    n_bow: usize,
+    tokens: Vec<Vec<Vec<(u32, u32)>>>,
+}
+
+/// CatBoost's `TMultinomialNaiveBayes` (priors 0.5, a seen-token prior of
+/// 1): class frequencies of Word tokens, updated row by row
+/// (`TNaiveBayesVisitor`).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct NaiveBayes {
+    docs: Vec<f64>,
+    total: Vec<f64>,
+    freq: Vec<std::collections::HashMap<u32, u64>>,
+    seen: SeenTokens,
+}
+
+/// The visitor's `TDenseHashSet<ui32>` of seen tokens, whose size is the
+/// `NumSeenTokens` prior. Its empty marker is 0, the id of the most frequent
+/// token: inserting token 0 always finds an "empty" bucket and counts once
+/// more, until a rehash (on reaching the grow threshold) drops it again.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SeenTokens {
+    keys: std::collections::HashSet<u32>,
+    filled: usize,
+    buckets: usize,
+    threshold: usize,
+}
+
+impl Default for SeenTokens {
+    fn default() -> Self {
+        // 1 << LogInitSize (8) buckets, MaxLoadFactor 50.
+        Self {
+            keys: Default::default(),
+            filled: 0,
+            buckets: 256,
+            threshold: 127,
+        }
+    }
+}
+
+impl SeenTokens {
+    fn insert(&mut self, token: u32) {
+        if token != 0 && !self.keys.insert(token) {
+            return;
+        }
+        self.filled += 1;
+        if self.filled >= self.threshold {
+            self.buckets *= 2;
+            self.threshold = (self.buckets / 2).max(1) - 1;
+            self.filled = self.keys.len();
+        }
+    }
+}
+
+impl NaiveBayes {
+    fn new(n_classes: usize) -> Self {
+        Self {
+            docs: vec![0.0; n_classes],
+            total: vec![0.0; n_classes],
+            freq: vec![std::collections::HashMap::new(); n_classes],
+            seen: SeenTokens::default(),
+        }
+    }
+
+    /// Features per text: one for two classes (the first class's
+    /// probability), else one per class.
+    fn n_features(n_classes: usize) -> usize {
+        if n_classes > 2 {
+            n_classes
+        } else {
+            1
+        }
+    }
+
+    /// `Compute`: the softmax of the classes' log probabilities (float32).
+    fn compute(&self, text: &[(u32, u32)]) -> Vec<f32> {
+        let k = self.docs.len();
+        let mut lp: Vec<f64> = (0..k)
+            .map(|c| {
+                let mut value = (self.docs[c] + 0.5).ln();
+                let mut class_tokens = self.total[c] + 0.5 * (self.seen.filled as f64 + 1.0);
+                let mut len = 0.0;
+                for &(t, n) in text {
+                    len += f64::from(n);
+                    let num = match self.freq[c].get(&t) {
+                        Some(&f) => 0.5 + f as f64,
+                        None => {
+                            class_tokens += 0.5;
+                            0.5
+                        }
+                    };
+                    value += f64::from(n) * num.ln();
+                }
+                value - len * class_tokens.ln()
+            })
+            .collect();
+        let max = lp.iter().copied().fold(lp[0], f64::max);
+        let mut total = 0.0;
+        for v in &mut lp {
+            *v = (*v - max).exp();
+            total += *v;
+        }
+        lp.iter_mut().for_each(|v| *v /= total);
+        lp[..Self::n_features(k)]
+            .iter()
+            .map(|&v| v as f32)
+            .collect()
+    }
+
+    fn update(&mut self, class: usize, text: &[(u32, u32)]) {
+        for &(t, n) in text {
+            self.seen.insert(t);
+            *self.freq[class].entry(t).or_default() += u64::from(n);
+            self.total[class] += f64::from(n);
+        }
+        self.docs[class] += 1.0;
+    }
+}
+
+impl OnlineText {
+    /// The features of the rows, each from the rows before it in `order`
+    /// (`ComputeOnlineFeatures`): per text column, its NaiveBayes features.
+    /// Row `r` of the result is row `r`, not `order[r]`: CatBoost stores the
+    /// values by row but reads them by position in the fold (as its online
+    /// CTRs), so a permuted fold sees them misaligned.
+    fn values(&self, order: &[usize]) -> Vec<Vec<f32>> {
+        let m = NaiveBayes::n_features(self.n_classes);
+        let mut out = vec![vec![0.0; order.len()]; self.tokens.len() * m];
+        for (t, col) in self.tokens.iter().enumerate() {
+            let mut nb = NaiveBayes::new(self.n_classes);
+            for &r in order {
+                for (j, v) in nb.compute(&col[r]).into_iter().enumerate() {
+                    out[t * m + j][r] = v;
+                }
+                nb.update(self.classes[r] as usize, &col[r]);
+            }
+        }
+        out
+    }
+
+    fn columns(&self, order: &[usize]) -> Vec<Column> {
+        self.values(order)
+            .into_iter()
+            .zip(&self.borders)
+            .enumerate()
+            .map(|(j, (values, borders))| Column {
+                buckets: values
+                    .iter()
+                    .map(|&v| borders.partition_point(|&b| v > b) as u8)
+                    .collect(),
+                n_buckets: borders.len() + 1,
+                split: ColumnSplit::Float {
+                    feature: self.first + j,
+                    borders: borders.clone(),
+                },
+                ctr_key: None,
+            })
+            .collect()
+    }
 }
 
 /// A categorical feature with CTRs: every row's category id (in the order
@@ -2710,6 +2892,8 @@ fn quantize(
         draws,
         cat_features: cat_features.clone(),
         estimated: n_main..n_main,
+        online: None,
+        online_cols: n_main..n_main,
     };
     if !ctr_features.is_empty() {
         let (classes, n_classes) = cat.classes.ok_or_else(|| {
@@ -3029,10 +3213,15 @@ fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(us
     let mut packed_cats: Vec<(usize, Option<(usize, usize)>)> = Vec::new();
     let mut ctr_groups: Vec<(Projection, Vec<(usize, usize)>)> = Vec::new();
     let mut estimated = Vec::new();
+    let mut online = Vec::new();
     for (c, cand) in candidates.iter().enumerate() {
         let column = cand.get(q);
         if matches!(cand, ColumnRef::Base(i) if q.estimated.contains(i)) {
             estimated.push((c, 0));
+            continue;
+        }
+        if matches!(cand, ColumnRef::Base(i) if q.online_cols.contains(i)) {
+            online.push(c);
             continue;
         }
         match &column.split {
@@ -3084,6 +3273,11 @@ fn candidate_entries(q: &Quantized, candidates: &[ColumnRef]) -> Vec<Vec<Vec<(us
     // The offline estimated features' packs of 8 come after the CTRs.
     for pack in estimated.chunks(8) {
         entries.push(vec![pack.to_vec()]);
+    }
+    // Then the online estimated features, one candidate each.
+    for c in online {
+        let n_splits = candidates[c].get(q).n_buckets - 1;
+        entries.push(vec![(0..n_splits).map(|s| (c, s)).collect()]);
     }
     entries
 }
@@ -3143,7 +3337,9 @@ fn grow_tree(
         // per simple CTR feature and per tree CTR, then the seed of the
         // candidates' score noise.
         let n_ctr_features = q.ctr.as_ref().map_or(0, |c| c.features.len());
-        for _ in 0..q.draws.0 + n_ctr_features + tree_ctr_draws + q.estimated.len() {
+        for _ in
+            0..q.draws.0 + n_ctr_features + tree_ctr_draws + q.estimated.len() + q.online_cols.len()
+        {
             rng.real1();
         }
         let noise_seed = rng.gen();
@@ -3604,8 +3800,10 @@ fn grow_depthwise(
     object_weights: bool,
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
-    let level_draws =
-        q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len()) + q.estimated.len();
+    let level_draws = q.draws.0
+        + q.ctr.as_ref().map_or(0, |c| c.features.len())
+        + q.estimated.len()
+        + q.online_cols.len();
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -3822,8 +4020,10 @@ fn grow_lossguide(
 ) -> (Vec<(ColumnRef, usize)>, NodeChildren) {
     let wts = sample.leafwise_weights(object_weights);
     let candidates: Vec<ColumnRef> = (0..q.columns.len()).map(ColumnRef::Base).collect();
-    let level_draws =
-        q.draws.0 + q.ctr.as_ref().map_or(0, |c| c.features.len()) + q.estimated.len();
+    let level_draws = q.draws.0
+        + q.ctr.as_ref().map_or(0, |c| c.features.len())
+        + q.estimated.len()
+        + q.online_cols.len();
     let entries = candidate_entries(q, &candidates);
     let n = sample.taken.len();
     let mut rows_of: Vec<Vec<usize>> = vec![(0..n).filter(|&i| sample.taken[i]).collect()];
@@ -4535,6 +4735,29 @@ impl Quantized {
         self.columns.splice(at..at, new);
         self.borders.extend(std::iter::repeat_n(vec![0.5f32], n));
         self.estimated = at..at + n;
+        self.online_cols = at + n..at + n;
+    }
+
+    /// Add text NaiveBayes features (after the offline estimated ones,
+    /// before the CTRs), with borders from the rows' order (`border_count`,
+    /// GreedyLogSum as the float features).
+    fn add_online(&mut self, mut src: OnlineText, border_count: usize) {
+        let identity: Vec<usize> = (0..src.classes.len()).collect();
+        src.borders = src
+            .values(&identity)
+            .iter()
+            .map(|v| {
+                let col: Vec<f64> = v.iter().map(|&x| f64::from(x)).collect();
+                feature_borders(ndarray::ArrayView1::from(&col), border_count)
+            })
+            .collect();
+        self.borders.extend(src.borders.iter().cloned());
+        let columns = src.columns(&identity);
+        let at = self.estimated.end;
+        let n = columns.len();
+        self.columns.splice(at..at, columns);
+        self.online_cols = at..at + n;
+        self.online = Some(std::sync::Arc::new(src));
     }
 
     fn permuted(&self, perm: &[usize]) -> Quantized {
@@ -4542,7 +4765,11 @@ impl Quantized {
         let mut columns: Vec<Column> = self
             .columns
             .iter()
-            .filter(|c| !matches!(c.split, ColumnSplit::Ctr { .. }))
+            .enumerate()
+            .filter(|(i, c)| {
+                !matches!(c.split, ColumnSplit::Ctr { .. }) && !self.online_cols.contains(i)
+            })
+            .map(|(_, c)| c)
             .map(|c| Column {
                 split: match &c.split {
                     ColumnSplit::Float { feature, borders } => ColumnSplit::Float {
@@ -4581,7 +4808,14 @@ impl Quantized {
             draws: self.draws,
             cat_features: self.cat_features.clone(),
             estimated: self.estimated.clone(),
+            online: self.online.clone(),
+            online_cols: self.online_cols.clone(),
         };
+        // Online estimated features in the fold's order.
+        if let Some(src) = &self.online {
+            let at = self.online_cols.start;
+            columns.splice(at..at, src.columns(perm));
+        }
         std::mem::swap(&mut q.columns, &mut columns);
         if let Some(src) = &q.ctr {
             let features: Vec<usize> = src.features.iter().map(|c| c.feature).collect();
@@ -5814,6 +6048,25 @@ impl TextProcessing {
 
     fn n_features(&self) -> usize {
         self.columns.iter().map(|(b, w)| b.len() + w.len()).sum()
+    }
+
+    /// The Word dictionary ids of a text of column `col`, with counts,
+    /// sorted by id (CatBoost's `TText`).
+    fn word_tokens(&self, col: usize, text: &str) -> Vec<(u32, u32)> {
+        let words = &self.columns[col].1;
+        let mut ids: Vec<u32> = Self::tokens(text)
+            .into_iter()
+            .filter_map(|t| words.iter().position(|w| w == t).map(|i| i as u32))
+            .collect();
+        ids.sort_unstable();
+        let mut out: Vec<(u32, u32)> = Vec::new();
+        for id in ids {
+            match out.last_mut() {
+                Some((last, n)) if *last == id => *n += 1,
+                _ => out.push((id, 1)),
+            }
+        }
+        out
     }
 
     /// `[x | BoW(text)]`.
@@ -7624,6 +7877,13 @@ pub struct FittedCatBoostClassifier {
     /// MultiClassOneVsAll: a sigmoid per class.
     #[serde(default)]
     one_vs_all: bool,
+    /// Text features: their dictionaries and the NaiveBayes of every text
+    /// column on all rows (the model's trailing features: BoW, then
+    /// NaiveBayes).
+    #[serde(default)]
+    text: Option<TextProcessing>,
+    #[serde(default)]
+    text_nb: Vec<NaiveBayes>,
 }
 
 impl FittedCatBoostClassifier {
@@ -7648,7 +7908,46 @@ impl FittedCatBoostClassifier {
     pub fn raw_predictions<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
         let x: ArrayView2<f64> = x.into();
         check_features(x, self.n_features)?;
+        if self.text.is_some() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has text features: use predict_proba_with_text".into(),
+            ));
+        }
         Ok(raw_scores(&self.trees, &self.ctrs, &self.bias, x))
+    }
+
+    /// Class probabilities of a model fitted with text features
+    /// ([`CatBoostClassifier::fit_with_text`]).
+    pub fn predict_proba_with_text(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+    ) -> Result<Array2<f64>> {
+        check_features(x, self.n_features)?;
+        let Some(processing) = &self.text else {
+            return Err(RustMlError::InvalidParameter(
+                "the model has no text features: use predict_proba".into(),
+            ));
+        };
+        let bow = processing.augment(x, text)?;
+        let m = NaiveBayes::n_features(self.classes.len());
+        let mut augmented = Array2::zeros((x.nrows(), bow.ncols() + m * text.len()));
+        augmented
+            .slice_mut(ndarray::s![.., ..bow.ncols()])
+            .assign(&bow);
+        for (c, (col, nb)) in text.iter().zip(&self.text_nb).enumerate() {
+            for (r, t) in col.iter().enumerate() {
+                for (j, v) in nb
+                    .compute(&processing.word_tokens(c, t))
+                    .into_iter()
+                    .enumerate()
+                {
+                    augmented[[r, bow.ncols() + c * m + j]] = f64::from(v);
+                }
+            }
+        }
+        let raw = raw_scores(&self.trees, &self.ctrs, &self.bias, augmented.view());
+        Ok(self.proba_of(raw))
     }
 
     /// Log-odds of the second class (two classes; see
@@ -7667,8 +7966,12 @@ impl FittedCatBoostClassifier {
     /// the log-odds, or the softmax of the class scores.
     pub fn predict_proba<'a>(&self, x: impl AsArray<'a, f64, Ix2>) -> Result<Array2<f64>> {
         let raw = self.raw_predictions(x)?;
+        Ok(self.proba_of(raw))
+    }
+
+    fn proba_of(&self, raw: Array2<f64>) -> Array2<f64> {
         if self.one_vs_all {
-            return Ok(raw.mapv(|v| 1.0 / (1.0 + (-v).exp())));
+            return raw.mapv(|v| 1.0 / (1.0 + (-v).exp()));
         }
         if self.classes.len() == 2 {
             let mut proba = Array2::zeros((raw.nrows(), 2));
@@ -7677,7 +7980,7 @@ impl FittedCatBoostClassifier {
                 proba[[i, 0]] = 1.0 - p1;
                 proba[[i, 1]] = p1;
             }
-            return Ok(proba);
+            return proba;
         }
         let mut proba = raw;
         for mut row in proba.rows_mut() {
@@ -7686,7 +7989,7 @@ impl FittedCatBoostClassifier {
             let sum = row.sum();
             row.mapv_inplace(|v| v / sum);
         }
-        Ok(proba)
+        proba
     }
 }
 
@@ -7699,11 +8002,49 @@ impl FitWeighted<f64> for CatBoostClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<Self::Fitted> {
-        self.fit_inner(x, y, sample_weight, None)
+        self.fit_inner(x, y, sample_weight, None, None)
     }
 }
 
 impl CatBoostClassifier {
+    /// Fit with text features (CatBoost's `text_features`, its default
+    /// processing for classification): BoW over BiGram and Word
+    /// dictionaries (see [`CatBoostRegressor::fit_with_text`]) and the
+    /// NaiveBayes of the Word tokens, an online feature computed in every
+    /// fold's order (one per class, one for two classes).
+    pub fn fit_with_text(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostClassifier> {
+        if self.loss_function != CatBoostClassifierLoss::Auto {
+            return Err(RustMlError::InvalidParameter(
+                "text features support Logloss and MultiClass".into(),
+            ));
+        }
+        if text.is_empty() || text.iter().any(|c| c.len() != x.nrows()) {
+            return Err(RustMlError::ShapeMismatch(
+                "every text column needs one text per row".into(),
+            ));
+        }
+        let processing = TextProcessing::fit(text, 3);
+        let augmented = processing.augment(x, text)?;
+        let tokens = text
+            .iter()
+            .enumerate()
+            .map(|(c, col)| col.iter().map(|t| processing.word_tokens(c, t)).collect())
+            .collect();
+        let fit = TextFit {
+            n_bow: processing.n_features(),
+            tokens,
+        };
+        let mut f = self.fit_inner(augmented.view(), y, sample_weight, None, Some(fit))?;
+        f.text = Some(processing);
+        Ok(f)
+    }
+
     /// Fit with an eval set (CatBoost's `eval_set`): see
     /// [`CatBoostRegressor::fit_with_eval`]. Its labels must be classes of
     /// `y`; the class weights weight it too.
@@ -7714,7 +8055,7 @@ impl CatBoostClassifier {
         sample_weight: Option<ArrayView1<f64>>,
         eval: CatBoostEvalSet<'_>,
     ) -> Result<FittedCatBoostClassifier> {
-        self.fit_inner(x, y, sample_weight, Some(eval))
+        self.fit_inner(x, y, sample_weight, Some(eval), None)
     }
 
     fn fit_inner(
@@ -7723,6 +8064,7 @@ impl CatBoostClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
         eval: Option<CatBoostEvalSet<'_>>,
+        text: Option<TextFit>,
     ) -> Result<FittedCatBoostClassifier> {
         let p = self.train_params();
         let use_best = self.use_best_model_with(eval.as_ref(), x.ncols())?;
@@ -7739,7 +8081,17 @@ impl CatBoostClassifier {
             ));
         }
         let mut rng = CatRng::new(self.random_seed);
-        let shuffled = self.learn_order(x.nrows(), &mut rng).map(|order| {
+        let order = self.learn_order(x.nrows(), &mut rng);
+        // Text: the rows' tokens follow the shuffle.
+        let text = text.map(|mut t| {
+            if let Some(order) = &order {
+                for col in &mut t.tokens {
+                    *col = order.iter().map(|&r| col[r].clone()).collect();
+                }
+            }
+            t
+        });
+        let shuffled = order.map(|order| {
             (
                 x.select(ndarray::Axis(0), &order),
                 y.select(ndarray::Axis(0), &order),
@@ -7865,7 +8217,40 @@ impl CatBoostClassifier {
             classes: Some((&classes_of, classes.len())),
             max_ctr_complexity: self.max_ctr_complexity(),
         };
-        let q = quantize(x, self.border_count_for(loss), cat)?;
+        let n_est = text.as_ref().map_or(0, |t| t.n_bow);
+        let text_cols = text.as_ref().map_or(0, |t| t.tokens.len());
+        let n_main = x.ncols() - n_est;
+        let mut q = quantize(
+            x.slice(ndarray::s![.., ..n_main]),
+            self.border_count_for(loss),
+            cat,
+        )?;
+        let mut text_nb = Vec::new();
+        if let Some(t) = text {
+            let columns = (n_main..x.ncols())
+                .map(|c| x.column(c).iter().map(|&v| u8::from(v > 0.5)).collect())
+                .collect();
+            q.add_estimated(n_main, columns);
+            // The model's NaiveBayes: all rows (`MakeFinalFeatureCalcer`).
+            for col in &t.tokens {
+                let mut nb = NaiveBayes::new(classes.len());
+                for (r, tokens) in col.iter().enumerate() {
+                    nb.update(classes_of[r] as usize, tokens);
+                }
+                text_nb.push(nb);
+            }
+            q.add_online(
+                OnlineText {
+                    tokens: t.tokens,
+                    classes: classes_of.clone(),
+                    n_classes: classes.len(),
+                    first: x.ncols(),
+                    borders: Vec::new(),
+                },
+                self.border_count_for(loss),
+            );
+        }
+        let n_external = x.ncols() - n_est + text_cols;
         self.check_grow_policy(q.ctr.is_some())?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         // CatBoost has no automatic learning rate for CrossEntropy.
@@ -7875,7 +8260,7 @@ impl CatBoostClassifier {
         };
         let p = TrainParams {
             learning_rate: f64::from(learning_rate as f32),
-            leaf_iterations: self.leaf_iterations(loss, x.ncols()),
+            leaf_iterations: self.leaf_iterations(loss, n_external),
             bootstrap,
             subsample,
             ..p
@@ -7905,7 +8290,9 @@ impl CatBoostClassifier {
             best_iteration: b.best_iteration,
             borders: q.borders,
             classes,
-            n_features: x.ncols(),
+            n_features: x.ncols() - n_est,
+            text: None,
+            text_nb,
             one_vs_all,
         })
     }
