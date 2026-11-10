@@ -379,6 +379,38 @@ fn catboost_models_match_catboost() {
         } else {
             let p = &case["params"];
             let mut m = configure!(CatBoostClassifier::new(), p);
+            if let Some(t) = case.get("text") {
+                let text_of = |v: &Value| -> Vec<Vec<String>> {
+                    v.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| {
+                            c.as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|t| t.as_str().unwrap().to_string())
+                                .collect()
+                        })
+                        .collect()
+                };
+                let f = m
+                    .fit_with_text(
+                        x.view(),
+                        &text_of(t),
+                        y.view(),
+                        sw.as_ref().map(|w| w.view()),
+                    )
+                    .unwrap();
+                let proba = f
+                    .predict_proba_with_text(x_test.view(), &text_of(&case["text_test"]))
+                    .unwrap();
+                let err = worst(proba, array2_with_nan(&case["predictions"]));
+                report.push(format!("{name}: {err:e}"));
+                if err > TOL {
+                    failures.push(format!("{name}: worst {err:e}"));
+                }
+                continue;
+            }
             if p["loss_function"] == "CrossEntropy" {
                 m = m.with_loss_function(CatBoostClassifierLoss::CrossEntropy);
             }
