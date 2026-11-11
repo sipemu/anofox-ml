@@ -6,6 +6,23 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### LightGBM: two split-finding parity fixes (#243)
+
+- After its descending threshold scan, LightGBM takes the right child's
+  output from `totals - left` (`sum_hessian - best_sum_left_hessian`), not
+  from the scanned right sums. The two differ by rounding: one leaf in
+  ~30 trees was off by an ulp.
+- LightGBM skips, in a node's children, every feature the node could not
+  split on (`FeatureHistogram::is_splittable`; with hessian-estimated
+  counts a child can pass checks its parent failed). The engine evaluated
+  them, and picked other splits.
+- Both show up with non-constant hessians (custom objectives such as
+  anofox-orchestration's FFORMA loss). The M5 FFORMA meta-learner (60 955
+  rows, 3 outputs, 200 rounds, feature fraction and bagging) now matches
+  LightGBM 4.7 bit for bit, where it diverged at round 158. New golden cases
+  `fforma_capi` and `fforma_capi_sampling` (3 000 rows, 300 rounds) fail
+  without the fixes.
+
 ### CatBoost-style boosting: embedding features, LDA and KNN (#211)
 
 - `CatBoostRegressor` / `CatBoostClassifier::fit_with_embeddings(x,
