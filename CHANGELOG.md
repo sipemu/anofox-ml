@@ -33,8 +33,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `embedding_options` is catboost's `[LDA, KNN]`. KNN fits match catboost
   1.2.10 to ~1e-15: binary, multiclass, exact distance ties, `k=3`,
   ordered, regression, 1200 rows (approximate searches) and the defaults.
-- Not yet: LDA `likelihood`, text and embeddings in one fit, registry and
-  Python.
+- Registry: `DynModel::fit_with_embeddings` / `predict_with_embeddings` /
+  `predict_proba_with_embeddings` for `CatBoostRegressor` and
+  `CatBoostClassifier`. Python: `embedding_features=[...]` (cells hold
+  vectors) and `embedding_calcers=["LDA", "KNN:k=3", ...]` (catboost's
+  option strings), matching `catboost.Pool(embedding_features=...)`.
+- Not yet: LDA `likelihood`, text and embeddings in one fit.
 
 ### LightGBM learning to rank (#207)
 

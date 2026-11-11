@@ -1130,6 +1130,8 @@ registry! {
         fit_with_group: |c, x, y, w, g| c.fit_with_groups(x, need_y(K, y)?, w, g),
         fit_with_text: |c, x, t, y, w| c.fit_with_text(x, t, need_y(K, y)?, w),
         predict_with_text: |m, x, t| m.predict_with_text(x, t),
+        fit_with_embeddings: |c, x, e, y, w| c.fit_with_embeddings(x, e, need_y(K, y)?, w),
+        predict_with_embeddings: |m, x, e| m.predict_with_embeddings(x, e),
     }
     CatBoostMultiRegressor {
         config: CatBoostMultiConfig = Default::default(),
@@ -1161,6 +1163,9 @@ registry! {
         fit_with_text: |c, x, t, y, w| c.fit_with_text(x, t, need_y(K, y)?, w),
         predict_with_text: |m, x, t| m.predict_with_text(x, t),
         predict_proba_with_text: |m, x, t| m.predict_proba_with_text(x, t),
+        fit_with_embeddings: |c, x, e, y, w| c.fit_with_embeddings(x, e, need_y(K, y)?, w),
+        predict_with_embeddings: |m, x, e| m.predict_with_embeddings(x, e),
+        predict_proba_with_embeddings: |m, x, e| m.predict_proba_with_embeddings(x, e),
     }
     #[cfg(feature = "perpetual")]
     PerpetualRegressor {

@@ -831,6 +831,40 @@ def _text_options(tp):
     }
 
 
+def _embedding_options(calcers):
+    """The Rust ``CatBoostEmbeddingOptions`` of catboost ``embedding_calcers``
+    strings: ``"LDA"``, ``"LDA:reg=0.1"``, ``"LDA:components=2"``, ``"KNN"``,
+    ``"KNN:k=3"``."""
+    if isinstance(calcers, str):
+        calcers = [calcers]
+    out = []
+    for c in calcers:
+        name, _, opts = str(c).partition(":")
+        kv = {}
+        for item in filter(None, opts.split(",")):
+            key, sep, value = item.partition("=")
+            if not sep:
+                raise ValueError(f"embedding_calcers: cannot parse {c!r}")
+            kv[key.strip()] = value.strip()
+        if name == "LDA":
+            unknown = set(kv) - {"components", "reg"}
+            if unknown:
+                raise ValueError(f"embedding_calcers: unsupported LDA options {sorted(unknown)}")
+            out.append({"Lda": {"components": int(kv["components"]) if "components" in kv
+                                else None,
+                                "reg": float(kv.get("reg", 0.00005))}})
+        elif name == "KNN":
+            unknown = set(kv) - {"k"}
+            if unknown:
+                raise ValueError(f"embedding_calcers: unsupported KNN options {sorted(unknown)}")
+            out.append({"Knn": {"k": int(kv.get("k", 5))}})
+        else:
+            raise ValueError(f"embedding_calcers: unknown calcer {name!r} (LDA or KNN)")
+    if not out:
+        raise ValueError("embedding_calcers is empty")
+    return {"calcers": out}
+
+
 class _CatBoost(BaseEstimator):
     """CatBoost-style boosting on oblivious trees; parameters follow
     ``catboost.CatBoost`` (``learning_rate=None`` is CatBoost's automatic one)."""
@@ -847,9 +881,12 @@ class _CatBoost(BaseEstimator):
                  auto_class_weights=None, loss_function=None, use_best_model=None,
                  early_stopping_rounds=None, od_type=None, od_wait=None, od_pval=None,
                  grow_policy="SymmetricTree", min_data_in_leaf=1, max_leaves=31,
-                 thread_count=-1, text_features=None, text_processing=None):
+                 thread_count=-1, text_features=None, text_processing=None,
+                 embedding_features=None, embedding_calcers=None):
         self.text_features = text_features
         self.text_processing = text_processing
+        self.embedding_features = embedding_features
+        self.embedding_calcers = embedding_calcers
         self.thread_count = thread_count
         self.grow_policy = grow_policy
         self.min_data_in_leaf = min_data_in_leaf
@@ -909,6 +946,8 @@ class _CatBoost(BaseEstimator):
         params["cat_features"] = self._cat_indices(self._n_raw_)
         if self.text_processing is not None:
             params["text_options"] = _text_options(self.text_processing)
+        if self.embedding_calcers is not None:
+            params["embedding_options"] = _embedding_options(self.embedding_calcers)
         if self.one_hot_max_size is not None:
             params["one_hot_max_size"] = int(self.one_hot_max_size)
         params["model_size_reg"] = float(self.model_size_reg)
@@ -996,16 +1035,29 @@ class _CatBoost(BaseEstimator):
             return []
         return sorted({int(i) % n_features for i in self.text_features})
 
+    def _embedding_indices(self, n_features):
+        if self.embedding_features is None:
+            return []
+        return sorted({int(i) % n_features for i in self.embedding_features})
+
+    def _special_indices(self, n_features):
+        """The text and embedding columns (not in the encoded array)."""
+        texts = self._text_indices(n_features)
+        embeddings = self._embedding_indices(n_features)
+        if set(texts) & set(embeddings):
+            raise ValueError("a column cannot be both a text and an embedding feature")
+        return sorted(texts + embeddings)
+
     def _cat_indices(self, n_features):
-        """The categorical columns among the non-text ones of ``n_features``
-        input columns (their indices in the encoded array)."""
+        """The categorical columns among the non-text, non-embedding ones of
+        ``n_features`` input columns (their indices in the encoded array)."""
         if self.cat_features is None:
             return []
-        texts = self._text_indices(n_features)
+        special = self._special_indices(n_features)
         cats = {int(i) % n_features for i in self.cat_features}
-        if cats & set(texts):
-            raise ValueError("a column cannot be both a cat and a text feature")
-        keep = [j for j in range(n_features) if j not in texts]
+        if cats & set(special):
+            raise ValueError("a column cannot be both a cat and a text or embedding feature")
+        keep = [j for j in range(n_features) if j not in special]
         return [k for k, j in enumerate(keep) if j in cats]
 
     def _texts(self, X):
@@ -1016,12 +1068,24 @@ class _CatBoost(BaseEstimator):
             return "" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)
         return [[text(v) for v in X[:, j]] for j in self._text_indices(X.shape[1])]
 
+    def _embeddings(self, X):
+        """The embedding columns of ``X`` (one vector per cell) as 2D float
+        arrays."""
+        X = np.asarray(X, dtype=object)
+        out = []
+        for j in self._embedding_indices(X.shape[1]):
+            rows = [np.asarray(v, dtype=np.float64).ravel() for v in X[:, j]]
+            if len({len(r) for r in rows}) > 1:
+                raise ValueError(f"embedding column {j} has vectors of different lengths")
+            out.append(np.ascontiguousarray(np.vstack(rows)))
+        return out
+
     def _encode(self, X, fit):
         """Numeric array of the non-text columns, the categorical ones as
         category codes (any hashable values; unseen ones get their own
         code)."""
-        X = np.asarray(X, dtype=object if self.cat_features or self.text_features
-                       else np.float64)
+        X = np.asarray(X, dtype=object if (self.cat_features or self.text_features
+                                           or self.embedding_features) else np.float64)
         if X.ndim != 2:
             raise ValueError(f"Expected a 2D array, got {X.ndim}D")
         if fit:
@@ -1033,9 +1097,9 @@ class _CatBoost(BaseEstimator):
                 f"X has {X.shape[1]} features, but {type(self).__name__} is "
                 f"expecting {n_raw} features as input."
             )
-        texts = self._text_indices(n_raw)
-        if texts:
-            X = X[:, [j for j in range(n_raw) if j not in texts]]
+        special = self._special_indices(n_raw)
+        if special:
+            X = X[:, [j for j in range(n_raw) if j not in special]]
         cats = self._cat_indices(n_raw)
         if not cats:
             return np.ascontiguousarray(X, dtype=np.float64)
@@ -1057,6 +1121,20 @@ class _CatBoost(BaseEstimator):
         return out
 
     def _fit_model(self, X, y=None, sample_weight=None, eval_set=None):
+        if self.embedding_features:
+            if self.text_features:
+                raise ValueError("text_features and embedding_features in one model are "
+                                 "not supported yet")
+            if eval_set is not None:
+                raise ValueError("eval_set is not supported with embedding_features")
+            embeddings = self._embeddings(X)
+            X = self._encode(X, fit=True)
+            w = None if sample_weight is None else _check_1d(sample_weight, "sample_weight")
+            model = self._new_model(X, y)
+            model.fit_with_embeddings(X, embeddings, y, w)
+            self._model_ = model
+            self.n_features_in_ = self._n_raw_
+            return self
         if self.text_features:
             if eval_set is not None:
                 raise ValueError("eval_set is not supported with text_features")
@@ -1095,6 +1173,13 @@ class _CatBoost(BaseEstimator):
         return list(self._fitted_state().get("eval_metrics", []))
 
     def _call(self, method, X):
+        if self.embedding_features:
+            if method not in ("predict", "predict_proba"):
+                raise ValueError(f"{method} is not supported with embedding_features")
+            self._model()
+            embeddings = self._embeddings(X)
+            return getattr(self._model(), method + "_with_embeddings")(
+                self._encode(X, fit=False), embeddings)
         if self.text_features:
             if method not in ("predict", "predict_proba"):
                 raise ValueError(f"{method} is not supported with text_features")
@@ -1133,6 +1218,9 @@ class CatBoostRegressor(RegressorMixin, _CatBoost):
         """``eval_set``: ``(X_val, y_val)`` or ``(X_val, y_val, weight_val)``."""
         if self.text_features and self.loss_function in ("MultiRMSE", "RMSEWithUncertainty"):
             raise ValueError(f"text_features do not support {self.loss_function}")
+        if self.embedding_features and self.loss_function in ("MultiRMSE",
+                                                              "RMSEWithUncertainty"):
+            raise ValueError(f"embedding_features do not support {self.loss_function}")
         if self.loss_function == "MultiRMSE":
             return self._fit_multi(X, y, sample_weight, eval_set)
         return self._fit_model(X, _check_1d(y), sample_weight, eval_set)
@@ -1204,8 +1292,8 @@ class CatBoostRanker(CatBoostRegressor):
     def fit(self, X, y, group_id=None, sample_weight=None):
         if group_id is None:
             raise ValueError("CatBoostRanker.fit needs group_id")
-        if self.text_features:
-            raise ValueError("CatBoostRanker does not support text_features")
+        if self.text_features or self.embedding_features:
+            raise ValueError("CatBoostRanker does not support text or embedding features")
         self._ranking_loss()
         X = self._encode(X, fit=True)
         y = _check_1d(y)

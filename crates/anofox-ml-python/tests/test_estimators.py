@@ -906,6 +906,43 @@ def test_catboost_text_features_match_catboost():
         ours.fit(frame, labels, eval_set=(frame, labels))
 
 
+def test_catboost_embedding_features_match_catboost():
+    cb = pytest.importorskip("catboost")
+    pd = pytest.importorskip("pandas")
+    off = dict(random_strength=0, bootstrap_type="No", has_time=True, thread_count=1)
+    kw = dict(iterations=20, learning_rate=0.2, depth=4)
+    r = np.random.RandomState(6)
+    n = 300
+    y = r.randint(0, 3, n)
+    emb = np.round(r.randn(3, 5)[y] * 0.8 + r.randn(n, 5), 3)
+    colour = r.choice(["a", "b", "c"], n)
+    # The embedding in the middle, a categorical column after it.
+    frame = pd.DataFrame({"x0": r.randn(n), "emb": list(emb), "colour": colour})
+    pool = cb.Pool(frame, embedding_features=[1], cat_features=[2])
+    for calcers in (None, ["LDA:reg=0.1"], ["KNN:k=3"]):
+        ref = cb.CatBoostClassifier(**kw, **off, verbose=0, allow_writing_files=False)
+        if calcers is not None:
+            ref._init_params["embedding_calcers"] = calcers
+        ref.fit(cb.Pool(frame, y, embedding_features=[1], cat_features=[2]))
+        ours = am.CatBoostClassifier(**kw, **off, embedding_features=[1], cat_features=[2],
+                                     embedding_calcers=calcers).fit(frame, y)
+        np.testing.assert_allclose(ours.predict_proba(frame), ref.predict_proba(pool),
+                                   rtol=1e-12, atol=1e-12)
+    target = emb[:, 0] - emb[:, 1] + (colour == "b") + 0.3 * r.randn(n)
+    ref = cb.CatBoostRegressor(**kw, **off, verbose=0, allow_writing_files=False).fit(
+        cb.Pool(frame, target, embedding_features=[1], cat_features=[2]))
+    ours = am.CatBoostRegressor(**kw, **off, embedding_features=[1], cat_features=[2]).fit(
+        frame, target)
+    np.testing.assert_allclose(ours.predict(frame), ref.predict(pool), rtol=1e-12, atol=1e-12)
+    restored = pickle.loads(pickle.dumps(ours))
+    np.testing.assert_array_equal(restored.predict(frame), ours.predict(frame))
+    with pytest.raises(ValueError):
+        am.CatBoostClassifier(embedding_features=[1], embedding_calcers=["PCA"], **kw).fit(
+            frame, y)
+    with pytest.raises(ValueError):
+        ours.fit(frame, target, eval_set=(frame, target))
+
+
 def test_catboost_text_processing_matches_catboost():
     cb = pytest.importorskip("catboost")
     pd = pytest.importorskip("pandas")

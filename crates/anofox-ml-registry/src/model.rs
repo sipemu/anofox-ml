@@ -219,6 +219,34 @@ pub trait DynModel: Send + Sync {
     fn predict_proba_with_text(&self, _x: ArrayView2<f64>, _text: &[Vec<String>]) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_proba_with_text"))
     }
+    /// Fit with embedding columns besides `x` (CatBoost's
+    /// `embedding_features`): `embeddings[c]` holds one vector per row.
+    fn fit_with_embeddings<'a>(
+        &mut self,
+        _x: ArrayView2<'a, f64>,
+        _embeddings: &[ArrayView2<'a, f64>],
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "fit_with_embeddings"))
+    }
+    /// Predictions of a model fitted with [`DynModel::fit_with_embeddings`].
+    fn predict_with_embeddings(
+        &self,
+        _x: ArrayView2<f64>,
+        _embeddings: &[ArrayView2<f64>],
+    ) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_with_embeddings"))
+    }
+    /// Class probabilities of a model fitted with
+    /// [`DynModel::fit_with_embeddings`].
+    fn predict_proba_with_embeddings(
+        &self,
+        _x: ArrayView2<f64>,
+        _embeddings: &[ArrayView2<f64>],
+    ) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_proba_with_embeddings"))
+    }
     /// Fit with an explicit validation set for early stopping (sklearn's
     /// HistGradientBoosting `fit(X, y, sample_weight, X_val=, y_val=,
     /// sample_weight_val=)`).
@@ -630,6 +658,43 @@ macro_rules! registry {
             &self,
             $x: ndarray::ArrayView2<f64>,
             $t: &[Vec<String>],
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
+        }
+    };
+    (@cap $kind:ident, fit_with_embeddings, $c:ident, $x:ident, $e:ident, $y:ident, $w:ident,
+     $body:expr) => {
+        #[allow(unused_variables)]
+        fn fit_with_embeddings<'a>(
+            &mut self,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $e: &[ndarray::ArrayView2<'a, f64>],
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    (@cap $kind:ident, predict_with_embeddings, $m:ident, $x:ident, $e:ident, $body:expr) => {
+        fn predict_with_embeddings(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $e: &[ndarray::ArrayView2<f64>],
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
+        }
+    };
+    (@cap $kind:ident, predict_proba_with_embeddings, $m:ident, $x:ident, $e:ident, $body:expr) => {
+        fn predict_proba_with_embeddings(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $e: &[ndarray::ArrayView2<f64>],
         ) -> anofox_ml_core::Result<$crate::model::Out> {
             let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
             Ok($crate::model::Out::from($body?))

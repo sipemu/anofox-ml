@@ -100,9 +100,12 @@ calcers `BoW:top_tokens_count=N`, `NaiveBayes` and `BM25`. NaiveBayes and
 BM25 are classification only. No eval sets, rankers or MultiRMSE with text
 yet.
 
-CatBoost embedding features (Rust only so far, matching catboost):
-`fit_with_embeddings(x, &[emb.view()], y, w)` / `predict_with_embeddings`,
-where each embedding is an `n x dim` array. The default calcers are
+CatBoost embedding features (matching catboost): pass
+`embedding_features=[...]` in Python (a DataFrame or object array whose
+cells are vectors) with optional `embedding_calcers=["LDA:reg=0.1",
+"KNN:k=3"]`, or call `fit_with_embeddings(x, &[emb.view()], y, w)` /
+`predict_with_embeddings` in Rust, where each embedding is an `n x dim`
+array. The default calcers are
 catboost's `[LDA, KNN]`; `with_embedding_options(CatBoostEmbeddingOptions {
 calcers })` picks `Lda { components, reg }` and `Knn { k }`. For regression
 catboost's LDA reduces to the embedding's last coordinate; KNN gives the mean
