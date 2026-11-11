@@ -12,6 +12,9 @@ description = "scikit-learn-style machine learning umbrella crate — re-exports
 documentation = "https://docs.rs/anofox-ml"
 keywords = ["machine-learning", "ml", "scikit-learn", "classification", "regression"]
 categories = ["science", "algorithms"]
+# The golden tests and their fixtures (~40 MB) stay in the repository:
+# crates.io takes at most 10 MB per crate.
+exclude = ["tests/", "benches/"]
 
 [dependencies]
 anofox-ml-core = { workspace = true }
