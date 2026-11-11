@@ -2704,6 +2704,10 @@ struct CategoricalParams<'a> {
     classes: Option<(&'a [u8], usize)>,
     /// CatBoost's `max_ctr_complexity`: 1 for no combinations.
     max_ctr_complexity: usize,
+    /// The learn shuffle (row `i` of `x` is original row `order[i]`):
+    /// categories are numbered by their first appearance in the original
+    /// order, as CatBoost's perfect hash is built before the shuffle.
+    order: Option<&'a [usize]>,
 }
 
 fn quantize(
@@ -2757,20 +2761,28 @@ fn quantize(
     // Categorical features with two values (CatBoost packs them as binary
     // features), and whether they are one-hot candidates.
     let mut two_valued: Vec<bool> = Vec::new();
+    let scan: Vec<usize> = match cat.order {
+        Some(order) => {
+            let mut position = vec![0; order.len()];
+            for (i, &r) in order.iter().enumerate() {
+                position[r] = i;
+            }
+            position
+        }
+        None => (0..x.nrows()).collect(),
+    };
     for &f in &cat_features {
         let mut index = std::collections::HashMap::new();
         let mut values = Vec::new();
-        let ids: Vec<u32> = x
-            .column(f)
-            .iter()
-            .map(|&v| {
-                let key = category(v);
-                *index.entry(key).or_insert_with(|| {
-                    values.push(key);
-                    values.len() as u32 - 1
-                })
-            })
-            .collect();
+        let column = x.column(f);
+        for &i in &scan {
+            let key = category(column[i]);
+            index.entry(key).or_insert_with(|| {
+                values.push(key);
+                values.len() as u32 - 1
+            });
+        }
+        let ids: Vec<u32> = column.iter().map(|&v| index[&category(v)]).collect();
         if values.len() == 2 {
             two_valued.push(values.len() <= cat.one_hot_max_size);
         }
@@ -7884,6 +7896,7 @@ impl CatBoostRegressor {
                 order
             })
         };
+        let learn_perm = order.clone();
         let shuffled = order.map(|order| {
             (
                 x.select(ndarray::Axis(0), &order),
@@ -7939,6 +7952,7 @@ impl CatBoostRegressor {
             one_hot_max_size: self.one_hot_max_size_for(loss),
             classes: Some((&classes_of, 2)),
             max_ctr_complexity: self.max_ctr_complexity(),
+            order: learn_perm.as_deref(),
         };
         let n_main = x.ncols() - n_estimated;
         let mut q = quantize(
@@ -8351,6 +8365,7 @@ impl CatBoostClassifier {
             }
             t
         });
+        let learn_perm = order.clone();
         let shuffled = order.map(|order| {
             (
                 x.select(ndarray::Axis(0), &order),
@@ -8476,6 +8491,7 @@ impl CatBoostClassifier {
             one_hot_max_size: self.one_hot_max_size_for(loss),
             classes: Some((&classes_of, classes.len())),
             max_ctr_complexity: self.max_ctr_complexity(),
+            order: learn_perm.as_deref(),
         };
         let n_est = text.as_ref().map_or(0, |t| t.n_bow);
         let text_cols = text.as_ref().map_or(0, |t| t.n_columns);
@@ -8580,6 +8596,7 @@ pub fn catboost_borders(x: ArrayView2<f64>, border_count: usize) -> Vec<Vec<f32>
         one_hot_max_size: 0,
         classes: None,
         max_ctr_complexity: 1,
+        order: None,
     };
     quantize(x, border_count, cat).unwrap().borders
 }
@@ -8610,6 +8627,8 @@ mod tests {
             one_hot_max_size: 0,
             classes: None,
             max_ctr_complexity: 1,
+            order: None,
+            order: None,
         };
         let q = quantize(x.view(), 254, cat).unwrap();
         assert_eq!(q.borders[0][0], -f32::MAX);
@@ -8754,6 +8773,8 @@ mod tests {
             one_hot_max_size: 1,
             classes: Some((&classes, 2)),
             max_ctr_complexity: 1,
+            order: None,
+            order: None,
         };
         let q = quantize(x.view(), 254, cat).unwrap();
         // Borders with prior 0: 0/1, 1/2, 2/3, 0/1, 0/2.
@@ -8770,6 +8791,8 @@ mod tests {
             one_hot_max_size: 2,
             classes: Some((&classes, 2)),
             max_ctr_complexity: 1,
+            order: None,
+            order: None,
         };
         let q = quantize(x.view(), 254, cat).unwrap();
         assert!(q.columns[0].one_hot() && q.ctr.is_none());
