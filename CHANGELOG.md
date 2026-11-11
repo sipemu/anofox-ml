@@ -6,6 +6,31 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Encoders, SelectFromModel and the sklearn searches (#255, part 2)
+
+- `LabelEncoder` and `OrdinalEncoder` take any `Category` (strings,
+  integers, floats), not only strings. A NaN seen in fit is the missing
+  category: it sorts last and `transform_f64` codes it as the new
+  `encoded_missing_value` (default NaN), as in sklearn. A known code for
+  `unknown_value` is checked against the categories other than the missing
+  one. **Breaking:** `FittedOrdinalEncoder` / `FittedLabelEncoder` are
+  generic (default `String`), and their serialized form changed: they no
+  longer store a hash map.
+- Registry kinds `LabelEncoder`, `OrdinalEncoder` (numeric categories) and
+  `SelectFromModel` (fits the estimator spec, then keeps the features whose
+  `|coef|` or `feature_importances` reach the threshold).
+- `anofox_ml_tune::evaluate_candidates` cross-validates given parameter sets
+  in order. The new `TuneOptions::weighted_scoring` option weights the
+  fold scores by the sample weights, as sklearn 1.8's search scorers do.
+- Python: `LabelEncoder`, `OrdinalEncoder` (string columns are coded by
+  their sorted order before Rust; `None` is a category, NaN is missing),
+  `SelectFromModel` (sklearn's thresholds, including the 1e-5 default for
+  L1 models), `FunctionTransformer` (plain Python), `GridSearchCV`,
+  `RandomizedSearchCV`, `ParameterGrid`, `ParameterSampler` and
+  `StratifiedKFold`. The searches run every candidate's CV in Rust and
+  accept `step__param` names into composites. The candidates, folds,
+  scores and ranks match sklearn's own search of the same estimators.
+
 ### sklearn composition tools in the registry and Python (#255, part 1)
 
 - Registry kinds `Pipeline`, `FeatureUnion` and `ColumnTransformer` over

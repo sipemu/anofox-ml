@@ -15,6 +15,12 @@ use ndarray::Array2;
 pub trait Category: Clone + std::fmt::Debug {
     /// Total order used to sort and look up categories.
     fn cmp_category(&self, other: &Self) -> Ordering;
+
+    /// Whether the value is a missing value (NaN for the floats), which
+    /// [`OrdinalEncoder`](crate::OrdinalEncoder) encodes apart.
+    fn is_missing(&self) -> bool {
+        false
+    }
 }
 
 macro_rules! impl_category_ord {
@@ -32,11 +38,19 @@ impl Category for f64 {
     fn cmp_category(&self, other: &Self) -> Ordering {
         crate::quantile::total_cmp(self, other)
     }
+
+    fn is_missing(&self) -> bool {
+        self.is_nan()
+    }
 }
 
 impl Category for f32 {
     fn cmp_category(&self, other: &Self) -> Ordering {
         crate::quantile::total_cmp(self, other)
+    }
+
+    fn is_missing(&self) -> bool {
+        self.is_nan()
     }
 }
 

@@ -29,6 +29,7 @@
 //! ```
 
 mod compose;
+mod encoders;
 mod estimator;
 mod meta;
 mod model;
@@ -57,6 +58,68 @@ mod tests {
         }
         assert!(failures.is_empty(), "{failures:#?}");
         assert!(super::make("NoSuchModel", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn encoders_and_select_from_model() {
+        use ndarray::array;
+        let a1 = |o| match o {
+            super::Out::A1(a) => a,
+            super::Out::A2(_) => panic!("expected 1-D output"),
+        };
+        let a2 = |o| match o {
+            super::Out::A2(a) => a,
+            super::Out::A1(_) => panic!("expected 2-D output"),
+        };
+        let mut le = super::make("LabelEncoder", &serde_json::json!({})).unwrap();
+        le.fit(array![[10.0], [2.0], [10.0]].view(), None, None)
+            .unwrap();
+        assert_eq!(
+            a1(le.transform(array![[2.0], [10.0]].view()).unwrap()),
+            array![0.0, 1.0]
+        );
+        assert_eq!(
+            a1(le.inverse_transform(array![[1.0]].view()).unwrap()),
+            array![10.0]
+        );
+        assert!(le.transform(array![[3.0]].view()).is_err());
+
+        let nan = f64::NAN;
+        let mut oe = super::make(
+            "OrdinalEncoder",
+            &serde_json::json!({"handle_unknown": {"UseEncodedValue": null}}),
+        )
+        .unwrap();
+        oe.fit(
+            array![[3.0, 1.0], [1.0, nan], [3.0, 1.0]].view(),
+            None,
+            None,
+        )
+        .unwrap();
+        let t = a2(oe.transform(array![[1.0, nan], [7.0, 1.0]].view()).unwrap());
+        assert_eq!(t.row(0)[0], 0.0);
+        assert!(t[[0, 1]].is_nan() && t[[1, 0]].is_nan());
+        assert_eq!(t[[1, 1]], 0.0);
+        let loaded = super::load("OrdinalEncoder", &oe.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            a2(loaded.inverse_transform(array![[1.0, 0.0]].view()).unwrap()),
+            array![[3.0, 1.0]]
+        );
+
+        // y depends on x0 and x2 only: Ridge's |coef| above the mean.
+        let x =
+            ndarray::Array2::from_shape_fn((30, 4), |(i, j)| (i as f64 * (j as f64 + 1.3)).sin());
+        let y = x.column(0).mapv(|v| 3.0 * v) - x.column(2).mapv(|v| 2.0 * v);
+        let params = serde_json::json!({"estimator": "RidgeRegressor",
+                                        "estimator_params": {"lambda": 1e-6}});
+        let mut sfm = super::make("SelectFromModel", &params).unwrap();
+        sfm.fit(x.view(), Some(y.view()), None).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&sfm.fitted_json().unwrap()).unwrap();
+        assert_eq!(
+            state["support"],
+            serde_json::json!([true, false, true, false])
+        );
+        assert_eq!(a2(sfm.transform(x.view()).unwrap()).ncols(), 2);
     }
 
     #[test]

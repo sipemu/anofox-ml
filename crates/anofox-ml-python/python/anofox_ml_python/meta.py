@@ -1,6 +1,7 @@
 """Meta-estimators over this package's estimators, run entirely in Rust:
 voting, stacking, probability calibration, target transformation,
-multi-output regression, recursive / sequential feature selection.
+multi-output regression, recursive / sequential / importance-based feature
+selection.
 
 Each takes this package's estimators (``estimator=``, ``estimators=[(name,
 est), ...]``) and sends their kind and parameters to the Rust registry, so
@@ -457,3 +458,78 @@ class SequentialFeatureSelector(TransformerMixin, _Selector):
         n = None if n == "auto" else _count(n, X.shape[1], "n_features_to_select")
         return {**self._spec(X, y), "n_features_to_select": n, "direction": self.direction,
                 "cv": _cv(self.cv)}
+
+
+def _l1_penalized(est):
+    """sklearn's estimators whose default ``SelectFromModel`` threshold is
+    1e-5 (their coefficients are exactly zero when dropped)."""
+    name = type(est).__name__
+    l1_ratio = getattr(est, "l1_ratio", None)
+    return (getattr(est, "penalty", None) == "l1" or "Lasso" in name
+            or (name in ("ElasticNet", "LogisticRegression") and l1_ratio is not None
+                and np.isclose(l1_ratio, 1.0)))
+
+
+def _threshold(threshold, est):
+    if threshold is None:
+        threshold = 1e-5 if _l1_penalized(est) else "mean"
+    if isinstance(threshold, str):
+        scale, _, reference = threshold.rpartition("*")
+        reference = reference.strip()
+        if reference not in ("mean", "median"):
+            raise ValueError(f"Expected threshold='mean' or threshold='median', got "
+                             f"{threshold!r}")
+        rule = reference.capitalize()
+        if not scale:
+            return rule
+        return {f"Scaled{rule}": float(scale.strip())}
+    value = float(threshold)
+    # JSON has no -inf; below every |importance| it selects the same.
+    return {"Value": max(value, np.finfo(np.float64).min)}
+
+
+class SelectFromModel(TransformerMixin, _Selector):
+    """The features whose importance (``|coef_|``, the ``norm_order``-norm
+    over the classes of a 2-D ``coef_``, else ``feature_importances_``) is at
+    least ``threshold`` (a value, ``"mean"``, ``"median"`` or ``"1.25*mean"``;
+    default the mean, 1e-5 for L1-penalized estimators), among the
+    ``max_features`` largest. The estimator is fitted in Rust, so
+    ``prefit=True`` is not supported and ``importance_getter`` is ``"auto"``."""
+
+    _kind = "SelectFromModel"
+    _estimator_type = None
+
+    def __init__(self, estimator, *, threshold=None, prefit=False, norm_order=1,
+                 max_features=None, importance_getter="auto"):
+        self.estimator = estimator
+        self.threshold = threshold
+        self.prefit = prefit
+        self.norm_order = norm_order
+        self.max_features = max_features
+        self.importance_getter = importance_getter
+
+    def _rust_params(self, X, y):
+        if self.prefit:
+            raise ValueError("prefit=True is not supported: the estimator is fitted in Rust")
+        if self.importance_getter != "auto":
+            raise ValueError("only importance_getter='auto' is supported")
+        max_features = self.max_features
+        if callable(max_features):
+            max_features = max_features(X)
+        if max_features is not None:
+            if not isinstance(max_features, (int, np.integer)) or isinstance(max_features, bool) \
+                    or not 0 <= max_features <= X.shape[1]:
+                raise ValueError(f"max_features must be an int in [0, {X.shape[1]}], got "
+                                 f"{max_features!r}")
+            max_features = int(max_features)
+        norm_order = None if np.isinf(self.norm_order) else float(self.norm_order)
+        return {**self._spec(X, y), "threshold": _threshold(self.threshold, self.estimator),
+                "max_features": max_features, "norm_order": norm_order}
+
+    def fit(self, X, y=None, sample_weight=None):
+        _Selector.fit(self, X, y, sample_weight)
+        state = self._fitted_state()
+        self.threshold_ = state["threshold"]
+        self.max_features_ = self.max_features(np.asarray(X)) if callable(self.max_features) \
+            else self.max_features
+        return self

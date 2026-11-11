@@ -2124,6 +2124,110 @@ impl RfeFit {
 }
 
 // ============================================================
+// Selection by importance
+// ============================================================
+
+/// sklearn's `SelectFromModel` (`importance_getter="auto"`, `prefit=False`):
+/// the estimator is fitted, its `|coef|` (the `norm_order`-norm over the
+/// classes of a 2-D `coef`), else its `feature_importances`, are the
+/// importances, and the features at or above `threshold` (among the
+/// `max_features` largest) are kept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct SelectFromModelConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    /// `None`: the mean importance.
+    pub threshold: Option<anofox_ml_preprocessing::Threshold>,
+    pub max_features: Option<usize>,
+    /// `None`: infinity (the largest absolute value).
+    pub norm_order: Option<f64>,
+}
+
+impl Default for SelectFromModelConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "OlsRegressor".into(),
+            estimator_params: empty_params(),
+            threshold: None,
+            max_features: None,
+            norm_order: Some(1.0),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SelectFromModelFit {
+    /// Whether each input feature is kept (sklearn's `get_support()`).
+    support: Vec<bool>,
+    /// The importances the threshold was applied to.
+    importances: Vec<f64>,
+    /// The resolved threshold (sklearn's `threshold_`).
+    threshold: f64,
+    model: RegistryFitted,
+}
+
+impl SelectFromModelConfig {
+    pub fn fit(
+        &self,
+        x: ArrayView2<f64>,
+        y: Option<ArrayView1<f64>>,
+        w: Option<ArrayView1<f64>>,
+    ) -> Result<SelectFromModelFit> {
+        let mut model = crate::make(&self.estimator, &self.estimator_params)?;
+        model.fit(x, y, w)?;
+        let model = RegistryFitted(model);
+        let mut selector = anofox_ml_preprocessing::SelectFromModel::new()
+            .with_norm_order(self.norm_order.unwrap_or(f64::INFINITY));
+        selector.threshold = self.threshold;
+        selector.max_features = self.max_features;
+        let fitted = if has(&model, "coef") {
+            match model.model().coef()? {
+                Out::A1(c) => selector.fit(&c),
+                Out::A2(c) => selector.fit_coef(&c),
+            }
+        } else if has(&model, "feature_importances") {
+            match model.model().feature_importances()? {
+                Out::A1(c) => selector.fit(&c),
+                Out::A2(_) => Err(err("SelectFromModel: 2-D feature_importances")),
+            }
+        } else {
+            Err(err(format!(
+                "SelectFromModel: {} has neither coef nor feature_importances",
+                model.model().kind()
+            )))
+        }?;
+        let p = x.ncols();
+        let mut support = vec![false; p];
+        for &j in fitted.selected_indices() {
+            support[j] = true;
+        }
+        Ok(SelectFromModelFit {
+            support,
+            importances: fitted.importances().to_vec(),
+            threshold: fitted.threshold(),
+            model,
+        })
+    }
+}
+
+impl SelectFromModelFit {
+    pub fn transform(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        if x.ncols() != self.support.len() {
+            return Err(err(format!(
+                "SelectFromModel: expected {} features, got {}",
+                self.support.len(),
+                x.ncols()
+            )));
+        }
+        let features: Vec<usize> = (0..self.support.len())
+            .filter(|&j| self.support[j])
+            .collect();
+        Ok(x.select(Axis(1), &features))
+    }
+}
+
+// ============================================================
 // Sequential feature selection
 // ============================================================
 
