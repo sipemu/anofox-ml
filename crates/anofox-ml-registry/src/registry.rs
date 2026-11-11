@@ -1222,6 +1222,33 @@ registry! {
         predict: |m, x| m.predict(x),
         predict_proba: |m, x| m.predict_proba(x),
     }
+    Pipeline {
+        config: crate::compose::PipelineConfig = Default::default(),
+        fitted: crate::compose::PipelineFit,
+        fit: |c, x, y, w| c.fit(x, y, w),
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        decision_function: |m, x| m.decision_function(x),
+        transform: |m, x| m.transform(x),
+    }
+    FeatureUnion {
+        config: crate::compose::FeatureUnionConfig = Default::default(),
+        fitted: crate::compose::FeatureUnionFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, y)
+        },
+        transform: |m, x| m.transform(x),
+    }
+    ColumnTransformer {
+        config: crate::compose::ColumnTransformerConfig = Default::default(),
+        fitted: crate::compose::ColumnTransformerFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, y)
+        },
+        transform: |m, x| m.transform(x),
+    }
     StackingRegressor {
         config: crate::meta::StackingRegressorConfig = Default::default(),
         fitted: crate::meta::StackingRegressorFit,
