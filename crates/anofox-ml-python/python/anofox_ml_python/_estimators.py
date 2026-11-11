@@ -2051,6 +2051,25 @@ class Lars(_LinearAttrs, RegressorMixin, BaseEstimator):
                 "max_iter": self.n_nonzero_coefs}
 
 
+class LassoLars(_LinearAttrs, RegressorMixin, BaseEstimator):
+    """The Lasso by LARS, solved exactly at ``alpha`` (sklearn's scale:
+    the correlation / ``n``). ``positive=True`` is not supported."""
+
+    _kind = "LassoLars"
+
+    def __init__(self, alpha=1.0, *, fit_intercept=True, max_iter=500, positive=False):
+        self.alpha = alpha
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+        self.positive = positive
+
+    def _rust_params(self, X, y):
+        if self.positive:
+            raise ValueError("positive=True is not supported")
+        return {"alpha": float(self.alpha), "fit_intercept": self.fit_intercept,
+                "max_iter": int(self.max_iter)}
+
+
 class OrthogonalMatchingPursuit(_LinearAttrs, RegressorMixin, BaseEstimator):
     _kind = "OrthogonalMatchingPursuit"
 
@@ -3375,6 +3394,68 @@ class RidgeClassifier(ClassifierMixin, BaseEstimator):
     @property
     def intercept_(self):
         return _nd(self._fitted_state()["intercept"])
+
+
+class RidgeClassifierCV(ClassifierMixin, BaseEstimator):
+    """``RidgeClassifier`` with ``alpha`` chosen among ``alphas``: by exact
+    leave-one-out on the ±1 targets (``cv=None``, in Rust), else by
+    ``cv``-fold accuracy (or ``scoring``) as sklearn does it, through
+    :class:`GridSearchCV`. ``alpha_``, ``best_score_``, ``coef_`` and
+    ``intercept_`` after ``fit``."""
+
+    _kind = "RidgeClassifierCV"
+
+    def __init__(self, alphas=(0.1, 1.0, 10.0), *, fit_intercept=True, scoring=None, cv=None,
+                 class_weight=None):
+        self.alphas = alphas
+        self.fit_intercept = fit_intercept
+        self.scoring = scoring
+        self.cv = cv
+        self.class_weight = class_weight
+
+    def _rust_params(self, X, y):
+        alphas = self._alphas if hasattr(self, "_alphas") else self.alphas
+        return {"alphas": [float(a) for a in np.atleast_1d(alphas)],
+                "fit_intercept": bool(self.fit_intercept),
+                "class_weight": self._encode_class_weight(self.class_weight)}
+
+    def fit(self, X, y, sample_weight=None):
+        self.__dict__.pop("_alphas", None)
+        if self.cv is None:
+            if self.scoring is not None:
+                raise ValueError("scoring is only supported with cv (sklearn's GCV mode "
+                                 "scores by the squared error)")
+            ClassifierMixin.fit(self, X, y, sample_weight)
+            state = self._fitted_state()
+            self.alpha_ = float(state["alpha"])
+            mse = _nd(state["loo_mse"])
+            self.best_score_ = -float(mse[list(np.atleast_1d(self.alphas)).index(self.alpha_)])
+            return self
+        from .model_selection import GridSearchCV
+
+        search = GridSearchCV(RidgeClassifier(fit_intercept=self.fit_intercept,
+                                              class_weight=self.class_weight),
+                              {"alpha": [float(a) for a in np.atleast_1d(self.alphas)]},
+                              scoring=self.scoring, cv=self.cv, refit=False)
+        search.fit(X, y, sample_weight=sample_weight)
+        self.alpha_ = float(search.best_params_["alpha"])
+        self.best_score_ = float(search.best_score_)
+        self._alphas = [self.alpha_]
+        return ClassifierMixin.fit(self, X, y, sample_weight)
+
+    # sklearn's shapes: two classes give coef_ (n_features,) and intercept_
+    # (1,), or 0.0 without an intercept.
+    @property
+    def coef_(self):
+        coef = _nd(self._fitted_state()["fitted"]["coef"])
+        return coef.ravel() if coef.shape[0] == 1 else coef
+
+    @property
+    def intercept_(self):
+        intercept = _nd(self._fitted_state()["fitted"]["intercept"])
+        if len(intercept) == 1 and not self.fit_intercept:
+            return 0.0
+        return intercept
 
 
 class Perceptron(ClassifierMixin, BaseEstimator):

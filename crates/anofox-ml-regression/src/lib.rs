@@ -65,7 +65,9 @@ pub use omp::{FittedOrthogonalMatchingPursuit, OrthogonalMatchingPursuit};
 pub use omp_cv::{FittedOrthogonalMatchingPursuitCV, OrthogonalMatchingPursuitCV};
 pub use quantile::{FittedQuantileRegressor, QuantileRegressor};
 pub use ridge::{FittedRidgeRegressor, RidgeRegressor};
-pub use ridge_classifier::{FittedRidgeClassifier, RidgeClassifier};
+pub use ridge_classifier::{
+    FittedRidgeClassifier, FittedRidgeClassifierCV, RidgeClassifier, RidgeClassifierCV,
+};
 pub use ridge_cv::{FittedRidgeCrossValidated, RidgeCrossValidated};
 pub use robust::{
     FittedRansacRegressor, FittedTheilSenRegressor, RansacRegressor, TheilSenRegressor,

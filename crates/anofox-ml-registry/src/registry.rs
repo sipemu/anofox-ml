@@ -1520,6 +1520,13 @@ registry! {
         predict: |m, x| m.predict(x),
         decision_function: |m, x| DecisionFunction::decision_function(m, x),
     }
+    RidgeClassifierCV {
+        config: reg::RidgeClassifierCV = Default::default(),
+        fitted: reg::FittedRidgeClassifierCV,
+        fit: |c, x, y, w| wsup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        decision_function: |m, x| DecisionFunction::decision_function(m, x),
+    }
     Perceptron {
         config: linear::Perceptron = Default::default(),
         fitted: linear::FittedSgdClassifier<f64>,
@@ -1865,6 +1872,13 @@ registry! {
         fitted: reg::FittedLars,
         fit: |c, x, y, w| sup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
+    }
+    LassoLars {
+        config: reg::Lars = reg::Lars::lasso_lars(1.0),
+        fitted: reg::FittedLars,
+        fit: |c, x, y, w| sup(K, c, x, y, w),
+        predict: |m, x| m.predict(x),
+        coef: |m| m.coef.clone(),
     }
     IsotonicRegressor {
         config: reg::IsotonicRegressor = Default::default(),
