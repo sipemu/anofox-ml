@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-11
+
+LightGBM catches up on objectives, custom objectives and raw scores,
+linear trees, learning to rank and panel-scale data (f32 input, binning
+once), with two split-finding parity fixes. The CatBoost-style booster
+gains the remaining losses (Huber, LogCosh, Lq, CrossEntropy,
+MultiClassOneVsAll, RMSEWithUncertainty, MultiRMSE), ranking (QueryRMSE,
+PairLogit, YetiRank, PFound / NDCG, pairwise scoring) and text and embedding
+features. The scikit-learn 1.8 parity tracker (#262) starts with #255:
+`Pipeline`, `FeatureUnion`, `ColumnTransformer`, the label and ordinal
+encoders, `SelectFromModel`, `FunctionTransformer`, `GridSearchCV` and
+`RandomizedSearchCV`, in the registry and Python. Breaking changes are
+marked below.
+
 ### Encoders, SelectFromModel and the sklearn searches (#255, part 2)
 
 - `LabelEncoder` and `OrdinalEncoder` take any `Category` (strings,
