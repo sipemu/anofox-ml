@@ -19,7 +19,10 @@ from .meta import (
     RFE,
     RFECV,
     CalibratedClassifierCV,
+    ClassifierChain,
+    MultiOutputClassifier,
     MultiOutputRegressor,
+    OutputCodeClassifier,
     RegressorChain,
     SelectFromModel,
     SequentialFeatureSelector,
@@ -207,6 +210,7 @@ from ._estimators import (
     LocallyLinearEmbedding,
     ClassicalMDS,
 )
+from .frozen import FrozenEstimator
 from .function_transformer import FunctionTransformer
 from .model_selection import (
     GridSearchCV,
@@ -254,7 +258,8 @@ __all__ = [
     "BaseEstimator", "NotFittedError", "conformal", "meta", "metrics", "model_selection", "multiclass", "train_test_split",
     "TuneSearchCV", "GridSearchCV", "RandomizedSearchCV", "ParameterGrid", "ParameterSampler",
     "StratifiedKFold", "FunctionTransformer", "LabelEncoder", "OrdinalEncoder",
-    "SelectFromModel",
+    "SelectFromModel", "MultiOutputClassifier", "ClassifierChain", "OutputCodeClassifier",
+    "FrozenEstimator",
     "OneVsRestClassifier", "OneVsOneClassifier", "FixedThresholdClassifier",
     "TunedThresholdClassifierCV", "SelfTrainingClassifier",
     "GenericUnivariateSelect", "SelectPercentile", "SelectFpr", "SelectFdr", "SelectFwe",

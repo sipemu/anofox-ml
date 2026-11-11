@@ -123,6 +123,56 @@ mod tests {
     }
 
     #[test]
+    fn multi_output_classifiers_and_output_codes() {
+        let x = ndarray::Array2::from_shape_fn((40, 2), |(i, j)| {
+            (i as f64 * (j as f64 + 0.7)).sin() * 3.0
+        });
+        // Two targets: labels {2, 5} and {0, 1}, both from x0 / x1.
+        let y0 = x.column(0).mapv(|v| if v > 0.0 { 5.0 } else { 2.0 });
+        let y1 = x.column(1).mapv(|v| if v > 0.5 { 1.0 } else { 0.0 });
+        let xy = ndarray::concatenate(
+            ndarray::Axis(1),
+            &[
+                x.view(),
+                y0.view().insert_axis(ndarray::Axis(1)),
+                y1.view().insert_axis(ndarray::Axis(1)),
+            ],
+        )
+        .unwrap();
+        let tree = serde_json::json!({"estimator": "DecisionTreeClassifier",
+                                      "estimator_params": {}, "y_columns": 2});
+        for kind in ["MultiOutputClassifier", "ClassifierChain"] {
+            let mut m = super::make(kind, &tree).unwrap();
+            m.fit(xy.view(), None, None).unwrap();
+            let super::Out::A2(pred) = m.predict(x.view()).unwrap() else {
+                panic!("{kind}: 2-D predictions")
+            };
+            // A full tree reproduces its training labels.
+            assert_eq!(pred.column(0), y0, "{kind}");
+            assert_eq!(pred.column(1), y1, "{kind}");
+            let loaded = super::load(kind, &m.to_bytes().unwrap()).unwrap();
+            assert!(loaded.predict_proba(x.view()).is_ok(), "{kind}");
+        }
+
+        // Three classes, a code book with a constant column.
+        let y = x
+            .column(0)
+            .mapv(|v| (v > -1.0) as u8 as f64 + (v > 1.0) as u8 as f64);
+        let params = serde_json::json!({
+            "estimator": "DecisionTreeClassifier", "estimator_params": {},
+            "code_book": [[1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0]]});
+        let mut ecoc = super::make("OutputCodeClassifier", &params).unwrap();
+        ecoc.fit(x.view(), Some(y.view()), None).unwrap();
+        let super::Out::A1(pred) = ecoc.predict(x.view()).unwrap() else {
+            panic!("1-D predictions")
+        };
+        assert_eq!(pred, y);
+        let bad = serde_json::json!({"code_book": [[1.0], [0.0]]});
+        let mut short = super::make("OutputCodeClassifier", &bad).unwrap();
+        assert!(short.fit(x.view(), Some(y.view()), None).is_err());
+    }
+
+    #[test]
     fn fitted_model_round_trips_through_bytes() {
         let x = ndarray::array![[0.0, 1.0], [1.0, 0.0], [2.0, 1.0], [3.0, 0.0], [4.0, 1.0]];
         let y = ndarray::array![0.0, 0.0, 1.0, 1.0, 1.0];

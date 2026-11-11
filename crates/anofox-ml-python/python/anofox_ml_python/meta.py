@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import _native
 from ._base import (
     BaseEstimator,
     ClassifierMixin,
@@ -309,6 +310,150 @@ class RegressorChain(_MultiOutput):
             raise ValueError("order='random' is not supported; pass a list of column indices")
         order = None if order is None else [int(i) for i in order]
         return {**self._base(X, y), "y_columns": int(y.shape[1]), "order": order}
+
+
+# ---------------------------------------------------------------------------
+# multi-output classification and output codes
+# ---------------------------------------------------------------------------
+
+
+class _MultiOutputClassifier(BaseEstimator):
+    """Fit on ``(X, Y)`` with ``Y`` of shape ``n × k`` (labels per column);
+    ``predict`` returns ``n × k`` labels and ``classes_`` lists each
+    column's sorted labels. Numeric labels go to Rust as they are, other
+    labels as their index in ``classes_``."""
+
+    _estimator_type = "classifier"
+
+    def fit(self, X, Y):
+        X = _check_X(X)
+        Y = np.asarray(Y)
+        if Y.ndim != 2:
+            raise ValueError("y must have at least two dimensions for multi-output "
+                             "classification but has only one.")
+        if Y.shape[0] != X.shape[0]:
+            raise ValueError(f"X has {X.shape[0]} rows but y has {Y.shape[0]}")
+        self.classes_ = [np.unique(Y[:, j]) for j in range(Y.shape[1])]
+        self._coded = Y.dtype.kind not in "biuf"
+        self._y_dtype = Y.dtype
+        if self._coded:
+            Yf = np.column_stack([np.searchsorted(c, Y[:, j])
+                                  for j, c in enumerate(self.classes_)]).astype(np.float64)
+        else:
+            Yf = Y.astype(np.float64)
+        model = self._new_model(X, Yf)
+        model.fit(np.ascontiguousarray(np.hstack([X, Yf])), None, None)
+        self._model_ = model
+        self.n_features_in_ = X.shape[1]
+        return self
+
+    def _base(self, X, Y):
+        codes = np.searchsorted(np.unique(Y[:, 0]), Y[:, 0]).astype(np.float64)
+        return {**_spec(self.estimator, X, codes, mixin=ClassifierMixin),
+                "y_columns": int(Y.shape[1])}
+
+    def predict(self, X):
+        pred = np.asarray(self._call("predict", X))
+        if self._coded:
+            return np.column_stack([c[pred[:, j].astype(np.int64)]
+                                    for j, c in enumerate(self.classes_)])
+        return pred.astype(self._y_dtype)
+
+    def score(self, X, y):
+        """Subset accuracy: the share of rows with every output right."""
+        return float(np.mean(np.all(np.asarray(y) == self.predict(X), axis=1)))
+
+
+class MultiOutputClassifier(_MultiOutputClassifier):
+    """One classifier per target column; ``predict_proba`` is a list with
+    each output's class probabilities."""
+
+    _kind = "MultiOutputClassifier"
+
+    def __init__(self, estimator, *, n_jobs=None):
+        self.estimator = estimator
+        self.n_jobs = n_jobs
+
+    def _rust_params(self, X, y):
+        return self._base(X, y)
+
+    def predict_proba(self, X):
+        proba = np.asarray(self._call("predict_proba", X))
+        edges = np.cumsum([len(c) for c in self.classes_])[:-1]
+        return np.split(proba, edges, axis=1)
+
+
+class ClassifierChain(_MultiOutputClassifier):
+    """Classifiers fitted in ``order`` (default the column order, or
+    ``"random"`` with ``random_state``), each on ``X`` and the targets
+    before it; predictions use the earlier predicted labels.
+    ``predict_proba`` / ``decision_function`` give each output's binary
+    score. Only ``cv=None`` and ``chain_method="predict"`` are supported."""
+
+    _kind = "ClassifierChain"
+
+    def __init__(self, estimator=None, *, order=None, cv=None, chain_method="predict",
+                 random_state=None, verbose=False):
+        self.estimator = estimator
+        self.order = order
+        self.cv = cv
+        self.chain_method = chain_method
+        self.random_state = random_state
+        self.verbose = verbose
+
+    def _rust_params(self, X, y):
+        if self.estimator is None:
+            raise ValueError("ClassifierChain needs an estimator")
+        if self.cv is not None:
+            raise ValueError("only cv=None is supported")
+        if self.chain_method != "predict":
+            raise ValueError("only chain_method='predict' is supported")
+        order = self.order
+        if isinstance(order, str):
+            if order != "random":
+                raise ValueError(f"order must be a list, None or 'random', got {order!r}")
+            from .model_selection import _random_state
+
+            order = _random_state(self.random_state).permutation(y.shape[1])
+        self.order_ = np.arange(y.shape[1]) if order is None else np.asarray(order)
+        return {**self._base(X, y), "order": [int(i) for i in self.order_]}
+
+    def predict_proba(self, X):
+        return np.asarray(self._call("predict_proba", X))
+
+    def decision_function(self, X):
+        return np.asarray(self._call("decision_function", X))
+
+
+class OutputCodeClassifier(ClassifierMixin, BaseEstimator):
+    """Error-correcting output codes: ``int(n_classes * code_size)`` binary
+    classifiers on a random code book (sklearn's draw for the same
+    ``random_state``: entries 1 and -1, or 0 for estimators without a
+    decision function); a row is the class with the nearest code."""
+
+    _kind = "OutputCodeClassifier"
+
+    def __init__(self, estimator, *, code_size=1.5, random_state=None, n_jobs=None):
+        self.estimator = estimator
+        self.code_size = code_size
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+
+    def _rust_params(self, X, y):
+        from .model_selection import _random_state
+
+        if self.code_size <= 0:
+            raise ValueError(f"code_size must be positive, got {self.code_size}")
+        rng = _random_state(self.random_state)
+        n_classes = len(self.classes_)
+        code_book = rng.uniform(size=(n_classes, int(n_classes * self.code_size)))
+        code_book[code_book > 0.5] = 1.0
+        spec = _spec(self.estimator, X, y, mixin=ClassifierMixin)
+        has_decision = "decision_function" in _native.Model(spec["estimator"], None) \
+            .capabilities()
+        code_book[code_book != 1] = -1.0 if has_decision else 0.0
+        self.code_book_ = code_book
+        return {**spec, "code_book": code_book.tolist()}
 
 
 # ---------------------------------------------------------------------------
