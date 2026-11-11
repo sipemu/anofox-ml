@@ -929,6 +929,121 @@ pub(crate) fn sygst_syev(n: usize, a: &mut [f32], b: &[f32]) -> Vec<f32> {
     w
 }
 
+/// `isamax`: the index of the first entry of largest absolute value.
+fn isamax(x: &[f32]) -> usize {
+    let mut best = 0;
+    let mut smax = x[0].abs();
+    for (i, v) in x.iter().enumerate().skip(1) {
+        if v.abs() > smax {
+            best = i;
+            smax = v.abs();
+        }
+    }
+    best
+}
+
+/// `sgetf2`: the LU factorization with partial pivoting of the `n` x `n`
+/// matrix `a` (CatBoost's `sgetrf` with block size 1). Returns the pivots.
+fn sgetf2(n: usize, a: &mut [f32]) -> Vec<usize> {
+    let ld = n;
+    let mut ipiv = vec![0; n];
+    for j in 0..n {
+        let jp = j + isamax(&a[at(ld, j, j)..at(ld, n - 1, j) + 1]);
+        ipiv[j] = jp;
+        if a[at(ld, jp, j)] != 0.0 {
+            if jp != j {
+                for c in 0..n {
+                    a.swap(at(ld, j, c), at(ld, jp, c));
+                }
+            }
+            if j + 1 < n {
+                let pivot = a[at(ld, j, j)];
+                let col = at(ld, j + 1, j)..at(ld, n - 1, j) + 1;
+                if pivot.abs() >= SAFMIN {
+                    sscal(1.0 / pivot, &mut a[col]);
+                } else {
+                    a[col].iter_mut().for_each(|v| *v /= pivot);
+                }
+            }
+        }
+        if j + 1 < n {
+            // sger: A[j+1.., j+1..] -= a[j+1.., j] a[j, j+1..].
+            for c in j + 1..n {
+                let yv = a[at(ld, j, c)];
+                if yv != 0.0 {
+                    let temp = -1.0 * yv;
+                    for i in j + 1..n {
+                        let x = a[at(ld, i, j)];
+                        a[at(ld, i, c)] += x * temp;
+                    }
+                }
+            }
+        }
+    }
+    ipiv
+}
+
+/// `strti2("U", "N")`: the inverse of the upper triangle of `a` in place.
+fn strti2_upper(n: usize, a: &mut [f32]) {
+    let ld = n;
+    for j in 0..n {
+        a[at(ld, j, j)] = 1.0 / a[at(ld, j, j)];
+        let ajj = -a[at(ld, j, j)];
+        // strmv("U", "N", "N") of column j by the leading j x j triangle.
+        for k in 0..j {
+            let xk = a[at(ld, k, j)];
+            if xk != 0.0 {
+                for i in 0..k {
+                    let v = a[at(ld, i, k)];
+                    a[at(ld, i, j)] += xk * v;
+                }
+                a[at(ld, k, j)] *= a[at(ld, k, k)];
+            }
+        }
+        sscal(ajj, &mut a[at(ld, 0, j)..at(ld, 0, j) + j]);
+    }
+}
+
+/// CatBoost's `InverseMatrix`: `sgetrf` + `sgetri` (block size 1) of the
+/// `n` x `n` matrix `a`, in place.
+pub(crate) fn inverse(n: usize, a: &mut [f32]) {
+    if n == 0 {
+        return;
+    }
+    let ld = n;
+    let ipiv = sgetf2(n, a);
+    // strtri stops at a zero diagonal (singular): sgetri leaves `a` as is.
+    if (0..n).any(|j| a[at(ld, j, j)] == 0.0) {
+        return;
+    }
+    strti2_upper(n, a);
+    let mut work = vec![0.0f32; n];
+    for j in (0..n).rev() {
+        for i in j + 1..n {
+            work[i] = a[at(ld, i, j)];
+            a[at(ld, i, j)] = 0.0;
+        }
+        // sgemv("N"): a[:, j] -= a[:, j+1..] work[j+1..].
+        for c in j + 1..n {
+            if work[c] != 0.0 {
+                let temp = -1.0 * work[c];
+                for i in 0..n {
+                    let v = a[at(ld, i, c)];
+                    a[at(ld, i, j)] += temp * v;
+                }
+            }
+        }
+    }
+    for j in (0..n.saturating_sub(1)).rev() {
+        let jp = ipiv[j];
+        if jp != j {
+            for i in 0..n {
+                a.swap(at(ld, i, j), at(ld, i, jp));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,5 +1083,25 @@ mod tests {
             cases += 1;
         }
         assert_eq!(cases, 31);
+    }
+
+    /// `sgetrf` + `sgetri` bit for bit against CatBoost's CLAPACK.
+    #[test]
+    fn inverse_matches_catboost_clapack() {
+        let golden = include_str!("lapack_inv_golden.txt");
+        let mut lines = golden.lines();
+        let mut cases = 0;
+        while let Some(n) = lines.next() {
+            let n: usize = n.parse().unwrap();
+            let mut a = bits(lines.next().unwrap());
+            let want = bits(lines.next().unwrap());
+            inverse(n, &mut a);
+            assert!(
+                a.iter().zip(&want).all(|(p, q)| p.to_bits() == q.to_bits()),
+                "case {cases} (n = {n})"
+            );
+            cases += 1;
+        }
+        assert!(cases >= 10);
     }
 }

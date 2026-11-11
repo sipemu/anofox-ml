@@ -833,7 +833,8 @@ def _text_options(tp):
 
 def _embedding_options(calcers):
     """The Rust ``CatBoostEmbeddingOptions`` of catboost ``embedding_calcers``
-    strings: ``"LDA"``, ``"LDA:reg=0.1"``, ``"LDA:components=2"``, ``"KNN"``,
+    strings: ``"LDA"``, ``"LDA:reg=0.1"``, ``"LDA:components=2"``,
+    ``"LDA:likelihood=true"``, ``"KNN"``,
     ``"KNN:k=3"``."""
     if isinstance(calcers, str):
         calcers = [calcers]
@@ -847,12 +848,16 @@ def _embedding_options(calcers):
                 raise ValueError(f"embedding_calcers: cannot parse {c!r}")
             kv[key.strip()] = value.strip()
         if name == "LDA":
-            unknown = set(kv) - {"components", "reg"}
+            unknown = set(kv) - {"components", "reg", "likelihood"}
             if unknown:
                 raise ValueError(f"embedding_calcers: unsupported LDA options {sorted(unknown)}")
+            likelihood = kv.get("likelihood", "false").lower()
+            if likelihood not in ("true", "false"):
+                raise ValueError(f"embedding_calcers: likelihood must be true or false in {c!r}")
             out.append({"Lda": {"components": int(kv["components"]) if "components" in kv
                                 else None,
-                                "reg": float(kv.get("reg", 0.00005))}})
+                                "reg": float(kv.get("reg", 0.00005)),
+                                "likelihood": likelihood == "true"}})
         elif name == "KNN":
             unknown = set(kv) - {"k"}
             if unknown:

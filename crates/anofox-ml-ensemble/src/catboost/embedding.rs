@@ -3,7 +3,7 @@
 //! and the KNN calcer (`knn.rs`).
 
 use super::knn::Knn;
-use super::lapack::sygst_syev;
+use super::lapack::{inverse, sygst_syev};
 use anofox_ml_core::error::{Result, RustMlError};
 
 /// How the features of one embedding column are calculated (CatBoost's
@@ -14,8 +14,14 @@ pub enum CatBoostEmbeddingCalcer {
     /// generalized eigenvectors of the total vs within-class scatter
     /// (`LDA`). `components` defaults to min(classes - 1, dim - 1) (1 for
     /// regression); `reg` (0.00005) is added to the within-class scatter's
-    /// diagonal.
-    Lda { components: Option<usize>, reg: f32 },
+    /// diagonal. `likelihood` (classification) adds the normalized Gaussian
+    /// likelihood of every class.
+    Lda {
+        components: Option<usize>,
+        reg: f32,
+        #[serde(default)]
+        likelihood: bool,
+    },
     /// The class counts (classification) or the mean target (regression) of
     /// the `k` (5) nearest rows seen so far, through an online HNSW index
     /// (`KNN`).
@@ -28,6 +34,7 @@ impl CatBoostEmbeddingCalcer {
         Self::Lda {
             components: None,
             reg: 0.00005,
+            likelihood: false,
         }
     }
 
@@ -103,7 +110,14 @@ impl EmbeddingSpec {
 
     pub(crate) fn n_features(&self) -> usize {
         match *self {
-            Self::Lda(s) => s.components,
+            Self::Lda(s) => {
+                s.components
+                    + if s.likelihood {
+                        s.n_classes.unwrap_or(0)
+                    } else {
+                        0
+                    }
+            }
             Self::Knn { n_classes, .. } => Knn::n_features(n_classes),
         }
     }
@@ -179,6 +193,8 @@ pub(crate) struct LdaSpec {
     pub n_classes: Option<usize>,
     pub components: usize,
     pub reg: f32,
+    /// The class likelihood features (classification only).
+    pub likelihood: bool,
 }
 
 impl LdaSpec {
@@ -187,7 +203,12 @@ impl LdaSpec {
         dim: usize,
         n_classes: Option<usize>,
     ) -> Result<Self> {
-        let CatBoostEmbeddingCalcer::Lda { components, reg } = *calcer else {
+        let CatBoostEmbeddingCalcer::Lda {
+            components,
+            reg,
+            likelihood,
+        } = *calcer
+        else {
             unreachable!("an LDA spec of another calcer");
         };
         let components = components.unwrap_or_else(|| {
@@ -215,6 +236,7 @@ impl LdaSpec {
             n_classes,
             components,
             reg,
+            likelihood: likelihood && n_classes.is_some(),
         })
     }
 }
@@ -326,6 +348,9 @@ pub(crate) struct Lda {
     clouds: Vec<Cloud>,
     /// `components` x `dim`, row-major.
     projection: Vec<f32>,
+    /// `BetweenMatrix`: with `likelihood`, the inverse of the regularized
+    /// within-class scatter of the last flush (zeros before).
+    between: Vec<f32>,
 }
 
 impl Lda {
@@ -336,6 +361,7 @@ impl Lda {
             last_flush: 0,
             clouds: vec![Cloud::new(spec.dim); spec.n_classes.unwrap_or(1)],
             projection: vec![0.0; spec.components * spec.dim],
+            between: vec![0.0; spec.dim * spec.dim],
         }
     }
 
@@ -343,11 +369,20 @@ impl Lda {
         LdaProjection {
             dim: self.spec.dim,
             projection: self.projection.clone(),
+            likelihood: self.spec.likelihood.then(|| Likelihood {
+                centers: self.clouds.iter().map(|c| c.center.clone()).collect(),
+                inverse: self.between.clone(),
+            }),
         }
     }
 
     pub(crate) fn compute(&self, x: &[f32]) -> Vec<f32> {
-        project(&self.projection, self.spec.dim, x)
+        let mut out = project(&self.projection, self.spec.dim, x);
+        if self.spec.likelihood {
+            let centers: Vec<&[f32]> = self.clouds.iter().map(|c| &c.center[..]).collect();
+            out.extend(likelihoods(x, &centers, &self.between));
+        }
+        out
     }
 
     /// `TLinearDACalcerVisitor::Update` (`target` is the class, or ignored
@@ -398,6 +433,10 @@ impl Lda {
         sygst_syev(dim, &mut total, &within);
         let n = self.projection.len();
         self.projection.copy_from_slice(&total[dim * dim - n..]);
+        if self.spec.likelihood {
+            inverse(dim, &mut within);
+            self.between = within;
+        }
     }
 }
 
@@ -406,6 +445,16 @@ impl Lda {
 pub(crate) struct LdaProjection {
     dim: usize,
     projection: Vec<f32>,
+    #[serde(default)]
+    likelihood: Option<Likelihood>,
+}
+
+/// What the likelihood features need: the class centers and the inverted
+/// within-class scatter.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Likelihood {
+    centers: Vec<Vec<f32>>,
+    inverse: Vec<f32>,
 }
 
 impl LdaProjection {
@@ -414,8 +463,54 @@ impl LdaProjection {
     }
 
     pub(crate) fn compute(&self, x: &[f32]) -> Vec<f32> {
-        project(&self.projection, self.dim, x)
+        let mut out = project(&self.projection, self.dim, x);
+        if let Some(l) = &self.likelihood {
+            let centers: Vec<&[f32]> = l.centers.iter().map(|c| &c[..]).collect();
+            out.extend(likelihoods(x, &centers, &l.inverse));
+        }
+        out
     }
+}
+
+/// The normalized class likelihoods (`TLinearDACalcer::Compute` with
+/// `ComputeProbabilities`): uniform when they all but vanish.
+fn likelihoods(x: &[f32], centers: &[&[f32]], inverse: &[f32]) -> Vec<f32> {
+    let like: Vec<f32> = centers
+        .iter()
+        .map(|c| gaussian_likelihood(x, c, inverse))
+        .collect();
+    let mut total = 0.0f32;
+    for &l in &like {
+        total += l;
+    }
+    let uniform = (1.0 / centers.len() as f64) as f32;
+    like.into_iter()
+        .map(|l| {
+            if f64::from(total) > 1e-6 {
+                l / total
+            } else {
+                uniform
+            }
+        })
+        .collect()
+}
+
+/// `CalculateGaussianLikehood`: `exp(-d' S d / 2)` for `d = mean - x`, the
+/// quadratic form through cblas_sgemv (row-major) and the exponent as
+/// `Exp2f(-log2(e) / 2 · deg)`.
+fn gaussian_likelihood(x: &[f32], mean: &[f32], scatter: &[f32]) -> f32 {
+    let dim = mean.len();
+    let diff: Vec<f32> = mean.iter().zip(x).map(|(&m, &v)| m - v).collect();
+    let mut deg = 0.0f32;
+    for (r, &d) in diff.iter().enumerate() {
+        let mut temp = 0.0f32;
+        for (c, &dc) in diff.iter().enumerate() {
+            temp += scatter[r * dim + c] * dc;
+        }
+        let askew = 0.0 + 1.0 * temp;
+        deg += askew * d;
+    }
+    ((-std::f64::consts::LOG2_E * 0.5 * f64::from(deg)) as f32).exp2()
 }
 
 /// cblas_sgemv(RowMajor, NoTrans): the projection of `x`, as the reference
@@ -448,11 +543,13 @@ mod tests {
         let three = CatBoostEmbeddingCalcer::Lda {
             components: Some(3),
             reg: 0.1,
+            likelihood: false,
         };
         assert!(LdaSpec::new(&three, 3, Some(2)).is_err());
         let negative = CatBoostEmbeddingCalcer::Lda {
             components: None,
             reg: -1.0,
+            likelihood: false,
         };
         assert!(LdaSpec::new(&negative, 3, Some(2)).is_err());
     }

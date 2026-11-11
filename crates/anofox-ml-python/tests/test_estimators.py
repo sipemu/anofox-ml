@@ -919,7 +919,7 @@ def test_catboost_embedding_features_match_catboost():
     # The embedding in the middle, a categorical column after it.
     frame = pd.DataFrame({"x0": r.randn(n), "emb": list(emb), "colour": colour})
     pool = cb.Pool(frame, embedding_features=[1], cat_features=[2])
-    for calcers in (None, ["LDA:reg=0.1"], ["KNN:k=3"]):
+    for calcers in (None, ["LDA:reg=0.1"], ["KNN:k=3"], ["LDA:likelihood=true"]):
         ref = cb.CatBoostClassifier(**kw, **off, verbose=0, allow_writing_files=False)
         if calcers is not None:
             ref._init_params["embedding_calcers"] = calcers

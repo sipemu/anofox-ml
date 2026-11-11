@@ -55,7 +55,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   `CatBoostClassifier`. Python: `embedding_features=[...]` (cells hold
   vectors) and `embedding_calcers=["LDA", "KNN:k=3", ...]` (catboost's
   option strings), matching `catboost.Pool(embedding_features=...)`.
-- Not yet: LDA `likelihood`, text and embeddings in one fit.
+- LDA `likelihood` (`Lda { likelihood: true }`, Python `"LDA:likelihood=true"`): the
+  normalized Gaussian likelihood of every class through the inverted
+  within-class scatter, a port of catboost's `sgetrf` + `sgetri` (bit-exact
+  on 18 matrices). In catboost these features never split (their values
+  vary, but its trees never pick them), so they get no borders here either.
+  Binary, multiclass and ordered fits match to ~2e-16.
+- Not yet: text and embeddings in one fit.
 
 ### LightGBM learning to rank (#207)
 

@@ -5175,6 +5175,24 @@ impl Quantized {
                 feature_borders(ndarray::ArrayView1::from(&col), border_count)
             })
             .collect();
+        // LDA's class likelihoods never split in CatBoost: their values vary
+        // (checked in an instrumented build), but its trees never pick
+        // them, and fits match when they get no borders.
+        let mut at: usize = src
+            .sources
+            .iter()
+            .map(|(k, _)| OnlineCalcer::n_features(*k, src.n_classes))
+            .sum();
+        for e in &src.embeddings {
+            if let EmbeddingSpec::Lda(l) = e.spec {
+                if l.likelihood {
+                    for b in &mut src.borders[at + l.components..at + e.spec.n_features()] {
+                        b.clear();
+                    }
+                }
+            }
+            at += e.spec.n_features();
+        }
         self.borders.extend(src.borders.iter().cloned());
         let columns = src.columns(&identity);
         let at = self.estimated.end;
