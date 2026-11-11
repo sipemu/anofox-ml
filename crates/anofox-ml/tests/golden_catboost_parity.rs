@@ -7,9 +7,10 @@ use anofox_ml::prelude::*;
 use anofox_ml_ensemble::catboost::catboost_borders;
 use anofox_ml_ensemble::{
     CatBoostAutoClassWeights, CatBoostBacktracking, CatBoostBoostingType, CatBoostBootstrap,
-    CatBoostClassifier, CatBoostClassifierLoss, CatBoostEvalSet, CatBoostGrowPolicy,
-    CatBoostLeafEstimation, CatBoostMultiEvalSet, CatBoostOdType, CatBoostRegressionLoss,
-    CatBoostRegressor, CatBoostScoreFunction, CatBoostShrinkMode,
+    CatBoostClassifier, CatBoostClassifierLoss, CatBoostEmbeddingCalcer, CatBoostEmbeddingOptions,
+    CatBoostEvalSet, CatBoostGrowPolicy, CatBoostLeafEstimation, CatBoostMultiEvalSet,
+    CatBoostOdType, CatBoostRegressionLoss, CatBoostRegressor, CatBoostScoreFunction,
+    CatBoostShrinkMode,
 };
 use common::{json_to_array1, load_golden_file};
 use ndarray::{Array1, Array2};
@@ -38,6 +39,40 @@ fn worst(pred: impl IntoIterator<Item = f64>, expected: impl IntoIterator<Item =
             0.0,
             |w, d| if d.is_nan() { f64::INFINITY } else { w.max(d) },
         )
+}
+
+/// Embedding columns of a golden case: one `rows x dim` array each.
+fn embeddings_of(v: &Value) -> Vec<Array2<f64>> {
+    v.as_array().unwrap().iter().map(array2_with_nan).collect()
+}
+
+fn views(e: &[Array2<f64>]) -> Vec<ndarray::ArrayView2<'_, f64>> {
+    e.iter().map(|a| a.view()).collect()
+}
+
+/// CatBoost `embedding_calcers` strings (`LDA`, `LDA:reg=0.5`).
+fn embedding_options(v: &Value) -> CatBoostEmbeddingOptions {
+    let calcers = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            let c = c.as_str().unwrap();
+            let (name, opts) = c.split_once(':').unwrap_or((c, ""));
+            assert_eq!(name, "LDA");
+            let (mut components, mut reg) = (None, 0.00005f32);
+            for kv in opts.split(',').filter(|s| !s.is_empty()) {
+                let (k, val) = kv.split_once('=').unwrap();
+                match k {
+                    "components" => components = Some(val.parse().unwrap()),
+                    "reg" => reg = val.parse().unwrap(),
+                    _ => panic!("unknown LDA option {k}"),
+                }
+            }
+            CatBoostEmbeddingCalcer::Lda { components, reg }
+        })
+        .collect();
+    CatBoostEmbeddingOptions { calcers }
 }
 
 #[test]
@@ -344,6 +379,22 @@ fn catboost_models_match_catboost() {
                     })
                     .collect()
             };
+            if let Some(e) = case.get("embeddings") {
+                let f = m
+                    .with_embedding_options(embedding_options(&case["embedding_calcers"]))
+                    .fit_with_embeddings(x.view(), &views(&embeddings_of(e)), y.view(), w)
+                    .unwrap();
+                let test = embeddings_of(&case["embeddings_test"]);
+                let pred = f
+                    .predict_with_embeddings(x_test.view(), &views(&test))
+                    .unwrap();
+                let err = worst(pred, json_to_array1(&case["predictions"]));
+                report.push(format!("{name}: {err:e}"));
+                if err > TOL {
+                    failures.push(format!("{name}: worst {err:e}"));
+                }
+                continue;
+            }
             if let Some(t) = case.get("text") {
                 if let Some(o) = case.get("text_options") {
                     m = m.with_text_options(serde_json::from_value(o.clone()).unwrap());
@@ -382,6 +433,27 @@ fn catboost_models_match_catboost() {
         } else {
             let p = &case["params"];
             let mut m = configure!(CatBoostClassifier::new(), p);
+            if let Some(e) = case.get("embeddings") {
+                let f = m
+                    .with_embedding_options(embedding_options(&case["embedding_calcers"]))
+                    .fit_with_embeddings(
+                        x.view(),
+                        &views(&embeddings_of(e)),
+                        y.view(),
+                        sw.as_ref().map(|w| w.view()),
+                    )
+                    .unwrap();
+                let test = embeddings_of(&case["embeddings_test"]);
+                let proba = f
+                    .predict_proba_with_embeddings(x_test.view(), &views(&test))
+                    .unwrap();
+                let err = worst(proba, array2_with_nan(&case["predictions"]));
+                report.push(format!("{name}: {err:e}"));
+                if err > TOL {
+                    failures.push(format!("{name}: worst {err:e}"));
+                }
+                continue;
+            }
             if let Some(t) = case.get("text") {
                 if let Some(o) = case.get("text_options") {
                     m = m.with_text_options(serde_json::from_value(o.clone()).unwrap());

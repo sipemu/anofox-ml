@@ -6,6 +6,27 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### CatBoost-style boosting: embedding features, LDA (#211, part)
+
+- `CatBoostRegressor` / `CatBoostClassifier::fit_with_embeddings(x,
+  embeddings, y, w)` with `predict_with_embeddings` /
+  `predict_proba_with_embeddings`, and `with_embedding_options(
+  CatBoostEmbeddingOptions)`. The `LDA` calcer (`components`, `reg`) is an
+  online feature, computed in every fold's order as catboost's
+  `TLinearDACalcer`: incremental float32 class scatters, the projection
+  recomputed whenever the row count doubles. The generalized eigenproblem
+  goes through a float32 port of catboost's bundled f2c CLAPACK (`ssygst`
+  + `ssyev`), which matches it bit for bit on 31 matrices. CatBoost passes
+  the within-class scatter to `ssygst` without a Cholesky factor first, and
+  its f2c `ilaenv` makes every block size 1; the port does both too.
+  Binary, multiclass, two-column, ordered, weighted, custom-option,
+  regression and full-default fits match catboost 1.2.10 to ~6e-16.
+- Regression LDA has one class cloud and a zero total scatter, so (as in
+  catboost) its feature is the embedding's last coordinate.
+- Not yet: `KNN` (catboost's default calcers are `[LDA, KNN]`, so
+  `embedding_options` must be set), LDA `likelihood`, text and embeddings
+  in one fit, registry and Python.
+
 ### LightGBM learning to rank (#207)
 
 - `LgbmObjective::LambdaRank` and `LgbmObjective::RankXendcg` with query
