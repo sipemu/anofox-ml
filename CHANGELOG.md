@@ -6,6 +6,12 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### anofox-regression 0.12
+
+- `anofox-ml-regression`, `-linear` and `-preprocessing` use
+  anofox-regression 0.12 (0.12.2). Results are unchanged: the Rust golden
+  tests and the Python suite pass as before.
+
 ## [0.6.1] - 2026-11-11
 
 0.6.0 without the packaging bug: the umbrella crate `anofox-ml` 0.6.0
