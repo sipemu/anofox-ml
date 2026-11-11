@@ -89,6 +89,9 @@ pub struct TuneOptions {
     pub params: Value,
     /// Refit the best parameters on all rows and return the model.
     pub refit: bool,
+    /// Weight the test-fold scores by the sample weights too (scikit-learn
+    /// >= 1.8's search scorers); otherwise the weights only go to the fits.
+    pub weighted_scoring: bool,
 }
 
 impl Default for TuneOptions {
@@ -104,6 +107,7 @@ impl Default for TuneOptions {
             population_size: 50,
             params: Value::Object(Map::new()),
             refit: true,
+            weighted_scoring: false,
         }
     }
 }
@@ -264,18 +268,7 @@ fn run(
     map_params: Option<ParamMap<'_>>,
 ) -> Result<TuneResult> {
     let space = SearchSpace::from_json(space)?;
-    let metric = match &options.metric {
-        Some(name) => Metric::from_name(name)?,
-        None => Metric::default_for(kind),
-    };
-    let mut objectives = vec![Objective::Metric(metric)];
-    for name in &options.objectives {
-        let o = Objective::from_name(name)?;
-        if objectives.contains(&o) {
-            return Err(invalid(format!("objective '{name}' is listed twice")));
-        }
-        objectives.push(o);
-    }
+    let (metric, objectives) = objectives_of(kind, options)?;
     let fixed = check_params(
         kind,
         map_params.is_none().then_some(&space),
@@ -292,16 +285,7 @@ fn run(
     if options.n_trials == 0 {
         return Err(invalid("n_trials must be at least 1"));
     }
-    if splits.is_empty() {
-        return Err(invalid("no CV splits"));
-    }
-    if x.nrows() != y.len() || sample_weight.is_some_and(|w| w.len() != y.len()) {
-        return Err(RustMlError::ShapeMismatch(format!(
-            "x has {} rows, y {} values",
-            x.nrows(),
-            y.len()
-        )));
-    }
+    check_data(x, y, sample_weight, splits)?;
 
     let study = new_study(kind, &objectives, options)?;
     let mut trials = Vec::with_capacity(options.n_trials);
@@ -309,44 +293,18 @@ fn run(
         let mut trial = study.ask().map_err(study_err)?;
         let number = trial.number;
         let suggested = space.suggest(&mut trial)?;
-        let outcome = mapped(&suggested).and_then(|params| {
-            cv_evaluate(
-                kind,
-                &Value::Object(params),
-                x,
-                y,
-                sample_weight,
-                splits,
-                &objectives,
-            )
-        });
-        let mut record = TrialRecord {
-            number: number as usize,
-            params: Value::Object(suggested),
-            score: None,
-            fold_scores: Vec::new(),
-            values: Vec::new(),
-            error: None,
-        };
-        match outcome {
-            Ok(folds) => {
-                let n = folds.len() as f64;
-                let means: Vec<f64> = (0..objectives.len())
-                    .map(|k| folds.iter().map(|f| f[k]).sum::<f64>() / n)
-                    .collect();
-                record.fold_scores = folds.iter().map(|f| f[0]).collect();
-                match means.iter().position(|v| !v.is_finite()) {
-                    None => {
-                        record.score = Some(means[0]);
-                        record.values = means;
-                    }
-                    Some(k) => {
-                        record.error = Some(format!("{} is not finite", objectives[k].name()));
-                    }
-                }
-            }
-            Err(e) => record.error = Some(e.to_string()),
-        }
+        let record = trial_record(
+            number as usize,
+            suggested,
+            &mapped,
+            kind,
+            x,
+            y,
+            sample_weight,
+            splits,
+            &objectives,
+            options.weighted_scoring,
+        );
         let state = if record.values.is_empty() {
             TrialStateValues::Fail
         } else {
@@ -428,6 +386,161 @@ fn run(
         trials,
         model,
     })
+}
+
+/// The metric and every objective of a search, the metric first.
+fn objectives_of(kind: &str, options: &TuneOptions) -> Result<(Metric, Vec<Objective>)> {
+    let metric = match &options.metric {
+        Some(name) => Metric::from_name(name)?,
+        None => Metric::default_for(kind),
+    };
+    let mut objectives = vec![Objective::Metric(metric)];
+    for name in &options.objectives {
+        let o = Objective::from_name(name)?;
+        if objectives.contains(&o) {
+            return Err(invalid(format!("objective '{name}' is listed twice")));
+        }
+        objectives.push(o);
+    }
+    Ok((metric, objectives))
+}
+
+fn check_data(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    sample_weight: Option<ArrayView1<f64>>,
+    splits: &[CvSplit],
+) -> Result<()> {
+    if splits.is_empty() {
+        return Err(invalid("no CV splits"));
+    }
+    if x.nrows() != y.len() || sample_weight.is_some_and(|w| w.len() != y.len()) {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "x has {} rows, y {} values",
+            x.nrows(),
+            y.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Cross-validate one parameter set: the record of trial `number`, with
+/// its score or why it failed.
+#[allow(clippy::too_many_arguments)]
+fn trial_record(
+    number: usize,
+    suggested: Map<String, Value>,
+    mapped: ParamMap<'_>,
+    kind: &str,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    sample_weight: Option<ArrayView1<f64>>,
+    splits: &[CvSplit],
+    objectives: &[Objective],
+    weighted_scoring: bool,
+) -> TrialRecord {
+    let outcome = mapped(&suggested).and_then(|params| {
+        cv_evaluate(
+            kind,
+            &Value::Object(params),
+            x,
+            y,
+            sample_weight,
+            splits,
+            objectives,
+            weighted_scoring,
+        )
+    });
+    let mut record = TrialRecord {
+        number,
+        params: Value::Object(suggested),
+        score: None,
+        fold_scores: Vec::new(),
+        values: Vec::new(),
+        error: None,
+    };
+    match outcome {
+        Ok(folds) => {
+            let n = folds.len() as f64;
+            let means: Vec<f64> = (0..objectives.len())
+                .map(|k| folds.iter().map(|f| f[k]).sum::<f64>() / n)
+                .collect();
+            record.fold_scores = folds.iter().map(|f| f[0]).collect();
+            match means.iter().position(|v| !v.is_finite()) {
+                None => {
+                    record.score = Some(means[0]);
+                    record.values = means;
+                }
+                Some(k) => {
+                    record.error = Some(format!("{} is not finite", objectives[k].name()));
+                }
+            }
+        }
+        Err(e) => record.error = Some(e.to_string()),
+    }
+    record
+}
+
+/// Cross-validate fixed parameter sets in order (the candidates of
+/// scikit-learn's `GridSearchCV` / `RandomizedSearchCV`), one
+/// [`TrialRecord`] each, scored on `options.metric` and
+/// `options.objectives`; `options.params` are fixed for every candidate.
+/// `map_params`, as in [`tune_with_splits_mapped`], turns each candidate
+/// into estimator parameters (the candidates' names are then not checked).
+/// The sampler options, `n_trials` and `refit` are not used: choosing and
+/// refitting the best candidate is the caller's.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_candidates(
+    kind: &str,
+    candidates: &[Map<String, Value>],
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    sample_weight: Option<ArrayView1<f64>>,
+    splits: &[CvSplit],
+    options: &TuneOptions,
+    map_params: Option<ParamMap<'_>>,
+) -> Result<Vec<TrialRecord>> {
+    if candidates.is_empty() {
+        return Err(invalid("no candidates to evaluate"));
+    }
+    let (_, objectives) = objectives_of(kind, options)?;
+    let fixed = check_params(kind, None, &options.params)?;
+    if map_params.is_none() {
+        if let Some(name) = candidates
+            .iter()
+            .flat_map(Map::keys)
+            .find(|n| !fixed.contains_key(*n))
+        {
+            return Err(invalid(format!("{kind} has no parameter '{name}'")));
+        }
+    }
+    check_data(x, y, sample_weight, splits)?;
+    let mapped = |suggested: &Map<String, Value>| -> Result<Map<String, Value>> {
+        let mut params = fixed.clone();
+        params.extend(match map_params {
+            Some(map) => map(suggested)?,
+            None => suggested.clone(),
+        });
+        Ok(params)
+    };
+    Ok(candidates
+        .iter()
+        .enumerate()
+        .map(|(number, c)| {
+            trial_record(
+                number,
+                c.clone(),
+                &mapped,
+                kind,
+                x,
+                y,
+                sample_weight,
+                splits,
+                &objectives,
+                options.weighted_scoring,
+            )
+        })
+        .collect())
 }
 
 /// Validate the fixed and (when given) searched parameter names against the
@@ -518,8 +631,10 @@ fn new_study(kind: &str, objectives: &[Objective], options: &TuneOptions) -> Res
     .map_err(study_err)
 }
 
-/// Fit `kind` with `params` on every split and evaluate every objective;
+/// Fit `kind` with `params` on every split and evaluate every objective
+/// (weighted by the test rows' sample weights with `weighted_scoring`);
 /// returns one row of objective values per split.
+#[allow(clippy::too_many_arguments)]
 fn cv_evaluate(
     kind: &str,
     params: &Value,
@@ -528,6 +643,7 @@ fn cv_evaluate(
     sample_weight: Option<ArrayView1<f64>>,
     splits: &[CvSplit],
     objectives: &[Objective],
+    weighted_scoring: bool,
 ) -> Result<Vec<Vec<f64>>> {
     let metrics = || {
         objectives.iter().filter_map(|o| match o {
@@ -545,6 +661,9 @@ fn cv_evaluate(
             let w_train = sample_weight.map(|w| w.select(Axis(0), train));
             let x_test = x.select(Axis(0), test);
             let y_test = y.select(Axis(0), test);
+            let w_test = sample_weight
+                .filter(|_| weighted_scoring)
+                .map(|w| w.select(Axis(0), test));
             let mut model = anofox_ml_registry::make(kind, params)?;
             let start = std::time::Instant::now();
             model.fit(
@@ -569,10 +688,15 @@ fn cv_evaluate(
             objectives
                 .iter()
                 .map(|o| match o {
-                    Objective::Metric(m) if m.needs_proba() => {
-                        m.score_proba(&y_test, proba.as_ref().expect("computed"), &classes)
+                    Objective::Metric(m) if m.needs_proba() => m.score_proba(
+                        &y_test,
+                        proba.as_ref().expect("computed"),
+                        &classes,
+                        w_test.as_ref(),
+                    ),
+                    Objective::Metric(m) => {
+                        m.score(&y_test, pred.as_ref().expect("computed"), w_test.as_ref())
                     }
-                    Objective::Metric(m) => m.score(&y_test, pred.as_ref().expect("computed")),
                     Objective::FitTime => Ok(fit_time),
                     Objective::ModelSize => Ok(model.to_bytes()?.len() as f64),
                 })

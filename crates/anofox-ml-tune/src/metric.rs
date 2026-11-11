@@ -94,8 +94,17 @@ impl Metric {
         matches!(self, Metric::RocAuc | Metric::LogLoss)
     }
 
-    /// Score point predictions.
-    pub(crate) fn score(self, y: &Array1<f64>, pred: &Array1<f64>) -> Result<f64> {
+    /// Score point predictions, weighted by `w` when given (sklearn's
+    /// scorers with `sample_weight`).
+    pub(crate) fn score(
+        self,
+        y: &Array1<f64>,
+        pred: &Array1<f64>,
+        w: Option<&Array1<f64>>,
+    ) -> Result<f64> {
+        if let Some(w) = w {
+            return self.score_weighted(y, pred, w);
+        }
         match self {
             Metric::R2 => m::r2_score(y, pred),
             Metric::Mse => m::mse(y, pred),
@@ -112,13 +121,77 @@ impl Metric {
         }
     }
 
+    fn score_weighted(self, y: &Array1<f64>, pred: &Array1<f64>, w: &Array1<f64>) -> Result<f64> {
+        if y.len() != pred.len() || y.len() != w.len() {
+            return Err(RustMlError::ShapeMismatch(format!(
+                "{} labels, {} predictions, {} weights",
+                y.len(),
+                pred.len(),
+                w.len()
+            )));
+        }
+        let total = w.sum();
+        if total == 0.0 {
+            return Err(RustMlError::InvalidParameter(
+                "sum of sample_weight is zero".into(),
+            ));
+        }
+        let average = |v: &Array1<f64>| (v * w).sum() / total;
+        let err = y - pred;
+        let classification = |avg| {
+            let opts = m::ClassificationOptions::new().with_sample_weight(w);
+            m::f1_score_with(y, pred, avg, &opts)
+        };
+        match self {
+            Metric::R2 | Metric::ExplainedVariance => {
+                let y_mean = average(y);
+                let denom = average(&y.mapv(|v| (v - y_mean).powi(2)));
+                let num = if self == Metric::R2 {
+                    average(&err.mapv(|e| e * e))
+                } else {
+                    let err_mean = average(&err);
+                    average(&err.mapv(|e| (e - err_mean).powi(2)))
+                };
+                // sklearn: a constant y scores 1 when predicted exactly, else 0.
+                Ok(if denom == 0.0 {
+                    if num == 0.0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    1.0 - num / denom
+                })
+            }
+            Metric::Mse => Ok(average(&err.mapv(|e| e * e))),
+            Metric::Rmse => Ok(average(&err.mapv(|e| e * e)).sqrt()),
+            Metric::Mae => Ok(average(&err.mapv(f64::abs))),
+            Metric::Mape => {
+                let rel =
+                    Array1::from_shape_fn(y.len(), |i| err[i].abs() / y[i].abs().max(f64::EPSILON));
+                Ok(average(&rel))
+            }
+            Metric::Accuracy => m::accuracy_score_with(y, pred, Some(w)),
+            Metric::F1Macro => classification(m::Average::Macro),
+            Metric::F1Weighted => classification(m::Average::Weighted),
+            Metric::MedianAbsoluteError | Metric::BalancedAccuracy => {
+                Err(RustMlError::InvalidParameter(format!(
+                    "scoring '{}' with sample weights is not supported",
+                    self.name()
+                )))
+            }
+            Metric::RocAuc | Metric::LogLoss => unreachable!("probability metric"),
+        }
+    }
+
     /// Score class probabilities whose columns follow `classes` (the sorted
-    /// distinct training labels).
+    /// distinct training labels), weighted by `w` when given.
     pub(crate) fn score_proba(
         self,
         y: &Array1<f64>,
         proba: &Array2<f64>,
         classes: &[f64],
+        w: Option<&Array1<f64>>,
     ) -> Result<f64> {
         if proba.ncols() != classes.len() {
             return Err(RustMlError::ShapeMismatch(format!(
@@ -128,10 +201,14 @@ impl Metric {
             )));
         }
         match self {
-            Metric::LogLoss => m::log_loss_multiclass(y, proba, Some(classes), None),
+            Metric::LogLoss => m::log_loss_multiclass(y, proba, Some(classes), w),
             Metric::RocAuc if classes.len() == 2 => {
                 let positive = y.mapv(|v| if v == classes[1] { 1.0 } else { 0.0 });
-                m::roc_auc_score(&positive, &proba.column(1).to_owned())
+                let score = proba.column(1).to_owned();
+                match w {
+                    None => m::roc_auc_score(&positive, &score),
+                    Some(_) => m::roc_auc_score_with(&positive, &score, w),
+                }
             }
             Metric::RocAuc => m::roc_auc_score_multiclass(
                 y,
@@ -139,7 +216,7 @@ impl Metric {
                 m::MultiClass::Ovr,
                 m::Average::Macro,
                 Some(classes),
-                None,
+                w,
             ),
             _ => unreachable!("point metric"),
         }

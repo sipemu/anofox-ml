@@ -488,3 +488,77 @@ fn mapped_search_spaces_translate_each_trial() {
         );
     }
 }
+
+#[test]
+fn candidates_are_cross_validated_in_order_with_weighted_scores() {
+    use anofox_ml_tune::evaluate_candidates;
+    use ndarray::Axis;
+    let x = Array2::from_shape_fn((40, 2), |(i, j)| ((i * (2 + j * 5)) % 13) as f64);
+    let y = Array1::from_shape_fn(40, |i| 2.0 * x[[i, 0]] - x[[i, 1]] + (i % 3) as f64);
+    let w = Array1::from_shape_fn(40, |i| 0.5 + (i % 4) as f64);
+    let splits = anofox_ml_core::utils::k_fold(40, 4).unwrap();
+    let candidates: Vec<_> = [0.1, 100.0]
+        .iter()
+        .map(|a| json!({ "lambda": a }).as_object().unwrap().clone())
+        .collect();
+    let opts = |weighted| TuneOptions {
+        metric: Some("mse".into()),
+        weighted_scoring: weighted,
+        ..Default::default()
+    };
+    let run = |weighted| {
+        evaluate_candidates(
+            "RidgeRegressor",
+            &candidates,
+            x.view(),
+            y.view(),
+            Some(w.view()),
+            &splits,
+            &opts(weighted),
+            None,
+        )
+        .unwrap()
+    };
+    let (plain, weighted) = (run(false), run(true));
+    assert_eq!(plain.len(), 2);
+    assert_eq!(plain[1].params, json!({"lambda": 100.0}));
+    // A larger penalty fits worse.
+    assert!(plain[0].score.unwrap() < plain[1].score.unwrap());
+
+    // Each fold by hand: a weighted fit, scored with and without the weights.
+    for (k, (train, test)) in splits.iter().enumerate() {
+        let mut model =
+            anofox_ml_registry::make("RidgeRegressor", &json!({"lambda": 0.1})).unwrap();
+        let wt = w.select(Axis(0), train);
+        model
+            .fit(
+                x.select(Axis(0), train).view(),
+                Some(y.select(Axis(0), train).view()),
+                Some(wt.view()),
+            )
+            .unwrap();
+        let Out::A1(pred) = model.predict(x.select(Axis(0), test).view()).unwrap() else {
+            panic!("1-D predictions")
+        };
+        let err2 = (&y.select(Axis(0), test) - &pred).mapv(|e| e * e);
+        let ws = w.select(Axis(0), test);
+        let mse = err2.mean().unwrap();
+        let wmse = (&err2 * &ws).sum() / ws.sum();
+        assert!((plain[0].fold_scores[k] - mse).abs() < 1e-9);
+        assert!((weighted[0].fold_scores[k] - wmse).abs() < 1e-9);
+    }
+
+    let bad = vec![json!({"nope": 1}).as_object().unwrap().clone()];
+    let err = evaluate_candidates(
+        "RidgeRegressor",
+        &bad,
+        x.view(),
+        y.view(),
+        None,
+        &splits,
+        &opts(false),
+        None,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("no parameter 'nope'"), "{err}");
+}

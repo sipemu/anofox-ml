@@ -1355,6 +1355,12 @@ registry! {
         predict: |m, x| m.predict(x),
         transform: |m, x| m.transform(x),
     }
+    SelectFromModel {
+        config: crate::meta::SelectFromModelConfig = Default::default(),
+        fitted: crate::meta::SelectFromModelFit,
+        fit: |c, x, y, w| c.fit(x, y, w),
+        transform: |m, x| m.transform(x),
+    }
     SequentialFeatureSelector {
         config: crate::meta::SfsConfig = Default::default(),
         fitted: crate::meta::SfsFit,
@@ -2261,6 +2267,28 @@ registry! {
         inverse_transform: |m, x| m
             .inverse_transform(&x.to_owned())
             .map(|a| a.mapv(|v| v.unwrap_or(f64::NAN))),
+    }
+    LabelEncoder {
+        config: crate::encoders::LabelEncoderConfig = Default::default(),
+        fitted: pre::FittedLabelEncoder<f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x)
+        },
+        transform: |m, x| crate::encoders::label_transform(m, x),
+        inverse_transform: |m, x| crate::encoders::label_inverse(m, x),
+    }
+    OrdinalEncoder {
+        config: pre::OrdinalEncoder = Default::default(),
+        fitted: pre::FittedOrdinalEncoder<f64>,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(&crate::encoders::columns(x))
+        },
+        transform: |m, x| m.transform_f64(&crate::encoders::columns(x)),
+        inverse_transform: |m, x| m
+            .inverse_transform_f64(x)
+            .map(|cols| crate::encoders::from_columns(cols, x.nrows())),
     }
     Nmf {
         config: pre::Nmf = pre::Nmf::new(2),

@@ -1,6 +1,8 @@
-"""Label and dict encoders (sklearn's ``LabelBinarizer``,
-``MultiLabelBinarizer`` and ``DictVectorizer``). They only map labels or
-feature names to columns, so they are plain Python; outputs are dense."""
+"""Label and dict encoders. ``LabelEncoder`` and ``OrdinalEncoder`` run in
+Rust on numeric categories; other labels (strings, objects) are first coded
+by their sorted order here. ``LabelBinarizer``, ``MultiLabelBinarizer`` and
+``DictVectorizer`` only map labels or feature names to columns, so they are
+plain Python; outputs are dense."""
 
 from __future__ import annotations
 
@@ -8,7 +10,7 @@ from numbers import Number
 
 import numpy as np
 
-from ._base import BaseEstimator, NotFittedError
+from ._base import BaseEstimator, NotFittedError, TransformerMixin
 
 
 def _check_fitted(est, attr):
@@ -17,6 +19,221 @@ def _check_fitted(est, attr):
             f"This {type(est).__name__} instance is not fitted yet. "
             "Call 'fit' with appropriate arguments before using this estimator."
         )
+
+
+def _is_nan(v):
+    return isinstance(v, (float, np.floating)) and np.isnan(v)
+
+
+def _numeric(values):
+    """Whether a 1-D array holds numbers only (NaN allowed)."""
+    if values.dtype.kind in "biuf":
+        return True
+    return all(isinstance(v, Number) and not isinstance(v, (str, bytes)) for v in values)
+
+
+class _Coder:
+    """Codes the non-numeric categories of one column by their sorted
+    order (the Rust encoders see the codes): ``None`` sorts last, as in
+    sklearn, NaN is missing (NaN), and an unseen category is -1 (never a
+    code, so the Rust encoder treats it as unknown)."""
+
+    def __init__(self, values):
+        present = [v for v in values if v is not None and not _is_nan(v)]
+        cats = list(np.unique(np.asarray(present, dtype=object))) if present else []
+        if any(v is None for v in values):
+            cats.append(None)
+        self.categories = np.empty(len(cats), dtype=object)
+        self.categories[:] = cats
+        self.index = {c: i for i, c in enumerate(cats)}
+
+    def __call__(self, values):
+        return np.asarray([np.nan if _is_nan(v) else self.index.get(v, -1.0) for v in values],
+                          dtype=np.float64)
+
+
+class LabelEncoder(BaseEstimator):
+    """Labels as ``0..n_classes-1`` in sorted order (``classes_``)."""
+
+    _kind = "LabelEncoder"
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def _labels(y):
+        y = np.asarray(y)
+        if y.ndim == 2 and y.shape[1] == 1:
+            y = y.ravel()
+        if y.ndim != 1:
+            raise ValueError("y should be a 1d array")
+        return y
+
+    def _codes(self, y):
+        if self._coder is None:
+            return np.ascontiguousarray(y, dtype=np.float64).reshape(-1, 1)
+        return self._coder(y).reshape(-1, 1)
+
+    def fit(self, y):
+        y = self._labels(y)
+        self._coder = None if _numeric(y) else _Coder(y)
+        self._fit_model(self._codes(y))
+        if self._coder is None:
+            vocab = [np.nan if v is None else v for v in self._fitted_state()["vocab"]]
+            self.classes_ = np.asarray(vocab, dtype=np.float64).astype(y.dtype)
+        else:
+            self.classes_ = self._coder.categories.astype(y.dtype)
+        return self
+
+    def fit_transform(self, y):
+        return self.fit(y).transform(y)
+
+    def transform(self, y):
+        _check_fitted(self, "classes_")
+        y = self._labels(y)
+        if len(y) == 0:
+            return np.empty(0, dtype=np.int64)
+        codes = self._codes(y)
+        unseen = codes[:, 0] < 0 if self._coder is not None else ~np.isin(y, self.classes_)
+        if unseen.any():
+            raise ValueError("y contains previously unseen labels: "
+                             f"{np.unique(y[unseen].astype(str)).tolist()}")
+        return np.asarray(self._call("transform", codes), dtype=np.int64)
+
+    def inverse_transform(self, y):
+        _check_fitted(self, "classes_")
+        y = np.asarray(y)
+        if len(y) == 0:
+            return np.empty(0, dtype=self.classes_.dtype)
+        y = np.ascontiguousarray(self._labels(y), dtype=np.float64).reshape(-1, 1)
+        out = np.asarray(self._call("inverse_transform", y))
+        if self._coder is None:
+            return out.astype(self.classes_.dtype)
+        return self.classes_[out.astype(np.int64)]
+
+
+class OrdinalEncoder(TransformerMixin, BaseEstimator):
+    """Each column's categories as ``0..n_categories-1`` in sorted order
+    (``categories_``). A missing value (NaN / ``None``) is a category of its
+    own, encoded as ``encoded_missing_value``; with
+    ``handle_unknown="use_encoded_value"`` unseen categories become
+    ``unknown_value``. Only ``categories="auto"`` and no infrequent
+    grouping (``min_frequency`` / ``max_categories``) are supported."""
+
+    _kind = "OrdinalEncoder"
+
+    def __init__(self, *, categories="auto", dtype=np.float64, handle_unknown="error",
+                 unknown_value=None, encoded_missing_value=np.nan, min_frequency=None,
+                 max_categories=None):
+        self.categories = categories
+        self.dtype = dtype
+        self.handle_unknown = handle_unknown
+        self.unknown_value = unknown_value
+        self.encoded_missing_value = encoded_missing_value
+        self.min_frequency = min_frequency
+        self.max_categories = max_categories
+
+    @staticmethod
+    def _code_value(v):
+        return None if v is None or np.isnan(v) else float(v)
+
+    def _rust_params(self, X, y):
+        if not (isinstance(self.categories, str) and self.categories == "auto"):
+            raise ValueError("only categories='auto' is supported")
+        if self.min_frequency is not None or self.max_categories is not None:
+            raise ValueError("min_frequency / max_categories are not supported")
+        if self.handle_unknown == "use_encoded_value":
+            u = self.unknown_value
+            if not _is_nan(u) and not (
+                    isinstance(u, (int, np.integer)) and not isinstance(u, bool)):
+                raise TypeError("unknown_value should be an integer or np.nan when "
+                                f"handle_unknown is 'use_encoded_value', got {u}.")
+            unknown = {"UseEncodedValue": self._code_value(u)}
+        elif self.handle_unknown == "error":
+            if self.unknown_value is not None:
+                raise TypeError("unknown_value should only be set when handle_unknown is "
+                                f"'use_encoded_value', got {self.unknown_value}.")
+            unknown = "Error"
+        else:
+            raise ValueError("handle_unknown must be 'error' or 'use_encoded_value', got "
+                             f"{self.handle_unknown!r}")
+        return {"handle_unknown": unknown,
+                "encoded_missing_value": self._code_value(self.encoded_missing_value)}
+
+    def _columns(self, X):
+        X = np.asarray(X, dtype=None if hasattr(X, "dtype") else object)
+        if X.ndim != 2:
+            raise ValueError(f"Expected a 2D array, got {X.ndim}D")
+        if X.dtype.kind not in "biuf":
+            X = X.astype(object)
+        return X
+
+    def _codes(self, X):
+        if X.shape[1] != self.n_features_in_:
+            raise ValueError(f"X has {X.shape[1]} features, but OrdinalEncoder is expecting "
+                             f"{self.n_features_in_} features as input.")
+        out = np.empty(X.shape, dtype=np.float64)
+        for j, coder in enumerate(self._coders):
+            out[:, j] = X[:, j].astype(np.float64) if coder is None else coder(X[:, j])
+        return out
+
+    def fit(self, X, y=None):
+        X = self._columns(X)
+        self.n_features_in_ = X.shape[1]
+        self._coders = [None if _numeric(X[:, j]) else _Coder(X[:, j])
+                        for j in range(X.shape[1])]
+        self._fit_model(self._codes(X))
+        self.categories_ = []
+        for coder, vocab in zip(self._coders, self._fitted_state()["vocabularies"]):
+            if coder is None:
+                self.categories_.append(np.asarray(
+                    [np.nan if v is None else v for v in vocab], dtype=np.float64))
+            else:
+                missing = bool(vocab) and vocab[-1] is None  # NaN in the JSON
+                cats = np.empty(len(coder.categories) + missing, dtype=object)
+                cats[:len(coder.categories)] = coder.categories
+                if missing:
+                    cats[-1] = np.nan
+                self.categories_.append(cats)
+        return self
+
+    def transform(self, X):
+        _check_fitted(self, "categories_")
+        out = np.asarray(self._call("transform", self._codes(self._columns(X))))
+        return out.astype(self.dtype, copy=False)
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X).transform(X)
+
+    def inverse_transform(self, X):
+        """Codes back to categories; ``unknown_value`` codes give ``None``."""
+        _check_fitted(self, "categories_")
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 2 or X.shape[1] != len(self.categories_):
+            raise ValueError("Shape of the passed X data is not correct. Expected "
+                             f"{len(self.categories_)} columns, got {X.shape[-1]}.")
+        unknown = (float(self.unknown_value) if self.handle_unknown == "use_encoded_value"
+                   else None)
+        out = np.empty(X.shape, dtype=object)
+        for j, cats in enumerate(self.categories_):
+            missing = len(cats) > 0 and _is_nan(cats[-1])
+            n = len(cats) - int(missing)
+            for i, v in enumerate(X[:, j]):
+                if missing and _same(v, float(self.encoded_missing_value)):
+                    out[i, j] = np.nan
+                elif unknown is not None and _same(v, unknown):
+                    out[i, j] = None
+                elif 0 <= v < n and float(v).is_integer():
+                    out[i, j] = cats[int(v)]
+                else:
+                    raise ValueError(f"encoded value {v} is out of range for column {j}")
+        if all(c is None for c in self._coders) and not any(v is None for v in out.flat):
+            return out.astype(np.float64)
+        return out
+
+
+def _same(a, b):
+    return np.isnan(a) if np.isnan(b) else a == b
 
 
 class LabelBinarizer(BaseEstimator):

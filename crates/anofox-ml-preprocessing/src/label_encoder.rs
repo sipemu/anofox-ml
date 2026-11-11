@@ -1,43 +1,27 @@
 use anofox_ml_core::{Result, RustMlError};
 use ndarray::Array1;
-use std::collections::HashMap;
 
-/// Encodes string labels as integer indices.
-///
-/// Maps each unique label to a unique integer in sorted order. This is useful
-/// for converting categorical target labels to numeric form for model training.
-///
-/// Unlike the numeric transformers, `LabelEncoder` works on string slices
-/// rather than float arrays, so it does not implement `FitUnsupervised`.
+use crate::one_hot_encoder::Category;
+
+/// Encodes labels as `0..n_classes` in their sorted order
+/// (`sklearn.preprocessing.LabelEncoder`). The labels are any
+/// [`Category`]: strings, integers, floats.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LabelEncoder;
 
 impl LabelEncoder {
-    /// Create a new `LabelEncoder`.
     pub fn new() -> Self {
         Self
     }
 
-    /// Fit the encoder on the given labels, learning the vocabulary.
-    pub fn fit(&self, labels: &[String]) -> Result<FittedLabelEncoder> {
+    pub fn fit<T: Category>(&self, labels: &[T]) -> Result<FittedLabelEncoder<T>> {
         if labels.is_empty() {
             return Err(RustMlError::EmptyInput("labels slice is empty".into()));
         }
-
-        let mut vocab: Vec<String> = labels.iter().cloned().collect();
-        vocab.sort();
-        vocab.dedup();
-
-        let label_to_index: HashMap<String, usize> = vocab
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.clone(), i))
-            .collect();
-
-        Ok(FittedLabelEncoder {
-            vocab,
-            label_to_index,
-        })
+        let mut vocab = labels.to_vec();
+        vocab.sort_by(|a, b| a.cmp_category(b));
+        vocab.dedup_by(|a, b| a.cmp_category(b).is_eq());
+        Ok(FittedLabelEncoder { vocab })
     }
 }
 
@@ -47,33 +31,28 @@ impl Default for LabelEncoder {
     }
 }
 
-/// Fitted LabelEncoder — holds the learned vocabulary and mapping.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FittedLabelEncoder {
-    vocab: Vec<String>,
-    label_to_index: HashMap<String, usize>,
+pub struct FittedLabelEncoder<T = String> {
+    /// The sorted labels (sklearn's `classes_`).
+    vocab: Vec<T>,
 }
 
-impl FittedLabelEncoder {
-    /// Transform string labels into integer-encoded values.
-    pub fn transform(&self, labels: &[String]) -> Result<Array1<usize>> {
-        let mut encoded = Vec::with_capacity(labels.len());
-        for label in labels {
-            match self.label_to_index.get(label) {
-                Some(&idx) => encoded.push(idx),
-                None => {
-                    return Err(RustMlError::InvalidParameter(format!(
-                        "unknown label: '{}'",
-                        label
-                    )));
-                }
-            }
-        }
-        Ok(Array1::from_vec(encoded))
+impl<T: Category> FittedLabelEncoder<T> {
+    pub fn transform(&self, labels: &[T]) -> Result<Array1<usize>> {
+        labels
+            .iter()
+            .map(|label| {
+                self.vocab
+                    .binary_search_by(|c| c.cmp_category(label))
+                    .map_err(|_| {
+                        RustMlError::InvalidParameter(format!("unknown label: '{label:?}'"))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Array1::from_vec)
     }
 
-    /// Inverse-transform integer-encoded values back to string labels.
-    pub fn inverse_transform(&self, encoded: &Array1<usize>) -> Result<Vec<String>> {
+    pub fn inverse_transform(&self, encoded: &Array1<usize>) -> Result<Vec<T>> {
         let mut labels = Vec::with_capacity(encoded.len());
         for &idx in encoded.iter() {
             if idx >= self.vocab.len() {
@@ -88,12 +67,10 @@ impl FittedLabelEncoder {
         Ok(labels)
     }
 
-    /// Return the learned vocabulary (sorted).
-    pub fn vocab(&self) -> &[String] {
+    pub fn vocab(&self) -> &[T] {
         &self.vocab
     }
 
-    /// Return the number of classes.
     pub fn num_classes(&self) -> usize {
         self.vocab.len()
     }
@@ -135,6 +112,19 @@ mod tests {
         let recovered = fitted.inverse_transform(&encoded).unwrap();
 
         assert_eq!(recovered, labels);
+    }
+
+    #[test]
+    fn test_numeric_labels() {
+        // sklearn: LabelEncoder().fit([10, 2, 2.5, 10]).classes_ == [2, 2.5, 10]
+        let fitted = LabelEncoder::new().fit(&[10.0, 2.0, 2.5, 10.0]).unwrap();
+        assert_eq!(fitted.vocab(), &[2.0, 2.5, 10.0]);
+        assert_eq!(fitted.transform(&[2.5, 10.0]).unwrap(), array![1, 2]);
+        assert!(fitted.transform(&[3.0]).is_err());
+        assert_eq!(
+            fitted.inverse_transform(&array![0, 2]).unwrap(),
+            vec![2.0, 10.0]
+        );
     }
 
     #[test]

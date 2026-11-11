@@ -7,7 +7,13 @@ and the heavy work runs in Rust with the GIL released.
 """
 
 from . import conformal, encoders, meta, metrics, model_selection, multiclass
-from .encoders import DictVectorizer, LabelBinarizer, MultiLabelBinarizer
+from .encoders import (
+    DictVectorizer,
+    LabelBinarizer,
+    LabelEncoder,
+    MultiLabelBinarizer,
+    OrdinalEncoder,
+)
 from .compose import ColumnTransformer, FeatureUnion, Pipeline, make_pipeline
 from .meta import (
     RFE,
@@ -15,6 +21,7 @@ from .meta import (
     CalibratedClassifierCV,
     MultiOutputRegressor,
     RegressorChain,
+    SelectFromModel,
     SequentialFeatureSelector,
     StackingClassifier,
     StackingRegressor,
@@ -200,7 +207,16 @@ from ._estimators import (
     LocallyLinearEmbedding,
     ClassicalMDS,
 )
-from .model_selection import TuneSearchCV, train_test_split
+from .function_transformer import FunctionTransformer
+from .model_selection import (
+    GridSearchCV,
+    ParameterGrid,
+    ParameterSampler,
+    RandomizedSearchCV,
+    StratifiedKFold,
+    TuneSearchCV,
+    train_test_split,
+)
 
 #: Previous (0.1) class names.
 KnnClassifier = KNeighborsClassifier
@@ -236,7 +252,9 @@ __all__ = [
     "GaussianProcessClassifier", "PLSRegression", "CCA", "PLSCanonical", "PLSSVD",
     "MultiTaskLasso", "MultiTaskElasticNet", "SpectralEmbedding", "RcsTransformer",
     "BaseEstimator", "NotFittedError", "conformal", "meta", "metrics", "model_selection", "multiclass", "train_test_split",
-    "TuneSearchCV",
+    "TuneSearchCV", "GridSearchCV", "RandomizedSearchCV", "ParameterGrid", "ParameterSampler",
+    "StratifiedKFold", "FunctionTransformer", "LabelEncoder", "OrdinalEncoder",
+    "SelectFromModel",
     "OneVsRestClassifier", "OneVsOneClassifier", "FixedThresholdClassifier",
     "TunedThresholdClassifierCV", "SelfTrainingClassifier",
     "GenericUnivariateSelect", "SelectPercentile", "SelectFpr", "SelectFdr", "SelectFwe",
