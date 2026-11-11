@@ -1986,6 +1986,328 @@ impl RegressorChainFit {
 }
 
 // ============================================================
+// Multi-output classification
+// ============================================================
+
+/// A classifier fitted on one target column: the column's sorted labels,
+/// and the model fitted on their indices.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LabelledModel {
+    classes: Vec<f64>,
+    model: RegistryFitted,
+}
+
+impl LabelledModel {
+    fn fit(spec: &EstimatorSpec, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<Self> {
+        let (classes, idx) = encode(y)?;
+        let codes: Array1<f64> = idx.iter().map(|&i| i as f64).collect();
+        Ok(Self {
+            classes,
+            model: spec.fit(x, codes.view())?,
+        })
+    }
+
+    /// Predicted labels.
+    fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let codes = self.model.predict(x)?;
+        codes
+            .iter()
+            .map(|&c| {
+                self.classes.get(c as usize).copied().ok_or_else(|| {
+                    err(format!("{}: predicted class {c} out of range", self.kind()))
+                })
+            })
+            .collect()
+    }
+
+    fn kind(&self) -> &str {
+        self.model.model().kind()
+    }
+}
+
+/// sklearn's `MultiOutputClassifier`: one classifier per target, fitted
+/// on `[X | Y]` whose last `y_columns` columns are the targets.
+/// `predict_proba` puts the outputs' probability columns side by side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct MultiOutputClassifierConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub y_columns: usize,
+}
+
+impl Default for MultiOutputClassifierConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "LogisticRegressor".into(),
+            estimator_params: empty_params(),
+            y_columns: 2,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct MultiOutputClassifierFit {
+    models: Vec<LabelledModel>,
+}
+
+impl MultiOutputClassifierConfig {
+    pub fn fit(&self, xy: ArrayView2<f64>) -> Result<MultiOutputClassifierFit> {
+        let (x, y) = split_targets("MultiOutputClassifier", xy, self.y_columns)?;
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let models = y
+            .columns()
+            .into_iter()
+            .map(|c| LabelledModel::fit(&spec, x.view(), c))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(MultiOutputClassifierFit { models })
+    }
+}
+
+impl MultiOutputClassifierFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        let cols = self
+            .models
+            .iter()
+            .map(|m| m.predict(x))
+            .collect::<Result<Vec<_>>>()?;
+        stack_columns(&cols)
+    }
+
+    pub fn predict_proba(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        let blocks = self
+            .models
+            .iter()
+            .map(|m| m.model.predict_proba(x))
+            .collect::<Result<Vec<_>>>()?;
+        let views: Vec<_> = blocks.iter().map(|b| b.view()).collect();
+        ndarray::concatenate(Axis(1), &views).map_err(|e| err(e.to_string()))
+    }
+}
+
+/// sklearn's `ClassifierChain` (`cv=None`, `chain_method="predict"`): the
+/// targets in `order`, each classifier fitted on `X` and the true earlier
+/// targets, predicting from the earlier predicted labels.
+/// `predict_proba` / `decision_function` give each link's binary score
+/// (P(larger label) / the decision value), in target order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct ClassifierChainConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub y_columns: usize,
+    pub order: Option<Vec<usize>>,
+}
+
+impl Default for ClassifierChainConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "LogisticRegressor".into(),
+            estimator_params: empty_params(),
+            y_columns: 2,
+            order: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ClassifierChainFit {
+    models: Vec<LabelledModel>,
+    order: Vec<usize>,
+}
+
+fn chain_order(kind: &str, order: &Option<Vec<usize>>, k: usize) -> Result<Vec<usize>> {
+    let order = order.clone().unwrap_or_else(|| (0..k).collect());
+    let mut seen = vec![false; k];
+    if order.len() != k
+        || order
+            .iter()
+            .any(|&o| o >= k || std::mem::replace(&mut seen[o], true))
+    {
+        return Err(err(format!(
+            "{kind}: order {order:?} is not a permutation of 0..{k}"
+        )));
+    }
+    Ok(order)
+}
+
+fn append_column<'a>(x: &'a Array2<f64>, c: ArrayView1<'a, f64>) -> Result<Array2<f64>> {
+    ndarray::concatenate(Axis(1), &[x.view(), c.insert_axis(Axis(1))])
+        .map_err(|e| err(e.to_string()))
+}
+
+impl ClassifierChainConfig {
+    pub fn fit(&self, xy: ArrayView2<f64>) -> Result<ClassifierChainFit> {
+        let (x, y) = split_targets("ClassifierChain", xy, self.y_columns)?;
+        let order = chain_order("ClassifierChain", &self.order, y.ncols())?;
+        let spec = EstimatorSpec {
+            estimator: self.estimator.clone(),
+            estimator_params: self.estimator_params.clone(),
+        };
+        let mut aug = x;
+        let mut models = Vec::with_capacity(order.len());
+        for &t in &order {
+            models.push(LabelledModel::fit(&spec, aug.view(), y.column(t))?);
+            aug = append_column(&aug, y.column(t))?;
+        }
+        Ok(ClassifierChainFit { models, order })
+    }
+}
+
+impl ClassifierChainFit {
+    /// Each link's `output` on `X` and the earlier predicted labels, in
+    /// target order.
+    fn outputs(
+        &self,
+        x: ArrayView2<f64>,
+        output: impl Fn(&LabelledModel, ArrayView2<f64>) -> Result<Array1<f64>>,
+    ) -> Result<Array2<f64>> {
+        let mut aug = x.to_owned();
+        let mut out = vec![Array1::zeros(0); self.order.len()];
+        for (m, &t) in self.models.iter().zip(&self.order) {
+            out[t] = output(m, aug.view())?;
+            aug = append_column(&aug, m.predict(aug.view())?.view())?;
+        }
+        stack_columns(&out)
+    }
+
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        self.outputs(x, |m, a| m.predict(a))
+    }
+
+    pub fn predict_proba(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        self.outputs(x, |m, a| proba_col(&m.model, a, 1))
+    }
+
+    pub fn decision_function(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        self.outputs(x, |m, a| decision_1d(&m.model, a))
+    }
+}
+
+// ============================================================
+// Error-correcting output codes
+// ============================================================
+
+/// One column of the code book: a binary model, or the column's value when
+/// it is the same for every class seen (sklearn's `_ConstantPredictor`).
+#[derive(Serialize, Deserialize)]
+enum CodeModel {
+    Fitted(RegistryFitted),
+    Constant(f64),
+}
+
+/// sklearn's `OutputCodeClassifier` with the code book given (the Python
+/// wrapper draws it as sklearn does): one binary model per column of
+/// `code_book` (`n_classes x n_codes`, entries 1 and -1 or 0), fitted on
+/// each row's class code; a row is the class whose code is nearest
+/// (Euclidean) to the models' scores (decision function, else P(1)).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct OutputCodeConfig {
+    pub estimator: String,
+    pub estimator_params: serde_json::Value,
+    pub code_book: Vec<Vec<f64>>,
+}
+
+impl Default for OutputCodeConfig {
+    fn default() -> Self {
+        Self {
+            estimator: "LogisticRegressor".into(),
+            estimator_params: empty_params(),
+            code_book: Vec::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OutputCodeFit {
+    classes: Vec<f64>,
+    code_book: Vec<Vec<f64>>,
+    models: Vec<CodeModel>,
+    use_decision: bool,
+}
+
+impl OutputCodeConfig {
+    pub fn fit(&self, x: ArrayView2<f64>, y: ArrayView1<f64>) -> Result<OutputCodeFit> {
+        let (classes, idx) = encode(y)?;
+        let n_codes = self.code_book.first().map_or(0, Vec::len);
+        if self.code_book.len() != classes.len()
+            || n_codes == 0
+            || self.code_book.iter().any(|r| r.len() != n_codes)
+        {
+            return Err(err(format!(
+                "OutputCodeClassifier: code_book must be {} rows (one per class) of equal, \
+                 non-zero length",
+                classes.len()
+            )));
+        }
+        let est = RegistryEstimator::new(&self.estimator, self.estimator_params.clone());
+        let mut models = Vec::with_capacity(n_codes);
+        for j in 0..n_codes {
+            let col: Array1<f64> = idx.iter().map(|&i| self.code_book[i][j]).collect();
+            let (values, codes) = encode(col.view())?;
+            models.push(if values.len() == 1 {
+                CodeModel::Constant(values[0])
+            } else {
+                let y01 = codes.iter().map(|&c| c as f64).collect();
+                CodeModel::Fitted(fit_binary(&est, x, &y01)?)
+            });
+        }
+        let use_decision = match models.iter().find_map(|m| match m {
+            CodeModel::Fitted(f) => Some(f),
+            CodeModel::Constant(_) => None,
+        }) {
+            Some(f) => {
+                let d = has(f, "decision_function");
+                check_scores(d, f)?;
+                d
+            }
+            None => false,
+        };
+        Ok(OutputCodeFit {
+            classes,
+            code_book: self.code_book.clone(),
+            models,
+            use_decision,
+        })
+    }
+}
+
+impl OutputCodeFit {
+    pub fn predict(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
+        let scores = self
+            .models
+            .iter()
+            .map(|m| match m {
+                CodeModel::Fitted(f) => binary_score(f, x, self.use_decision),
+                CodeModel::Constant(v) => Ok(Array1::from_elem(x.nrows(), *v)),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((0..x.nrows())
+            .map(|i| {
+                let dist = |code: &Vec<f64>| -> f64 {
+                    code.iter()
+                        .zip(&scores)
+                        .map(|(c, s)| (s[i] - c).powi(2))
+                        .sum()
+                };
+                let best = (0..self.code_book.len()).fold(0, |b, k| {
+                    if dist(&self.code_book[k]) < dist(&self.code_book[b]) {
+                        k
+                    } else {
+                        b
+                    }
+                });
+                self.classes[best]
+            })
+            .collect())
+    }
+}
+
+// ============================================================
 // Recursive feature elimination
 // ============================================================
 

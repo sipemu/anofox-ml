@@ -6,6 +6,20 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Multi-output and output-code classifiers (#256, part 1)
+
+- Registry kinds `MultiOutputClassifier` (one classifier per target, the
+  outputs' probabilities side by side), `ClassifierChain` (`cv=None`,
+  `chain_method="predict"`: each link on `X` and the earlier labels;
+  `predict_proba` / `decision_function` per link) and `OutputCodeClassifier`
+  (error-correcting output codes over a given code book; columns that are
+  constant over the classes predict their value, as sklearn's
+  `_ConstantPredictor`).
+- Python: `MultiOutputClassifier`, `ClassifierChain` (`order` list or
+  `"random"`), `OutputCodeClassifier` (sklearn's code book draw for the same
+  `random_state`) and `FrozenEstimator` (plain Python: it wraps a fitted
+  Python estimator). Tested against sklearn 1.8's meta-estimators.
+
 ### anofox-regression 0.12
 
 - `anofox-ml-regression`, `-linear` and `-preprocessing` use

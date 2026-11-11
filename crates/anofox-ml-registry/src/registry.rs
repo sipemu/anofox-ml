@@ -1345,6 +1345,36 @@ registry! {
         },
         predict: |m, x| m.predict(x),
     }
+    MultiOutputClassifier {
+        config: crate::meta::MultiOutputClassifierConfig = Default::default(),
+        fitted: crate::meta::MultiOutputClassifierFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+    }
+    ClassifierChain {
+        config: crate::meta::ClassifierChainConfig = Default::default(),
+        fitted: crate::meta::ClassifierChainFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x)
+        },
+        predict: |m, x| m.predict(x),
+        predict_proba: |m, x| m.predict_proba(x),
+        decision_function: |m, x| m.decision_function(x),
+    }
+    OutputCodeClassifier {
+        config: crate::meta::OutputCodeConfig = Default::default(),
+        fitted: crate::meta::OutputCodeFit,
+        fit: |c, x, y, w| {
+            no_weight(K, w)?;
+            c.fit(x, need_y(K, y)?)
+        },
+        predict: |m, x| m.predict(x),
+    }
     Rfe {
         config: crate::meta::RfeConfig = Default::default(),
         fitted: crate::meta::RfeFit,
