@@ -109,7 +109,9 @@ array. The default calcers are
 catboost's `[LDA, KNN]`; `with_embedding_options(CatBoostEmbeddingOptions {
 calcers })` picks `Lda { components, reg }` and `Knn { k }`. For regression
 catboost's LDA reduces to the embedding's last coordinate; KNN gives the mean
-target of the k nearest earlier rows.
+target of the k nearest earlier rows. Text and embedding columns can be
+combined (`fit_with_text_and_embeddings` in Rust; both `text_features` and
+`embedding_features` in Python).
 
 ## LightGBM: objectives
 

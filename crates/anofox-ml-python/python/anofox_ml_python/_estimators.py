@@ -1127,16 +1127,17 @@ class _CatBoost(BaseEstimator):
 
     def _fit_model(self, X, y=None, sample_weight=None, eval_set=None):
         if self.embedding_features:
-            if self.text_features:
-                raise ValueError("text_features and embedding_features in one model are "
-                                 "not supported yet")
             if eval_set is not None:
                 raise ValueError("eval_set is not supported with embedding_features")
             embeddings = self._embeddings(X)
+            texts = self._texts(X) if self.text_features else None
             X = self._encode(X, fit=True)
             w = None if sample_weight is None else _check_1d(sample_weight, "sample_weight")
             model = self._new_model(X, y)
-            model.fit_with_embeddings(X, embeddings, y, w)
+            if texts is not None:
+                model.fit_with_text_and_embeddings(X, texts, embeddings, y, w)
+            else:
+                model.fit_with_embeddings(X, embeddings, y, w)
             self._model_ = model
             self.n_features_in_ = self._n_raw_
             return self
@@ -1183,6 +1184,9 @@ class _CatBoost(BaseEstimator):
                 raise ValueError(f"{method} is not supported with embedding_features")
             self._model()
             embeddings = self._embeddings(X)
+            if self.text_features:
+                return getattr(self._model(), method + "_with_text_and_embeddings")(
+                    self._encode(X, fit=False), self._texts(X), embeddings)
             return getattr(self._model(), method + "_with_embeddings")(
                 self._encode(X, fit=False), embeddings)
         if self.text_features:

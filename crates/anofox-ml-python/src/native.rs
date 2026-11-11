@@ -361,6 +361,57 @@ impl PyModel {
         self.call(py, x, |m, x| m.predict_proba_with_embeddings(x, &e))
     }
 
+    /// Fit with text and embedding columns besides `x` (one CatBoost pool).
+    #[pyo3(signature = (x, text, embeddings, y, sample_weight=None))]
+    fn fit_with_text_and_embeddings(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        text: Vec<Vec<String>>,
+        embeddings: Vec<PyReadonlyArray2<'_, f64>>,
+        y: PyReadonlyArray1<'_, f64>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+    ) -> PyResult<()> {
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_array(),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let e: Vec<_> = embeddings.iter().map(|e| e.as_array()).collect();
+        let inner = &mut self.inner;
+        py.detach(|| inner.fit_with_text_and_embeddings(x, &text, &e, Some(y), w))
+            .map_err(to_py_err)
+    }
+
+    /// Predictions of a model fitted with `fit_with_text_and_embeddings`.
+    fn predict_with_text_and_embeddings(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        text: Vec<Vec<String>>,
+        embeddings: Vec<PyReadonlyArray2<'_, f64>>,
+    ) -> PyResult<Py<PyAny>> {
+        let e: Vec<_> = embeddings.iter().map(|e| e.as_array()).collect();
+        self.call(py, x, |m, x| {
+            m.predict_with_text_and_embeddings(x, &text, &e)
+        })
+    }
+
+    /// Class probabilities of a model fitted with
+    /// `fit_with_text_and_embeddings`.
+    fn predict_proba_with_text_and_embeddings(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        text: Vec<Vec<String>>,
+        embeddings: Vec<PyReadonlyArray2<'_, f64>>,
+    ) -> PyResult<Py<PyAny>> {
+        let e: Vec<_> = embeddings.iter().map(|e| e.as_array()).collect();
+        self.call(py, x, |m, x| {
+            m.predict_proba_with_text_and_embeddings(x, &text, &e)
+        })
+    }
+
     /// Predictions with an offset on the link scale (the GLMs).
     fn predict_with_offset(
         &self,

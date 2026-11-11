@@ -7968,6 +7968,17 @@ impl CatBoostRegressor {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<FittedCatBoostRegressor> {
+        self.fit_text_inner(x, text, &[], y, sample_weight)
+    }
+
+    fn fit_text_inner(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostRegressor> {
         let loss = self.loss(1);
         if loss.querywise() || matches!(loss, Loss::MultiRmse(_)) {
             return Err(RustMlError::InvalidParameter(
@@ -7985,6 +7996,11 @@ impl CatBoostRegressor {
             .unwrap_or_else(|| CatBoostTextOptions::default_for(false));
         let processing = TextProcessing::fit(&options, text, false)?;
         let (augmented, _) = processing.apply(x, text)?;
+        let columns = if embeddings.is_empty() {
+            Vec::new()
+        } else {
+            embedding_columns(self.embedding_options.as_ref(), embeddings, x.nrows())?
+        };
         let mut f = self.fit_targets(
             augmented.view(),
             y.insert_axis(ndarray::Axis(1)),
@@ -7994,13 +8010,33 @@ impl CatBoostRegressor {
             None,
             Some(Estimated {
                 n_bow: processing.n_bow(),
-                n_external: x.ncols() + text.len(),
-                embeddings: Vec::new(),
+                n_external: x.ncols() + text.len() + embeddings.len(),
+                embeddings: columns,
             }),
         )?;
         f.n_features = x.ncols();
         f.text = Some(processing);
+        f.n_embedding_columns = embeddings.len();
         Ok(f)
+    }
+
+    /// Fit with text and embedding features in one pool: the text features
+    /// as [`fit_with_text`](Self::fit_with_text), then the embedding
+    /// calcers as [`fit_with_embeddings`](Self::fit_with_embeddings).
+    pub fn fit_with_text_and_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostRegressor> {
+        if embeddings.is_empty() {
+            return Err(RustMlError::ShapeMismatch(
+                "fit_with_text_and_embeddings needs embedding columns".into(),
+            ));
+        }
+        self.fit_text_inner(x, text, embeddings, y, sample_weight)
     }
 
     /// Fit with embedding features (CatBoost's `embedding_features`):
@@ -8340,14 +8376,48 @@ impl FittedCatBoostRegressor {
                 "the model has no text features: use predict".into(),
             ));
         };
+        if !self.embeddings.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has embedding features too: use predict_with_text_and_embeddings".into(),
+            ));
+        }
         let (augmented, _) = processing.apply(x, text)?;
-        let raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), augmented.view());
+        Ok(self.predictions_of(augmented.view()))
+    }
+
+    /// Predictions of a model fitted with text and embedding features
+    /// ([`CatBoostRegressor::fit_with_text_and_embeddings`]).
+    pub fn predict_with_text_and_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array1<f64>> {
+        check_features(x, self.n_features)?;
+        let Some(processing) = &self.text else {
+            return Err(RustMlError::InvalidParameter(
+                "the model has no text features: use predict_with_embeddings".into(),
+            ));
+        };
+        let (augmented, _) = processing.apply(x, text)?;
+        let augmented = with_embedding_features(
+            augmented.view(),
+            &self.embeddings,
+            self.n_embedding_columns,
+            embeddings,
+        )?;
+        Ok(self.predictions_of(augmented.view()))
+    }
+
+    /// The predictions of the trees on full (augmented) feature rows.
+    fn predictions_of(&self, x: ArrayView2<f64>) -> Array1<f64> {
+        let raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), x);
         let raw = raw.column(0).to_owned();
-        Ok(if self.exp_prediction {
+        if self.exp_prediction {
             raw.mapv(f64::exp)
         } else {
             raw
-        })
+        }
     }
 }
 
@@ -8360,6 +8430,11 @@ impl FittedCatBoostRegressor {
         embeddings: &[ArrayView2<f64>],
     ) -> Result<Array1<f64>> {
         check_features(x, self.n_features)?;
+        if self.text.is_some() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has text features too: use predict_with_text_and_embeddings".into(),
+            ));
+        }
         let augmented =
             with_embedding_features(x, &self.embeddings, self.n_embedding_columns, embeddings)?;
         let raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), augmented.view());
@@ -8492,6 +8567,12 @@ impl FittedCatBoostClassifier {
         embeddings: &[ArrayView2<f64>],
     ) -> Result<Array2<f64>> {
         check_features(x, self.n_features)?;
+        if self.text.is_some() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has text features too: use predict_proba_with_text_and_embeddings"
+                    .into(),
+            ));
+        }
         let augmented =
             with_embedding_features(x, &self.embeddings, self.n_embedding_columns, embeddings)?;
         Ok(raw_scores(
@@ -8525,6 +8606,65 @@ impl FittedCatBoostClassifier {
     /// Raw scores of a model fitted with text features: `[x | BoW |
     /// NaiveBayes]` through the trees.
     fn raw_with_text(&self, x: ArrayView2<f64>, text: &[Vec<String>]) -> Result<Array2<f64>> {
+        if !self.embeddings.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has embedding features too: use predict_proba_with_text_and_embeddings"
+                    .into(),
+            ));
+        }
+        let augmented = self.text_augmented(x, text)?;
+        Ok(raw_scores(
+            &self.trees,
+            &self.ctrs,
+            &self.bias,
+            augmented.view(),
+        ))
+    }
+
+    /// Class probabilities of a model fitted with text and embedding
+    /// features ([`CatBoostClassifier::fit_with_text_and_embeddings`]).
+    pub fn predict_proba_with_text_and_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array2<f64>> {
+        Ok(self.proba_of(self.raw_with_text_and_embeddings(x, text, embeddings)?))
+    }
+
+    /// Classes of a model fitted with text and embedding features.
+    pub fn predict_with_text_and_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array1<f64>> {
+        Ok(self.classes_of(self.raw_with_text_and_embeddings(x, text, embeddings)?))
+    }
+
+    fn raw_with_text_and_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array2<f64>> {
+        let augmented = self.text_augmented(x, text)?;
+        let augmented = with_embedding_features(
+            augmented.view(),
+            &self.embeddings,
+            self.n_embedding_columns,
+            embeddings,
+        )?;
+        Ok(raw_scores(
+            &self.trees,
+            &self.ctrs,
+            &self.bias,
+            augmented.view(),
+        ))
+    }
+
+    /// `[x | BoW | the online text features]`.
+    fn text_augmented(&self, x: ArrayView2<f64>, text: &[Vec<String>]) -> Result<Array2<f64>> {
         check_features(x, self.n_features)?;
         let Some(processing) = &self.text else {
             return Err(RustMlError::InvalidParameter(
@@ -8556,12 +8696,7 @@ impl FittedCatBoostClassifier {
                 }
             }
         }
-        Ok(raw_scores(
-            &self.trees,
-            &self.ctrs,
-            &self.bias,
-            augmented.view(),
-        ))
+        Ok(augmented)
     }
 
     /// The most likely class of every row of raw scores (the first on
@@ -8649,11 +8784,47 @@ impl CatBoostClassifier {
         y: ArrayView1<f64>,
         sample_weight: Option<ArrayView1<f64>>,
     ) -> Result<FittedCatBoostClassifier> {
+        self.fit_text_inner(x, text, &[], y, sample_weight)
+    }
+
+    /// Fit with text and embedding features (CatBoost's `text_features`
+    /// and `embedding_features` in one pool): the text features as
+    /// [`fit_with_text`](Self::fit_with_text), then the embedding calcers
+    /// as [`fit_with_embeddings`](Self::fit_with_embeddings).
+    pub fn fit_with_text_and_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostClassifier> {
+        if embeddings.is_empty() {
+            return Err(RustMlError::ShapeMismatch(
+                "fit_with_text_and_embeddings needs embedding columns".into(),
+            ));
+        }
+        self.fit_text_inner(x, text, embeddings, y, sample_weight)
+    }
+
+    fn fit_text_inner(
+        &self,
+        x: ArrayView2<f64>,
+        text: &[Vec<String>],
+        embeddings: &[ArrayView2<f64>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostClassifier> {
         if self.loss_function != CatBoostClassifierLoss::Auto {
             return Err(RustMlError::InvalidParameter(
                 "text features support Logloss and MultiClass".into(),
             ));
         }
+        let columns = if embeddings.is_empty() {
+            Vec::new()
+        } else {
+            embedding_columns(self.embedding_options.as_ref(), embeddings, x.nrows())?
+        };
         if text.is_empty() || text.iter().any(|c| c.len() != x.nrows()) {
             return Err(RustMlError::ShapeMismatch(
                 "every text column needs one text per row".into(),
@@ -8667,16 +8838,17 @@ impl CatBoostClassifier {
         let (augmented, ids) = processing.apply(x, text)?;
         let fit = TextFit {
             n_bow: processing.n_bow(),
-            n_columns: processing.n_columns(),
+            n_columns: processing.n_columns() + embeddings.len(),
             online: processing
                 .online()
                 .into_iter()
                 .map(|(f, kind)| (kind, ids[f].clone()))
                 .collect(),
-            embeddings: Vec::new(),
+            embeddings: columns,
         };
         let mut f = self.fit_inner(augmented.view(), y, sample_weight, None, Some(fit))?;
         f.text = Some(processing);
+        f.n_embedding_columns = embeddings.len();
         Ok(f)
     }
 

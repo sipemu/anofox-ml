@@ -61,7 +61,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   on 18 matrices). In catboost these features never split (their values
   vary, but its trees never pick them), so they get no borders here either.
   Binary, multiclass and ordered fits match to ~2e-16.
-- Not yet: text and embeddings in one fit.
+- Text and embedding features in one pool:
+  `fit_with_text_and_embeddings(x, text, embeddings, y, w)` with
+  `predict(_proba)_with_text_and_embeddings` on both estimators, the
+  registry, and Python (`text_features=` together with
+  `embedding_features=`). The text calcers come first, then the embedding
+  calcers, as in catboost. Binary, multiclass, ordered and regression fits
+  match catboost to ~8e-16.
 
 ### LightGBM learning to rank (#207)
 
