@@ -317,6 +317,50 @@ impl PyModel {
         self.call(py, x, |m, x| m.predict_proba_with_text(x, &text))
     }
 
+    /// Fit with embedding columns besides `x` (CatBoost's
+    /// `embedding_features`): `embeddings[c]` holds one vector per row.
+    #[pyo3(signature = (x, embeddings, y, sample_weight=None))]
+    fn fit_with_embeddings(
+        &mut self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        embeddings: Vec<PyReadonlyArray2<'_, f64>>,
+        y: PyReadonlyArray1<'_, f64>,
+        sample_weight: Option<PyReadonlyArray1<'_, f64>>,
+    ) -> PyResult<()> {
+        let (x, y, w) = (
+            x.as_array(),
+            y.as_array(),
+            sample_weight.as_ref().map(|w| w.as_array()),
+        );
+        let e: Vec<_> = embeddings.iter().map(|e| e.as_array()).collect();
+        let inner = &mut self.inner;
+        py.detach(|| inner.fit_with_embeddings(x, &e, Some(y), w))
+            .map_err(to_py_err)
+    }
+
+    /// Predictions of a model fitted with `fit_with_embeddings`.
+    fn predict_with_embeddings(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        embeddings: Vec<PyReadonlyArray2<'_, f64>>,
+    ) -> PyResult<Py<PyAny>> {
+        let e: Vec<_> = embeddings.iter().map(|e| e.as_array()).collect();
+        self.call(py, x, |m, x| m.predict_with_embeddings(x, &e))
+    }
+
+    /// Class probabilities of a model fitted with `fit_with_embeddings`.
+    fn predict_proba_with_embeddings(
+        &self,
+        py: Python<'_>,
+        x: PyReadonlyArray2<'_, f64>,
+        embeddings: Vec<PyReadonlyArray2<'_, f64>>,
+    ) -> PyResult<Py<PyAny>> {
+        let e: Vec<_> = embeddings.iter().map(|e| e.as_array()).collect();
+        self.call(py, x, |m, x| m.predict_proba_with_embeddings(x, &e))
+    }
+
     /// Predictions with an offset on the link scale (the GLMs).
     fn predict_with_offset(
         &self,
