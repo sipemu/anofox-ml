@@ -6,6 +6,17 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### RidgeClassifierCV and LassoLars (#256, part 2)
+
+- `RidgeClassifierCV` (`anofox-ml-regression`, registry kind, Python):
+  `alpha` by exact leave-one-out over `alphas` on the ±1 targets, with
+  sample and class weights as sklearn's `_RidgeGCV`, then a
+  `RidgeClassifier` refit. In Python, `cv=k` selects by `GridSearchCV`
+  over `RidgeClassifier`, as sklearn does.
+- `LassoLars`: registry kind and Python class over `Lars::lasso_lars`.
+- Both are equal to sklearn 1.8 to ~1e-14 (`alpha_`, `best_score_`,
+  `coef_`, `intercept_`, predictions).
+
 ### Multi-output and output-code classifiers (#256, part 1)
 
 - Registry kinds `MultiOutputClassifier` (one classifier per target, the
