@@ -916,6 +916,28 @@ def generate():
             kind="regressor")
     add_emb("emb_lda_defaults", dict(COMMON, iterations=60, depth=4, has_time=False), ["LDA"],
             [e_b], y_eb)
+    # KNN: an online HNSW index (k = 5, search 300) over the rows seen.
+    e_t = np.round(e_m, 0)    # exact distance ties
+    add_emb("emb_knn_binary", base, ["KNN"], [e_b], y_eb)
+    add_emb("emb_knn_multiclass", dict(base, iterations=20), ["KNN"], [e_m], y_em)
+    add_emb("emb_knn_ties", dict(base, iterations=20), ["KNN"], [e_t], y_em)
+    add_emb("emb_knn_k3", base, ["KNN:k=3"], [e_b], y_eb)
+    add_emb("emb_knn_permuted", dict(base, has_time=False, boosting_type="Ordered"), ["KNN"],
+            [e_m], y_em)
+    add_emb("emb_knn_regressor", base, ["KNN"], [e_r], y_reg, kind="regressor")
+    add_emb("emb_knn_regressor_ties", base, ["KNN"], [np.round(e_r, 0)], y_reg,
+            kind="regressor")
+    add_emb("emb_defaults", dict(COMMON, iterations=60, depth=4, has_time=False),
+            ["LDA", "KNN"], [e_m], y_em)
+    add_emb("emb_defaults_regressor", dict(COMMON, iterations=60, depth=4, has_time=False),
+            ["LDA", "KNN"], [e_r], y_reg, kind="regressor")
+    # Far more rows than the search neighborhood (300): approximate searches.
+    nl = 1200
+    Xl = np.round(r5.normal(size=(nl, 2)), 3)
+    y_l = (Xl[:, 0] + r5.logistic(size=nl) > 0).astype(float)
+    e_l = np.round(r5.normal(size=(2, 4))[y_l.astype(int)] * 0.6 + r5.normal(size=(nl, 4)), 2)
+    add_emb("emb_knn_large", dict(base, iterations=10, has_time=False), ["KNN"], [e_l], y_l,
+            Xd=Xl)
     return out
 
 

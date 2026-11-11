@@ -1,6 +1,8 @@
 //! CatBoost's embedding features: the online LDA calcer
-//! (`embedding_features/lda.cpp`), in float32 with CBLAS's operation order.
+//! (`embedding_features/lda.cpp`), in float32 with CBLAS's operation order,
+//! and the KNN calcer (`knn.rs`).
 
+use super::knn::Knn;
 use super::lapack::sygst_syev;
 use anofox_ml_core::error::{Result, RustMlError};
 
@@ -14,6 +16,10 @@ pub enum CatBoostEmbeddingCalcer {
     /// regression); `reg` (0.00005) is added to the within-class scatter's
     /// diagonal.
     Lda { components: Option<usize>, reg: f32 },
+    /// The class counts (classification) or the mean target (regression) of
+    /// the `k` (5) nearest rows seen so far, through an online HNSW index
+    /// (`KNN`).
+    Knn { k: usize },
 }
 
 impl CatBoostEmbeddingCalcer {
@@ -24,19 +30,143 @@ impl CatBoostEmbeddingCalcer {
             reg: 0.00005,
         }
     }
+
+    /// CatBoost's `KNN` with its default k = 5.
+    pub fn knn() -> Self {
+        Self::Knn { k: 5 }
+    }
 }
 
 /// The processing of the embedding columns: the calcers of every column,
-/// in order. CatBoost's default is `[LDA, KNN]`; KNN is not available yet.
+/// in order. The default is CatBoost's `[LDA, KNN]`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CatBoostEmbeddingOptions {
     pub calcers: Vec<CatBoostEmbeddingCalcer>,
+}
+
+impl Default for CatBoostEmbeddingOptions {
+    fn default() -> Self {
+        Self {
+            calcers: vec![
+                CatBoostEmbeddingCalcer::lda(),
+                CatBoostEmbeddingCalcer::knn(),
+            ],
+        }
+    }
 }
 
 impl CatBoostEmbeddingOptions {
     pub fn lda() -> Self {
         Self {
             calcers: vec![CatBoostEmbeddingCalcer::lda()],
+        }
+    }
+
+    pub fn knn() -> Self {
+        Self {
+            calcers: vec![CatBoostEmbeddingCalcer::knn()],
+        }
+    }
+}
+
+/// An embedding calcer as CatBoost builds it for a fold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum EmbeddingSpec {
+    Lda(LdaSpec),
+    Knn {
+        dim: usize,
+        n_classes: Option<usize>,
+        k: usize,
+    },
+}
+
+impl EmbeddingSpec {
+    pub(crate) fn new(
+        calcer: &CatBoostEmbeddingCalcer,
+        dim: usize,
+        n_classes: Option<usize>,
+    ) -> Result<Self> {
+        match *calcer {
+            CatBoostEmbeddingCalcer::Lda { .. } => {
+                Ok(Self::Lda(LdaSpec::new(calcer, dim, n_classes)?))
+            }
+            CatBoostEmbeddingCalcer::Knn { k } => {
+                if k == 0 {
+                    return Err(RustMlError::InvalidParameter(
+                        "KNN: k must be at least 1".into(),
+                    ));
+                }
+                Ok(Self::Knn { dim, n_classes, k })
+            }
+        }
+    }
+
+    pub(crate) fn n_features(&self) -> usize {
+        match *self {
+            Self::Lda(s) => s.components,
+            Self::Knn { n_classes, .. } => Knn::n_features(n_classes),
+        }
+    }
+
+    pub(crate) fn calcer(&self) -> OnlineEmbedding {
+        match *self {
+            Self::Lda(s) => OnlineEmbedding::Lda(Lda::new(s)),
+            Self::Knn { dim, n_classes, k } => OnlineEmbedding::Knn(Knn::new(dim, n_classes, k)),
+        }
+    }
+}
+
+/// An embedding calcer's state during a fit.
+#[derive(Debug, Clone)]
+pub(crate) enum OnlineEmbedding {
+    Lda(Lda),
+    Knn(Knn),
+}
+
+impl OnlineEmbedding {
+    pub(crate) fn compute(&self, x: &[f32]) -> Vec<f32> {
+        match self {
+            Self::Lda(c) => c.compute(x),
+            Self::Knn(c) => c.compute(x),
+        }
+    }
+
+    /// `label` is the row's class (classification) or target (regression).
+    pub(crate) fn update(&mut self, label: f32, x: &[f32]) {
+        match self {
+            Self::Lda(c) => c.update(label as usize, x),
+            Self::Knn(c) => c.update(label, x),
+        }
+    }
+
+    /// The model's calcer (fitted on all rows).
+    pub(crate) fn into_model(self) -> EmbeddingCalcerModel {
+        match self {
+            Self::Lda(c) => EmbeddingCalcerModel::Lda(c.projection()),
+            Self::Knn(c) => EmbeddingCalcerModel::Knn(c),
+        }
+    }
+}
+
+/// A fitted model's embedding calcer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum EmbeddingCalcerModel {
+    Lda(LdaProjection),
+    Knn(Knn),
+}
+
+impl EmbeddingCalcerModel {
+    pub(crate) fn dim(&self) -> usize {
+        match self {
+            Self::Lda(c) => c.dim(),
+            Self::Knn(c) => c.dim(),
+        }
+    }
+
+    pub(crate) fn compute(&self, x: &[f32]) -> Vec<f32> {
+        match self {
+            Self::Lda(c) => c.compute(x),
+            Self::Knn(c) => c.compute(x),
         }
     }
 }
@@ -57,7 +187,9 @@ impl LdaSpec {
         dim: usize,
         n_classes: Option<usize>,
     ) -> Result<Self> {
-        let CatBoostEmbeddingCalcer::Lda { components, reg } = *calcer;
+        let CatBoostEmbeddingCalcer::Lda { components, reg } = *calcer else {
+            unreachable!("an LDA spec of another calcer");
+        };
         let components = components.unwrap_or_else(|| {
             n_classes
                 .map_or(1, |k| k.saturating_sub(1))
