@@ -8628,7 +8628,6 @@ mod tests {
             classes: None,
             max_ctr_complexity: 1,
             order: None,
-            order: None,
         };
         let q = quantize(x.view(), 254, cat).unwrap();
         assert_eq!(q.borders[0][0], -f32::MAX);
@@ -8774,7 +8773,6 @@ mod tests {
             classes: Some((&classes, 2)),
             max_ctr_complexity: 1,
             order: None,
-            order: None,
         };
         let q = quantize(x.view(), 254, cat).unwrap();
         // Borders with prior 0: 0/1, 1/2, 2/3, 0/1, 0/2.
@@ -8791,7 +8789,6 @@ mod tests {
             one_hot_max_size: 2,
             classes: Some((&classes, 2)),
             max_ctr_complexity: 1,
-            order: None,
             order: None,
         };
         let q = quantize(x.view(), 254, cat).unwrap();
