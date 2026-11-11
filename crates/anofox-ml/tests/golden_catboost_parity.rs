@@ -389,14 +389,29 @@ fn catboost_models_match_catboost() {
                     .collect()
             };
             if let Some(e) = case.get("embeddings") {
-                let f = m
-                    .with_embedding_options(embedding_options(&case["embedding_calcers"]))
-                    .fit_with_embeddings(x.view(), &views(&embeddings_of(e)), y.view(), w)
-                    .unwrap();
+                let m = m.with_embedding_options(embedding_options(&case["embedding_calcers"]));
                 let test = embeddings_of(&case["embeddings_test"]);
-                let pred = f
-                    .predict_with_embeddings(x_test.view(), &views(&test))
-                    .unwrap();
+                let pred = if let Some(t) = case.get("text") {
+                    m.fit_with_text_and_embeddings(
+                        x.view(),
+                        &text_of(t),
+                        &views(&embeddings_of(e)),
+                        y.view(),
+                        w,
+                    )
+                    .unwrap()
+                    .predict_with_text_and_embeddings(
+                        x_test.view(),
+                        &text_of(&case["text_test"]),
+                        &views(&test),
+                    )
+                    .unwrap()
+                } else {
+                    m.fit_with_embeddings(x.view(), &views(&embeddings_of(e)), y.view(), w)
+                        .unwrap()
+                        .predict_with_embeddings(x_test.view(), &views(&test))
+                        .unwrap()
+                };
                 let err = worst(pred, json_to_array1(&case["predictions"]));
                 report.push(format!("{name}: {err:e}"));
                 if err > TOL {
@@ -443,19 +458,33 @@ fn catboost_models_match_catboost() {
             let p = &case["params"];
             let mut m = configure!(CatBoostClassifier::new(), p);
             if let Some(e) = case.get("embeddings") {
-                let f = m
-                    .with_embedding_options(embedding_options(&case["embedding_calcers"]))
-                    .fit_with_embeddings(
+                let m = m.with_embedding_options(embedding_options(&case["embedding_calcers"]));
+                let test = embeddings_of(&case["embeddings_test"]);
+                let w = sw.as_ref().map(|w| w.view());
+                let proba = if let Some(t) = case.get("text") {
+                    let text_of = |v: &Value| -> Vec<Vec<String>> {
+                        serde_json::from_value(v.clone()).unwrap()
+                    };
+                    m.fit_with_text_and_embeddings(
                         x.view(),
+                        &text_of(t),
                         &views(&embeddings_of(e)),
                         y.view(),
-                        sw.as_ref().map(|w| w.view()),
+                        w,
                     )
-                    .unwrap();
-                let test = embeddings_of(&case["embeddings_test"]);
-                let proba = f
-                    .predict_proba_with_embeddings(x_test.view(), &views(&test))
-                    .unwrap();
+                    .unwrap()
+                    .predict_proba_with_text_and_embeddings(
+                        x_test.view(),
+                        &text_of(&case["text_test"]),
+                        &views(&test),
+                    )
+                    .unwrap()
+                } else {
+                    m.fit_with_embeddings(x.view(), &views(&embeddings_of(e)), y.view(), w)
+                        .unwrap()
+                        .predict_proba_with_embeddings(x_test.view(), &views(&test))
+                        .unwrap()
+                };
                 let err = worst(proba, array2_with_nan(&case["predictions"]));
                 report.push(format!("{name}: {err:e}"));
                 if err > TOL {

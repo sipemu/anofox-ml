@@ -219,6 +219,41 @@ pub trait DynModel: Send + Sync {
     fn predict_proba_with_text(&self, _x: ArrayView2<f64>, _text: &[Vec<String>]) -> Result<Out> {
         Err(unsupported(self.kind(), "predict_proba_with_text"))
     }
+    /// Fit with text and embedding columns besides `x` (CatBoost's
+    /// `text_features` and `embedding_features` in one pool).
+    fn fit_with_text_and_embeddings<'a>(
+        &mut self,
+        _x: ArrayView2<'a, f64>,
+        _text: &[Vec<String>],
+        _embeddings: &[ArrayView2<'a, f64>],
+        _y: Option<ArrayView1<'a, f64>>,
+        _sample_weight: Option<ArrayView1<'a, f64>>,
+    ) -> Result<()> {
+        Err(unsupported(self.kind(), "fit_with_text_and_embeddings"))
+    }
+    /// Predictions of a model fitted with
+    /// [`DynModel::fit_with_text_and_embeddings`].
+    fn predict_with_text_and_embeddings(
+        &self,
+        _x: ArrayView2<f64>,
+        _text: &[Vec<String>],
+        _embeddings: &[ArrayView2<f64>],
+    ) -> Result<Out> {
+        Err(unsupported(self.kind(), "predict_with_text_and_embeddings"))
+    }
+    /// Class probabilities of a model fitted with
+    /// [`DynModel::fit_with_text_and_embeddings`].
+    fn predict_proba_with_text_and_embeddings(
+        &self,
+        _x: ArrayView2<f64>,
+        _text: &[Vec<String>],
+        _embeddings: &[ArrayView2<f64>],
+    ) -> Result<Out> {
+        Err(unsupported(
+            self.kind(),
+            "predict_proba_with_text_and_embeddings",
+        ))
+    }
     /// Fit with embedding columns besides `x` (CatBoost's
     /// `embedding_features`): `embeddings[c]` holds one vector per row.
     fn fit_with_embeddings<'a>(
@@ -678,6 +713,49 @@ macro_rules! registry {
             let $c = &self.0.config;
             self.0.fitted = Some($body?);
             Ok(())
+        }
+    };
+    (@cap $kind:ident, fit_with_text_and_embeddings, $c:ident, $x:ident, $t:ident, $e:ident,
+     $y:ident, $w:ident, $body:expr) => {
+        #[allow(unused_variables)]
+        fn fit_with_text_and_embeddings<'a>(
+            &mut self,
+            $x: ndarray::ArrayView2<'a, f64>,
+            $t: &[Vec<String>],
+            $e: &[ndarray::ArrayView2<'a, f64>],
+            $y: Option<ndarray::ArrayView1<'a, f64>>,
+            $w: Option<ndarray::ArrayView1<'a, f64>>,
+        ) -> anofox_ml_core::Result<()> {
+            #[allow(non_snake_case, dead_code)]
+            const K: &str = stringify!($kind);
+            let $c = &self.0.config;
+            self.0.fitted = Some($body?);
+            Ok(())
+        }
+    };
+    // (Four closure arguments do not fit the grammar: a fifth, unused one.)
+    (@cap $kind:ident, predict_with_text_and_embeddings, $m:ident, $x:ident, $t:ident, $e:ident,
+     $_u:ident, $body:expr) => {
+        fn predict_with_text_and_embeddings(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $t: &[Vec<String>],
+            $e: &[ndarray::ArrayView2<f64>],
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
+        }
+    };
+    (@cap $kind:ident, predict_proba_with_text_and_embeddings, $m:ident, $x:ident, $t:ident,
+     $e:ident, $_u:ident, $body:expr) => {
+        fn predict_proba_with_text_and_embeddings(
+            &self,
+            $x: ndarray::ArrayView2<f64>,
+            $t: &[Vec<String>],
+            $e: &[ndarray::ArrayView2<f64>],
+        ) -> anofox_ml_core::Result<$crate::model::Out> {
+            let $m = self.0.fitted.as_ref().ok_or_else(|| $crate::model::not_fitted(stringify!($kind)))?;
+            Ok($crate::model::Out::from($body?))
         }
     };
     (@cap $kind:ident, predict_with_embeddings, $m:ident, $x:ident, $e:ident, $body:expr) => {

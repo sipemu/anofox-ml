@@ -936,6 +936,17 @@ def test_catboost_embedding_features_match_catboost():
     np.testing.assert_allclose(ours.predict(frame), ref.predict(pool), rtol=1e-12, atol=1e-12)
     restored = pickle.loads(pickle.dumps(ours))
     np.testing.assert_array_equal(restored.predict(frame), ours.predict(frame))
+    # Text and embeddings in one pool.
+    vocab = ["red", "green", "blue", "big", "small"]
+    frame["words"] = [" ".join(vocab[i] for i in r.randint(0, 5, r.randint(0, 4)))
+                      for _ in range(n)]
+    pool = cb.Pool(frame, embedding_features=[1], cat_features=[2], text_features=[3])
+    ref = cb.CatBoostClassifier(**kw, **off, verbose=0, allow_writing_files=False).fit(
+        cb.Pool(frame, y, embedding_features=[1], cat_features=[2], text_features=[3]))
+    both = am.CatBoostClassifier(**kw, **off, embedding_features=[1], cat_features=[2],
+                                 text_features=[3]).fit(frame, y)
+    np.testing.assert_allclose(both.predict_proba(frame), ref.predict_proba(pool),
+                               rtol=1e-12, atol=1e-12)
     with pytest.raises(ValueError):
         am.CatBoostClassifier(embedding_features=[1], embedding_calcers=["PCA"], **kw).fit(
             frame, y)

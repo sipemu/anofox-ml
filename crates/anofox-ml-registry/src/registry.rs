@@ -1132,6 +1132,10 @@ registry! {
         predict_with_text: |m, x, t| m.predict_with_text(x, t),
         fit_with_embeddings: |c, x, e, y, w| c.fit_with_embeddings(x, e, need_y(K, y)?, w),
         predict_with_embeddings: |m, x, e| m.predict_with_embeddings(x, e),
+        fit_with_text_and_embeddings: |c, x, t, e, y, w| {
+            c.fit_with_text_and_embeddings(x, t, e, need_y(K, y)?, w)
+        },
+        predict_with_text_and_embeddings: |m, x, t, e, _u| m.predict_with_text_and_embeddings(x, t, e),
     }
     CatBoostMultiRegressor {
         config: CatBoostMultiConfig = Default::default(),
@@ -1166,6 +1170,13 @@ registry! {
         fit_with_embeddings: |c, x, e, y, w| c.fit_with_embeddings(x, e, need_y(K, y)?, w),
         predict_with_embeddings: |m, x, e| m.predict_with_embeddings(x, e),
         predict_proba_with_embeddings: |m, x, e| m.predict_proba_with_embeddings(x, e),
+        fit_with_text_and_embeddings: |c, x, t, e, y, w| {
+            c.fit_with_text_and_embeddings(x, t, e, need_y(K, y)?, w)
+        },
+        predict_with_text_and_embeddings: |m, x, t, e, _u| m.predict_with_text_and_embeddings(x, t, e),
+        predict_proba_with_text_and_embeddings: |m, x, t, e, _u| {
+            m.predict_proba_with_text_and_embeddings(x, t, e)
+        },
     }
     #[cfg(feature = "perpetual")]
     PerpetualRegressor {

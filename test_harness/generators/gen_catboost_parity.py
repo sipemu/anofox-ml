@@ -937,6 +937,36 @@ def generate():
             ["LDA", "KNN"], [e_m], y_em)
     add_emb("emb_defaults_regressor", dict(COMMON, iterations=60, depth=4, has_time=False),
             ["LDA", "KNN"], [e_r], y_reg, kind="regressor")
+    # Text and embedding features in one pool (#211): the text calcers first.
+    def add_text_emb(name, params, cols, embs, y, kind="classifier", calcers=None):
+        frame = pd.DataFrame({f"f{j}": X[:, j] for j in range(X.shape[1])})
+        for t, col in enumerate(cols):
+            frame[f"t{t}"] = col
+        for e, col in enumerate(embs):
+            frame[f"e{e}"] = list(col)
+        text_idx = list(range(X.shape[1], X.shape[1] + len(cols)))
+        emb_idx = list(range(X.shape[1] + len(cols), X.shape[1] + len(cols) + len(embs)))
+        cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
+        m = cls(**params)
+        if calcers is not None:
+            m._init_params["embedding_calcers"] = calcers
+        m.fit(cb.Pool(frame, y, text_features=text_idx, embedding_features=emb_idx))
+        tp = cb.Pool(frame.iloc[::4], text_features=text_idx, embedding_features=emb_idx)
+        out["models"].append({
+            "name": name, "kind": kind,
+            "params": {k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+            "X": nulls(X), "y": y.tolist(), "text": [list(c) for c in cols],
+            "text_test": [list(c[::4]) for c in cols],
+            "embedding_calcers": calcers if calcers is not None else ["LDA", "KNN"],
+            "embeddings": [c.tolist() for c in embs],
+            "X_test": nulls(X[::4]), "embeddings_test": [c[::4].tolist() for c in embs],
+            "predictions": (m.predict(tp) if kind == "regressor" else m.predict_proba(tp)).tolist(),
+        })
+    add_text_emb("text_emb_binary", base, [t0], [e_b], y_eb)
+    add_text_emb("text_emb_multiclass", dict(base, iterations=20), [t0, t1], [e_m], y_em)
+    add_text_emb("text_emb_permuted", dict(base, has_time=False, boosting_type="Ordered"), [t0],
+                 [e_m], y_em, calcers=["LDA"])
+    add_text_emb("text_emb_regressor", base, [t0], [e_r], y_reg, kind="regressor")
     # Far more rows than the search neighborhood (300): approximate searches.
     nl = 1200
     Xl = np.round(r5.normal(size=(nl, 2)), 3)
