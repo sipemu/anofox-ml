@@ -84,6 +84,40 @@ def generate():
     # A large min_data_in_leaf: few splits per tree.
     add("pseudo_huber_min_leaf", dict(base, min_data_in_leaf=200), pseudo_huber(y, 0.5), 1,
         rounds=10, side={"y": y.tolist(), "delta": 0.5})
+
+    # anofox-orchestration's FFORMA loop on a larger matrix (#243): many
+    # features (feature_fraction samples), hessians clamped at 1e-6, full
+    # trees. LightGBM is driven as its C API loop does (objective "none" from
+    # the start, `__boost` each round): Python's callable objective resets
+    # the parameters first, which re-seeds the feature sampler.
+    env = lambda k, d: type(d)(os.environ.get(k, d))
+    r = np.random.default_rng(env("CAPI_SEED", 243))
+    nl, dl, ml = env("CAPI_N", 3000), env("CAPI_D", 12), 3
+    Xl = np.round(r.normal(size=(nl, dl)), 3)
+    Xl[:, 3] = np.round(Xl[:, 3] * 2)
+    El = np.abs(r.standard_t(2, size=(nl, ml))) ** env("CAPI_POW", 3.0) * np.exp(
+        np.outer(Xl[:, 0] - 0.5 * Xl[:, 1], [-0.8, 0.0, 0.8]) * env("CAPI_SCALE", 2.0))
+    El = np.round(El, 5) + 1e-5
+    Xl_test = Xl[::11]
+    rounds_l = env("CAPI_ROUNDS", 300)
+    for name, extra, rounds in (("fforma_capi", {}, rounds_l),
+                                ("fforma_capi_sampling", dict(feature_fraction=0.8,
+                                                              bagging_fraction=0.8,
+                                                              bagging_freq=5), rounds_l)):
+        params = dict(num_leaves=31, learning_rate=0.05, min_data_in_leaf=20, objective="none",
+                      num_class=ml, **COMMON, **extra)
+        booster = lgb.Booster(params, lgb.Dataset(Xl, label=np.zeros(nl), free_raw_data=False))
+        fobj = fforma(El)
+        for _ in range(rounds):
+            g, h = fobj(booster._Booster__inner_predict(data_idx=0), None)
+            booster._Booster__boost(grad=g, hess=h)
+        raw = booster.predict(Xl_test, raw_score=True).reshape(len(Xl_test), ml)
+        out.append({"name": name, "outputs": ml, "rounds": rounds,
+                    "n_trees": booster.num_trees(),
+                    "params": {a: b for a, b in params.items()
+                               if a not in COMMON and a not in ("objective", "num_class")},
+                    "categorical": [], "side": {"errors": El.tolist()},
+                    "X": Xl.tolist(), "X_test": Xl_test.tolist(), "raw": raw.tolist()})
     return out
 
 

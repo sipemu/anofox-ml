@@ -1693,6 +1693,7 @@ fn find_best_split(
     groups: &[usize],
     feature_rng: Option<&mut Generator>,
     node_features: Option<&[usize]>,
+    splittable: &mut [bool],
 ) -> Option<BestSplit> {
     let LgbmParams {
         min_child_samples,
@@ -1867,6 +1868,25 @@ fn find_best_split(
                 right_val = leaf_value(right_grad, right_hess, l1, l2);
             }
 
+            // LightGBM gains from the scanned sums but takes the right
+            // output from `totals - left` (`sum_hessian -
+            // best_sum_left_hessian`), which rounds differently after a
+            // descending scan.
+            let right_val = if params.sklearn_compat {
+                right_val
+            } else {
+                let v = leaf_value(
+                    total_grad - left_grad,
+                    total_hess + 2.0 * LGBM_EPSILON - left_hess,
+                    l1,
+                    l2,
+                );
+                if constrained {
+                    v.clamp(lo, hi)
+                } else {
+                    v
+                }
+            };
             if !params.sklearn_compat
                 || (gain > min_split_gain && gain > best.borrow().as_ref().map_or(0.0, |b| b.gain))
             {
@@ -2026,26 +2046,48 @@ fn find_best_split(
         }
         best.into_inner()
     };
-    let n_bins: usize = positions
+    // LightGBM evaluates every feature still splittable in the parent
+    // (`is_splittable`: some threshold passed the checks with a gain above
+    // the shift) and only then filters by node and interaction constraints;
+    // the children skip the features their parent could not split on.
+    let evaluated: Vec<usize> = if params.sklearn_compat {
+        positions.clone()
+    } else {
+        (0..feature_indices.len())
+            .filter(|&k| splittable[k])
+            .collect()
+    };
+    let n_bins: usize = evaluated
         .iter()
         .map(|&k| n_value_bins(&all_bins[feature_indices[k]]))
         .sum();
     let per_feature: Vec<Option<BestSplit>> = if n_bins >= PARALLEL_SPLIT_BINS {
         use rayon::prelude::*;
-        positions
+        evaluated
             .par_iter()
             .with_min_len(4)
             .map(|&k| feature_best(feature_indices[k], &hists[k]))
             .collect()
     } else {
-        positions
+        evaluated
             .iter()
             .map(|&k| feature_best(feature_indices[k], &hists[k]))
             .collect()
     };
-    for split in per_feature.into_iter().flatten() {
-        if split.gain > best.as_ref().map_or(0.0, |b| b.gain) {
-            best = Some(split);
+    if !params.sklearn_compat {
+        splittable.iter_mut().for_each(|s| *s = false);
+    }
+    for (&k, split) in evaluated.iter().zip(per_feature) {
+        if !params.sklearn_compat {
+            splittable[k] = split.is_some();
+            if !positions.contains(&k) {
+                continue;
+            }
+        }
+        if let Some(split) = split {
+            if split.gain > best.as_ref().map_or(0.0, |b| b.gain) {
+                best = Some(split);
+            }
         }
     }
 
@@ -2216,6 +2258,9 @@ struct LeafCandidate {
     groups: Vec<usize>,
     /// The node's gradient and hessian totals.
     totals: (f64, f64),
+    /// Per tree feature: whether LightGBM could split this node on it (its
+    /// children skip the others).
+    splittable: Vec<bool>,
 }
 
 impl PartialEq for LeafCandidate {
@@ -2295,7 +2340,8 @@ fn build_lgbm_tree(
                         bounds,
                         value,
                         groups: &[usize],
-                        node_features: Option<&[usize]>| {
+                        node_features: Option<&[usize]>,
+                        splittable: &mut [bool]| {
         find_best_split(
             hists,
             totals,
@@ -2308,6 +2354,7 @@ fn build_lgbm_tree(
             groups,
             feature_rng.as_mut(),
             node_features,
+            splittable,
         )
     };
     let mut draw_node_features = || col_sampler.as_mut().and_then(|c| c.node_features());
@@ -2330,6 +2377,7 @@ fn build_lgbm_tree(
     // matters for the draws of their feature subsampling).
     let root_splittable = root_indices.len() >= 2 * params.min_child_samples
         && (!params.sklearn_compat || root_totals.1 >= params.min_child_weight);
+    let mut root_splittable_features = vec![true; feature_indices.len()];
     let root_split = root_splittable
         .then(|| {
             let node_features = draw_node_features();
@@ -2341,6 +2389,7 @@ fn build_lgbm_tree(
                 root_value,
                 &root_groups,
                 node_features.as_deref(),
+                &mut root_splittable_features,
             )
         })
         .flatten();
@@ -2359,6 +2408,7 @@ fn build_lgbm_tree(
             bounds: UNBOUNDED,
             groups: root_groups,
             totals: root_totals,
+            splittable: root_splittable_features,
         });
     } else {
         leaf_rows.push(root_indices);
@@ -2559,6 +2609,7 @@ fn build_lgbm_tree(
             feature_indices,
             &params.fixed_bins,
         );
+        let candidate_splittable = candidate.splittable;
         let mut large = candidate.hists;
         for (parent, s) in large.iter_mut().zip(&small) {
             parent.subtract(s);
@@ -2596,6 +2647,7 @@ fn build_lgbm_tree(
                 leaf_rows.push(child_indices);
                 continue;
             }
+            let mut splittable = candidate_splittable.clone();
             if let Some(s) = best_for(
                 &hists,
                 totals,
@@ -2604,6 +2656,7 @@ fn build_lgbm_tree(
                 value,
                 &groups,
                 node_features.as_deref(),
+                &mut splittable,
             ) {
                 heap.push(LeafCandidate {
                     node_id: child_id,
@@ -2615,6 +2668,7 @@ fn build_lgbm_tree(
                     bounds,
                     groups: groups.clone(),
                     totals,
+                    splittable,
                 });
             } else {
                 leaf_rows.push(child_indices);
