@@ -6,6 +6,13 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-11
+
+0.6.0 without the packaging bug: the umbrella crate `anofox-ml` 0.6.0
+was rejected by crates.io (its golden test fixtures made it 40 MB, over
+the 10 MB limit), so `anofox-ml = "0.6"` had no umbrella crate. The
+package now leaves out `tests/` and `benches/` (35 KB). No code changes.
+
 ## [0.6.0] - 2026-11-11
 
 LightGBM catches up on objectives, custom objectives and raw scores,
