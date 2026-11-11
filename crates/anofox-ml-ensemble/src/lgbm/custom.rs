@@ -190,6 +190,7 @@ impl LgbmRegressor {
             )));
         }
         validate_max_bins(self.max_bins)?;
+        validate_num_leaves(self.num_leaves)?;
         self.sampling().validate()?;
 
         let (binned_x, bins) = (&data.binned, data.bins.clone());
@@ -329,6 +330,20 @@ mod tests {
 
     fn x() -> Array2<f64> {
         Array2::from_shape_fn((80, 2), |(i, j)| (i * (j + 1)) as f64)
+    }
+
+    #[test]
+    fn fewer_than_two_leaves_is_rejected() {
+        let shift = Shift {
+            target: vec![1.0],
+            flat: false,
+        };
+        for bad in [0usize, 1] {
+            let r = LgbmRegressor::new()
+                .with_num_leaves(bad)
+                .fit_custom(&x(), &shift);
+            assert!(matches!(r, Err(RustMlError::InvalidParameter(_))), "{bad}");
+        }
     }
 
     #[test]
