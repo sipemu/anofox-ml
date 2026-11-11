@@ -6,7 +6,7 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
-### CatBoost-style boosting: embedding features, LDA (#211, part)
+### CatBoost-style boosting: embedding features, LDA and KNN (#211)
 
 - `CatBoostRegressor` / `CatBoostClassifier::fit_with_embeddings(x,
   embeddings, y, w)` with `predict_with_embeddings` /
@@ -23,9 +23,18 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
   regression and full-default fits match catboost 1.2.10 to ~6e-16.
 - Regression LDA has one class cloud and a zero total scatter, so (as in
   catboost) its feature is the embedding's last coordinate.
-- Not yet: `KNN` (catboost's default calcers are `[LDA, KNN]`, so
-  `embedding_options` must be set), LDA `likelihood`, text and embeddings
-  in one fit, registry and Python.
+- `CatBoostEmbeddingCalcer::Knn { k }` (default 5): catboost's
+  `TKNNCalcer`, the class counts (classification) or mean target
+  (regression) of the k nearest earlier rows, online. It ports
+  `library/cpp/online_hnsw`: levels of 2, 4, 8, ... rows, diversity-trimmed
+  neighbor lists with inverse edges and retrims, the beam search
+  (neighborhood 300, naive below k + 2 rows) on libc++'s `priority_queue`
+  order, and the four-lane SSE L2 distance. With it the default
+  `embedding_options` is catboost's `[LDA, KNN]`. KNN fits match catboost
+  1.2.10 to ~1e-15: binary, multiclass, exact distance ties, `k=3`,
+  ordered, regression, 1200 rows (approximate searches) and the defaults.
+- Not yet: LDA `likelihood`, text and embeddings in one fit, registry and
+  Python.
 
 ### LightGBM learning to rank (#207)
 

@@ -50,7 +50,7 @@ fn views(e: &[Array2<f64>]) -> Vec<ndarray::ArrayView2<'_, f64>> {
     e.iter().map(|a| a.view()).collect()
 }
 
-/// CatBoost `embedding_calcers` strings (`LDA`, `LDA:reg=0.5`).
+/// CatBoost `embedding_calcers` strings (`LDA`, `LDA:reg=0.5`, `KNN:k=3`).
 fn embedding_options(v: &Value) -> CatBoostEmbeddingOptions {
     let calcers = v
         .as_array()
@@ -59,6 +59,10 @@ fn embedding_options(v: &Value) -> CatBoostEmbeddingOptions {
         .map(|c| {
             let c = c.as_str().unwrap();
             let (name, opts) = c.split_once(':').unwrap_or((c, ""));
+            if name == "KNN" {
+                let k = opts.strip_prefix("k=").map_or(5, |k| k.parse().unwrap());
+                return CatBoostEmbeddingCalcer::Knn { k };
+            }
             assert_eq!(name, "LDA");
             let (mut components, mut reg) = (None, 0.00005f32);
             for kv in opts.split(',').filter(|s| !s.is_empty()) {
