@@ -64,16 +64,21 @@ fn embedding_options(v: &Value) -> CatBoostEmbeddingOptions {
                 return CatBoostEmbeddingCalcer::Knn { k };
             }
             assert_eq!(name, "LDA");
-            let (mut components, mut reg) = (None, 0.00005f32);
+            let (mut components, mut reg, mut likelihood) = (None, 0.00005f32, false);
             for kv in opts.split(',').filter(|s| !s.is_empty()) {
                 let (k, val) = kv.split_once('=').unwrap();
                 match k {
                     "components" => components = Some(val.parse().unwrap()),
                     "reg" => reg = val.parse().unwrap(),
+                    "likelihood" => likelihood = val == "true",
                     _ => panic!("unknown LDA option {k}"),
                 }
             }
-            CatBoostEmbeddingCalcer::Lda { components, reg }
+            CatBoostEmbeddingCalcer::Lda {
+                components,
+                reg,
+                likelihood,
+            }
         })
         .collect();
     CatBoostEmbeddingOptions { calcers }

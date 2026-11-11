@@ -916,6 +916,12 @@ def generate():
             kind="regressor")
     add_emb("emb_lda_defaults", dict(COMMON, iterations=60, depth=4, has_time=False), ["LDA"],
             [e_b], y_eb)
+    # LDA's class likelihoods (sgetrf + sgetri of the within-class scatter).
+    add_emb("emb_lda_likelihood", base, ["LDA:likelihood=true"], [e_b], y_eb)
+    add_emb("emb_lda_likelihood_multiclass", dict(base, iterations=20),
+            ["LDA:likelihood=true"], [e_m], y_em)
+    add_emb("emb_lda_likelihood_permuted", dict(base, has_time=False, boosting_type="Ordered"),
+            ["LDA:likelihood=true"], [e_m], y_em)
     # KNN: an online HNSW index (k = 5, search 300) over the rows seen.
     e_t = np.round(e_m, 0)    # exact distance ties
     add_emb("emb_knn_binary", base, ["KNN"], [e_b], y_eb)

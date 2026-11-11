@@ -6,6 +6,8 @@ extern doublereal slamch_(char*);
 extern integer ilaenv_(integer*, char*, char*, integer*, integer*, integer*, integer*);
 extern int ssygst_(integer*, char*, integer*, real*, integer*, real*, integer*, integer*);
 extern int ssyev_(char*, char*, integer*, real*, integer*, real*, real*, integer*, integer*);
+extern int sgetrf_(integer*, integer*, real*, integer*, integer*, integer*);
+extern int sgetri_(integer*, real*, integer*, integer*, real*, integer*, integer*);
 int main(int argc, char** argv) {
   if (argc > 1 && !strcmp(argv[1], "consts")) {
     const char* q[] = {"E","S","B","P","N","R","M","U","L","O"};
@@ -14,6 +16,17 @@ int main(int argc, char** argv) {
     printf("SSYGST nb %d\n", ilaenv_(&one,"SSYGST","L",&n,&m1,&m1,&m1));
     printf("SSYTRD nb %d nbmin %d nx %d\n", ilaenv_(&one,"SSYTRD","L",&n,&m1,&m1,&m1), ilaenv_(&two,"SSYTRD","L",&n,&m1,&m1,&m1), ilaenv_(&three,"SSYTRD","L",&n,&m1,&m1,&m1));
     printf("SORGQR nb %d nbmin %d nx %d\n", ilaenv_(&one,"SORGQR"," ",&n,&n,&n,&m1), ilaenv_(&two,"SORGQR"," ",&n,&n,&n,&m1), ilaenv_(&three,"SORGQR"," ",&n,&n,&n,&m1));
+    return 0;
+  }
+  if (argc > 1 && !strcmp(argv[1], "inv")) {
+    /* catboost's InverseMatrix: stdin n, n*n bits; stdout the inverse's bits. */
+    integer n; if (scanf("%d", &n) != 1) return 1;
+    real* a = malloc(4*n*n); integer* piv = malloc(sizeof(integer)*n); real* cache = malloc(4*n);
+    for (int i = 0; i < n*n; ++i) { unsigned u; scanf("%x", &u); memcpy(&a[i],&u,4); }
+    integer info;
+    sgetrf_(&n, &n, a, &n, piv, &info);
+    sgetri_(&n, a, &n, piv, cache, &n, &info);
+    for (int i = 0; i < n*n; ++i) { unsigned u; memcpy(&u,&a[i],4); printf("%08x ", u); } printf("\n");
     return 0;
   }
   /* stdin: n, then n*n A bits, n*n B bits (hex u32). stdout: A bits, W bits, info */

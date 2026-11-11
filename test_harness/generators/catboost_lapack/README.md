@@ -1,7 +1,8 @@
 # CatBoost CLAPACK golden data
 
 `crates/anofox-ml-ensemble/src/catboost/lapack_golden.txt` holds bit patterns
-of `ssygst(1, "L")` + `ssyev("V", "L")` (with catboost's `lwork`) as computed
+of `ssygst(1, "L")` + `ssyev("V", "L")` (and `lapack_inv_golden.txt` of
+`sgetrf` + `sgetri`, the likelihood's `InverseMatrix`) (with catboost's `lwork`) as computed
 by catboost 1.2.10's bundled f2c CLAPACK and CBLAS. The LDA calcer
 (`embedding_features/lda.cpp`) runs exactly these two calls.
 
@@ -16,4 +17,5 @@ clang -O3 -msse4.2 harness.c -o harness -Wl,--start-group \
   $B/contrib/libs/libf2c/libcontrib-libs-libf2c.a -Wl,--end-group -lm
 ./harness consts   # slamch constants and ilaenv block sizes (all 1)
 python gen_lapack_golden.py ../../../crates/anofox-ml-ensemble/src/catboost/lapack_golden.txt
+python gen_inverse_golden.py ../../../crates/anofox-ml-ensemble/src/catboost/lapack_inv_golden.txt
 ```
