@@ -414,6 +414,17 @@ fn validate_max_bins(max_bins: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validate `num_leaves` (LightGBM fails with `num_leaves > 1`). One leaf
+/// used to fit trees that never split, a silent constant model.
+fn validate_num_leaves(num_leaves: usize) -> Result<()> {
+    if num_leaves < 2 {
+        return Err(RustMlError::InvalidParameter(format!(
+            "num_leaves must be at least 2, got {num_leaves}"
+        )));
+    }
+    Ok(())
+}
+
 /// Index of the category `v` among the sorted category values `edges`
 /// (values within 1e-12 match).
 #[inline]
@@ -4609,6 +4620,7 @@ impl LgbmRegressor {
         }
         validate_eval_opts(opts, data.n_features())?;
         validate_max_bins(self.max_bins)?;
+        validate_num_leaves(self.num_leaves)?;
         self.sampling().validate()?;
         validate_regression_objective(self.objective, y)?;
         let is_ranking = matches!(
@@ -5982,6 +5994,7 @@ impl LgbmClassifier {
         }
         validate_eval_opts(opts, data.n_features())?;
         validate_max_bins(self.max_bins)?;
+        validate_num_leaves(self.num_leaves)?;
         self.sampling().validate()?;
         if let Some(f) = prev {
             check_warm_start(
@@ -7438,6 +7451,26 @@ mod tests {
     }
 
     #[test]
+    fn test_lgbm_num_leaves_validated() {
+        let x = Array2::from_shape_fn((300, 1), |(i, _)| i as f64);
+        let y = Array1::from_shape_fn(300, |i| i as f64);
+        let yc = y.mapv(|v| (v > 150.0) as u8 as f64);
+        for bad in [0usize, 1] {
+            let reg = LgbmRegressor::new().with_num_leaves(bad);
+            let r = reg.fit(&x, &y);
+            assert!(matches!(r, Err(RustMlError::InvalidParameter(_))), "{bad}");
+            let r = reg.fit_dataset(&reg.dataset(&x).unwrap(), &y, &Default::default());
+            assert!(matches!(r, Err(RustMlError::InvalidParameter(_))), "{bad}");
+            let clf = LgbmClassifier::new().with_num_leaves(bad);
+            let c = clf.fit(&x, &yc);
+            assert!(matches!(c, Err(RustMlError::InvalidParameter(_))), "{bad}");
+            let c = clf.fit_dataset(&clf.dataset(&x).unwrap(), &yc, &Default::default());
+            assert!(matches!(c, Err(RustMlError::InvalidParameter(_))), "{bad}");
+        }
+        assert!(LgbmRegressor::new().with_num_leaves(2).fit(&x, &y).is_ok());
+    }
+
+    #[test]
     fn test_lgbm_max_bins_validated() {
         let x = Array2::from_shape_fn((300, 1), |(i, _)| i as f64);
         let y = Array1::from_shape_fn(300, |i| i as f64);
@@ -7569,25 +7602,6 @@ mod tests {
         let preds = fitted.predict(&x).unwrap();
         for &p in preds.iter() {
             assert_abs_diff_eq!(p, 7.0, epsilon = 0.1);
-        }
-    }
-
-    #[test]
-    fn test_lgbm_num_leaves_one_is_baseline_only() {
-        let x = array![[1.0], [2.0], [3.0], [4.0], [5.0]];
-        let y = array![2.0, 4.0, 6.0, 8.0, 10.0];
-
-        let fitted = LgbmRegressor::new()
-            .with_n_estimators(30)
-            .with_num_leaves(1)
-            .with_min_child_samples(1)
-            .fit(&x, &y)
-            .unwrap();
-
-        let preds = fitted.predict(&x).unwrap();
-        for &p in preds.iter() {
-            assert!(p.is_finite());
-            assert_abs_diff_eq!(p, 6.0, epsilon = 1.0);
         }
     }
 
