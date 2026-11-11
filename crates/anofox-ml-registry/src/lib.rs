@@ -28,6 +28,7 @@
 //! assert!(loaded.is_fitted());
 //! ```
 
+mod compose;
 mod estimator;
 mod meta;
 mod model;

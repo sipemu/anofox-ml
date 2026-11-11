@@ -6,6 +6,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### sklearn composition tools in the registry and Python (#255, part 1)
+
+- Registry kinds `Pipeline`, `FeatureUnion` and `ColumnTransformer` over
+  estimator specs: one fitted registry model each (they pickle).
+- Python: `Pipeline` (with `make_pipeline`, `named_steps`, `"passthrough"`
+  steps; a classifier last step gives the classifier API), `FeatureUnion`
+  (`transformer_weights` by name) and `ColumnTransformer` (indices, masks,
+  slices or DataFrame names; `"passthrough"` / `"drop"` steps; `remainder`).
+  Tested against the same sklearn compositions.
+
 ### LightGBM: two split-finding parity fixes (#243)
 
 - After its descending threshold scan, LightGBM takes the right child's

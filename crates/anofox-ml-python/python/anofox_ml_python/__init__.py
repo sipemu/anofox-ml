@@ -8,6 +8,7 @@ and the heavy work runs in Rust with the GIL released.
 
 from . import conformal, encoders, meta, metrics, model_selection, multiclass
 from .encoders import DictVectorizer, LabelBinarizer, MultiLabelBinarizer
+from .compose import ColumnTransformer, FeatureUnion, Pipeline, make_pipeline
 from .meta import (
     RFE,
     RFECV,
@@ -227,6 +228,7 @@ __all__ = [
     "CountVectorizer", "TfidfVectorizer", "HashingVectorizer",
     "LarsCV", "LassoLarsCV",
     "MultiTaskLassoCV", "MultiTaskElasticNetCV",
+    "Pipeline", "make_pipeline", "FeatureUnion", "ColumnTransformer",
     "VotingRegressor", "VotingClassifier", "StackingRegressor", "StackingClassifier",
     "CalibratedClassifierCV", "TransformedTargetRegressor", "MultiOutputRegressor",
     "RegressorChain", "RFE", "RFECV", "SequentialFeatureSelector",
