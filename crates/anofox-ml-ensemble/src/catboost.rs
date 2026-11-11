@@ -6753,8 +6753,11 @@ macro_rules! catboost_config {
             pub od_pval: Option<f64>,
             /// CatBoost's `grow_policy`: oblivious trees (default), Depthwise
             /// or Lossguide (plain boosting, no monotone constraints). With
-            /// categorical features, near-ties can still go another way than
-            /// in CatBoost on some data, mostly multiclass (#154).
+            /// categorical features, one known difference: CatBoost orders a
+            /// two-valued categorical's sides by its categories' string
+            /// hashes, which the numeric input does not carry. Depthwise trees
+            /// with such a feature and CTRs can then visit leaves in another
+            /// order and pick other CTR splits (#154).
             pub grow_policy: CatBoostGrowPolicy,
             /// Depthwise: leaves with fewer sampled rows are not split
             /// (CatBoost's `min_data_in_leaf`, default 1).

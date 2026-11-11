@@ -69,7 +69,7 @@ Builder names follow each reference library's parameter names (with a
   `with_monotone_constraints`, `with_model_shrink_rate`,
   `with_early_stopping_rounds`, `with_use_best_model`, `fit_with_eval`,
   `with_grow_policy` (Depthwise / Lossguide: plain boosting, CTR features
-  too; with categoricals close to CatBoost, not always exact, #154),
+  too; exact, except Depthwise with a two-valued categorical plus CTRs, #154),
   `with_min_data_in_leaf`, `with_max_leaves`; classifier:
   `with_class_weights`, `with_auto_class_weights`.
 
