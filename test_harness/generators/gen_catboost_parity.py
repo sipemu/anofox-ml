@@ -101,21 +101,24 @@ def generate():
     cat_cols = [1, 3, 4]
     cat = dict(base, cat_features=cat_cols, max_ctr_complexity=1)
 
-    def add_cat(name, params, y, kind="classifier", sw=None):
+    def add_cat(name, params, y, kind="classifier", sw=None, Xd=None):
         cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
-        Xo = Xc.astype(object)
-        for c in cat_cols:
-            Xo[:, c] = Xc[:, c].astype(int)
+        cols = params.get("cat_features", cat_cols)
+        Xd = Xc if Xd is None else Xd
+        Xo = Xd.astype(object)
+        for c in cols:
+            Xo[:, c] = Xd[:, c].astype(int)
         m = cls(**params).fit(Xo, y, sample_weight=sw)
-        X_test = np.vstack([Xc[::4], [[0.1, 99, 0.2, 1, 0]]])  # an unseen category
+        X_test = (np.vstack([Xc[::4], [[0.1, 99, 0.2, 1, 0]]])  # an unseen category
+                  if Xd is Xc else Xd[::4])
         Xt = X_test.astype(object)
-        for c in cat_cols:
+        for c in cols:
             Xt[:, c] = X_test[:, c].astype(int)
         pred = m.predict(Xt) if kind == "regressor" else m.predict_proba(Xt)
         out["models"].append({
             "name": name, "kind": kind,
             "params": {k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
-            "X": nulls(Xc), "y": y.tolist(),
+            "X": nulls(Xd), "y": y.tolist(),
             "sample_weight": None if sw is None else sw.tolist(),
             "X_test": nulls(X_test), "predictions": pred.tolist(),
         })
@@ -857,6 +860,15 @@ def generate():
     # MultiClass learning folds over many trees (softmax by FastExpWithInf).
     add_cat("cat_mc_perm_long", dict(cat_mc, has_time=False, iterations=80, depth=5), y_cat_mc)
     add_cat("dw_ctr_mc", dict(cat_mc, grow_policy="Depthwise", iterations=60), y_cat_mc)
+    # Categories numbered by first appearance before the learn shuffle: a
+    # two-valued one-hot feature's sides decide the Depthwise leaf order.
+    r4 = np.random.RandomState(104)
+    Xq = np.column_stack([np.round(r4.randn(500), 2), r4.randint(0, 2, 500),
+                          r4.randint(0, 12, 500), r4.randint(0, 2, 500)]).astype(float)
+    eta_q = Xq[:, 0] + 0.6 * Xq[:, 1] - 0.5 * Xq[:, 3] + 0.3 * (Xq[:, 2] % 4)
+    y_q2 = (eta_q + r4.logistic(size=500) > 0.5).astype(float)
+    add_cat("dw_ctr_perm_onehot", dict(base, cat_features=[2, 3], grow_policy="Depthwise",
+                                       has_time=False, depth=5, iterations=40), y_q2, Xd=Xq)
     return out
 
 
