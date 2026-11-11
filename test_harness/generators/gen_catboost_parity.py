@@ -869,6 +869,53 @@ def generate():
     y_q2 = (eta_q + r4.logistic(size=500) > 0.5).astype(float)
     add_cat("dw_ctr_perm_onehot", dict(base, cat_features=[2, 3], grow_policy="Depthwise",
                                        has_time=False, depth=5, iterations=40), y_q2, Xd=Xq)
+    # Embedding features (#211): online LDA (float32 LAPACK ssygst + ssyev).
+    r5 = np.random.RandomState(211)
+    def add_emb(name, params, calcers, cols, y, kind="classifier", Xd=X, sw=None):
+        frame = pd.DataFrame({f"f{j}": Xd[:, j] for j in range(Xd.shape[1])})
+        for e, col in enumerate(cols):
+            frame[f"e{e}"] = list(col)
+        emb_idx = list(range(Xd.shape[1], Xd.shape[1] + len(cols)))
+        cls = cb.CatBoostRegressor if kind == "regressor" else cb.CatBoostClassifier
+        m = cls(**params)
+        m._init_params["embedding_calcers"] = calcers
+        m.fit(cb.Pool(frame, y, weight=sw, embedding_features=emb_idx))
+        tp = cb.Pool(frame.iloc[::4], embedding_features=emb_idx)
+        out["models"].append({
+            "name": name, "kind": kind,
+            "params": dict({k: v for k, v in params.items() if k not in COMMON or v != COMMON[k]},
+                           **({"defaults": [k for k in ("random_strength", "bootstrap_type")
+                                            if k not in params]}
+                              if any(k not in params for k in ("random_strength",
+                                                                "bootstrap_type")) else {})),
+            "X": nulls(Xd), "y": y.tolist(), "embedding_calcers": calcers,
+            "embeddings": [c.tolist() for c in cols],
+            "sample_weight": None if sw is None else sw.tolist(),
+            "X_test": nulls(Xd[::4]), "embeddings_test": [c[::4].tolist() for c in cols],
+            "predictions": (m.predict(tp) if kind == "regressor" else m.predict_proba(tp)).tolist(),
+        })
+    y_eb = (eta + r5.logistic(size=n) > 0).astype(float)
+    y_em = np.digitize(eta + r5.normal(scale=0.5, size=n), [-0.5, 0.5]).astype(float)
+    def embed(y, dim, scale):
+        means = r5.normal(size=(int(y.max()) + 1, dim))
+        return np.round(means[y.astype(int)] * scale + r5.normal(size=(len(y), dim)), 3)
+    e_b = embed(y_eb, 6, 0.7)
+    e_m = embed(y_em, 5, 0.8)
+    e_r = np.round(np.column_stack([eta, -eta, X[:, 0] * X[:, 1]]) * 0.5
+                   + r5.normal(size=(n, 3)), 3)
+    add_emb("emb_lda_binary", base, ["LDA"], [e_b], y_eb)
+    add_emb("emb_lda_multiclass", dict(base, iterations=20), ["LDA"], [e_m], y_em)
+    add_emb("emb_lda_two_columns", base, ["LDA"], [e_b, e_m], y_eb)
+    add_emb("emb_lda_permuted", dict(base, has_time=False, boosting_type="Ordered"), ["LDA"],
+            [e_m], y_em)
+    add_emb("emb_lda_options", base, ["LDA:reg=0.5"], [e_m], y_em)
+    add_emb("emb_lda_components", dict(base, iterations=20), ["LDA:components=3"], [e_m], y_em)
+    add_emb("emb_lda_weighted", base, ["LDA"], [e_b], y_eb, sw=weights)
+    add_emb("emb_lda_regressor", base, ["LDA"], [e_r], y_reg, kind="regressor")
+    add_emb("emb_lda_regressor_components", base, ["LDA:components=2"], [e_r], y_reg,
+            kind="regressor")
+    add_emb("emb_lda_defaults", dict(COMMON, iterations=60, depth=4, has_time=False), ["LDA"],
+            [e_b], y_eb)
     return out
 
 

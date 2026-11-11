@@ -26,7 +26,12 @@
 //! (updated with fmath's fast `exp`); ours agree with those to rounding, which
 //! on large data can rarely decide a near-tie between splits differently.
 
+mod embedding;
+mod lapack;
 mod text;
+
+pub use embedding::{CatBoostEmbeddingCalcer, CatBoostEmbeddingOptions};
+use embedding::{Lda, LdaProjection, LdaSpec};
 
 pub use text::{
     CatBoostTextCalcer, CatBoostTextDictionary, CatBoostTextOptions, CatBoostTextProcessing,
@@ -2486,6 +2491,8 @@ struct Quantized {
 #[derive(Debug)]
 struct OnlineText {
     sources: Vec<(OnlineKind, Vec<TokenCounts>)>,
+    /// The embedding calcers, after the text ones.
+    embeddings: Vec<EmbeddingSource>,
     classes: Vec<u8>,
     n_classes: usize,
     /// The first model feature of the online features.
@@ -2494,11 +2501,170 @@ struct OnlineText {
 }
 
 /// Text input of a classifier fit: the number of trailing BoW columns of
-/// `x` and the online calcers' sources.
+/// `x`, the external text and embedding columns, the online calcers'
+/// sources and the embedding columns.
 struct TextFit {
     n_bow: usize,
     n_columns: usize,
     online: Vec<(OnlineKind, Vec<TokenCounts>)>,
+    embeddings: Vec<EmbeddingColumn>,
+}
+
+/// Estimated features of a regressor fit: the trailing BoW (0 / 1) columns
+/// of `x`, the external feature count and the embedding columns.
+struct Estimated {
+    n_bow: usize,
+    n_external: usize,
+    embeddings: Vec<EmbeddingColumn>,
+}
+
+/// One calcer of an embedding column, with the column's rows (float32, as
+/// CatBoost stores them).
+struct EmbeddingColumn {
+    column: usize,
+    calcer: CatBoostEmbeddingCalcer,
+    rows: Vec<Vec<f32>>,
+}
+
+/// An embedding calcer of a fit: its spec and rows.
+#[derive(Debug)]
+struct EmbeddingSource {
+    spec: LdaSpec,
+    rows: Vec<Vec<f32>>,
+}
+
+/// A fitted model's embedding calcer (fitted on all rows,
+/// `MakeFinalFeatureCalcer`): its column and projection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct EmbeddingModel {
+    column: usize,
+    lda: LdaProjection,
+}
+
+/// The calcers of every embedding column (`embeddings[j]` is column `j`,
+/// one row per row of `x`).
+fn embedding_columns(
+    options: Option<&CatBoostEmbeddingOptions>,
+    embeddings: &[ArrayView2<f64>],
+    n_rows: usize,
+) -> Result<Vec<EmbeddingColumn>> {
+    let Some(options) = options else {
+        return Err(RustMlError::InvalidParameter(
+            "CatBoost's default embedding processing is [LDA, KNN] and KNN is not available \
+             yet: set embedding_options (CatBoostEmbeddingOptions::lda())"
+                .into(),
+        ));
+    };
+    if embeddings.is_empty() || embeddings.iter().any(|e| e.nrows() != n_rows) {
+        return Err(RustMlError::ShapeMismatch(
+            "every embedding column needs one vector per row".into(),
+        ));
+    }
+    if options.calcers.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "embedding_options has no calcers".into(),
+        ));
+    }
+    let mut out = Vec::new();
+    for (column, e) in embeddings.iter().enumerate() {
+        if e.iter().any(|v| !v.is_finite()) {
+            return Err(RustMlError::InvalidParameter(
+                "embedding values must be finite".into(),
+            ));
+        }
+        let rows: Vec<Vec<f32>> = e
+            .rows()
+            .into_iter()
+            .map(|r| r.iter().map(|&v| v as f32).collect())
+            .collect();
+        for calcer in &options.calcers {
+            out.push(EmbeddingColumn {
+                column,
+                calcer: calcer.clone(),
+                rows: rows.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The embedding calcers of a fit on rows in their (shuffled) order, and the
+/// model's calcers fitted on all of them. `classes` are the rows' classes
+/// (classification) or empty (regression).
+fn fit_embeddings(
+    columns: Vec<EmbeddingColumn>,
+    n_classes: Option<usize>,
+    classes: &[u8],
+) -> Result<(Vec<EmbeddingSource>, Vec<EmbeddingModel>)> {
+    let mut sources = Vec::new();
+    let mut models = Vec::new();
+    for c in columns {
+        let dim = c.rows.first().map_or(0, Vec::len);
+        let spec = LdaSpec::new(&c.calcer, dim, n_classes)?;
+        let mut lda = Lda::new(spec);
+        for (r, row) in c.rows.iter().enumerate() {
+            lda.update(classes.get(r).map_or(0, |&k| k as usize), row);
+        }
+        models.push(EmbeddingModel {
+            column: c.column,
+            lda: lda.projection(),
+        });
+        sources.push(EmbeddingSource { spec, rows: c.rows });
+    }
+    Ok((sources, models))
+}
+
+/// `[x | the embedding calcers' features]` for prediction.
+fn with_embedding_features(
+    x: ArrayView2<f64>,
+    models: &[EmbeddingModel],
+    n_columns: usize,
+    embeddings: &[ArrayView2<f64>],
+) -> Result<Array2<f64>> {
+    if models.is_empty() {
+        return Err(RustMlError::InvalidParameter(
+            "the model has no embedding features".into(),
+        ));
+    }
+    if embeddings.len() != n_columns || embeddings.iter().any(|e| e.nrows() != x.nrows()) {
+        return Err(RustMlError::ShapeMismatch(format!(
+            "the model needs {n_columns} embedding columns with one vector per row"
+        )));
+    }
+    let features: Vec<Vec<Vec<f32>>> = models
+        .iter()
+        .map(|m| {
+            let e = embeddings[m.column];
+            if e.ncols() != m.lda.dim() {
+                return Err(RustMlError::ShapeMismatch(format!(
+                    "embedding column {} has {} dimensions, the model {}",
+                    m.column,
+                    e.ncols(),
+                    m.lda.dim()
+                )));
+            }
+            Ok(e.rows()
+                .into_iter()
+                .map(|r| {
+                    let v: Vec<f32> = r.iter().map(|&v| v as f32).collect();
+                    m.lda.compute(&v)
+                })
+                .collect())
+        })
+        .collect::<Result<_>>()?;
+    let m: usize = features.iter().map(|f| f.first().map_or(0, Vec::len)).sum();
+    let mut out = Array2::zeros((x.nrows(), x.ncols() + m));
+    out.slice_mut(ndarray::s![.., ..x.ncols()]).assign(&x);
+    for r in 0..x.nrows() {
+        let mut at = x.ncols();
+        for f in &features {
+            for &v in &f[r] {
+                out[[r, at]] = f64::from(v);
+                at += 1;
+            }
+        }
+    }
+    Ok(out)
 }
 
 impl OnlineText {
@@ -2518,6 +2684,17 @@ impl OnlineText {
                     values[j][r] = v;
                 }
                 calcer.update(self.classes[r] as usize, &rows[r]);
+            }
+            out.extend(values);
+        }
+        for src in &self.embeddings {
+            let mut values = vec![vec![0.0; order.len()]; src.spec.components];
+            let mut lda = Lda::new(src.spec);
+            for &r in order {
+                for (j, v) in lda.compute(&src.rows[r]).into_iter().enumerate() {
+                    values[j][r] = v;
+                }
+                lda.update(self.classes.get(r).map_or(0, |&c| c as usize), &src.rows[r]);
             }
             out.extend(values);
         }
@@ -4982,7 +5159,12 @@ impl Quantized {
     /// before the CTRs), with borders from the rows' order (`border_count`,
     /// GreedyLogSum as the float features).
     fn add_online(&mut self, mut src: OnlineText, border_count: usize) {
-        let identity: Vec<usize> = (0..src.classes.len()).collect();
+        // Regression has no classes: the rows are the embeddings'.
+        let n = src
+            .embeddings
+            .first()
+            .map_or(src.classes.len(), |e| e.rows.len());
+        let identity: Vec<usize> = (0..n).collect();
         src.borders = src
             .values(&identity)
             .iter()
@@ -6773,6 +6955,10 @@ macro_rules! catboost_config {
             /// `text_processing`): `None` is CatBoost's default
             /// ([`CatBoostTextOptions::default_for`]).
             pub text_options: Option<CatBoostTextOptions>,
+            /// Embedding processing for `fit_with_embeddings` (CatBoost's
+            /// `embedding_calcers`): `None` is CatBoost's default `[LDA,
+            /// KNN]`, which needs KNN (not available yet).
+            pub embedding_options: Option<CatBoostEmbeddingOptions>,
             $($($(#[$fdoc])* pub $field: $fty,)*)?
         }
 
@@ -6816,6 +7002,7 @@ macro_rules! catboost_config {
                     max_leaves: 31,
                     thread_count: None,
                     text_options: None,
+                    embedding_options: None,
                     $($($field: $fdef,)*)?
                 }
             }
@@ -7004,6 +7191,11 @@ macro_rules! catboost_config {
                 self.thread_count = n;
                 self
             }
+            pub fn with_embedding_options(mut self, o: CatBoostEmbeddingOptions) -> Self {
+                self.embedding_options = Some(o);
+                self
+            }
+
             pub fn with_text_options(mut self, o: CatBoostTextOptions) -> Self {
                 self.text_options = Some(o);
                 self
@@ -7501,6 +7693,11 @@ pub struct FittedCatBoostRegressor {
     /// their bag-of-words).
     #[serde(default)]
     text: Option<TextProcessing>,
+    /// Embedding features: the calcers (the model's trailing features).
+    #[serde(default)]
+    embeddings: Vec<EmbeddingModel>,
+    #[serde(default)]
+    n_embedding_columns: usize,
 }
 
 impl FittedCatBoostRegressor {
@@ -7775,10 +7972,49 @@ impl CatBoostRegressor {
             None,
             self.use_best_model_with(None, x.ncols())?,
             None,
-            Some((processing.n_bow(), x.ncols() + text.len())),
+            Some(Estimated {
+                n_bow: processing.n_bow(),
+                n_external: x.ncols() + text.len(),
+                embeddings: Vec::new(),
+            }),
         )?;
         f.n_features = x.ncols();
         f.text = Some(processing);
+        Ok(f)
+    }
+
+    /// Fit with embedding features (CatBoost's `embedding_features`):
+    /// `embeddings[j]` holds the vectors of embedding column `j`, one row
+    /// per row of `x`. Each column gets the calcers of `embedding_options`;
+    /// LDA is an online feature, computed in every fold's order.
+    pub fn fit_with_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        embeddings: &[ArrayView2<f64>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostRegressor> {
+        let loss = self.loss(1);
+        if loss.querywise() || matches!(loss, Loss::MultiRmse(_)) {
+            return Err(RustMlError::InvalidParameter(
+                "embedding features support the pointwise regression losses".into(),
+            ));
+        }
+        let columns = embedding_columns(self.embedding_options.as_ref(), embeddings, x.nrows())?;
+        let mut f = self.fit_targets(
+            x,
+            y.insert_axis(ndarray::Axis(1)),
+            sample_weight,
+            None,
+            self.use_best_model_with(None, x.ncols())?,
+            None,
+            Some(Estimated {
+                n_bow: 0,
+                n_external: x.ncols() + embeddings.len(),
+                embeddings: columns,
+            }),
+        )?;
+        f.n_embedding_columns = embeddings.len();
         Ok(f)
     }
 
@@ -7858,11 +8094,12 @@ impl CatBoostRegressor {
         eval_set: Option<EvalSet<'_>>,
         use_best: bool,
         queries: Option<Vec<usize>>,
-        // Text: the trailing estimated (0 / 1) columns of `x` and the
-        // external feature count.
-        estimated: Option<(usize, usize)>,
+        estimated: Option<Estimated>,
     ) -> Result<FittedCatBoostRegressor> {
-        let (n_estimated, n_external) = estimated.unwrap_or((0, x.ncols()));
+        let (n_estimated, n_external, embeddings) = match estimated {
+            Some(e) => (e.n_bow, e.n_external, e.embeddings),
+            None => (0, x.ncols(), Vec::new()),
+        };
         let p = self.train_params();
         validate(
             x,
@@ -7899,6 +8136,16 @@ impl CatBoostRegressor {
                 order
             })
         };
+        // Embeddings: the rows follow the shuffle.
+        let embeddings: Vec<EmbeddingColumn> = embeddings
+            .into_iter()
+            .map(|mut c| {
+                if let Some(order) = &order {
+                    c.rows = order.iter().map(|&r| c.rows[r].clone()).collect();
+                }
+                c
+            })
+            .collect();
         let learn_perm = order.clone();
         let shuffled = order.map(|order| {
             (
@@ -7969,6 +8216,22 @@ impl CatBoostRegressor {
                 .collect();
             q.add_estimated(n_main, columns);
         }
+        let mut embedding_models = Vec::new();
+        if !embeddings.is_empty() {
+            let (sources, models) = fit_embeddings(embeddings, None, &[])?;
+            embedding_models = models;
+            q.add_online(
+                OnlineText {
+                    sources: Vec::new(),
+                    embeddings: sources,
+                    classes: Vec::new(),
+                    n_classes: 0,
+                    first: x.ncols(),
+                    borders: Vec::new(),
+                },
+                self.border_count_for(loss),
+            );
+        }
         self.check_grow_policy()?;
         let (bootstrap, subsample) = self.sampling(loss, x.nrows());
         // CatBoost's YetiRank default `l2_leaf_reg` is 0 (made 1e-20).
@@ -8028,6 +8291,8 @@ impl CatBoostRegressor {
             borders: q.borders,
             n_features: x.ncols(),
             text: None,
+            embeddings: embedding_models,
+            n_embedding_columns: 0,
         })
     }
 }
@@ -8065,12 +8330,38 @@ impl FittedCatBoostRegressor {
     }
 }
 
+impl FittedCatBoostRegressor {
+    /// Predictions of a model fitted with embedding features
+    /// ([`CatBoostRegressor::fit_with_embeddings`]).
+    pub fn predict_with_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array1<f64>> {
+        check_features(x, self.n_features)?;
+        let augmented =
+            with_embedding_features(x, &self.embeddings, self.n_embedding_columns, embeddings)?;
+        let raw = raw_scores(&self.trees, &self.ctrs, &self.biases(), augmented.view());
+        let raw = raw.column(0).to_owned();
+        Ok(if self.exp_prediction {
+            raw.mapv(f64::exp)
+        } else {
+            raw
+        })
+    }
+}
+
 impl Predict<f64> for FittedCatBoostRegressor {
     fn predict_view(&self, x: ArrayView2<f64>) -> Result<Array1<f64>> {
         check_features(x, self.n_features)?;
         if self.text.is_some() {
             return Err(RustMlError::InvalidParameter(
                 "the model has text features: use predict_with_text".into(),
+            ));
+        }
+        if !self.embeddings.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has embedding features: use predict_with_embeddings".into(),
             ));
         }
         if !self.multi_bias.is_empty() {
@@ -8113,6 +8404,11 @@ pub struct FittedCatBoostClassifier {
     text: Option<TextProcessing>,
     #[serde(default)]
     text_online: Vec<OnlineCalcer>,
+    /// Embedding features: the calcers (the model's trailing features).
+    #[serde(default)]
+    embeddings: Vec<EmbeddingModel>,
+    #[serde(default)]
+    n_embedding_columns: usize,
 }
 
 impl FittedCatBoostClassifier {
@@ -8142,7 +8438,47 @@ impl FittedCatBoostClassifier {
                 "the model has text features: use predict_proba_with_text".into(),
             ));
         }
+        if !self.embeddings.is_empty() {
+            return Err(RustMlError::InvalidParameter(
+                "the model has embedding features: use predict_proba_with_embeddings".into(),
+            ));
+        }
         Ok(raw_scores(&self.trees, &self.ctrs, &self.bias, x))
+    }
+
+    /// Class probabilities of a model fitted with embedding features
+    /// ([`CatBoostClassifier::fit_with_embeddings`]).
+    pub fn predict_proba_with_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array2<f64>> {
+        Ok(self.proba_of(self.raw_with_embeddings(x, embeddings)?))
+    }
+
+    /// Classes of a model fitted with embedding features.
+    pub fn predict_with_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array1<f64>> {
+        Ok(self.classes_of(self.raw_with_embeddings(x, embeddings)?))
+    }
+
+    fn raw_with_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        embeddings: &[ArrayView2<f64>],
+    ) -> Result<Array2<f64>> {
+        check_features(x, self.n_features)?;
+        let augmented =
+            with_embedding_features(x, &self.embeddings, self.n_embedding_columns, embeddings)?;
+        Ok(raw_scores(
+            &self.trees,
+            &self.ctrs,
+            &self.bias,
+            augmented.view(),
+        ))
     }
 
     /// Class probabilities of a model fitted with text features
@@ -8316,9 +8652,37 @@ impl CatBoostClassifier {
                 .into_iter()
                 .map(|(f, kind)| (kind, ids[f].clone()))
                 .collect(),
+            embeddings: Vec::new(),
         };
         let mut f = self.fit_inner(augmented.view(), y, sample_weight, None, Some(fit))?;
         f.text = Some(processing);
+        Ok(f)
+    }
+
+    /// Fit with embedding features (CatBoost's `embedding_features`): see
+    /// [`CatBoostRegressor::fit_with_embeddings`]. LDA projects on the
+    /// leading discriminants of the classes.
+    pub fn fit_with_embeddings(
+        &self,
+        x: ArrayView2<f64>,
+        embeddings: &[ArrayView2<f64>],
+        y: ArrayView1<f64>,
+        sample_weight: Option<ArrayView1<f64>>,
+    ) -> Result<FittedCatBoostClassifier> {
+        if self.loss_function != CatBoostClassifierLoss::Auto {
+            return Err(RustMlError::InvalidParameter(
+                "embedding features support Logloss and MultiClass".into(),
+            ));
+        }
+        let columns = embedding_columns(self.embedding_options.as_ref(), embeddings, x.nrows())?;
+        let fit = TextFit {
+            n_bow: 0,
+            n_columns: embeddings.len(),
+            online: Vec::new(),
+            embeddings: columns,
+        };
+        let mut f = self.fit_inner(x, y, sample_weight, None, Some(fit))?;
+        f.n_embedding_columns = embeddings.len();
         Ok(f)
     }
 
@@ -8364,6 +8728,9 @@ impl CatBoostClassifier {
             if let Some(order) = &order {
                 for (_, col) in &mut t.online {
                     *col = order.iter().map(|&r| col[r].clone()).collect();
+                }
+                for c in &mut t.embeddings {
+                    c.rows = order.iter().map(|&r| c.rows[r].clone()).collect();
                 }
             }
             t
@@ -8505,6 +8872,7 @@ impl CatBoostClassifier {
             cat,
         )?;
         let mut text_online = Vec::new();
+        let mut embedding_models = Vec::new();
         if let Some(t) = text {
             let columns = (n_main..x.ncols())
                 .map(|c| x.column(c).iter().map(|&v| u8::from(v > 0.5)).collect())
@@ -8518,9 +8886,13 @@ impl CatBoostClassifier {
                 }
                 text_online.push(calcer);
             }
+            let (embeddings, models) =
+                fit_embeddings(t.embeddings, Some(classes.len()), &classes_of)?;
+            embedding_models = models;
             q.add_online(
                 OnlineText {
                     sources: t.online,
+                    embeddings,
                     classes: classes_of.clone(),
                     n_classes: classes.len(),
                     first: x.ncols(),
@@ -8573,6 +8945,8 @@ impl CatBoostClassifier {
             text: None,
             text_online,
             one_vs_all,
+            embeddings: embedding_models,
+            n_embedding_columns: 0,
         })
     }
 }
@@ -9169,5 +9543,41 @@ mod tests {
                 .fit_with_groups(x.view(), labels.view(), None, &groups)
                 .is_err());
         }
+    }
+
+    #[test]
+    fn embedding_fits_check_their_input() {
+        let x = Array2::from_shape_fn((60, 1), |(i, _)| i as f64);
+        let e = Array2::from_shape_fn((60, 3), |(i, j)| ((i * (j + 2)) % 7) as f64);
+        let y = Array1::from_shape_fn(60, |i| (i % 2) as f64);
+        let clf = CatBoostClassifier::new().with_iterations(5);
+        // CatBoost's default [LDA, KNN] needs KNN.
+        assert!(clf
+            .fit_with_embeddings(x.view(), &[e.view()], y.view(), None)
+            .is_err());
+        let clf = clf.with_embedding_options(CatBoostEmbeddingOptions::lda());
+        let short = e.slice(ndarray::s![..50, ..]);
+        assert!(clf
+            .fit_with_embeddings(x.view(), &[short], y.view(), None)
+            .is_err());
+        let f = clf
+            .fit_with_embeddings(x.view(), &[e.view()], y.view(), None)
+            .unwrap();
+        assert!(f.predict_proba(&x).is_err());
+        assert!(f.predict_proba_with_embeddings(x.view(), &[]).is_err());
+        let p = f
+            .predict_proba_with_embeddings(x.view(), &[e.view()])
+            .unwrap();
+        assert_eq!(p.dim(), (60, 2));
+        let reg = CatBoostRegressor::new()
+            .with_iterations(5)
+            .with_embedding_options(CatBoostEmbeddingOptions::lda());
+        let f = reg
+            .fit_with_embeddings(x.view(), &[e.view()], y.view(), None)
+            .unwrap();
+        assert!(f.predict(&x).is_err());
+        let wide = Array2::<f64>::zeros((60, 4));
+        assert!(f.predict_with_embeddings(x.view(), &[wide.view()]).is_err());
+        assert!(f.predict_with_embeddings(x.view(), &[e.view()]).is_ok());
     }
 }

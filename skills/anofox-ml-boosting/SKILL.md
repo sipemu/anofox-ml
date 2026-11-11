@@ -100,6 +100,13 @@ calcers `BoW:top_tokens_count=N`, `NaiveBayes` and `BM25`. NaiveBayes and
 BM25 are classification only. No eval sets, rankers or MultiRMSE with text
 yet.
 
+CatBoost embedding features (Rust only so far, matching catboost):
+`fit_with_embeddings(x, &[emb.view()], y, w)` / `predict_with_embeddings`
+with `with_embedding_options(CatBoostEmbeddingOptions::lda())`, where each
+embedding is an `n x dim` array. Only the `LDA` calcer (`components`, `reg`)
+exists; catboost's default `[LDA, KNN]` is rejected until KNN lands. For
+regression catboost's LDA reduces to the embedding's last coordinate.
+
 ## LightGBM: objectives
 
 `LgbmRegressor::with_objective`: `Regression` (L2), `RegressionL1`,
