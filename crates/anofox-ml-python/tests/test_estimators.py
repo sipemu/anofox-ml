@@ -37,6 +37,7 @@ SPECIAL = {
     "PoissonRegressor": dict(y=np.round(np.exp(y_reg / 3))),
     "GammaRegressor": dict(y=np.exp(y_reg / 3)),
     "NMF": dict(X=X_pos),
+    "SparseCoder": dict(params=dict(dictionary=np.eye(3, 4))),
     "AdditiveChi2Sampler": dict(X=X_pos),
     "SkewedChi2Sampler": dict(X=X_pos),
     "PowerTransformer": dict(),
@@ -153,7 +154,10 @@ def test_fit_predict_pickle_clone(name):
 
     # pickling keeps the fitted model and the hyperparameters
     clone = pickle.loads(pickle.dumps(est))
-    assert clone.get_params() == est.get_params()
+    a, b = clone.get_params(), est.get_params()
+    assert a.keys() == b.keys()
+    for k in a:  # array-valued parameters (SparseCoder's dictionary)
+        assert np.array_equal(a[k], b[k]) if isinstance(a[k], np.ndarray) else a[k] == b[k], k
     if kind in ("classifier", "regressor"):
         np.testing.assert_array_equal(clone.predict(Xd), out)
     elif kind is None and hasattr(est, "transform"):
