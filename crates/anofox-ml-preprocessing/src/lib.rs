@@ -58,6 +58,7 @@ pub mod polynomial_features;
 pub mod power_transformer;
 pub(crate) mod quantile;
 pub mod quantile_transformer;
+mod randomized_svd;
 pub mod rcs_transformer;
 pub mod rfe;
 pub mod robust_scaler;
@@ -133,9 +134,10 @@ pub use select_k_best::{FittedSelectKBest, SelectKBest};
 pub use simple_imputer::{FittedSimpleImputer, ImputeStrategy, SimpleImputer};
 pub use sparse_coding::{
     sparse_encode, CodingAlgorithm, CodingParams, DictionaryLearning, FitAlgorithm,
-    FittedDictionaryLearning, FittedSparseCoder, SparseCoder,
+    FittedDictionaryLearning, FittedMiniBatchDictionaryLearning, FittedSparseCoder,
+    MiniBatchDictionaryLearning, SparseCoder,
 };
-pub use sparse_pca::{FittedSparsePca, SparsePca};
+pub use sparse_pca::{FittedSparsePca, MiniBatchSparsePca, SparsePca};
 pub use spline_transformer::{
     Extrapolation, FittedSplineTransformer, SplineKnots, SplineTransformer,
 };

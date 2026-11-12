@@ -5246,6 +5246,106 @@ class DictionaryLearning(TransformerMixin, BaseEstimator):
     n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
 
 
+class MiniBatchDictionaryLearning(TransformerMixin, BaseEstimator):
+    """Dictionary learning on mini-batches: started from the randomized SVD
+    and updated batch by batch from running statistics, as sklearn's; for
+    an int ``random_state`` the draws (SVD test matrix, shuffle, unused-atom
+    restarts) are numpy's, so the dictionary is sklearn's. ``partial_fit``
+    is not supported."""
+
+    _kind = "MiniBatchDictionaryLearning"
+
+    def __init__(self, n_components=None, *, alpha=1, max_iter=1000, fit_algorithm="lars",
+                 n_jobs=None, batch_size=256, shuffle=True, dict_init=None,
+                 transform_algorithm="omp", transform_n_nonzero_coefs=None,
+                 transform_alpha=None, verbose=False, split_sign=False, random_state=None,
+                 positive_code=False, positive_dict=False, transform_max_iter=1000,
+                 callback=None, tol=1e-3, max_no_improvement=10):
+        self.n_components = n_components
+        self.alpha = alpha
+        self.max_iter = max_iter
+        self.fit_algorithm = fit_algorithm
+        self.n_jobs = n_jobs
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.dict_init = dict_init
+        self.transform_algorithm = transform_algorithm
+        self.transform_n_nonzero_coefs = transform_n_nonzero_coefs
+        self.transform_alpha = transform_alpha
+        self.verbose = verbose
+        self.split_sign = split_sign
+        self.random_state = random_state
+        self.positive_code = positive_code
+        self.positive_dict = positive_dict
+        self.transform_max_iter = transform_max_iter
+        self.callback = callback
+        self.tol = tol
+        self.max_no_improvement = max_no_improvement
+
+    def _rust_params(self, X, y):
+        if self.dict_init is not None or self.callback is not None or self.positive_dict:
+            raise ValueError("dict_init, callback and positive_dict are not supported")
+        return {"n_components": None if self.n_components is None else int(self.n_components),
+                "alpha": float(self.alpha), "max_iter": int(self.max_iter),
+                "fit_algorithm": _choice(self.fit_algorithm, {"lars": "lars", "cd": "cd"},
+                                         "fit_algorithm"),
+                "batch_size": int(self.batch_size), "shuffle": bool(self.shuffle),
+                "transform": _coding(self, self.transform_alpha), "tol": float(self.tol),
+                "max_no_improvement": None if self.max_no_improvement is None
+                else int(self.max_no_improvement),
+                "seed": _numpy_seed(self.random_state)}
+
+    def inverse_transform(self, X):
+        return _inverse_code(self, X, self.components_)
+
+    components_ = property(lambda self: _nd(self._fitted_state()["components"]))
+    n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
+    n_steps_ = property(lambda self: int(self._fitted_state()["n_steps"]))
+
+
+class MiniBatchSparsePCA(SparsePCA):
+    """Sparse components by mini-batch dictionary learning on the centred,
+    transposed data (sklearn's ``MiniBatchSparsePCA``); for an int
+    ``random_state`` the components are sklearn's. ``transform`` is
+    ``SparsePCA``'s ridge projection."""
+
+    _kind = "MiniBatchSparsePca"
+
+    def __init__(self, n_components=None, *, alpha=1, ridge_alpha=0.01, max_iter=1000,
+                 callback=None, batch_size=3, verbose=False, shuffle=True, n_jobs=None,
+                 method="lars", random_state=None, tol=1e-3, max_no_improvement=10):
+        self.n_components = n_components
+        self.alpha = alpha
+        self.ridge_alpha = ridge_alpha
+        self.max_iter = max_iter
+        self.callback = callback
+        self.batch_size = batch_size
+        self.verbose = verbose
+        self.shuffle = shuffle
+        self.n_jobs = n_jobs
+        self.method = method
+        self.random_state = random_state
+        self.tol = tol
+        self.max_no_improvement = max_no_improvement
+
+    def _rust_params(self, X, y):
+        if self.callback is not None:
+            raise ValueError("callback is not supported")
+        return {"n_components": None if self.n_components is None else int(self.n_components),
+                "alpha": float(self.alpha), "ridge_alpha": float(self.ridge_alpha),
+                "max_iter": int(self.max_iter), "batch_size": int(self.batch_size),
+                "shuffle": bool(self.shuffle),
+                "method": _choice(self.method, {"lars": "lars", "cd": "cd"}, "method"),
+                "tol": float(self.tol),
+                "max_no_improvement": None if self.max_no_improvement is None
+                else int(self.max_no_improvement),
+                "seed": _numpy_seed(self.random_state)}
+
+    @property
+    def error_(self):
+        raise AttributeError("'MiniBatchSparsePCA' object has no attribute 'error_'")
+
+
 class MiniBatchNMF(TransformerMixin, BaseEstimator):
     """NMF by online multiplicative updates over contiguous mini-batches
     (no ``fresh_restarts``). With the default NNDSVDa init it draws no

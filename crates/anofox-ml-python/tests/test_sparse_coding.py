@@ -64,3 +64,42 @@ def test_dictionary_learning_options():
         am.SparseCoder(D, positive_code=True).transform(X)
     split = am.DictionaryLearning(n_components=3, split_sign=True, random_state=0)
     assert split.fit_transform(X).shape == (40, 6)
+
+
+# The mini-batch ones start from randomized_svd with svd_flip, so they are
+# compared exactly (no sign alignment).
+@pytest.mark.parametrize("kw, tol", [
+    ({"n_components": 5, "batch_size": 8}, 1e-10),
+    ({"n_components": 4, "batch_size": 16, "shuffle": False, "alpha": 0.5,
+      "transform_algorithm": "lasso_lars"}, 1e-10),
+    # sklearn stops each Lasso-CD code at tol=1e-8; over ~2500 steps that
+    # compounds to ~1e-5.
+    ({"n_components": 6, "batch_size": 10, "fit_algorithm": "cd"}, 1e-4),
+    ({"n_components": 3, "batch_size": 7, "max_iter": 5, "tol": 0, "split_sign": True}, 1e-10),
+])
+def test_minibatch_dictionary_learning_matches_sklearn(kw, tol):
+    Xm = np.random.RandomState(1).randn(60, 10)
+    ours = am.MiniBatchDictionaryLearning(random_state=0, **kw).fit(Xm)
+    ref = skd.MiniBatchDictionaryLearning(random_state=0, **kw).fit(Xm)
+    close(ours.components_, ref.components_, tol)
+    assert ours.n_steps_ == ref.n_steps_ and ours.n_iter_ == ref.n_iter_
+    close(ours.transform(Xm), ref.transform(Xm), tol)
+    code = ref.transform(Xm)
+    close(ours.inverse_transform(code), ref.inverse_transform(code), tol)
+    close(pickle.loads(pickle.dumps(ours)).transform(Xm), ours.transform(Xm))
+
+
+@pytest.mark.parametrize("kw, tol", [
+    ({"n_components": 4}, 1e-10),
+    ({"n_components": 6, "alpha": 0.5, "batch_size": 5}, 1e-10),
+    ({"n_components": 3, "method": "cd", "shuffle": False}, 1e-6),
+])
+def test_minibatch_sparse_pca_matches_sklearn(kw, tol):
+    Xs = np.random.RandomState(2).randn(30, 12)
+    ours = am.MiniBatchSparsePCA(random_state=0, **kw).fit(Xs)
+    ref = skd.MiniBatchSparsePCA(random_state=0, **kw).fit(Xs)
+    close(ours.components_, ref.components_, tol)
+    close(ours.mean_, ref.mean_)
+    assert ours.n_iter_ == ref.n_iter_
+    close(ours.transform(Xs), ref.transform(Xs), tol)
+    assert not hasattr(ours, "error_")

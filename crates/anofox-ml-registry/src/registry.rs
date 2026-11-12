@@ -2300,6 +2300,18 @@ registry! {
         transform: |m, x| Transform::transform(m, x),
         embedding: |m| m.train_code.clone(),
     }
+    MiniBatchDictionaryLearning {
+        config: pre::MiniBatchDictionaryLearning = Default::default(),
+        fitted: pre::FittedMiniBatchDictionaryLearning,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    MiniBatchSparsePca {
+        config: pre::MiniBatchSparsePca = Default::default(),
+        fitted: pre::FittedSparsePca,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     SparsePca {
         config: pre::SparsePca = Default::default(),
         fitted: pre::FittedSparsePca,
