@@ -91,9 +91,11 @@ pub use kbins_discretizer::{
     BinStrategy, EncodeStrategy, FittedKBinsDiscretizer, KBinsDiscretizer,
 };
 pub use kernel_approximation::{
-    johnson_lindenstrauss_min_dim, FittedKernelCenterer, FittedNystroem, FittedRandomProjection,
-    FittedRbfSampler, GaussianRandomProjection, KernelCenterer, Nystroem, NystroemKernel,
-    ProjectionComponents, RbfSampler, SparseRandomProjection,
+    johnson_lindenstrauss_min_dim, AdditiveChi2Sampler, FittedAdditiveChi2Sampler,
+    FittedKernelCenterer, FittedNystroem, FittedPolynomialCountSketch, FittedRandomProjection,
+    FittedRbfSampler, FittedSkewedChi2Sampler, GaussianRandomProjection, KernelCenterer, Nystroem,
+    NystroemKernel, PolynomialCountSketch, ProjectionComponents, RbfSampler, SkewedChi2Sampler,
+    SparseRandomProjection,
 };
 pub use kernel_pca::{FittedKernelPca, KernelPca, KpcaKernel};
 pub use knn_imputer::{FittedKnnImputer, KnnImputeWeights, KnnImputer};
