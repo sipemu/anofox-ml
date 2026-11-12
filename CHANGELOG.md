@@ -6,6 +6,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### SparseCoder and DictionaryLearning (#258, part 1)
+
+- `sparse_encode`, `SparseCoder` and `DictionaryLearning`
+  (`anofox-ml-preprocessing`, registry kinds, Python): codes by OMP, LARS,
+  LassoLars, Lasso (coordinate descent) or soft thresholding; dictionary
+  learning by LassoLars or coordinate descent from the SVD, sklearn's
+  `_dict_learning` loop (now shared with `SparsePca`).
+- Equal to sklearn 1.8: `SparseCoder` to ~1e-15 (Lasso-CD to sklearn's
+  tolerance), `DictionaryLearning` up to each atom's sign (LAPACK's SVD
+  signs are arbitrary). With as many atoms as features or more, the LARS
+  codings differ until sipemu/anofox-regression#334 (the LARS path stops
+  early when `n_samples <= n_features`) is released.
+
 ### Kernel approximation samplers (#257)
 
 - `AdditiveChi2Sampler`, `SkewedChi2Sampler` and `PolynomialCountSketch`

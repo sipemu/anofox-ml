@@ -2287,6 +2287,19 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    SparseCoder {
+        config: pre::SparseCoder = Default::default(),
+        fitted: pre::FittedSparseCoder,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    DictionaryLearning {
+        config: pre::DictionaryLearning = Default::default(),
+        fitted: pre::FittedDictionaryLearning,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+        embedding: |m| m.train_code.clone(),
+    }
     SparsePca {
         config: pre::SparsePca = Default::default(),
         fitted: pre::FittedSparsePca,

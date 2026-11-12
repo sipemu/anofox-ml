@@ -5111,6 +5111,141 @@ class SparsePCA(TransformerMixin, BaseEstimator):
     n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
 
 
+_CODING = {"omp": "omp", "lars": "lars", "lasso_lars": "lasso_lars", "lasso_cd": "lasso_cd",
+           "threshold": "threshold"}
+
+
+def _coding(est, alpha):
+    """The transform settings of SparseCoder / DictionaryLearning."""
+    if getattr(est, "positive_code", False):
+        raise ValueError("positive_code=True is not supported")
+    n_nonzero = est.transform_n_nonzero_coefs
+    return {"algorithm": _choice(est.transform_algorithm, _CODING, "transform_algorithm"),
+            "n_nonzero_coefs": None if n_nonzero is None else int(n_nonzero),
+            "alpha": None if alpha is None else float(alpha),
+            "split_sign": bool(est.split_sign), "max_iter": int(est.transform_max_iter)}
+
+
+def _ndarray_json(a):
+    a = np.ascontiguousarray(a, dtype=np.float64)
+    return {"v": 1, "dim": list(a.shape), "data": a.ravel().tolist()}
+
+
+class SparseCoder(TransformerMixin, BaseEstimator):
+    """Codes rows on a fixed ``dictionary`` (atoms as rows) by
+    ``transform_algorithm``: ``"omp"`` (default), ``"lars"``,
+    ``"lasso_lars"``, ``"lasso_cd"`` or ``"threshold"``. With as many atoms
+    as features or more, ``"lars"`` / ``"lasso_lars"`` differ from sklearn's
+    until sipemu/anofox-regression#334 is released."""
+
+    _kind = "SparseCoder"
+
+    def __init__(self, dictionary, *, transform_algorithm="omp", transform_n_nonzero_coefs=None,
+                 transform_alpha=None, split_sign=False, n_jobs=None, positive_code=False,
+                 transform_max_iter=1000):
+        self.dictionary = dictionary
+        self.transform_algorithm = transform_algorithm
+        self.transform_n_nonzero_coefs = transform_n_nonzero_coefs
+        self.transform_alpha = transform_alpha
+        self.split_sign = split_sign
+        self.n_jobs = n_jobs
+        self.positive_code = positive_code
+        self.transform_max_iter = transform_max_iter
+
+    def _rust_params(self, X, y):
+        return {"dictionary": _ndarray_json(self.dictionary),
+                "coding": _coding(self, self.transform_alpha)}
+
+    def fit(self, X=None, y=None):
+        """Only validates the dictionary (sklearn's ``fit`` is a no-op)."""
+        D = np.asarray(self.dictionary, dtype=np.float64)
+        return super().fit(np.zeros((1, D.shape[1])) if X is None else X)
+
+    def transform(self, X):
+        if not hasattr(self, "_model_"):
+            self.fit(X)
+        return super().transform(X)
+
+    def inverse_transform(self, X):
+        return _inverse_code(self, X, np.asarray(self.dictionary, dtype=np.float64))
+
+
+def _inverse_code(est, code, dictionary):
+    """sklearn's ``_inverse_transform``: ``code @ dictionary`` (split signs
+    recombined first)."""
+    code = np.asarray(code, dtype=np.float64)
+    k = dictionary.shape[0] * (2 if est.split_sign else 1)
+    if code.ndim != 2 or code.shape[1] != k:
+        raise ValueError("The number of components in the code is different from the number "
+                         f"of components in the dictionary.Expected {k}, got "
+                         f"{code.shape[-1]}.")
+    if est.split_sign:
+        half = k // 2
+        code = code[:, :half] - code[:, half:]
+    return code @ dictionary
+
+
+class DictionaryLearning(TransformerMixin, BaseEstimator):
+    """Learns a dictionary of ``n_components`` atoms with codes of sparsity
+    ``alpha`` (``fit_algorithm`` ``"lars"`` or ``"cd"``), started from the
+    SVD as sklearn's; ``transform`` codes by ``transform_algorithm``.
+    ``fit_transform`` returns the training codes, as sklearn's. Equal to
+    sklearn's up to each atom's sign (LAPACK's SVD signs are arbitrary) for
+    ``n_components < n_features``; with more atoms the ``"lars"`` fit waits
+    on sipemu/anofox-regression#334."""
+
+    _kind = "DictionaryLearning"
+
+    def __init__(self, n_components=None, *, alpha=1, max_iter=1000, tol=1e-8,
+                 fit_algorithm="lars", transform_algorithm="omp",
+                 transform_n_nonzero_coefs=None, transform_alpha=None, n_jobs=None,
+                 code_init=None, dict_init=None, callback=None, verbose=False, split_sign=False,
+                 random_state=None, positive_code=False, positive_dict=False,
+                 transform_max_iter=1000):
+        self.n_components = n_components
+        self.alpha = alpha
+        self.max_iter = max_iter
+        self.tol = tol
+        self.fit_algorithm = fit_algorithm
+        self.transform_algorithm = transform_algorithm
+        self.transform_n_nonzero_coefs = transform_n_nonzero_coefs
+        self.transform_alpha = transform_alpha
+        self.n_jobs = n_jobs
+        self.code_init = code_init
+        self.dict_init = dict_init
+        self.callback = callback
+        self.verbose = verbose
+        self.split_sign = split_sign
+        self.random_state = random_state
+        self.positive_code = positive_code
+        self.positive_dict = positive_dict
+        self.transform_max_iter = transform_max_iter
+
+    def _rust_params(self, X, y):
+        if self.code_init is not None or self.dict_init is not None or \
+                self.callback is not None or self.positive_dict:
+            raise ValueError("code_init, dict_init, callback and positive_dict are not "
+                             "supported")
+        return {"n_components": None if self.n_components is None else int(self.n_components),
+                "alpha": float(self.alpha), "max_iter": int(self.max_iter),
+                "tol": float(self.tol),
+                "fit_algorithm": _choice(self.fit_algorithm, {"lars": "lars", "cd": "cd"},
+                                         "fit_algorithm"),
+                "transform": _coding(self, self.transform_alpha),
+                "seed": _seed(self.random_state) % 2**32}
+
+    def fit_transform(self, X, y=None):
+        self.fit(X)
+        return np.asarray(self._model().embedding())
+
+    def inverse_transform(self, X):
+        return _inverse_code(self, X, self.components_)
+
+    components_ = property(lambda self: _nd(self._fitted_state()["components"]))
+    error_ = property(lambda self: np.asarray(self._fitted_state()["error"]))
+    n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
+
+
 class MiniBatchNMF(TransformerMixin, BaseEstimator):
     """NMF by online multiplicative updates over contiguous mini-batches
     (no ``fresh_restarts``). With the default NNDSVDa init it draws no

@@ -13,11 +13,8 @@
 //! is never used is redrawn from a data row plus noise (numpy's
 //! `RandomState`), as in sklearn.
 
-use anofox_ml_core::numpy_random::RandomState;
-use anofox_ml_core::{Fit, FitUnsupervised, Result, RustMlError, Transform};
-use anofox_ml_regression::Lars;
-use faer::linalg::solvers::Svd;
-use faer::Mat;
+use crate::sparse_coding::CodingAlgorithm;
+use anofox_ml_core::{FitUnsupervised, Result, RustMlError, Transform};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 
@@ -62,65 +59,6 @@ pub struct FittedSparsePca {
     ridge_alpha: f64,
 }
 
-/// Thin SVD of `x` with descending singular values: `(U, s, Vᵀ)`.
-fn thin_svd(x: &Array2<f64>) -> Result<(Array2<f64>, Vec<f64>, Array2<f64>)> {
-    let (n, p) = x.dim();
-    let m = Mat::<f64>::from_fn(n, p, |i, j| x[[i, j]]);
-    let svd = Svd::new_thin(m.as_ref())
-        .map_err(|e| RustMlError::InvalidParameter(format!("SVD failed: {e:?}")))?;
-    let (s, u, v) = (svd.S().column_vector(), svd.U(), svd.V());
-    let r = s.nrows();
-    let mut order: Vec<usize> = (0..r).collect();
-    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
-    let uu = Array2::from_shape_fn((n, r), |(i, c)| u[(i, order[c])]);
-    let vt = Array2::from_shape_fn((r, p), |(c, j)| v[(j, order[c])]);
-    Ok((uu, order.iter().map(|&i| s[i]).collect(), vt))
-}
-
-/// sklearn's `_sparse_encode(algorithm="lasso_lars")`: one LassoLars fit
-/// per row of `x` on the atoms.
-fn sparse_encode(x: &Array2<f64>, dictionary: &Array2<f64>, alpha: f64) -> Result<Array2<f64>> {
-    let design = dictionary.t().to_owned(); // n × k
-    let lars = Lars::lasso_lars(alpha / x.ncols() as f64)
-        .with_fit_intercept(false)
-        .with_max_iter(1000);
-    let mut code = Array2::<f64>::zeros((x.nrows(), dictionary.nrows()));
-    for (i, row) in x.rows().into_iter().enumerate() {
-        let fit = Fit::fit(&lars, &design, &row.to_owned())?;
-        code.row_mut(i).assign(&fit.coef);
-    }
-    Ok(code)
-}
-
-/// sklearn's `_update_dict` (no positivity constraint).
-fn update_dict(
-    dictionary: &mut Array2<f64>,
-    y: &Array2<f64>,
-    code: &mut Array2<f64>,
-    rng: &mut RandomState,
-) {
-    let n_samples = code.nrows();
-    let a = code.t().dot(code);
-    let b = y.t().dot(code);
-    for k in 0..dictionary.nrows() {
-        if a[[k, k]] > 1e-6 {
-            let step = (&b.column(k) - &a.row(k).dot(dictionary)) / a[[k, k]];
-            let mut row = dictionary.row_mut(k);
-            row += &step;
-        } else {
-            let pick = rng.randint(n_samples as u64) as usize;
-            let newd = y.row(pick).to_owned();
-            let std = newd.std(0.0);
-            let level = 0.01 * if std == 0.0 { 1.0 } else { std };
-            let noisy = newd.mapv(|v| v + rng.normal(0.0, level));
-            dictionary.row_mut(k).assign(&noisy);
-            code.column_mut(k).fill(0.0);
-        }
-        let norm = dictionary.row(k).dot(&dictionary.row(k)).sqrt();
-        dictionary.row_mut(k).mapv_inplace(|v| v / norm.max(1.0));
-    }
-}
-
 impl FitUnsupervised<f64> for SparsePca {
     type Fitted = FittedSparsePca;
 
@@ -144,29 +82,17 @@ impl FitUnsupervised<f64> for SparsePca {
         let mean = x.mean_axis(Axis(0)).unwrap();
         // Dictionary learning on Xcᵀ (features as samples).
         let y = (&x - &mean).reversed_axes().to_owned(); // p × n
-        let (u, s, vt) = thin_svd(&y)?;
-        let r = s.len();
-        let mut code = Array2::<f64>::zeros((p, k));
-        let mut dictionary = Array2::<f64>::zeros((k, n));
-        for c in 0..k.min(r) {
-            code.column_mut(c).assign(&u.column(c));
-            dictionary.row_mut(c).assign(&(&vt.row(c) * s[c]));
-        }
-        let mut rng = RandomState::new(self.seed);
-        let mut errors: Vec<f64> = Vec::new();
-        for ii in 0..self.max_iter {
-            code = sparse_encode(&y, &dictionary, self.alpha)?;
-            update_dict(&mut dictionary, &y, &mut code, &mut rng);
-            let resid = &y - &code.dot(&dictionary);
-            let cost = 0.5 * resid.mapv(|v| v * v).sum() + self.alpha * code.mapv(f64::abs).sum();
-            errors.push(cost);
-            if ii > 0 {
-                let de = errors[ii - 1] - errors[ii];
-                if de < self.tol * errors[ii] {
-                    break;
-                }
-            }
-        }
+        let fit = crate::sparse_coding::dict_learning(
+            &y,
+            k,
+            self.alpha,
+            self.tol,
+            self.max_iter,
+            CodingAlgorithm::LassoLars,
+            1000,
+            self.seed,
+        )?;
+        let (mut code, errors) = (fit.code, fit.errors);
         // svd_flip(code, dictionary, u_based_decision=True): np.sign of each
         // code column's largest-magnitude entry (0 for a zero column).
         for c in 0..k {
