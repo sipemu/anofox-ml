@@ -128,3 +128,83 @@ fn dictionary_learning_matches_sklearn_up_to_atom_signs() {
         );
     }
 }
+
+#[test]
+fn minibatch_dictionary_learning_matches_sklearn() {
+    use anofox_ml_preprocessing::MiniBatchDictionaryLearning;
+    for c in golden()["minibatch"].as_array().unwrap() {
+        let p = &c["params"];
+        let est = MiniBatchDictionaryLearning {
+            n_components: p["n_components"].as_u64().map(|v| v as usize),
+            alpha: p["alpha"].as_f64().unwrap_or(1.0),
+            max_iter: p["max_iter"].as_u64().map_or(1000, |v| v as usize),
+            fit_algorithm: if p["fit_algorithm"] == "cd" {
+                FitAlgorithm::Cd
+            } else {
+                FitAlgorithm::Lars
+            },
+            batch_size: p["batch_size"].as_u64().unwrap() as usize,
+            shuffle: p["shuffle"].as_bool().unwrap_or(true),
+            transform: coding(p, None),
+            tol: p["tol"].as_f64().unwrap_or(1e-3),
+            ..Default::default()
+        };
+        let x = json_to_array2(&c["X"]);
+        let fitted = est.fit(&x).unwrap();
+        let ctx = format!("{p}");
+        // Coordinate descent: sklearn's per-code tolerance (see above).
+        let tol = if p["fit_algorithm"] == "cd" {
+            1e-6
+        } else {
+            1e-10
+        };
+        assert_array2_close(
+            &fitted.components,
+            &json_to_array2(&c["components"]),
+            tol,
+            &ctx,
+        );
+        assert_eq!(
+            fitted.n_steps as u64,
+            c["n_steps"].as_u64().unwrap(),
+            "{ctx}"
+        );
+        assert_eq!(fitted.n_iter as u64, c["n_iter"].as_u64().unwrap(), "{ctx}");
+        let out = fitted.transform(&x).unwrap();
+        assert_array2_close(&out, &json_to_array2(&c["transform"]), tol, &ctx);
+    }
+}
+
+#[test]
+fn minibatch_sparse_pca_matches_sklearn() {
+    use anofox_ml_preprocessing::MiniBatchSparsePca;
+    for c in golden()["minibatch_spca"].as_array().unwrap() {
+        let p = &c["params"];
+        let cd = p["method"] == "cd";
+        let est = MiniBatchSparsePca {
+            n_components: p["n_components"].as_u64().map(|v| v as usize),
+            alpha: p["alpha"].as_f64().unwrap_or(1.0),
+            batch_size: p["batch_size"].as_u64().map_or(3, |v| v as usize),
+            shuffle: p["shuffle"].as_bool().unwrap_or(true),
+            method: if cd {
+                FitAlgorithm::Cd
+            } else {
+                FitAlgorithm::Lars
+            },
+            ..Default::default()
+        };
+        let x = json_to_array2(&c["X"]);
+        let fitted = est.fit(&x).unwrap();
+        let ctx = format!("{p}");
+        let tol = if cd { 1e-6 } else { 1e-10 };
+        assert_array2_close(
+            &fitted.components,
+            &json_to_array2(&c["components"]),
+            tol,
+            &ctx,
+        );
+        assert_eq!(fitted.n_iter as u64, c["n_iter"].as_u64().unwrap(), "{ctx}");
+        let out = fitted.transform(&x).unwrap();
+        assert_array2_close(&out, &json_to_array2(&c["transform"]), tol, &ctx);
+    }
+}

@@ -6,6 +6,17 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### MiniBatchDictionaryLearning and MiniBatchSparsePCA (#258, part 2)
+
+- `MiniBatchDictionaryLearning` and `MiniBatchSparsePca`
+  (`anofox-ml-preprocessing`, registry kinds, Python): sklearn's
+  mini-batch loop (randomized-SVD start, shuffle, running statistics,
+  `tol` / `max_no_improvement` stopping). A port of sklearn's
+  `randomized_svd` draws its test matrix from numpy's `RandomState`, so
+  with an int `random_state` the dictionaries, step counts and transforms
+  equal sklearn 1.8's (~1e-12; Lasso-CD to sklearn's tolerance).
+  `partial_fit` is not supported.
+
 ### SparseCoder and DictionaryLearning (#258, part 1)
 
 - `sparse_encode`, `SparseCoder` and `DictionaryLearning`

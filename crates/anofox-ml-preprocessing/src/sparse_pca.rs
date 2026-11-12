@@ -13,7 +13,9 @@
 //! is never used is redrawn from a data row plus noise (numpy's
 //! `RandomState`), as in sklearn.
 
-use crate::sparse_coding::CodingAlgorithm;
+use crate::sparse_coding::{
+    CodingAlgorithm, CodingParams, FitAlgorithm, MiniBatchDictionaryLearning,
+};
 use anofox_ml_core::{FitUnsupervised, Result, RustMlError, Transform};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
@@ -161,6 +163,93 @@ fn cholesky_solve(a: &Array2<f64>, b: &Array2<f64>) -> Result<Array2<f64>> {
         }
     }
     Ok(z)
+}
+
+/// sklearn's `MiniBatchSparsePCA`: `MiniBatchDictionaryLearning` on the
+/// centred, transposed data, whose LassoLars (or Lasso-CD) codes of the
+/// data at `alpha` are the components (normalised); `transform` is [`SparsePca`]'s ridge
+/// projection. The draws are numpy's `RandomState(seed)`, so the components
+/// are sklearn's for the same `random_state`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MiniBatchSparsePca {
+    /// `None`: `n_features`.
+    pub n_components: Option<usize>,
+    pub alpha: f64,
+    pub ridge_alpha: f64,
+    pub max_iter: usize,
+    pub batch_size: usize,
+    pub shuffle: bool,
+    pub method: FitAlgorithm,
+    pub tol: f64,
+    pub max_no_improvement: Option<usize>,
+    pub seed: u32,
+}
+
+impl Default for MiniBatchSparsePca {
+    fn default() -> Self {
+        Self {
+            n_components: None,
+            alpha: 1.0,
+            ridge_alpha: 0.01,
+            max_iter: 1000,
+            batch_size: 3,
+            shuffle: true,
+            method: FitAlgorithm::Lars,
+            tol: 1e-3,
+            max_no_improvement: Some(10),
+            seed: 0,
+        }
+    }
+}
+
+impl FitUnsupervised<f64> for MiniBatchSparsePca {
+    type Fitted = FittedSparsePca;
+
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<FittedSparsePca> {
+        let (n, p) = x.dim();
+        if n == 0 || p == 0 {
+            return Err(RustMlError::EmptyInput(
+                "MiniBatchSparsePCA needs data".into(),
+            ));
+        }
+        let mean = x.mean_axis(Axis(0)).unwrap();
+        let y = (&x - &mean).reversed_axes().to_owned(); // p × n
+        let est = MiniBatchDictionaryLearning {
+            n_components: Some(self.n_components.unwrap_or(p)),
+            alpha: self.alpha,
+            max_iter: self.max_iter,
+            fit_algorithm: self.method,
+            batch_size: self.batch_size,
+            shuffle: self.shuffle,
+            // sklearn codes the components by "lasso_" + method at alpha.
+            transform: CodingParams {
+                algorithm: match self.method {
+                    FitAlgorithm::Lars => CodingAlgorithm::LassoLars,
+                    FitAlgorithm::Cd => CodingAlgorithm::LassoCd,
+                },
+                alpha: Some(self.alpha),
+                ..CodingParams::default()
+            },
+            tol: self.tol,
+            max_no_improvement: self.max_no_improvement,
+            seed: self.seed,
+        };
+        let fitted = est.learn(&y)?;
+        let mut components = fitted.transform(&y)?.reversed_axes();
+        for mut row in components.rows_mut() {
+            let norm = row.dot(&row).sqrt();
+            let norm = if norm == 0.0 { 1.0 } else { norm };
+            row.mapv_inplace(|v| v / norm);
+        }
+        Ok(FittedSparsePca {
+            components,
+            mean,
+            error: Vec::new(),
+            n_iter: fitted.n_iter,
+            ridge_alpha: self.ridge_alpha,
+        })
+    }
 }
 
 impl Transform<f64> for FittedSparsePca {

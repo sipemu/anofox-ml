@@ -230,16 +230,25 @@ pub(crate) fn thin_svd(x: &Array2<f64>) -> Result<(Array2<f64>, Vec<f64>, Array2
     Ok((uu, order.iter().map(|&i| s[i]).collect(), vt))
 }
 
-/// sklearn's `_update_dict` (no positivity constraint).
+/// sklearn's `_update_dict` (no positivity constraint), with the running
+/// statistics `(A, B)` of the mini-batch version, else `codeᵀcode` and
+/// `yᵀcode`.
 fn update_dict(
     dictionary: &mut Array2<f64>,
     y: &Array2<f64>,
     code: &mut Array2<f64>,
+    stats: Option<(&Array2<f64>, &Array2<f64>)>,
     rng: &mut RandomState,
 ) {
     let n_samples = code.nrows();
-    let a = code.t().dot(code);
-    let b = y.t().dot(code);
+    let owned;
+    let (a, b) = match stats {
+        Some(ab) => ab,
+        None => {
+            owned = (code.t().dot(code), y.t().dot(code));
+            (&owned.0, &owned.1)
+        }
+    };
     for k in 0..dictionary.nrows() {
         if a[[k, k]] > 1e-6 {
             let step = (&b.column(k) - &a.row(k).dot(dictionary)) / a[[k, k]];
@@ -313,7 +322,7 @@ pub(crate) fn dict_learning(
             Some(alpha),
             method_max_iter,
         )?;
-        update_dict(&mut dictionary, x, &mut code, &mut rng);
+        update_dict(&mut dictionary, x, &mut code, None, &mut rng);
         let resid = x - &code.dot(&dictionary);
         let cost = 0.5 * resid.mapv(|v| v * v).sum() + alpha * code.mapv(f64::abs).sum();
         errors.push(cost);
@@ -421,6 +430,216 @@ impl FitUnsupervised<f64> for DictionaryLearning {
 }
 
 impl Transform<f64> for FittedDictionaryLearning {
+    fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
+        self.transform.encode(x, &self.components)
+    }
+}
+
+// ============================================================
+// Mini-batch dictionary learning
+// ============================================================
+
+/// sklearn's `MiniBatchDictionaryLearning` (no initial dictionary, no
+/// positivity constraints): the dictionary starts from `randomized_svd`,
+/// the rows are shuffled (`shuffle`), and each mini-batch of `batch_size`
+/// rows is coded (LassoLars or LassoCd at `alpha`), folded into the running
+/// statistics `A`, `B` and the dictionary updated, for up to `max_iter`
+/// passes; it stops early when the dictionary moves by at most `tol` (per
+/// atom) or the smoothed batch cost has not improved for
+/// `max_no_improvement` steps. All draws are numpy's `RandomState(seed)`,
+/// so the dictionary is sklearn's for the same `random_state`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MiniBatchDictionaryLearning {
+    pub n_components: Option<usize>,
+    pub alpha: f64,
+    pub max_iter: usize,
+    pub fit_algorithm: FitAlgorithm,
+    pub batch_size: usize,
+    pub shuffle: bool,
+    pub transform: CodingParams,
+    pub tol: f64,
+    /// `None`: no early stopping on the cost.
+    pub max_no_improvement: Option<usize>,
+    pub seed: u32,
+}
+
+impl Default for MiniBatchDictionaryLearning {
+    fn default() -> Self {
+        Self {
+            n_components: None,
+            alpha: 1.0,
+            max_iter: 1000,
+            fit_algorithm: FitAlgorithm::Lars,
+            batch_size: 256,
+            shuffle: true,
+            transform: CodingParams::default(),
+            tol: 1e-3,
+            max_no_improvement: Some(10),
+            seed: 0,
+        }
+    }
+}
+
+/// A fitted [`MiniBatchDictionaryLearning`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FittedMiniBatchDictionaryLearning {
+    /// The atoms, `n_components × n_features` (sklearn's `components_`).
+    pub components: Array2<f64>,
+    /// Passes over the data (sklearn's `n_iter_`).
+    pub n_iter: usize,
+    /// Mini-batch steps (sklearn's `n_steps_`).
+    pub n_steps: usize,
+    transform: CodingParams,
+}
+
+/// sklearn's `_check_convergence` state.
+struct Convergence {
+    ewa_cost: Option<f64>,
+    ewa_cost_min: Option<f64>,
+    no_improvement: usize,
+}
+
+impl MiniBatchDictionaryLearning {
+    pub(crate) fn learn(&self, x: &Array2<f64>) -> Result<FittedMiniBatchDictionaryLearning> {
+        let (n, p) = x.dim();
+        if n == 0 || p == 0 {
+            return Err(RustMlError::EmptyInput(
+                "dictionary learning needs data".into(),
+            ));
+        }
+        let k = self.n_components.unwrap_or(p);
+        if k == 0 || self.batch_size == 0 || self.max_iter == 0 {
+            return Err(RustMlError::InvalidParameter(
+                "n_components, batch_size and max_iter must be at least 1".into(),
+            ));
+        }
+        let method = match self.fit_algorithm {
+            FitAlgorithm::Lars => CodingAlgorithm::LassoLars,
+            FitAlgorithm::Cd => CodingAlgorithm::LassoCd,
+        };
+        let mut rng = RandomState::new(self.seed);
+        // _initialize_dict: randomized SVD, then pad / cut to k atoms.
+        let (_, sv, vt) = crate::randomized_svd::randomized_svd(x, k, &mut rng)?;
+        let mut dictionary = Array2::<f64>::zeros((k, p));
+        for (c, &sc) in sv.iter().enumerate().take(k) {
+            dictionary.row_mut(c).assign(&(&vt.row(c) * sc));
+        }
+        let train = if self.shuffle {
+            let mut rows: Vec<usize> = (0..n).collect();
+            rng.shuffle(&mut rows);
+            x.select(ndarray::Axis(0), &rows)
+        } else {
+            x.clone()
+        };
+        let batch_size = self.batch_size.min(n);
+        let mut a = Array2::<f64>::zeros((k, k));
+        let mut b = Array2::<f64>::zeros((p, k));
+        let steps_per_iter = n.div_ceil(batch_size);
+        let n_steps = self.max_iter * steps_per_iter;
+        let mut conv = Convergence {
+            ewa_cost: None,
+            ewa_cost_min: None,
+            no_improvement: 0,
+        };
+        let mut steps_done = 0;
+        for step in 0..n_steps {
+            let start = (step % steps_per_iter) * batch_size;
+            let batch = train.slice(ndarray::s![start..(start + batch_size).min(n), ..]);
+            let old_dict = dictionary.clone();
+            let bs = batch.nrows();
+            let mut code = sparse_encode(
+                batch,
+                dictionary.view(),
+                method,
+                None,
+                Some(self.alpha),
+                self.transform.max_iter,
+            )?;
+            let resid = &batch - &code.dot(&dictionary);
+            let batch_cost = (0.5 * resid.mapv(|v| v * v).sum()
+                + self.alpha * code.mapv(f64::abs).sum())
+                / bs as f64;
+            // _update_inner_stats
+            let theta = if step < bs - 1 {
+                ((step + 1) * bs) as f64
+            } else {
+                (bs * bs + step + 1 - bs) as f64
+            };
+            let beta = (theta + 1.0 - bs as f64) / (theta + 1.0);
+            a = a * beta + code.t().dot(&code) / bs as f64;
+            b = b * beta + batch.t().dot(&code) / bs as f64;
+            update_dict(
+                &mut dictionary,
+                &batch.to_owned(),
+                &mut code,
+                Some((&a, &b)),
+                &mut rng,
+            );
+            steps_done = step + 1;
+            if self.converged(&mut conv, bs, batch_cost, &dictionary, &old_dict, n, step) {
+                break;
+            }
+        }
+        let mut transform = self.transform.clone();
+        transform.alpha = transform.alpha.or(Some(self.alpha));
+        Ok(FittedMiniBatchDictionaryLearning {
+            components: dictionary,
+            n_iter: steps_done.div_ceil(steps_per_iter),
+            n_steps: steps_done,
+            transform,
+        })
+    }
+
+    /// sklearn's `_check_convergence`.
+    #[allow(clippy::too_many_arguments)]
+    fn converged(
+        &self,
+        conv: &mut Convergence,
+        batch_size: usize,
+        batch_cost: f64,
+        new_dict: &Array2<f64>,
+        old_dict: &Array2<f64>,
+        n_samples: usize,
+        step: usize,
+    ) -> bool {
+        let step = step + 1;
+        if (step as f64) <= (100.0_f64).min(n_samples as f64 / batch_size as f64) {
+            return false;
+        }
+        conv.ewa_cost = Some(match conv.ewa_cost {
+            None => batch_cost,
+            Some(ewa) => {
+                let w = (batch_size as f64 / (n_samples as f64 + 1.0)).min(1.0);
+                ewa * (1.0 - w) + batch_cost * w
+            }
+        });
+        let k = new_dict.nrows() as f64;
+        let diff = (new_dict - old_dict).mapv(|v| v * v).sum().sqrt() / k;
+        if self.tol > 0.0 && diff <= self.tol {
+            return true;
+        }
+        let ewa = conv.ewa_cost.expect("set above");
+        if conv.ewa_cost_min.is_none_or(|m| ewa < m) {
+            conv.no_improvement = 0;
+            conv.ewa_cost_min = Some(ewa);
+        } else {
+            conv.no_improvement += 1;
+        }
+        self.max_no_improvement
+            .is_some_and(|m| conv.no_improvement >= m)
+    }
+}
+
+impl FitUnsupervised<f64> for MiniBatchDictionaryLearning {
+    type Fitted = FittedMiniBatchDictionaryLearning;
+
+    fn fit_view(&self, x: ArrayView2<f64>) -> Result<FittedMiniBatchDictionaryLearning> {
+        self.learn(&x.to_owned())
+    }
+}
+
+impl Transform<f64> for FittedMiniBatchDictionaryLearning {
     fn transform_view(&self, x: ArrayView2<f64>) -> Result<Array2<f64>> {
         self.transform.encode(x, &self.components)
     }
