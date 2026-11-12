@@ -37,7 +37,7 @@ fn check_x(x: ArrayView2<f64>, min_rows: usize) -> Result<()> {
 }
 
 /// Mean of the rows, or zeros when `assume_centered`.
-fn location_of(x: ArrayView2<f64>, assume_centered: bool) -> Array1<f64> {
+pub(crate) fn location_of(x: ArrayView2<f64>, assume_centered: bool) -> Array1<f64> {
     if assume_centered {
         Array1::zeros(x.ncols())
     } else {
@@ -46,7 +46,7 @@ fn location_of(x: ArrayView2<f64>, assume_centered: bool) -> Array1<f64> {
 }
 
 /// Maximum-likelihood covariance (sklearn's `empirical_covariance`).
-fn empirical(x: ArrayView2<f64>, assume_centered: bool) -> Array2<f64> {
+pub(crate) fn empirical(x: ArrayView2<f64>, assume_centered: bool) -> Array2<f64> {
     let n = x.nrows() as f64;
     if assume_centered {
         x.t().dot(&x) / n
@@ -78,7 +78,7 @@ fn symmetric_eigen(a: &Array2<f64>) -> Result<(Vec<f64>, Array2<f64>)> {
 }
 
 /// scipy's `pinvh`: eigenvalues below `max(n) · eps · max|λ|` are dropped.
-fn pinvh(a: &Array2<f64>) -> Result<Array2<f64>> {
+pub(crate) fn pinvh(a: &Array2<f64>) -> Result<Array2<f64>> {
     let (vals, vecs) = symmetric_eigen(a)?;
     let n = a.nrows();
     let max_abs = vals.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -99,7 +99,7 @@ fn pinvh(a: &Array2<f64>) -> Result<Array2<f64>> {
 
 /// sklearn's `fast_logdet`: `log det` of a positive-definite matrix, `−∞`
 /// otherwise.
-fn logdet(a: &Array2<f64>) -> Result<f64> {
+pub(crate) fn logdet(a: &Array2<f64>) -> Result<f64> {
     let (vals, _) = symmetric_eigen(a)?;
     if vals.iter().any(|&l| l <= 0.0) {
         return Ok(f64::NEG_INFINITY);
@@ -130,6 +130,25 @@ pub struct FittedCovariance {
 }
 
 impl FittedCovariance {
+    /// A fitted model with a precision of its own (GraphicalLasso's).
+    pub(crate) fn with_precision(
+        location: Array1<f64>,
+        covariance: Array2<f64>,
+        precision: Array2<f64>,
+    ) -> Self {
+        Self {
+            location,
+            covariance,
+            precision,
+            shrinkage: None,
+            support: None,
+            dist: None,
+            raw_location: None,
+            raw_covariance: None,
+            raw_support: None,
+        }
+    }
+
     fn new(location: Array1<f64>, covariance: Array2<f64>, shrinkage: Option<f64>) -> Result<Self> {
         let precision = pinvh(&covariance)?;
         Ok(Self {

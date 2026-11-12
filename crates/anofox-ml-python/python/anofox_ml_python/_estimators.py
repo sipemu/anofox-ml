@@ -3607,7 +3607,8 @@ class _Covariance(BaseEstimator):
         return self._fit_model(X, None, None)
 
     def _state(self, key):
-        return _nd(self._fitted_state()[key])
+        state = self._fitted_state()
+        return _nd(state["cov"][key] if "cov" in state else state[key])
 
     @property
     def location_(self):
@@ -3642,6 +3643,104 @@ class EmpiricalCovariance(_Covariance):
 
     def _rust_params(self, X, y):
         return {"assume_centered": bool(self.assume_centered)}
+
+
+def _glasso_common(est):
+    if est.mode != "cd":
+        raise ValueError("only mode='cd' is supported")
+    return {"tol": float(est.tol), "enet_tol": float(est.enet_tol),
+            "max_iter": int(est.max_iter), "assume_centered": bool(est.assume_centered),
+            "eps": float(est.eps)}
+
+
+class _GraphicalLassoAttrs:
+    @property
+    def costs_(self):
+        return [tuple(c) for c in self._fitted_state()["costs"]]
+
+    @property
+    def n_iter_(self):
+        return int(self._fitted_state()["n_iter"])
+
+
+class GraphicalLasso(_GraphicalLassoAttrs, _Covariance):
+    """Sparse inverse covariance by the L1-penalised (``alpha``) Gaussian
+    likelihood, sklearn's coordinate-descent solver (``mode="cd"``);
+    ``covariance="precomputed"`` takes the empirical covariance as ``X``."""
+
+    _kind = "GraphicalLasso"
+
+    def __init__(self, alpha=0.01, *, mode="cd", covariance=None, tol=1e-4, enet_tol=1e-4,
+                 max_iter=100, verbose=False, eps=np.finfo(np.float64).eps,
+                 assume_centered=False):
+        self.alpha = alpha
+        self.mode = mode
+        self.covariance = covariance
+        self.tol = tol
+        self.enet_tol = enet_tol
+        self.max_iter = max_iter
+        self.verbose = verbose
+        self.eps = eps
+        self.assume_centered = assume_centered
+
+    def _rust_params(self, X, y):
+        if self.covariance not in (None, "precomputed"):
+            raise ValueError("covariance must be None or 'precomputed'")
+        return {**_glasso_common(self), "alpha": float(self.alpha),
+                "precomputed": self.covariance == "precomputed"}
+
+
+class GraphicalLassoCV(_GraphicalLassoAttrs, _Covariance):
+    """``GraphicalLasso`` with ``alpha`` by the mean held-out log-likelihood
+    over ``cv`` folds (KFold, or any splitter), the grid refined
+    ``n_refinements`` times around the best alpha, as sklearn's."""
+
+    _kind = "GraphicalLassoCV"
+
+    def __init__(self, *, alphas=4, n_refinements=4, cv=None, tol=1e-4, enet_tol=1e-4,
+                 max_iter=100, mode="cd", n_jobs=None, verbose=False,
+                 eps=np.finfo(np.float64).eps, assume_centered=False):
+        self.alphas = alphas
+        self.n_refinements = n_refinements
+        self.cv = cv
+        self.tol = tol
+        self.enet_tol = enet_tol
+        self.max_iter = max_iter
+        self.mode = mode
+        self.n_jobs = n_jobs
+        self.verbose = verbose
+        self.eps = eps
+        self.assume_centered = assume_centered
+
+    def _rust_params(self, X, y):
+        if isinstance(self.alphas, (int, np.integer)):
+            alphas = {"grid": int(self.alphas)}
+        else:
+            alphas = {"list": [float(a) for a in self.alphas]}
+        cv, splits = 5, None
+        if isinstance(self.cv, (int, np.integer)):
+            cv = int(self.cv)
+        elif self.cv is not None:
+            splitter = self.cv if hasattr(self.cv, "split") else None
+            pairs = splitter.split(X) if splitter is not None else self.cv
+            splits = [[np.asarray(tr).tolist(), np.asarray(te).tolist()] for tr, te in pairs]
+        return {**_glasso_common(self), "alphas": alphas,
+                "n_refinements": int(self.n_refinements), "cv": cv, "splits": splits}
+
+    @property
+    def alpha_(self):
+        return float(self._fitted_state()["alpha"])
+
+    @property
+    def cv_results_(self):
+        cv = self._fitted_state()["cv_results"]
+        scores = _nd(cv["scores"])
+        out = {"alphas": np.asarray(cv["alphas"], dtype=np.float64)}
+        for i in range(scores.shape[1]):
+            out[f"split{i}_test_score"] = scores[:, i]
+        out["mean_test_score"] = scores.mean(axis=1)
+        out["std_test_score"] = scores.std(axis=1)
+        return out
 
 
 class ShrunkCovariance(_Covariance):
