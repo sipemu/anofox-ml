@@ -3,7 +3,7 @@
 //!
 //! [`sparse_encode`] is sklearn's `sparse_encode`: each row of `x` coded on
 //! the dictionary's atoms by OMP, LARS, LassoLars, Lasso (coordinate
-//! descent) or soft thresholding. [`dict_learning`] is sklearn's
+//! descent) or soft thresholding. `dict_learning` is sklearn's
 //! `_dict_learning`: start from the thin SVD, then alternate sparse codes
 //! and the block-coordinate dictionary update until the cost
 //! `½‖X − code·dict‖² + alpha·‖code‖₁` improves by less than `tol`
