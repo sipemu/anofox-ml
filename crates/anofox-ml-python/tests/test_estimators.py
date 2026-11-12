@@ -37,6 +37,8 @@ SPECIAL = {
     "PoissonRegressor": dict(y=np.round(np.exp(y_reg / 3))),
     "GammaRegressor": dict(y=np.exp(y_reg / 3)),
     "NMF": dict(X=X_pos),
+    "AdditiveChi2Sampler": dict(X=X_pos),
+    "SkewedChi2Sampler": dict(X=X_pos),
     "PowerTransformer": dict(),
     "SelectKBest": dict(params=dict(k=2), y=y_multi),
     "MutualInformationSelector": dict(params=dict(n_features_to_select=2)),

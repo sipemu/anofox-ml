@@ -3820,6 +3820,91 @@ class RBFSampler(TransformerMixin, BaseEstimator):
                 "n_components": int(self.n_components), "seed": _seed(self.random_state)}
 
 
+def _numpy_seed(random_state):
+    """The numpy ``RandomState`` seed the Rust sampler draws from (an int
+    ``random_state`` gives sklearn's draws)."""
+    seed = _seed(random_state)
+    if seed >= 2**32:
+        raise ValueError("random_state must be below 2**32")
+    return seed
+
+
+class AdditiveChi2Sampler(TransformerMixin, BaseEstimator):
+    """Deterministic feature map of the additive chi-squared kernel
+    (non-negative input; ``2 * sample_steps - 1`` columns per feature)."""
+
+    _kind = "AdditiveChi2Sampler"
+
+    def __init__(self, *, sample_steps=2, sample_interval=None):
+        self.sample_steps = sample_steps
+        self.sample_interval = sample_interval
+
+    def _rust_params(self, X, y):
+        return {"sample_steps": int(self.sample_steps),
+                "sample_interval": None if self.sample_interval is None
+                else float(self.sample_interval)}
+
+    def get_feature_names_out(self, input_features=None):
+        if input_features is None:
+            input_features = [f"x{i}" for i in range(self.n_features_in_)]
+        names = [f"additivechi2sampler_{f}_sqrt" for f in input_features]
+        for j in range(1, self.sample_steps):
+            names += [f"additivechi2sampler_{f}_cos{j}" for f in input_features]
+            names += [f"additivechi2sampler_{f}_sin{j}" for f in input_features]
+        return np.asarray(names, dtype=object)
+
+
+class SkewedChi2Sampler(TransformerMixin, BaseEstimator):
+    """Random Fourier features of the skewed chi-squared kernel; the same
+    features as sklearn for an int ``random_state``."""
+
+    _kind = "SkewedChi2Sampler"
+
+    def __init__(self, *, skewedness=1.0, n_components=100, random_state=None):
+        self.skewedness = skewedness
+        self.n_components = n_components
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"skewedness": float(self.skewedness), "n_components": int(self.n_components),
+                "seed": _numpy_seed(self.random_state)}
+
+    @property
+    def random_weights_(self):
+        return _nd(self._fitted_state()["random_weights"])
+
+    @property
+    def random_offset_(self):
+        return _nd(self._fitted_state()["random_offset"])
+
+
+class PolynomialCountSketch(TransformerMixin, BaseEstimator):
+    """Tensor Sketch of the polynomial kernel ``(gamma <x, y> + coef0) **
+    degree``; the same features as sklearn for an int ``random_state``."""
+
+    _kind = "PolynomialCountSketch"
+
+    def __init__(self, *, gamma=1.0, degree=2, coef0=0, n_components=100, random_state=None):
+        self.gamma = gamma
+        self.degree = degree
+        self.coef0 = coef0
+        self.n_components = n_components
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        return {"gamma": float(self.gamma), "degree": int(self.degree),
+                "coef0": float(self.coef0), "n_components": int(self.n_components),
+                "seed": _numpy_seed(self.random_state)}
+
+    @property
+    def indexHash_(self):  # noqa: N802 (sklearn's name)
+        return np.asarray(_nd(self._fitted_state()["index_hash"]), dtype=np.int64)
+
+    @property
+    def bitHash_(self):  # noqa: N802 (sklearn's name)
+        return np.asarray(_nd(self._fitted_state()["bit_hash"]), dtype=np.int64)
+
+
 class KernelCenterer(TransformerMixin, BaseEstimator):
     """Centre a kernel matrix in feature space."""
 

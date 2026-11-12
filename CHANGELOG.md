@@ -6,6 +6,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### Kernel approximation samplers (#257)
+
+- `AdditiveChi2Sampler`, `SkewedChi2Sampler` and `PolynomialCountSketch`
+  (`anofox-ml-preprocessing`, registry kinds, Python). The two random ones
+  draw from numpy's `RandomState`, so their features are sklearn's for the
+  same `random_state`. `PolynomialCountSketch` computes the sketches'
+  circular convolution directly instead of by FFT (sparse in the input
+  features, no FFT dependency). Golden test against sklearn 1.8
+  (`gen_kernel_samplers.py`) and Python tests.
+
 ### RidgeClassifierCV and LassoLars (#256, part 2)
 
 - `RidgeClassifierCV` (`anofox-ml-regression`, registry kind, Python):

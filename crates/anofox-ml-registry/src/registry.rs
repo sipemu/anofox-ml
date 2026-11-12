@@ -2371,6 +2371,24 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    AdditiveChi2Sampler {
+        config: pre::AdditiveChi2Sampler = Default::default(),
+        fitted: pre::FittedAdditiveChi2Sampler,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    SkewedChi2Sampler {
+        config: pre::SkewedChi2Sampler = Default::default(),
+        fitted: pre::FittedSkewedChi2Sampler,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    PolynomialCountSketch {
+        config: pre::PolynomialCountSketch = Default::default(),
+        fitted: pre::FittedPolynomialCountSketch,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     KernelCenterer {
         config: pre::KernelCenterer = Default::default(),
         fitted: pre::FittedKernelCenterer,
