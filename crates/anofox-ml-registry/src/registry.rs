@@ -2408,6 +2408,12 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    PatchExtractor {
+        config: pre::PatchExtractor = Default::default(),
+        fitted: pre::FittedPatchExtractor,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     AdditiveChi2Sampler {
         config: pre::AdditiveChi2Sampler = Default::default(),
         fitted: pre::FittedAdditiveChi2Sampler,

@@ -3971,6 +3971,55 @@ def _numpy_seed(random_state):
     return seed
 
 
+class PatchExtractor(BaseEstimator):
+    """All (or ``max_patches`` random) ``patch_size`` patches of a batch of
+    images, ``(n_images, height, width[, channels])`` (sklearn's
+    ``feature_extraction.image.PatchExtractor``; for an int
+    ``random_state`` the random patches are sklearn's)."""
+
+    _kind = "PatchExtractor"
+
+    def __init__(self, *, patch_size=None, max_patches=None, random_state=None):
+        self.patch_size = patch_size
+        self.max_patches = max_patches
+        self.random_state = random_state
+
+    def fit(self, X, y=None):
+        """Only validates (sklearn's ``fit`` learns nothing)."""
+        X = np.asarray(X)
+        if X.ndim not in (3, 4):
+            raise ValueError(f"X must be (n_images, height, width[, channels]), got {X.ndim}D")
+        return self
+
+    def _rust_params(self, X, y):
+        return self._params
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=np.float64)
+        self.fit(X)
+        n, h, w = X.shape[:3]
+        c = int(np.prod(X.shape[3:])) if X.ndim == 4 else 1
+        mp = self.max_patches
+        if mp is None or mp is False:
+            max_patches = None
+        elif isinstance(mp, (int, np.integer)) and not isinstance(mp, bool):
+            max_patches = {"count": int(mp)}
+        else:
+            max_patches = {"fraction": float(mp)}
+        self._params = {"image_shape": [h, w, c],
+                        "patch_size": None if self.patch_size is None
+                        else [int(v) for v in self.patch_size],
+                        "max_patches": max_patches, "seed": _numpy_seed(self.random_state)}
+        flat = np.ascontiguousarray(X.reshape(n, h * w * c))
+        self._fit_model(flat)
+        out = np.asarray(self._model().transform(flat))
+        ph, pw = self.patch_size if self.patch_size is not None else (h // 10, w // 10)
+        return out.reshape((-1, ph, pw) + ((c,) if c > 1 else ()))
+
+    def fit_transform(self, X, y=None):
+        return self.transform(X)
+
+
 class AdditiveChi2Sampler(TransformerMixin, BaseEstimator):
     """Deterministic feature map of the additive chi-squared kernel
     (non-negative input; ``2 * sample_steps - 1`` columns per feature)."""

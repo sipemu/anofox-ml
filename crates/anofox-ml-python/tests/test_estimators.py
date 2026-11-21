@@ -38,6 +38,7 @@ SPECIAL = {
     "GammaRegressor": dict(y=np.exp(y_reg / 3)),
     "NMF": dict(X=X_pos),
     "SparseCoder": dict(params=dict(dictionary=np.eye(3, 4))),
+    "PatchExtractor": dict(params=dict(patch_size=(1, 1))),
     "AdditiveChi2Sampler": dict(X=X_pos),
     "SkewedChi2Sampler": dict(X=X_pos),
     "PowerTransformer": dict(),
@@ -139,6 +140,12 @@ def test_fit_predict_pickle_clone(name):
         out = est.fit(Xd).score_samples(Xd)
         assert out.shape == (len(Xd),)
         assert est.sample(5, random_state=0).shape == (5, Xd.shape[1])
+    elif name == "PatchExtractor":  # images in, patches out
+        images = Xd.reshape(len(Xd), 2, -1)
+        out = est.fit_transform(images)
+        assert out.ndim == 3
+        np.testing.assert_array_equal(pickle.loads(pickle.dumps(est)).transform(images), out)
+        return
     elif name == "NearestNeighbors":  # the unsupervised index
         dist, ind = est.fit(Xd).kneighbors(Xd)
         assert dist.shape == ind.shape == (len(Xd), est.n_neighbors)
