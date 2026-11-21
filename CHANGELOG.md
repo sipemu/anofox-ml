@@ -6,6 +6,18 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### NearestNeighbors and RadiusNeighborsTransformer (#260, part 1)
+
+- `NearestNeighbors` (`anofox-ml-neighbors`, registry kind with
+  `kneighbors`, Python): the unsupervised index. Python adds sklearn's
+  `kneighbors(X=None)` (each training row not its own neighbour),
+  `radius_neighbors` (object arrays; `sort_results`) and the
+  `kneighbors_graph` / `radius_neighbors_graph` as scipy CSR.
+- `RadiusNeighborsTransformer`: the radius graph (distances or ones),
+  returned dense like `KNeighborsTransformer`.
+- Equal to sklearn 1.8 (golden test `gen_nearest_neighbors.py`, Python
+  tests); ties in distance go to the lower training index.
+
 ### GraphicalLasso and GraphicalLassoCV (#259)
 
 - `GraphicalLasso` and `GraphicalLassoCV` (`anofox-ml-preprocessing`,

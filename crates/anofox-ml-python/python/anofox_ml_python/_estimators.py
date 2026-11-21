@@ -4344,6 +4344,158 @@ class KNeighborsTransformer(TransformerMixin, BaseEstimator):
                 "n_neighbors": int(self.n_neighbors)}
 
 
+def _index_params(est):
+    if est.metric == "minkowski":
+        metric = {"Minkowski": float(est.p)}
+    else:
+        metric = _choice(est.metric, _METRIC, "metric")
+    if est.metric_params is not None:
+        raise ValueError("metric_params is not supported")
+    return {"metric": metric, "algorithm": _choice(est.algorithm, _ALGORITHM, "algorithm")}
+
+
+def _graph(rows, n_cols, mode):
+    """Rows of ``(indices, distances)`` as sklearn's CSR graph (dense
+    without scipy)."""
+    indptr = np.concatenate([[0], np.cumsum([len(ind) for ind, _ in rows])])
+    indices = np.concatenate([ind for ind, _ in rows]) if rows else np.empty(0, np.int64)
+    data = (np.concatenate([d for _, d in rows]) if mode == "distance"
+            else np.ones(len(indices)))
+    try:
+        from scipy.sparse import csr_matrix
+    except ImportError:  # pragma: no cover
+        out = np.zeros((len(rows), n_cols))
+        for r, (ind, d) in enumerate(rows):
+            out[r, ind] = d if mode == "distance" else 1.0
+        return out
+    return csr_matrix((data, indices, indptr), shape=(len(rows), n_cols))
+
+
+class NearestNeighbors(BaseEstimator):
+    """The unsupervised neighbour index (sklearn's ``NearestNeighbors``):
+    ``kneighbors``, ``radius_neighbors`` and their graphs (scipy CSR). Ties
+    in distance go to the lower training index; without ``X`` each training
+    row is not its own neighbour, as in sklearn."""
+
+    _kind = "NearestNeighbors"
+
+    def __init__(self, *, n_neighbors=5, radius=1.0, algorithm="auto", leaf_size=30,
+                 metric="minkowski", p=2, metric_params=None, n_jobs=None):
+        self.n_neighbors = n_neighbors
+        self.radius = radius
+        self.algorithm = algorithm
+        self.leaf_size = leaf_size
+        self.metric = metric
+        self.p = p
+        self.metric_params = metric_params
+        self.n_jobs = n_jobs
+
+    def _rust_params(self, X, y):
+        return {"n_neighbors": int(self.n_neighbors), **_index_params(self)}
+
+    def fit(self, X, y=None):
+        self._fit_model(X)
+        self._fit_X = _check_X(X)
+        self.n_samples_fit_ = self._fit_X.shape[0]
+        return self
+
+    def _query(self, X, k):
+        """``(dist, ind)`` of the ``k`` nearest, excluding each training
+        row itself when ``X`` is None (sklearn's mask)."""
+        self._model()
+        if X is not None:
+            X = self._checked(X)
+            if k > self.n_samples_fit_:
+                raise ValueError(f"Expected n_neighbors <= n_samples_fit, but n_neighbors = "
+                                 f"{k}, n_samples_fit = {self.n_samples_fit_}")
+            return self._model().kneighbors(X, k)
+        n = self.n_samples_fit_
+        if k + 1 > n:
+            raise ValueError(f"Expected n_neighbors < n_samples_fit, but n_neighbors = {k}, "
+                             f"n_samples_fit = {n}")
+        dist, ind = self._model().kneighbors(self._fit_X, k + 1)
+        mask = ind != np.arange(n)[:, None]
+        mask[:, 0][np.all(mask, axis=1)] = False
+        return dist[mask].reshape(n, k), ind[mask].reshape(n, k)
+
+    def kneighbors(self, X=None, n_neighbors=None, return_distance=True):
+        k = self.n_neighbors if n_neighbors is None else int(n_neighbors)
+        dist, ind = self._query(X, k)
+        return (dist, ind) if return_distance else ind
+
+    def _radius_rows(self, X, radius, sort_results):
+        radius = self.radius if radius is None else float(radius)
+        n = self.n_samples_fit_
+        if X is None:
+            dist, ind = self._model().kneighbors(self._fit_X, n)
+            own = np.arange(n)
+        else:
+            dist, ind = self._model().kneighbors(self._checked(X), n)
+            own = None
+        rows = []
+        for r in range(len(dist)):
+            keep = dist[r] <= radius
+            if own is not None:
+                keep &= ind[r] != own[r]
+            i, d = ind[r][keep], dist[r][keep]
+            if not sort_results:  # index order (sklearn's brute-force order)
+                order = np.argsort(i, kind="stable")
+                i, d = i[order], d[order]
+            rows.append((i.astype(np.int64), d))
+        return rows
+
+    def radius_neighbors(self, X=None, radius=None, return_distance=True, sort_results=False):
+        if sort_results and not return_distance:
+            raise ValueError("return_distance must be True if sort_results is True.")
+        rows = self._radius_rows(X, radius, sort_results)
+        ind = np.empty(len(rows), dtype=object)
+        dist = np.empty(len(rows), dtype=object)
+        for r, (i, d) in enumerate(rows):
+            ind[r], dist[r] = i, d
+        return (dist, ind) if return_distance else ind
+
+    def kneighbors_graph(self, X=None, n_neighbors=None, mode="connectivity"):
+        k = self.n_neighbors if n_neighbors is None else int(n_neighbors)
+        dist, ind = self._query(X, k)
+        return _graph(list(zip(ind.astype(np.int64), dist)), self.n_samples_fit_,
+                      _check_mode(mode))
+
+    def radius_neighbors_graph(self, X=None, radius=None, mode="connectivity",
+                               sort_results=False):
+        return _graph(self._radius_rows(X, radius, sort_results), self.n_samples_fit_,
+                      _check_mode(mode))
+
+
+def _check_mode(mode):
+    if mode not in ("connectivity", "distance"):
+        raise ValueError(f"Unsupported mode, must be one of 'connectivity', or 'distance' "
+                         f"but got {mode!r} instead")
+    return mode
+
+
+class RadiusNeighborsTransformer(TransformerMixin, BaseEstimator):
+    """Radius-neighbour graph of ``X`` against the training rows, as a
+    dense array (sklearn returns it sparse)."""
+
+    _kind = "RadiusNeighborsTransformer"
+
+    def __init__(self, *, mode="distance", radius=1.0, algorithm="auto", leaf_size=30,
+                 metric="minkowski", p=2, metric_params=None, n_jobs=None):
+        self.mode = mode
+        self.radius = radius
+        self.algorithm = algorithm
+        self.leaf_size = leaf_size
+        self.metric = metric
+        self.p = p
+        self.metric_params = metric_params
+        self.n_jobs = n_jobs
+
+    def _rust_params(self, X, y):
+        return {"mode": _choice(self.mode, {"distance": "Distance",
+                                            "connectivity": "Connectivity"}, "mode"),
+                "radius": float(self.radius), **_index_params(self)}
+
+
 # ---------------------------------------------------------------------------
 # registry kinds: LARS-IC, GLMs, isotonic, Gaussian processes, PLS / CCA,
 # multi-task linear models, spectral embedding, splines

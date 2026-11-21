@@ -1479,6 +1479,18 @@ registry! {
         fit: |c, x, y, w| wsup(K, c, x, y, w),
         predict: |m, x| m.predict(x),
     }
+    NearestNeighbors {
+        config: neighbors::NearestNeighbors = Default::default(),
+        fitted: neighbors::FittedNearestNeighbors,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        kneighbors: |m, x, k| m.kneighbors(x, k),
+    }
+    RadiusNeighborsTransformer {
+        config: neighbors::RadiusNeighborsTransformer = Default::default(),
+        fitted: neighbors::FittedRadiusNeighborsTransformer,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     KNeighborsTransformer {
         config: neighbors::KNeighborsTransformer = Default::default(),
         fitted: neighbors::FittedKNeighborsTransformer,

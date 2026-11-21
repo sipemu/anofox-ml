@@ -139,6 +139,9 @@ def test_fit_predict_pickle_clone(name):
         out = est.fit(Xd).score_samples(Xd)
         assert out.shape == (len(Xd),)
         assert est.sample(5, random_state=0).shape == (5, Xd.shape[1])
+    elif name == "NearestNeighbors":  # the unsupervised index
+        dist, ind = est.fit(Xd).kneighbors(Xd)
+        assert dist.shape == ind.shape == (len(Xd), est.n_neighbors)
     elif hasattr(est, "mahalanobis"):  # covariance estimators
         out = est.fit(Xd).mahalanobis(Xd)
         assert out.shape == (len(Xd),)

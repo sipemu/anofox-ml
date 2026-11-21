@@ -43,6 +43,7 @@ pub mod knn_regressor;
 pub mod lof;
 pub mod nca;
 pub mod nearest_centroid;
+pub mod nearest_neighbors;
 pub mod radius;
 pub mod semi_supervised;
 
@@ -56,6 +57,10 @@ pub use lof::{FittedLocalOutlierFactor, LocalOutlierFactor, LofAlgorithm};
 pub use nca::{FittedNeighborhoodComponentsAnalysis, NcaInit, NeighborhoodComponentsAnalysis};
 pub use nearest_centroid::{
     CentroidMetric, CentroidPriors, FittedNearestCentroid, NearestCentroid,
+};
+pub use nearest_neighbors::{
+    FittedNearestNeighbors, FittedRadiusNeighborsTransformer, NearestNeighbors,
+    RadiusNeighborsTransformer,
 };
 pub use radius::{
     FittedRadiusNeighborsClassifier, FittedRadiusNeighborsRegressor, RadiusNeighborsClassifier,
