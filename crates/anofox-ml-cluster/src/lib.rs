@@ -59,7 +59,10 @@ pub use agglomerative::{
     FittedFeatureAgglomeration, Linkage,
 };
 pub use bgmm::{BayesianGaussianMixture, FittedBayesianGaussianMixture};
-pub use bicluster::{FittedSpectralCoclustering, SpectralCoclustering};
+pub use bicluster::{
+    BiclusterMethod, FittedSpectralBiclustering, FittedSpectralCoclustering, SpectralBiclustering,
+    SpectralCoclustering,
+};
 pub use birch::{Birch, FittedBirch};
 pub use bisecting_kmeans::{
     BisectingInit, BisectingKMeans, BisectingStrategy, FittedBisectingKMeans,
