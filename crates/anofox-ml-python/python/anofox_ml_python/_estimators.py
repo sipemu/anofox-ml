@@ -3961,6 +3961,75 @@ class MinCovDet(_Covariance):
         return np.asarray(self._fitted_state()["raw_support"], dtype=bool)
 
 
+class SGDOneClassSVM(OutlierMixin, BaseEstimator):
+    """Linear One-Class SVM by SGD (sklearn's ``SGDOneClassSVM``): for an int
+    ``random_state`` the epoch shuffles are sklearn's, so ``coef_``,
+    ``offset_`` and the decisions match it up to rounding."""
+
+    _kind = "SgdOneClassSvm"
+
+    def __init__(self, nu=0.5, fit_intercept=True, max_iter=1000, tol=1e-3, shuffle=True,
+                 verbose=0, random_state=None, learning_rate="optimal", eta0=0.01,
+                 power_t=0.5, warm_start=False, average=False):
+        self.nu = nu
+        self.fit_intercept = fit_intercept
+        self.max_iter = max_iter
+        self.tol = tol
+        self.shuffle = shuffle
+        self.verbose = verbose
+        self.random_state = random_state
+        self.learning_rate = learning_rate
+        self.eta0 = eta0
+        self.power_t = power_t
+        self.warm_start = warm_start
+        self.average = average
+
+    def _rust_params(self, X, y):
+        if self.warm_start:
+            raise ValueError("warm_start is not supported")
+        return {"nu": float(self.nu), "fit_intercept": bool(self.fit_intercept),
+                "max_iter": int(self.max_iter),
+                "tol": None if self.tol is None else float(self.tol),
+                "shuffle": bool(self.shuffle),
+                "learning_rate": _choice(self.learning_rate, {
+                    "constant": "Constant", "optimal": "Optimal",
+                    "invscaling": "InvScaling", "adaptive": "Adaptive"}, "learning_rate"),
+                "eta0": float(self.eta0), "power_t": float(self.power_t),
+                "average": int(bool(self.average)) if isinstance(self.average, bool)
+                else int(self.average),
+                "seed": _numpy_seed(self.random_state)}
+
+    def fit(self, X, y=None, coef_init=None, offset_init=None, sample_weight=None):
+        if coef_init is not None or offset_init is not None:
+            raise ValueError("coef_init and offset_init are not supported")
+        return self._fit_model(X, None, sample_weight)
+
+    def predict(self, X):
+        return np.asarray(self._call("predict", X), dtype=np.int64)
+
+    def decision_function(self, X):
+        return self._call("decision_function", X)
+
+    def score_samples(self, X):
+        return self._call("score_samples", X)
+
+    @property
+    def coef_(self):
+        return _nd(self._fitted_state()["coef"])
+
+    @property
+    def offset_(self):
+        return np.array([float(self._fitted_state()["offset"])])
+
+    @property
+    def n_iter_(self):
+        return int(self._fitted_state()["n_iter"])
+
+    @property
+    def t_(self):
+        return float(self._fitted_state()["t"])
+
+
 class EllipticEnvelope(OutlierMixin, BaseEstimator):
     """Outliers under a Gaussian assumption, from a robust (MCD) fit."""
 

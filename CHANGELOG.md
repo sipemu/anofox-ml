@@ -6,6 +6,17 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### SGDOneClassSVM (#261, part 4)
+
+- `SgdOneClassSvm` (`anofox-ml-linear`, registry kind, Python
+  `SGDOneClassSVM`): a port of sklearn's `_plain_sgd` one-class path
+  (`WeightVector` with lazy scaling and averaging, `SequentialDataset`'s
+  `our_rand_r` shuffle seeded by `RandomState(random_state).randint`),
+  with the constant, optimal, invscaling and adaptive schedules, averaging
+  and sample weights. For an int `random_state`, `coef_`, `offset_`,
+  `n_iter_` and `t_` equal sklearn 1.8's (up to rounding). `warm_start`,
+  `partial_fit` and `coef_init` / `offset_init` are not supported.
+
 ### SpectralBiclustering (#261, part 3)
 
 - `SpectralBiclustering` (`anofox-ml-cluster`, registry kind, Python):

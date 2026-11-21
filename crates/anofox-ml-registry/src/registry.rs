@@ -2492,6 +2492,14 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    SgdOneClassSvm {
+        config: linear::SgdOneClassSvm = Default::default(),
+        fitted: linear::FittedSgdOneClassSvm,
+        fit: |c, x, y, w| FitUnsupervisedWeighted::fit_unsupervised_weighted_view(c, x, w),
+        predict: |m, x| m.predict(x),
+        decision_function: |m, x| m.decision_function(x),
+        score_samples: |m, x| m.score_samples(x),
+    }
     EllipticEnvelope {
         config: pre::EllipticEnvelope = Default::default(),
         fitted: pre::FittedEllipticEnvelope,
