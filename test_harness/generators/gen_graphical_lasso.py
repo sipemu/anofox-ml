@@ -1,7 +1,8 @@
 """Golden data for GraphicalLasso and GraphicalLassoCV (#259,
 scikit-learn 1.8.0, mode="cd"). The coordinate descent is ported with its
-screening and stopping rules, so the fits match to rounding, including a
-fit that stops at max_iter."""
+screening and stopping rules, so the fits match to rounding. Every case is
+well-conditioned (a 1e-14 perturbation of X moves the results by < 1e-10),
+so the fixture regenerates identically on other machines."""
 
 import warnings
 
@@ -11,9 +12,11 @@ from sklearn.datasets import make_sparse_spd_matrix
 
 
 def _data(seed, p, n):
+    # Through the Cholesky factor (unique), not multivariate_normal: its SVD
+    # signs depend on the LAPACK build, so other machines drew other data.
     prec = make_sparse_spd_matrix(p, alpha=0.9, random_state=seed)
-    rng = np.random.RandomState(seed)
-    return rng.multivariate_normal(np.zeros(p), np.linalg.inv(prec), size=n) + 1.5
+    L = np.linalg.cholesky(np.linalg.inv(prec))
+    return np.random.RandomState(seed).randn(n, p) @ L.T + 1.5
 
 
 def generate():
