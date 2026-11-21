@@ -39,6 +39,7 @@ use ndarray::ArrayView2;
 pub mod affinity_propagation;
 pub mod agglomerative;
 pub mod bgmm;
+pub mod bicluster;
 pub mod birch;
 pub mod bisecting_kmeans;
 pub mod dbscan;
@@ -58,6 +59,7 @@ pub use agglomerative::{
     FittedFeatureAgglomeration, Linkage,
 };
 pub use bgmm::{BayesianGaussianMixture, FittedBayesianGaussianMixture};
+pub use bicluster::{FittedSpectralCoclustering, SpectralCoclustering};
 pub use birch::{Birch, FittedBirch};
 pub use bisecting_kmeans::{
     BisectingInit, BisectingKMeans, BisectingStrategy, FittedBisectingKMeans,

@@ -2541,6 +2541,11 @@ registry! {
     }
 
     // --------------------------------------------------------- cluster
+    SpectralCoclustering {
+        config: cluster::SpectralCoclustering = Default::default(),
+        fitted: cluster::FittedSpectralCoclustering,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+    }
     KMeans {
         config: cluster::KMeans = Default::default(),
         fitted: cluster::FittedKMeans<f64>,

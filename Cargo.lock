@@ -62,6 +62,7 @@ dependencies = [
  "anofox-ml-core",
  "anofox-ml-manifold",
  "anofox-ml-neighbors",
+ "anofox-ml-preprocessing",
  "approx",
  "faer",
  "ndarray",

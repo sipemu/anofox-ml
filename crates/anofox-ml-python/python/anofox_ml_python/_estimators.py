@@ -2915,6 +2915,58 @@ class MutualInformationSelector(SupervisedTransformerMixin, BaseEstimator):
 # ---------------------------------------------------------------------------
 
 
+class SpectralCoclustering(BaseEstimator):
+    """Spectral co-clustering of a non-negative matrix (sklearn's
+    ``SpectralCoclustering``, ``svd_method="randomized"``, KMeans with
+    k-means++): for an int ``random_state`` the SVD and KMeans draws are
+    numpy's, so the biclusters are sklearn's."""
+
+    _kind = "SpectralCoclustering"
+
+    def __init__(self, n_clusters=3, *, svd_method="randomized", n_svd_vecs=None,
+                 mini_batch=False, init="k-means++", n_init=10, random_state=None):
+        self.n_clusters = n_clusters
+        self.svd_method = svd_method
+        self.n_svd_vecs = n_svd_vecs
+        self.mini_batch = mini_batch
+        self.init = init
+        self.n_init = n_init
+        self.random_state = random_state
+
+    def _rust_params(self, X, y):
+        if self.svd_method != "randomized" or self.mini_batch or self.init != "k-means++":
+            raise ValueError("only svd_method='randomized', mini_batch=False and "
+                             "init='k-means++' are supported")
+        return {"n_clusters": int(self.n_clusters),
+                "n_svd_vecs": None if self.n_svd_vecs is None else int(self.n_svd_vecs),
+                "n_init": int(self.n_init), "seed": _numpy_seed(self.random_state)}
+
+    def fit(self, X, y=None):
+        self._fit_model(X)
+        state = self._fitted_state()
+        self.row_labels_ = np.asarray(state["row_labels"], dtype=np.int64)
+        self.column_labels_ = np.asarray(state["column_labels"], dtype=np.int64)
+        k = int(self.n_clusters)
+        self.rows_ = np.vstack([self.row_labels_ == c for c in range(k)])
+        self.columns_ = np.vstack([self.column_labels_ == c for c in range(k)])
+        return self
+
+    @property
+    def biclusters_(self):
+        return self.rows_, self.columns_
+
+    def get_indices(self, i):
+        return np.nonzero(self.rows_[i])[0], np.nonzero(self.columns_[i])[0]
+
+    def get_shape(self, i):
+        rows, cols = self.get_indices(i)
+        return len(rows), len(cols)
+
+    def get_submatrix(self, i, data):
+        rows, cols = self.get_indices(i)
+        return np.asarray(data)[rows[:, np.newaxis], cols]
+
+
 class KMeans(ClusterMixin, BaseEstimator):
     _kind = "KMeans"
 
