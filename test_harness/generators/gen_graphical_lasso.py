@@ -26,8 +26,11 @@ def generate():
         warnings.simplefilter("ignore")
         for kw in [{"alpha": 0.01}, {"alpha": 0.1}, {"alpha": 0.3, "max_iter": 20},
                    {"alpha": 0.05, "assume_centered": True}, {"alpha": 0.0}]:
-            est = GraphicalLasso(**kw).fit(X)
-            single.append({"params": kw, "X": X.tolist(),
+            # assume_centered on the offset data is ill-conditioned (its
+            # rounding differs across machines), so that case uses mean 0.
+            Xk = X - 1.5 if kw.get("assume_centered") else X
+            est = GraphicalLasso(**kw).fit(Xk)
+            single.append({"params": kw, "X": Xk.tolist(),
                            "location": est.location_.tolist(),
                            "covariance": est.covariance_.tolist(),
                            "precision": est.precision_.tolist(),
