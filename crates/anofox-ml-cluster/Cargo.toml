@@ -17,6 +17,7 @@ categories = ["science", "algorithms"]
 anofox-ml-core = { workspace = true }
 anofox-ml-manifold = { workspace = true }
 anofox-ml-neighbors = { workspace = true }
+anofox-ml-preprocessing = { workspace = true }
 faer = { workspace = true }
 ndarray = { workspace = true }
 num-traits = { workspace = true }

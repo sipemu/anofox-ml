@@ -60,7 +60,7 @@ pub mod polynomial_features;
 pub mod power_transformer;
 pub(crate) mod quantile;
 pub mod quantile_transformer;
-mod randomized_svd;
+pub mod randomized_svd;
 pub mod rcs_transformer;
 pub mod rfe;
 pub mod robust_scaler;

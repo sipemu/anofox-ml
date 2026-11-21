@@ -122,11 +122,13 @@ fn inertia(
     total
 }
 
-/// sklearn's `_kmeans_plusplus` for two centres (`n_local_trials = 2`).
-fn kmeans_plusplus(
+/// sklearn's `_kmeans_plusplus` for `k` centres
+/// (`n_local_trials = 2 + int(ln k)`): the chosen rows.
+pub(crate) fn kmeans_plusplus(
     x: ArrayView2<f64>,
     w: &[f64],
     xsq: &[f64],
+    k: usize,
     rng: &mut RandomState,
 ) -> Result<Vec<usize>> {
     let n = x.nrows();
@@ -140,34 +142,94 @@ fn kmeans_plusplus(
             .map(|i| ((-2.0 * x.row(c).dot(&x.row(i)) + xsq[c]) + xsq[i]).max(0.0))
             .collect()
     };
-    let closest = dist_to(first);
-    let pot: f64 = closest.iter().zip(w).map(|(d, v)| d * v).sum();
-    let trials = 2;
-    let draws: Vec<f64> = (0..trials).map(|_| rng.random_sample() * pot).collect();
-    let mut cum = 0.0;
-    let cumsum: Vec<f64> = closest
-        .iter()
-        .zip(w)
-        .map(|(d, v)| {
-            cum += d * v;
-            cum
-        })
-        .collect();
-    let mut best = (f64::INFINITY, first);
-    for r in draws {
-        let cand = cumsum.partition_point(|&c| c < r).min(n - 1);
-        let d = dist_to(cand);
-        let p: f64 = d
+    let mut closest = dist_to(first);
+    let mut pot: f64 = closest.iter().zip(w).map(|(d, v)| d * v).sum();
+    let trials = 2 + (k as f64).ln() as usize;
+    let mut chosen = vec![first];
+    for _ in 1..k {
+        let draws: Vec<f64> = (0..trials).map(|_| rng.random_sample() * pot).collect();
+        let mut cum = 0.0;
+        let cumsum: Vec<f64> = closest
             .iter()
-            .zip(&closest)
             .zip(w)
-            .map(|((a, b), v)| a.min(*b) * v)
-            .sum();
-        if p < best.0 {
-            best = (p, cand);
+            .map(|(d, v)| {
+                cum += d * v;
+                cum
+            })
+            .collect();
+        let mut best: Option<(f64, usize, Vec<f64>)> = None;
+        for r in draws {
+            let cand = cumsum.partition_point(|&c| c < r).min(n - 1);
+            let d: Vec<f64> = dist_to(cand)
+                .iter()
+                .zip(&closest)
+                .map(|(a, b)| a.min(*b))
+                .collect();
+            let p: f64 = d.iter().zip(w).map(|(a, v)| a * v).sum();
+            if best.as_ref().is_none_or(|b| p < b.0) {
+                best = Some((p, cand, d));
+            }
+        }
+        let (p, cand, d) = best.expect("at least one trial");
+        pot = p;
+        closest = d;
+        chosen.push(cand);
+    }
+    Ok(chosen)
+}
+
+/// sklearn's `KMeans(k, init="k-means++", n_init, algorithm="lloyd",
+/// tol=1e-4, max_iter=300, random_state=seed).fit(x)` (unit weights):
+/// `(labels, centres, inertia)`. The data is centred first, the tolerance
+/// is `1e-4 ×` the mean feature variance, and a run replaces the best only
+/// with a lower inertia and a different partition, as in sklearn.
+pub(crate) fn sklearn_kmeans(
+    x: ArrayView2<f64>,
+    k: usize,
+    n_init: usize,
+    seed: u32,
+) -> Result<(Vec<usize>, Array2<f64>, f64)> {
+    let (n, _) = x.dim();
+    if k == 0 || k > n || n_init == 0 {
+        return Err(RustMlError::InvalidParameter(format!(
+            "KMeans needs 1 <= n_clusters <= n_samples ({n}) and n_init >= 1"
+        )));
+    }
+    let mean = x.mean_axis(ndarray::Axis(0)).expect("non-empty");
+    let var_mean = x.var_axis(ndarray::Axis(0), 0.0).mean().unwrap_or(0.0);
+    let tol = var_mean * 1e-4;
+    let xc = &x - &mean;
+    let xsq: Vec<f64> = xc.rows().into_iter().map(|r| r.dot(&r)).collect();
+    let w = vec![1.0; n];
+    let mut rng = RandomState::new(seed);
+    let mut best: Option<(Vec<usize>, Array2<f64>, f64)> = None;
+    for _ in 0..n_init {
+        let init = kmeans_plusplus(xc.view(), &w, &xsq, k, &mut rng)?;
+        let centers = xc.select(ndarray::Axis(0), &init);
+        let (labels, centers, inertia) = lloyd2(xc.view(), &w, centers, 300, tol);
+        let replace = match &best {
+            None => true,
+            Some((bl, _, bi)) => inertia < *bi && !same_clustering(&labels, bl, k),
+        };
+        if replace {
+            best = Some((labels, centers, inertia));
         }
     }
-    Ok(vec![first, best.1])
+    let (labels, centers, inertia) = best.expect("n_init >= 1");
+    Ok((labels, &centers + &mean, inertia))
+}
+
+/// sklearn's `_is_same_clustering`: equal up to a relabelling.
+fn same_clustering(a: &[usize], b: &[usize], k: usize) -> bool {
+    let mut map = vec![usize::MAX; k];
+    for (&x, &y) in a.iter().zip(b) {
+        if map[x] == usize::MAX {
+            map[x] = y;
+        } else if map[x] != y {
+            return false;
+        }
+    }
+    true
 }
 
 /// sklearn's `_kmeans_single_lloyd` with two centres: labels, centres and
@@ -321,7 +383,7 @@ impl FitUnsupervisedWeighted<f64> for BisectingKMeans {
                         rng.choice_weighted(&pr, 2, false)?
                     }
                     BisectingInit::KMeansPlusPlus => {
-                        kmeans_plusplus(xs.view(), &ws, &xsq_s, &mut rng)?
+                        kmeans_plusplus(xs.view(), &ws, &xsq_s, 2, &mut rng)?
                     }
                 };
                 let init = xs.select(Axis(0), &seeds);

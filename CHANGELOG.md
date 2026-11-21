@@ -6,6 +6,19 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### SpectralCoclustering (#261, part 2)
+
+- `SpectralCoclustering` (`anofox-ml-cluster`, registry kind, Python):
+  scale normalization, `randomized_svd` (now public in
+  `anofox-ml-preprocessing`, with `randomized_svd_oversampled` for
+  `n_svd_vecs`) and sklearn's KMeans. For an int `random_state` the row and
+  column labels equal sklearn 1.8's.
+- `anofox-ml-cluster`: sklearn's numpy `_kmeans_plusplus` now seeds any
+  number of centres (`2 + int(ln k)` local trials; BisectingKMeans'
+  two-centre draws are unchanged), and a sklearn-exact best-of-`n_init`
+  KMeans (`k-means++`, Lloyd) backs the co-clustering. `anofox-ml-cluster`
+  now depends on `anofox-ml-preprocessing`.
+
 ### PatchExtractor (#261, part 1)
 
 - `PatchExtractor` (`anofox-ml-preprocessing`, registry kind, Python):

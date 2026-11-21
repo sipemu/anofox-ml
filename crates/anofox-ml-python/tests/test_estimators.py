@@ -39,6 +39,7 @@ SPECIAL = {
     "NMF": dict(X=X_pos),
     "SparseCoder": dict(params=dict(dictionary=np.eye(3, 4))),
     "PatchExtractor": dict(params=dict(patch_size=(1, 1))),
+    "SpectralCoclustering": dict(params=dict(n_clusters=2, random_state=0)),
     "AdditiveChi2Sampler": dict(X=X_pos),
     "SkewedChi2Sampler": dict(X=X_pos),
     "PowerTransformer": dict(),
@@ -145,6 +146,13 @@ def test_fit_predict_pickle_clone(name):
         out = est.fit_transform(images)
         assert out.ndim == 3
         np.testing.assert_array_equal(pickle.loads(pickle.dumps(est)).transform(images), out)
+        return
+    elif name == "SpectralCoclustering":  # labels for rows and columns
+        est.fit(np.abs(Xd))
+        assert est.row_labels_.shape == (len(Xd),)
+        assert est.column_labels_.shape == (Xd.shape[1],)
+        np.testing.assert_array_equal(pickle.loads(pickle.dumps(est)).row_labels_,
+                                      est.row_labels_)
         return
     elif name == "NearestNeighbors":  # the unsupervised index
         dist, ind = est.fit(Xd).kneighbors(Xd)

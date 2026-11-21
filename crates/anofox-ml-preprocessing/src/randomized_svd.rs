@@ -50,13 +50,24 @@ fn column_signs(u: &Array2<f64>) -> Vec<f64> {
 /// sklearn's `randomized_svd(m, k, n_oversamples=10, n_iter="auto",
 /// transpose="auto", flip_sign=True, random_state=rng)`: `(U, s, Vᵀ)` with
 /// `k` components.
-pub(crate) fn randomized_svd(
+pub fn randomized_svd(
     m: &Array2<f64>,
     k: usize,
     rng: &mut RandomState,
 ) -> Result<(Array2<f64>, Vec<f64>, Array2<f64>)> {
+    randomized_svd_oversampled(m, k, 10, rng)
+}
+
+/// [`randomized_svd`] with `n_oversamples` extra test vectors (sklearn's
+/// `n_oversamples`, default 10).
+pub fn randomized_svd_oversampled(
+    m: &Array2<f64>,
+    k: usize,
+    n_oversamples: usize,
+    rng: &mut RandomState,
+) -> Result<(Array2<f64>, Vec<f64>, Array2<f64>)> {
     let (n, p) = m.dim();
-    let n_random = k + 10;
+    let n_random = k + n_oversamples;
     let n_iter = if (k as f64) < 0.1 * n.min(p) as f64 {
         7
     } else {
