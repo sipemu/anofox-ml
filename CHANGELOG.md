@@ -6,6 +6,14 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### PatchExtractor (#261, part 1)
+
+- `PatchExtractor` (`anofox-ml-preprocessing`, registry kind, Python):
+  every patch of each image, or `max_patches` random ones (numpy
+  `RandomState` draws, so sklearn's for an int `random_state`); grey and
+  multi-channel images. Equal to sklearn 1.8 bit for bit. A default patch
+  size of 0 (images under 10 pixels high or wide) is an error.
+
 ### MDS (SMACOF) (#260, part 2)
 
 - `Mds` (`anofox-ml-manifold`, registry kind, Python `MDS`): sklearn's
