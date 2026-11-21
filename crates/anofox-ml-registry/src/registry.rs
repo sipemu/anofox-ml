@@ -2656,6 +2656,12 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         embedding: |m| m.embedding.clone(),
     }
+    Mds {
+        config: manifold::Mds = Default::default(),
+        fitted: manifold::FittedMds,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        embedding: |m| m.embedding.clone(),
+    }
     ClassicalMds {
         config: manifold::ClassicalMds = manifold::ClassicalMds::new(2),
         fitted: manifold::FittedClassicalMds,

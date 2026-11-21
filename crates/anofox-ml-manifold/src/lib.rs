@@ -14,12 +14,14 @@
 use anofox_ml_core::Float;
 pub mod isomap;
 pub mod lle;
+pub mod mds;
 pub mod sparse_eigen;
 pub mod spectral_embedding;
 pub mod tsne;
 
 pub use isomap::{FittedIsomap, Isomap};
 pub use lle::{FittedLocallyLinearEmbedding, LocallyLinearEmbedding};
+pub use mds::{FittedMds, Mds, MdsInit};
 pub use spectral_embedding::{
     build_affinity, spectral_embedding, Affinity, FittedSpectralEmbedding, SpectralAffinity,
     SpectralEmbedding,

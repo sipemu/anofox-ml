@@ -6,6 +6,16 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### MDS (SMACOF) (#260, part 2)
+
+- `Mds` (`anofox-ml-manifold`, registry kind, Python `MDS`): sklearn's
+  SMACOF, metric and non-metric (isotonic disparities), the best of
+  `n_init` random starts (numpy `RandomState` draws) or one classical-MDS
+  start, precomputed dissimilarities, sklearn 1.8's defaults (`n_init=4`,
+  `init="random"`, `normalized_stress="auto"`). Equal to sklearn to ~1e-15
+  (embedding, stress, `n_iter_`). As in sklearn, the classical start is
+  2-D, so the embedding is 2-D whatever `n_components` says.
+
 ### NearestNeighbors and RadiusNeighborsTransformer (#260, part 1)
 
 - `NearestNeighbors` (`anofox-ml-neighbors`, registry kind with
