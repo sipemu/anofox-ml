@@ -2967,6 +2967,62 @@ class SpectralCoclustering(BaseEstimator):
         return np.asarray(data)[rows[:, np.newaxis], cols]
 
 
+class SpectralBiclustering(SpectralCoclustering):
+    """Spectral biclustering with a checkerboard structure (sklearn's
+    ``SpectralBiclustering``, ``svd_method="randomized"``, KMeans with
+    k-means++): for an int ``random_state`` the SVD and KMeans draws are
+    numpy's, so the row and column labels are sklearn's."""
+
+    _kind = "SpectralBiclustering"
+
+    def __init__(self, n_clusters=3, *, method="bistochastic", n_components=6, n_best=3,
+                 svd_method="randomized", n_svd_vecs=None, mini_batch=False,
+                 init="k-means++", n_init=10, random_state=None):
+        super().__init__(n_clusters, svd_method=svd_method, n_svd_vecs=n_svd_vecs,
+                         mini_batch=mini_batch, init=init, n_init=n_init,
+                         random_state=random_state)
+        self.method = method
+        self.n_components = n_components
+        self.n_best = n_best
+
+    def _n_clusters(self):
+        if isinstance(self.n_clusters, (int, np.integer)):
+            return int(self.n_clusters), int(self.n_clusters)
+        try:
+            n_rows, n_cols = self.n_clusters
+            return int(n_rows), int(n_cols)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Incorrect parameter n_clusters has value: {self.n_clusters}. "
+                             "It should either be a single integer or an iterable with "
+                             "two integers: (n_row_clusters, n_column_clusters)") from e
+
+    def _rust_params(self, X, y):
+        if self.svd_method != "randomized" or self.mini_batch or self.init != "k-means++":
+            raise ValueError("only svd_method='randomized', mini_batch=False and "
+                             "init='k-means++' are supported")
+        methods = {"bistochastic": "Bistochastic", "scale": "Scale", "log": "Log"}
+        if self.method not in methods:
+            raise ValueError(f"method must be one of {sorted(methods)}, got {self.method!r}")
+        n_rows, n_cols = self._n_clusters()
+        return {"n_row_clusters": n_rows, "n_column_clusters": n_cols,
+                "method": methods[self.method], "n_components": int(self.n_components),
+                "n_best": int(self.n_best),
+                "n_svd_vecs": None if self.n_svd_vecs is None else int(self.n_svd_vecs),
+                "n_init": int(self.n_init), "seed": _numpy_seed(self.random_state)}
+
+    def fit(self, X, y=None):
+        self._fit_model(X)
+        state = self._fitted_state()
+        self.row_labels_ = np.asarray(state["row_labels"], dtype=np.int64)
+        self.column_labels_ = np.asarray(state["column_labels"], dtype=np.int64)
+        n_rows, n_cols = self._n_clusters()
+        self.rows_ = np.vstack([self.row_labels_ == r
+                                for r in range(n_rows) for _ in range(n_cols)])
+        self.columns_ = np.vstack([self.column_labels_ == c
+                                   for _ in range(n_rows) for c in range(n_cols)])
+        return self
+
+
 class KMeans(ClusterMixin, BaseEstimator):
     _kind = "KMeans"
 

@@ -40,6 +40,8 @@ SPECIAL = {
     "SparseCoder": dict(params=dict(dictionary=np.eye(3, 4))),
     "PatchExtractor": dict(params=dict(patch_size=(1, 1))),
     "SpectralCoclustering": dict(params=dict(n_clusters=2, random_state=0)),
+    "SpectralBiclustering": dict(params=dict(n_clusters=2, n_components=2, n_best=1,
+                                             random_state=0)),
     "AdditiveChi2Sampler": dict(X=X_pos),
     "SkewedChi2Sampler": dict(X=X_pos),
     "PowerTransformer": dict(),
@@ -147,7 +149,7 @@ def test_fit_predict_pickle_clone(name):
         assert out.ndim == 3
         np.testing.assert_array_equal(pickle.loads(pickle.dumps(est)).transform(images), out)
         return
-    elif name == "SpectralCoclustering":  # labels for rows and columns
+    elif name in ("SpectralCoclustering", "SpectralBiclustering"):  # row/column labels
         est.fit(np.abs(Xd))
         assert est.row_labels_.shape == (len(Xd),)
         assert est.column_labels_.shape == (Xd.shape[1],)

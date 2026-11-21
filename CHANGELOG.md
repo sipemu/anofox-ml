@@ -6,6 +6,15 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### SpectralBiclustering (#261, part 3)
+
+- `SpectralBiclustering` (`anofox-ml-cluster`, registry kind, Python):
+  bistochastic, scale or log normalization, `randomized_svd`, the `n_best`
+  singular vectors closest to a piecewise-constant 1-D KMeans fit, then
+  KMeans of the data projected onto them. `n_clusters` is an int or a
+  `(rows, columns)` pair. For an int `random_state` the row and column
+  labels equal sklearn 1.8's.
+
 ### SpectralCoclustering (#261, part 2)
 
 - `SpectralCoclustering` (`anofox-ml-cluster`, registry kind, Python):
