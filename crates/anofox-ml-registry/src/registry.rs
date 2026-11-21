@@ -2438,6 +2438,18 @@ registry! {
         fit: |c, x, y, w| unsup(K, c, x, w),
         transform: |m, x| Transform::transform(m, x),
     }
+    GraphicalLasso {
+        config: pre::GraphicalLasso = Default::default(),
+        fitted: pre::FittedGraphicalLasso,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
+    GraphicalLassoCV {
+        config: pre::GraphicalLassoCV = Default::default(),
+        fitted: pre::FittedGraphicalLasso,
+        fit: |c, x, y, w| unsup(K, c, x, w),
+        transform: |m, x| Transform::transform(m, x),
+    }
     ShrunkCovariance {
         config: pre::ShrunkCovariance = Default::default(),
         fitted: pre::FittedCovariance,

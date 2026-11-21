@@ -35,6 +35,7 @@ pub mod cca;
 pub mod covariance;
 pub mod factor_analysis;
 pub mod fast_ica;
+pub mod graphical_lasso;
 pub mod incremental_pca;
 pub mod iterative_imputer;
 pub mod kbins_discretizer;
@@ -84,6 +85,9 @@ pub use covariance::{
 };
 pub use factor_analysis::{FactorAnalysis, FactorRotation, FittedFactorAnalysis};
 pub use fast_ica::{FastIca, FittedFastIca, IcaAlgorithm, IcaFun, IcaWhiten, IcaWhitenSolver};
+pub use graphical_lasso::{
+    FittedGraphicalLasso, GlassoAlphas, GraphicalLasso, GraphicalLassoCV, GraphicalLassoCvResults,
+};
 pub use incremental_pca::{FittedIncrementalPca, IncrementalPca};
 pub use iterative_imputer::{
     AnyModel, AnyRegressor, FittedIterativeImputer, ImputationEstimator, ImputationModel,

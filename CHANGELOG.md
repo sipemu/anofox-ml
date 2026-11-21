@@ -6,6 +6,17 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+### GraphicalLasso and GraphicalLassoCV (#259)
+
+- `GraphicalLasso` and `GraphicalLassoCV` (`anofox-ml-preprocessing`,
+  registry kinds, Python; `mode="cd"`): sklearn's block coordinate
+  descent, with its Gram coordinate descent (`enet_coordinate_descent_gram`)
+  ported including gap-safe screening and stopping rules, and the CV's
+  alpha-grid refinement, warm-started fold paths and `alpha = 0`
+  (EmpiricalCovariance) row. Equal to sklearn 1.8 to rounding: precisions,
+  covariances, `costs_`, `n_iter_`, `alpha_`, `cv_results_`.
+  `covariance="precomputed"` is supported; `mode="lars"` is not.
+
 ### MiniBatchDictionaryLearning and MiniBatchSparsePCA (#258, part 2)
 
 - `MiniBatchDictionaryLearning` and `MiniBatchSparsePca`
