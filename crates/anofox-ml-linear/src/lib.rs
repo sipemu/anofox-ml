@@ -8,6 +8,7 @@ pub mod passive_aggressive;
 pub mod perceptron;
 pub mod sgd_classifier;
 pub mod sgd_common;
+pub mod sgd_one_class_svm;
 pub mod sgd_regressor;
 
 pub use passive_aggressive::{
@@ -17,4 +18,5 @@ pub use passive_aggressive::{
 pub use perceptron::Perceptron;
 pub use sgd_classifier::{ClassifierLoss, FittedSgdClassifier, SgdClassifier};
 pub use sgd_common::{LearningRate, Penalty as SgdPenalty};
+pub use sgd_one_class_svm::{FittedSgdOneClassSvm, OneClassLearningRate, SgdOneClassSvm};
 pub use sgd_regressor::{FittedSgdRegressor, RegressorLoss, SgdRegressor};
