@@ -221,6 +221,7 @@ from ._estimators import (
     TSNE,
     Isomap,
     LocallyLinearEmbedding,
+    MDS,
     ClassicalMDS,
 )
 from .frozen import FrozenEstimator
@@ -276,7 +277,7 @@ __all__ = [
     "AdditiveChi2Sampler", "SkewedChi2Sampler", "PolynomialCountSketch",
     "SparseCoder", "DictionaryLearning", "MiniBatchDictionaryLearning",
     "MiniBatchSparsePCA", "GraphicalLasso", "GraphicalLassoCV",
-    "NearestNeighbors", "RadiusNeighborsTransformer",
+    "NearestNeighbors", "RadiusNeighborsTransformer", "MDS",
     "OneVsRestClassifier", "OneVsOneClassifier", "FixedThresholdClassifier",
     "TunedThresholdClassifierCV", "SelfTrainingClassifier",
     "GenericUnivariateSelect", "SelectPercentile", "SelectFpr", "SelectFdr", "SelectFwe",

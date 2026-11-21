@@ -3280,8 +3280,7 @@ class LocallyLinearEmbedding(_Embedding):
 
 class ClassicalMDS(_Embedding):
     """Classical (Torgerson) multidimensional scaling, sklearn's
-    ``ClassicalMDS``. (sklearn's ``MDS`` is the iterative SMACOF algorithm,
-    which this package does not provide.)"""
+    ``ClassicalMDS`` (``MDS`` is the iterative SMACOF one)."""
 
     _kind = "ClassicalMds"
 
@@ -3292,6 +3291,50 @@ class ClassicalMDS(_Embedding):
     def _rust_params(self, X, y):
         return {"n_components": self.n_components,
                 "metric": _choice(self.metric, _METRIC, "metric")}
+
+
+class MDS(_Embedding):
+    """Multidimensional scaling by SMACOF (sklearn's ``MDS``): metric
+    (``metric_mds=True``) or non-metric stress majorization, the best of
+    ``n_init`` random starts (sklearn's draws for an int ``random_state``)
+    or one ``init="classical_mds"`` start; ``metric="precomputed"`` takes
+    the dissimilarities as ``X``. Defaults are sklearn 1.8's
+    (``n_init=4``, ``init="random"``)."""
+
+    _kind = "Mds"
+
+    def __init__(self, n_components=2, *, metric_mds=True, n_init=4, init="random",
+                 max_iter=300, verbose=0, eps=1e-6, n_jobs=None, random_state=None,
+                 metric="euclidean", metric_params=None, normalized_stress="auto"):
+        self.n_components = n_components
+        self.metric_mds = metric_mds
+        self.n_init = n_init
+        self.init = init
+        self.max_iter = max_iter
+        self.verbose = verbose
+        self.eps = eps
+        self.n_jobs = n_jobs
+        self.random_state = random_state
+        self.metric = metric
+        self.metric_params = metric_params
+        self.normalized_stress = normalized_stress
+
+    def _rust_params(self, X, y):
+        if self.metric not in ("euclidean", "precomputed") or self.metric_params is not None:
+            raise ValueError("metric must be 'euclidean' or 'precomputed'")
+        return {"n_components": int(self.n_components), "metric_mds": bool(self.metric_mds),
+                "n_init": int(self.n_init),
+                "init": _choice(self.init, {"random": "random",
+                                            "classical_mds": "classical_mds"}, "init"),
+                "max_iter": int(self.max_iter), "eps": float(self.eps),
+                "precomputed": self.metric == "precomputed",
+                "normalized_stress": None if self.normalized_stress == "auto"
+                else bool(self.normalized_stress),
+                "seed": _numpy_seed(self.random_state)}
+
+    stress_ = property(lambda self: float(self._fitted_state()["stress"]))
+    n_iter_ = property(lambda self: int(self._fitted_state()["n_iter"]))
+    dissimilarity_matrix_ = property(lambda self: _nd(self._fitted_state()["dissimilarity"]))
 
 
 # ---------------------------------------------------------------------------
