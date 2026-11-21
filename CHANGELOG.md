@@ -6,6 +6,18 @@ All notable changes to anofox-ml are recorded here. The format is loosely based 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-21
+
+The scikit-learn 1.8 parity tracker (#262) is complete. Every estimator in
+`sklearn.utils.all_estimators()` now has a Python class under sklearn's
+name. New in this release: multi-output and output-code classifiers,
+`RidgeClassifierCV`, `LassoLars`, the kernel approximation samplers, sparse
+coding and dictionary learning, `GraphicalLasso(CV)`, `NearestNeighbors`,
+`RadiusNeighborsTransformer`, `MDS`, `PatchExtractor`, spectral co- and
+biclustering and `SGDOneClassSVM`. Each comes with a scikit-learn 1.8.0
+golden test. The randomized estimators match sklearn's draws for an int
+`random_state`. No breaking changes. anofox-regression moves to 0.12.
+
 ### SGDOneClassSVM (#261, part 4)
 
 - `SgdOneClassSvm` (`anofox-ml-linear`, registry kind, Python
